@@ -9,7 +9,8 @@ static MAX_FILE_BYTES: GucSetting<i32> = GucSetting::<i32>::new(4 * 1024 * 1024)
 static MAX_BUNDLE_FILES: GucSetting<i32> = GucSetting::<i32>::new(100_000);
 static MAX_FRONTMATTER_BYTES: GucSetting<i32> = GucSetting::<i32>::new(256 * 1024);
 static MAX_GRAPH_HOPS: GucSetting<i32> = GucSetting::<i32>::new(5);
-static LOG_LEVEL: GucSetting<Option<&'static CStr>> = GucSetting::new(Some(c"warning"));
+static LOG_LEVEL: GucSetting<Option<&'static CStr>> =
+    GucSetting::<Option<&'static CStr>>::new(Some(c"warning"));
 
 #[pg_guard]
 pub extern "C-unwind" fn _PG_init() {
