@@ -1,14 +1,14 @@
-# OKF PostgreSQL Catalog
+# pgokf
 
-First PostgreSQL extension for Open Knowledge Format (OKF) metadata catalog.
+PostgreSQL extension for Open Knowledge Format (OKF) metadata catalogs.
 
 ## Quick Start
 
 ```sql
-CREATE EXTENSION okf_catalog;
-SELECT * FROM okf.register_bundle(/data/my-knowledge-bundle);
-SELECT id, title, type, tags FROM okf.concepts WHERE type = Runbook AND tags @> ARRAY[postgres];
-SELECT * FROM okf.concept_search(replication failover);
+CREATE EXTENSION pgokf;
+SELECT * FROM pgokf.register_bundle('/data/my-knowledge-bundle');
+SELECT id, title, type, tags FROM pgokf.concepts WHERE type = 'Runbook' AND tags @> ARRAY['postgres'];
+SELECT * FROM pgokf.concept_search('replication failover');
 ```
 
 ## Status
