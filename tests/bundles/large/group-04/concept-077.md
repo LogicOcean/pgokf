@@ -1,0 +1,12 @@
+---
+type: Playbook
+title: Large fixture concept 077
+description: Deterministic performance fixture document number 077.
+tags: [large, batch-04, oncall]
+status: draft
+generated: { by: process:fixture-generator, at: 2026-07-01T00:00:00Z }
+---
+
+# Concept 077
+
+This deterministic document exercises parser, synchronization, search, and graph performance. Its rare token is `rareterm077`. catalog search synchronization catalog search synchronization catalog search synchronization. Links: [next concept](./concept-078.md).
