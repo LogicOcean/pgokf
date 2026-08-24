@@ -20,17 +20,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # This workflow can land before the pgrx workspace branch. Keep the
+      # matrix visible but defer Rust/PostgreSQL setup until Cargo.toml exists.
+      - name: Detect pgrx workspace
+        id: workspace
+        run: |
+          if [[ -f Cargo.toml ]]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "Cargo.toml has not landed yet; pgrx matrix is a stub."
+          fi
+
       - uses: dtolnay/rust-toolchain@stable
+        if: steps.workspace.outputs.present == 'true'
         with:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
+        if: steps.workspace.outputs.present == 'true'
 
       - name: Install PostgreSQL ${{ matrix.pg }} development files
+        if: steps.workspace.outputs.present == 'true'
         run: |
           sudo install -d /usr/share/postgresql-common/pgdg
           curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-            | sudo gpg --dearmor -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
+            | sudo gpg --batch --yes --dearmor -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
           echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt noble-pgdg main" \
             | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update
@@ -42,16 +57,19 @@ jobs:
       # Stub pin: keep this version synchronized with the workspace pgrx
       # dependency once Cargo.toml/Cargo.lock land.
       - name: Install and initialize cargo-pgrx
+        if: steps.workspace.outputs.present == 'true'
         run: |
           cargo install --locked cargo-pgrx --version 0.12.9
           cargo pgrx init --pg${{ matrix.pg }}=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
 
       - name: Format
-        if: matrix.pg == 17
+        if: steps.workspace.outputs.present == 'true' && matrix.pg == 17
         run: cargo fmt --all -- --check
 
       - name: Clippy
+        if: steps.workspace.outputs.present == 'true'
         run: cargo clippy --no-default-features --features pg${{ matrix.pg }} --all-targets -- -D warnings
 
       - name: Test
+        if: steps.workspace.outputs.present == 'true'
         run: cargo pgrx test pg${{ matrix.pg }}
