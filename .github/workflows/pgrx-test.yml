@@ -15,7 +15,7 @@ jobs:
         pg: [14, 15, 16, 17]
     runs-on: ubuntu-22.04
     env:
-      PG_VERSION: ${{ matrix.pg }}
+      PG_MAJOR: ${{ matrix.pg }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88.0
@@ -31,10 +31,10 @@ jobs:
           echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
             | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update
-          sudo apt-get install -y postgresql-${PG_VERSION} postgresql-server-dev-${PG_VERSION}
+          sudo apt-get install -y postgresql-${PG_MAJOR} postgresql-server-dev-${PG_MAJOR}
       - name: Initialize pgrx
         run: |
           cargo install cargo-pgrx --version =0.14.3 --locked
-          cargo pgrx init --pg${PG_VERSION} /usr/lib/postgresql/${PG_VERSION}/bin/pg_config
+          cargo pgrx init --pg${PG_MAJOR} /usr/lib/postgresql/${PG_MAJOR}/bin/pg_config
       - name: Test extension
-        run: cargo pgrx test --manifest-path crates/extension/Cargo.toml --no-default-features --features pg${PG_VERSION}
+        run: cargo pgrx test --manifest-path crates/extension/Cargo.toml --no-default-features --features pg${PG_MAJOR}
