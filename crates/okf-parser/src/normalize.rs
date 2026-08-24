@@ -30,7 +30,10 @@ pub fn normalize_path(path: &Path) -> Result<String> {
     }
 
     let mut normalized = parts.join("/");
-    match Path::new(&normalized).extension().and_then(|ext| ext.to_str()) {
+    match Path::new(&normalized)
+        .extension()
+        .and_then(|ext| ext.to_str())
+    {
         None => normalized.push_str(".md"),
         Some(ext) if ext.eq_ignore_ascii_case("md") => {
             let length_without_extension = normalized.len() - ext.len();

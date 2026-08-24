@@ -13,7 +13,10 @@ fn state(path: &str, content: &[u8]) -> FileState {
 fn discovers_markdown_with_defaults_in_stable_order() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let files = discover(&root, &DiscoverOptions::default()).unwrap();
-    let paths: Vec<_> = files.iter().map(|file| file.relative_path.as_str()).collect();
+    let paths: Vec<_> = files
+        .iter()
+        .map(|file| file.relative_path.as_str())
+        .collect();
     assert_eq!(paths, ["nested/child.md", "root.md"]);
 }
 
@@ -42,7 +45,10 @@ fn invalid_root_and_glob_are_actionable_errors() {
         ..DiscoverOptions::default()
     };
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    assert!(matches!(discover(root, &options), Err(Error::InvalidGlob { .. })));
+    assert!(matches!(
+        discover(root, &options),
+        Err(Error::InvalidGlob { .. })
+    ));
 }
 
 #[test]

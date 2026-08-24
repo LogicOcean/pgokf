@@ -12,9 +12,15 @@ fn parses_known_fields_metadata_body_and_links() {
     assert_eq!(parsed.path, "concepts/failover.md");
     assert_eq!(parsed.r#type, "Runbook");
     assert_eq!(parsed.title, "Database failover");
-    assert_eq!(parsed.description.as_deref(), Some("Recover the primary safely"));
+    assert_eq!(
+        parsed.description.as_deref(),
+        Some("Recover the primary safely")
+    );
     assert_eq!(parsed.tags, ["postgres", "incident"]);
-    assert_eq!(parsed.resource.unwrap()["url"], "https://example.test/runbooks/db");
+    assert_eq!(
+        parsed.resource.unwrap()["url"],
+        "https://example.test/runbooks/db"
+    );
     assert_eq!(parsed.metadata["owner"], "sre");
     assert_eq!(parsed.metadata["severity"], "high");
     assert_eq!(
@@ -53,7 +59,11 @@ fn rejects_missing_unterminated_and_malformed_frontmatter() {
         Err(Error::MissingFrontmatter)
     ));
     assert!(matches!(
-        parse_concept(b"---\ntype: Note\ntitle: no end", "x.md", ParserLimits::default()),
+        parse_concept(
+            b"---\ntype: Note\ntitle: no end",
+            "x.md",
+            ParserLimits::default()
+        ),
         Err(Error::UnterminatedFrontmatter)
     ));
     assert!(matches!(
@@ -74,7 +84,10 @@ fn enforces_file_and_frontmatter_limits() {
     };
     assert!(matches!(
         parse_concept(b"four", "x.md", limits),
-        Err(Error::FileTooLarge { actual: 4, limit: 3 })
+        Err(Error::FileTooLarge {
+            actual: 4,
+            limit: 3
+        })
     ));
 
     let limits = ParserLimits {
@@ -89,10 +102,22 @@ fn enforces_file_and_frontmatter_limits() {
 
 #[test]
 fn rejects_unsafe_or_non_markdown_paths() {
-    assert!(matches!(normalize_path(Path::new("../secret.md")), Err(Error::PathTraversal(_))));
-    assert!(matches!(normalize_path(Path::new("/tmp/x.md")), Err(Error::AbsolutePath(_))));
-    assert!(matches!(normalize_path(Path::new("C:\\tmp\\x.md")), Err(Error::AbsolutePath(_))));
-    assert!(matches!(normalize_path(Path::new("x.txt")), Err(Error::UnsupportedExtension(_))));
+    assert!(matches!(
+        normalize_path(Path::new("../secret.md")),
+        Err(Error::PathTraversal(_))
+    ));
+    assert!(matches!(
+        normalize_path(Path::new("/tmp/x.md")),
+        Err(Error::AbsolutePath(_))
+    ));
+    assert!(matches!(
+        normalize_path(Path::new("C:\\tmp\\x.md")),
+        Err(Error::AbsolutePath(_))
+    ));
+    assert!(matches!(
+        normalize_path(Path::new("x.txt")),
+        Err(Error::UnsupportedExtension(_))
+    ));
     assert_eq!(normalize_path(Path::new("./a//b")).unwrap(), "a/b.md");
 }
 

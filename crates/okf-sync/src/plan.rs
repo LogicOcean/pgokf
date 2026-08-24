@@ -56,7 +56,6 @@ pub fn plan_sync(previous: &[FileState], current: &[FileState]) -> SyncPlan {
         }
     }
 
-
     tracing::debug!(
         added = plan.added.len(),
         updated = plan.updated.len(),

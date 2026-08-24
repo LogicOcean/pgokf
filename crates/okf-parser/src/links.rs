@@ -38,7 +38,9 @@ pub fn extract(markdown: &str) -> Vec<Link> {
     for event in Parser::new_ext(markdown, Options::all()) {
         match event {
             Event::Start(Tag::Link {
-                link_type, dest_url, ..
+                link_type,
+                dest_url,
+                ..
             }) => {
                 pending.push(PendingLink {
                     target: dest_url.into_string(),
