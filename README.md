@@ -1,16 +1,30 @@
-# OKF PostgreSQL Catalog
+# pgokf
 
-First PostgreSQL extension for Open Knowledge Format (OKF) metadata catalog.
+`pgokf` is a PostgreSQL extension for materializing Open Knowledge Format (OKF) Markdown bundles as a queryable catalog.
 
-## Quick Start
+> **Status:** Phase 1 foundation. The parser and synchronization planner are implemented; the PostgreSQL registration and query API is still under development.
+
+## Planned quick start
 
 ```sql
-CREATE EXTENSION okf_catalog;
-SELECT * FROM okf.register_bundle(/data/my-knowledge-bundle);
-SELECT id, title, type, tags FROM okf.concepts WHERE type = Runbook AND tags @> ARRAY[postgres];
-SELECT * FROM okf.concept_search(replication failover);
+CREATE EXTENSION pgokf;
+SELECT * FROM pgokf.register_bundle('/data/my-knowledge-bundle');
+SELECT id, title, type, tags
+FROM pgokf.concepts
+WHERE type = 'Runbook' AND tags @> ARRAY['postgres']::text[];
+SELECT * FROM pgokf.concept_search('replication failover');
 ```
 
-## Status
+The PostgreSQL server process—not the `psql` client—must be able to read a registered bundle directory.
 
-Under development. See [docs/IMPLEMENTATION-PLAN.md](docs/IMPLEMENTATION-PLAN.md) for the full plan.
+## Workspace
+
+- `crates/okf-parser`: YAML frontmatter and Markdown parsing
+- `crates/okf-sync`: file discovery, BLAKE3 hashing, and incremental sync planning
+- `crates/extension`: `pgokf` pgrx extension skeleton
+
+Run the pure-Rust test suite with:
+
+```sh
+cargo test --locked
+```
