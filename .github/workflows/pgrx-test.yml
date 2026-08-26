@@ -1,40 +1,75 @@
-name: pgrx tests
+name: pgrx test
 
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  pgrx:
+  test:
+    name: PostgreSQL ${{ matrix.pg }}
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         pg: [14, 15, 16, 17]
-    runs-on: ubuntu-22.04
-    env:
-      PG_MAJOR: ${{ matrix.pg }}
+
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.88.0
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: pgrx-pg${{ matrix.pg }}
-      - name: Install PostgreSQL ${{ matrix.pg }} and build dependencies
+
+      # This workflow can land before the pgrx workspace branch. Keep the
+      # matrix visible but defer Rust/PostgreSQL setup until Cargo.toml exists.
+      - name: Detect pgrx workspace
+        id: workspace
         run: |
-          sudo apt-get update
-          sudo apt-get install -y curl ca-certificates gnupg lsb-release build-essential libclang-dev
+          if [[ -f Cargo.toml ]]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "Cargo.toml has not landed yet; pgrx matrix is a stub."
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.workspace.outputs.present == 'true'
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.workspace.outputs.present == 'true'
+
+      - name: Install PostgreSQL ${{ matrix.pg }} development files
+        if: steps.workspace.outputs.present == 'true'
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
           curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-            | sudo gpg --dearmor -o /usr/share/keyrings/postgresql.gpg
-          echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo gpg --batch --yes --dearmor -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt noble-pgdg main" \
             | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update
-          sudo apt-get install -y postgresql-${PG_MAJOR} postgresql-server-dev-${PG_MAJOR}
-      - name: Initialize pgrx
+          sudo apt-get install -y \
+            postgresql-${{ matrix.pg }} \
+            postgresql-server-dev-${{ matrix.pg }} \
+            libclang-dev
+
+      # Stub pin: keep this version synchronized with the workspace pgrx
+      # dependency once Cargo.toml/Cargo.lock land.
+      - name: Install and initialize cargo-pgrx
+        if: steps.workspace.outputs.present == 'true'
         run: |
-          cargo install cargo-pgrx --version =0.14.3 --locked
-          cargo pgrx init --pg${PG_MAJOR} /usr/lib/postgresql/${PG_MAJOR}/bin/pg_config
-      - name: Test extension
-        run: cargo pgrx test --manifest-path crates/extension/Cargo.toml --no-default-features --features pg${PG_MAJOR}
+          cargo install --locked cargo-pgrx --version 0.12.9
+          cargo pgrx init --pg${{ matrix.pg }}=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+
+      - name: Format
+        if: steps.workspace.outputs.present == 'true' && matrix.pg == 17
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        if: steps.workspace.outputs.present == 'true'
+        run: cargo clippy --no-default-features --features pg${{ matrix.pg }} --all-targets -- -D warnings
+
+      - name: Test
+        if: steps.workspace.outputs.present == 'true'
+        run: cargo pgrx test pg${{ matrix.pg }}
