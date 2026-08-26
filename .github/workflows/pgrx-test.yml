@@ -59,7 +59,7 @@ jobs:
       - name: Install and initialize cargo-pgrx
         if: steps.workspace.outputs.present == 'true'
         run: |
-          cargo install --locked cargo-pgrx --version 0.12.9
+          cargo install --locked cargo-pgrx --version 0.19.2
           cargo pgrx init --pg${{ matrix.pg }}=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
 
       - name: Format
