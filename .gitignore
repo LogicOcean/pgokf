@@ -1,0 +1,11 @@
+/target/
+**/*.rs.bk
+*.swp
+*.swo
+.DS_Store
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+.cargo-pgrx/

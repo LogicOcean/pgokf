@@ -1,0 +1,26 @@
+[package]
+name = "pgokf"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+default = ["pg17"]
+pg14 = ["pgrx/pg14"]
+pg15 = ["pgrx/pg15"]
+pg16 = ["pgrx/pg16"]
+pg17 = ["pgrx/pg17"]
+pg_test = []
+
+[dependencies]
+okf-parser = { version = "=0.1.0", path = "../okf-parser" }
+okf-sync = { version = "=0.1.0", path = "../okf-sync" }
+pgrx.workspace = true
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
