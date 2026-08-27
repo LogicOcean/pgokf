@@ -60,22 +60,31 @@ use crate::security;
 /// cannot collide with another subsystem hashing similar strings.
 const ADVISORY_LOCK_NAMESPACE: &str = "pgokf.bundle";
 
-/// Maximum number of leading characters of a concept body fed to `to_tsvector`
-/// when building `body_tsv`.
+/// Per-input character bounds for the three weighted `to_tsvector` operands
+/// (title `A`, metadata `B`, body `D`) whose concatenation forms `body_tsv`.
 ///
-/// `PostgreSQL` caps a `tsvector`'s lexeme pool at `MAXSTRPOS` (`2^20 - 1` =
-/// `1_048_575` bytes) and raises SQLSTATE `54000` ("string is too long for
-/// tsvector") when a single document exceeds it — which can happen for a body
-/// with hundreds of thousands of distinct tokens even while it stays well within
-/// `pgokf.max_file_bytes`. Left unbounded, one such file would abort the whole
-/// sync and the bundle could never register. The lexeme pool can never exceed
-/// the byte length of the input text, and a UTF-8 character is at most four
-/// bytes, so bounding the input to this many characters keeps the worst case
-/// (`4 × 262_143 = 1_048_572` bytes) strictly under the limit. Normal concept
-/// documents are far smaller than this bound, so full-text quality is
-/// unaffected; only a pathologically large body has its *indexing* input
-/// truncated — `body_text` is still stored and returned in full.
-const BODY_TSV_CHAR_LIMIT: i32 = 262_143;
+/// `PostgreSQL` caps a `tsvector` at `MAXSTRPOS` (`2^20 - 1` = `1_048_575`
+/// bytes) and raises SQLSTATE `54000` ("string is too long for tsvector") when
+/// a document exceeds it — reachable for a body with hundreds of thousands of
+/// distinct tokens even while it stays within `pgokf.max_file_bytes`. Left
+/// unbounded, one such file would abort the whole sync and the bundle could
+/// never register.
+///
+/// The size the limit checks is the lexeme pool **plus** per-occurrence
+/// position data; in the worst case (single-character, four-byte lexemes each
+/// separated by one byte) that total is bounded by `4 × (input characters)`.
+/// Crucially the check applies to the **concatenated** vector, so bounding only
+/// the body is insufficient — the unbounded `A`/`B` operands push the combined
+/// vector over the limit. Bounding all three so their combined worst case stays
+/// under `MAXSTRPOS` makes `54000` structurally impossible:
+/// `4 × (TITLE + META + BODY) = 4 × 220_000 = 880_000 < 1_048_575` (≈ 16 %
+/// headroom). Normal concepts are far smaller than these bounds, so full-text
+/// quality is unaffected; only pathologically large inputs have their
+/// *indexing* text truncated — every column is still stored and returned in
+/// full.
+const TITLE_TSV_CHAR_LIMIT: i32 = 4_000;
+const META_TSV_CHAR_LIMIT: i32 = 16_000;
+const BODY_TSV_CHAR_LIMIT: i32 = 200_000;
 
 /// Derive the stable, bundle-scoped `pg_advisory_xact_lock` key for a
 /// canonical bundle path.
@@ -412,9 +421,10 @@ fn upsert_concepts(
     // stored column and the weighted `body_tsv` share it.
     //
     // `$14` is the configured text-search regconfig (bound as text and cast in
-    // SQL so no identifier is interpolated), and the body input is bounded with
-    // `left(..., BODY_TSV_CHAR_LIMIT)` so a single oversized body cannot make
-    // `to_tsvector` exceed the `tsvector` lexeme-pool limit and abort the sync.
+    // SQL so no identifier is interpolated). All three weighted inputs (title,
+    // metadata, body) are bounded with `left(...)` so their concatenated
+    // `tsvector` cannot exceed the `MAXSTRPOS` limit and abort the sync — see
+    // the `*_TSV_CHAR_LIMIT` constants.
     let upsert = format!(
         "
         INSERT INTO pgokf.concepts
@@ -424,13 +434,16 @@ fn upsert_concepts(
             $1, t.id, t.path, t.type, t.title, t.description, t.tags, t.resource,
             t.body_text, t.file_hash, pg_catalog.to_timestamp(t.modified_at),
             pg_catalog.setweight(
-                pg_catalog.to_tsvector($14::pg_catalog.regconfig, t.title), 'A')
+                pg_catalog.to_tsvector($14::pg_catalog.regconfig,
+                    pg_catalog.left(t.title, {TITLE_TSV_CHAR_LIMIT})), 'A')
             || pg_catalog.setweight(
                    pg_catalog.to_tsvector(
                        $14::pg_catalog.regconfig,
-                       pg_catalog.concat_ws(' ',
-                           pg_catalog.array_to_string(t.tags, ' '),
-                           t.type, t.description)),
+                       pg_catalog.left(
+                           pg_catalog.concat_ws(' ',
+                               pg_catalog.array_to_string(t.tags, ' '),
+                               t.type, t.description),
+                           {META_TSV_CHAR_LIMIT})),
                    'B')
             || pg_catalog.setweight(
                    pg_catalog.to_tsvector(
@@ -897,17 +910,28 @@ mod tests {
     }
 
     #[test]
-    fn body_tsv_char_limit_keeps_worst_case_under_the_tsvector_bound() {
-        // Arrange: Postgres caps a tsvector's lexeme pool at MAXSTRPOS bytes
-        // and a UTF-8 character encodes to at most four bytes.
+    fn combined_tsv_char_limits_keep_worst_case_under_the_tsvector_bound() {
+        // Arrange: Postgres caps a tsvector (pool + position data) at MAXSTRPOS
+        // bytes. The limit applies to the CONCATENATED A||B||D vector, and in the
+        // worst case (single four-byte lexemes) the size is bounded by four times
+        // the total input characters — so all three bounds must sum safely under
+        // the limit, not each individually.
         const MAX_TSVECTOR_STRPOS_BYTES: i64 = (1 << 20) - 1; // 1_048_575
         const MAX_UTF8_BYTES_PER_CHAR: i64 = 4;
 
-        // Act: the worst-case byte length of the truncated body input.
-        let worst_case_bytes = i64::from(BODY_TSV_CHAR_LIMIT) * MAX_UTF8_BYTES_PER_CHAR;
+        // Act: worst-case byte length of the three concatenated tsvector inputs.
+        let total_chars = i64::from(TITLE_TSV_CHAR_LIMIT)
+            + i64::from(META_TSV_CHAR_LIMIT)
+            + i64::from(BODY_TSV_CHAR_LIMIT);
+        let worst_case_bytes = total_chars * MAX_UTF8_BYTES_PER_CHAR;
 
-        // Assert: it stays strictly under the limit that raises SQLSTATE 54000.
-        assert!(worst_case_bytes <= MAX_TSVECTOR_STRPOS_BYTES);
+        // Assert: the combined worst case stays under the 54000 threshold with
+        // headroom, so no in-byte-limit document can abort a sync.
+        assert!(worst_case_bytes < MAX_TSVECTOR_STRPOS_BYTES);
+        assert!(
+            worst_case_bytes <= MAX_TSVECTOR_STRPOS_BYTES * 9 / 10,
+            "want >=10% headroom below MAXSTRPOS, got {worst_case_bytes} bytes"
+        );
     }
 
     #[test]
