@@ -145,7 +145,11 @@ fn main() {
     } else {
         f64::INFINITY
     };
-    let mib_per_sec = if seconds > 0.0 { mib / seconds } else { f64::INFINITY };
+    let mib_per_sec = if seconds > 0.0 {
+        mib / seconds
+    } else {
+        f64::INFINITY
+    };
 
     println!("okf-parser parse_all");
     println!("corpus_dir      {corpus}");

@@ -119,3 +119,19 @@ GRANT SELECT ON pgokf.bundles, pgokf.concepts, pgokf.concept_metadata TO pgokf_r
     name = "catalog_tables",
     requires = ["bootstrap"]
 );
+
+// The `pgokf.version()` function is declared in `crate::lib`'s `pgokf`
+// schema module, outside any `requires`-addressable catalog block. Its
+// documentation comment therefore ships as a `finalize` block, which pgrx
+// orders after every other SQL entity (including the generated
+// `CREATE FUNCTION pgokf.version()`), so the object always exists when the
+// comment is applied. This closes the last gap in COMMENT coverage of the
+// public API surface without touching the function's definition.
+extension_sql!(
+    r"
+COMMENT ON FUNCTION pgokf.version() IS
+    'Return the version string of the loaded pgokf shared library (its Cargo package version). Immutable and parallel-safe; used to confirm the SQL extension and module agree after an upgrade.';
+",
+    name = "version_comment",
+    finalize
+);
