@@ -348,6 +348,14 @@ fn reconstruct_file(dir: &Path, row: &SourceRow) -> Result<u64, CatalogError> {
                 Path::new(&row.path),
             )
         })?;
+        // `create_dir_all` follows a pre-existing directory symlink on any
+        // intermediate component, and the `O_NOFOLLOW` open below only guards
+        // the final path component — so a planted symlink at e.g. `dir/nested`
+        // could otherwise redirect the write outside the validated destination.
+        // Re-resolve the materialized parent with symlink-escape-safe
+        // containment against `dir` and refuse if it escapes.
+        let root = [dir.to_path_buf()];
+        crate::security::canonicalize_contained_path(parent, &root, Path::new(&row.path))?;
     }
 
     let mut file = export::create_export_file(&target)?;
