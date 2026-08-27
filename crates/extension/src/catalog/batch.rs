@@ -29,7 +29,11 @@
 //! deliberately does not declare — the JSON types reach it only through
 //! `okf_parser` and `pgrx::JsonB`).
 
+use std::path::Path;
+
+use crate::catalog::links::link_kind_text;
 use crate::catalog::types::{StagedConcept, count_to_i32};
+use crate::errors::CatalogError;
 
 /// Maximum number of rows packed into a single bulk `INSERT`.
 ///
@@ -80,6 +84,38 @@ pub struct ConceptColumns {
     pub file_hashes: Vec<String>,
     /// Filesystem modification times as seconds since the Unix epoch.
     pub modified_ats: Vec<Option<f64>>,
+}
+
+/// Every staged concept's outgoing links, transposed into the parallel arrays
+/// bound by the bulk `pgokf.links` `INSERT`.
+///
+/// The `Vec`s share length and ordering: row `i` inserts one link edge whose
+/// source is [`source_ids`](Self::source_ids)`[i]`. Nullable columns are
+/// carried as `Vec<Option<String>>` so a `NULL` element survives the `text[]`
+/// binding (an external or unresolvable link has `target_id` /
+/// [`target_paths`](Self::target_paths)` = NULL`), exactly as the row-by-row
+/// binding stored them. `resolved` is intentionally absent: it is computed
+/// set-based in SQL (a correlated `EXISTS` against `pgokf.concepts`), matching
+/// the per-row `INSERT` the row-by-row path used.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LinkColumns {
+    /// Source concept ID of each edge, repeated once per outgoing link.
+    pub source_ids: Vec<String>,
+    /// Internal destination concept ID, or `None` for external/unresolvable
+    /// destinations.
+    pub target_ids: Vec<Option<String>>,
+    /// Plain-text label of each link (`link_text`); always present, possibly
+    /// empty, exactly as the row-by-row binding stored it.
+    pub link_texts: Vec<String>,
+    /// Normalized bundle-relative destination path, or `None` for external
+    /// links.
+    pub target_paths: Vec<Option<String>>,
+    /// `snake_case` `link_kind` token for each edge.
+    pub link_kinds: Vec<String>,
+    /// Whether each destination is an external URL.
+    pub is_externals: Vec<bool>,
+    /// Zero-based document-order position of each link.
+    pub ordinals: Vec<i32>,
 }
 
 /// A batch of producer-metadata triples, transposed into the parallel arrays
@@ -185,6 +221,58 @@ pub fn flatten_metadata(staged: &[StagedConcept]) -> MetadataColumns {
     columns
 }
 
+/// Flatten the outgoing links of every staged concept into the column-major
+/// parameter arrays bound by the bulk `pgokf.links` `INSERT`, in staging order.
+///
+/// Every row carries the source concept's ID, so one array-unnest `INSERT`
+/// replaces the row-by-row loop that ran one statement per link. The per-link
+/// `resolved` flag is *not* marshalled: it is derived set-based in SQL from
+/// `target_id`, `is_external`, and an `EXISTS` against `pgokf.concepts` —
+/// byte-identical to the correlated-`EXISTS` expression the row-by-row
+/// `INSERT` evaluated. The result is returned whole and chunked by the caller
+/// at [`BATCH_SIZE`] for bounded bulk insertion.
+///
+/// # Errors
+///
+/// Returns a [`CatalogError`] if any link's zero-based `ordinal` exceeds the
+/// `i32` range of the `ordinal` column — the same failure the row-by-row
+/// `INSERT` raised, preserved verbatim so behavior is unchanged.
+pub fn marshal_links(staged: &[StagedConcept]) -> Result<LinkColumns, CatalogError> {
+    let capacity: usize = staged.iter().map(|entry| entry.concept.links.len()).sum();
+    let mut columns = LinkColumns {
+        source_ids: Vec::with_capacity(capacity),
+        target_ids: Vec::with_capacity(capacity),
+        link_texts: Vec::with_capacity(capacity),
+        target_paths: Vec::with_capacity(capacity),
+        link_kinds: Vec::with_capacity(capacity),
+        is_externals: Vec::with_capacity(capacity),
+        ordinals: Vec::with_capacity(capacity),
+    };
+
+    for entry in staged {
+        let source_id = entry.concept.id.as_str();
+        for link in &entry.concept.links {
+            let ordinal = i32::try_from(link.ordinal).map_err(|_| {
+                CatalogError::internal(
+                    format!("link ordinal {} exceeds the i32 range", link.ordinal),
+                    Path::new(""),
+                )
+            })?;
+            columns.source_ids.push(source_id.to_owned());
+            columns.target_ids.push(link.target_id.clone());
+            columns.link_texts.push(link.label.clone());
+            columns.target_paths.push(link.target_path.clone());
+            columns
+                .link_kinds
+                .push(link_kind_text(link.kind).to_owned());
+            columns.is_externals.push(link.is_external);
+            columns.ordinals.push(ordinal);
+        }
+    }
+
+    Ok(columns)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,6 +284,20 @@ mod tests {
     /// `serde_json` values directly.
     fn staged(path: &str, frontmatter: &str) -> StagedConcept {
         let markdown = format!("---\n{frontmatter}\n---\n\nBody of {path}.\n");
+        let concept: ParsedConcept =
+            parse_concept(markdown.as_bytes(), path, ParserLimits::default())
+                .expect("fixture parses");
+        StagedConcept {
+            concept,
+            file_hash: format!("hash-{path}"),
+            modified_at_epoch: Some(1.5),
+        }
+    }
+
+    /// Parse an OKF document with a caller-supplied Markdown body (so links can
+    /// be embedded) into a [`StagedConcept`].
+    fn staged_with_body(path: &str, frontmatter: &str, body: &str) -> StagedConcept {
+        let markdown = format!("---\n{frontmatter}\n---\n\n{body}\n");
         let concept: ParsedConcept =
             parse_concept(markdown.as_bytes(), path, ParserLimits::default())
                 .expect("fixture parses");
@@ -369,5 +471,60 @@ mod tests {
         assert!(columns.concept_ids.is_empty());
         assert!(columns.keys.is_empty());
         assert!(columns.values.is_empty());
+    }
+
+    #[test]
+    fn marshal_links_flattens_every_edge_in_source_order() {
+        // Arrange: two concepts, the first with two links, the second with one.
+        let batch = vec![
+            staged_with_body(
+                "a.md",
+                "type: note\ntitle: A",
+                "See [Bee](b.md) and [Site](https://example.test).",
+            ),
+            staged_with_body("b.md", "type: note\ntitle: B", "Back to [Ay](a.md)."),
+        ];
+
+        // Act
+        let columns = marshal_links(&batch).expect("ordinals in range");
+
+        // Assert: one row per link, grouped by source in staging order.
+        assert_eq!(columns.source_ids, vec!["a", "a", "b"]);
+        assert_eq!(columns.ordinals, vec![0, 1, 0]);
+        assert_eq!(columns.link_texts, vec!["Bee", "Site", "Ay"]);
+    }
+
+    #[test]
+    fn marshal_links_carries_null_target_for_external_edges() {
+        // Arrange: an internal edge (resolvable target) beside an external URL.
+        let batch = vec![staged_with_body(
+            "a.md",
+            "type: note\ntitle: A",
+            "[Internal](b.md) and [External](https://example.test).",
+        )];
+
+        // Act
+        let columns = marshal_links(&batch).expect("ordinals in range");
+
+        // Assert: the internal edge keeps its normalized target; the external
+        // one carries NULL target_id / target_path and is_external = true,
+        // exactly as the row-by-row INSERT bound them.
+        assert_eq!(columns.target_ids, vec![Some("b".to_owned()), None]);
+        assert_eq!(columns.target_paths, vec![Some("b.md".to_owned()), None]);
+        assert_eq!(columns.is_externals, vec![false, true]);
+        assert_eq!(columns.link_kinds, vec!["inline", "inline"]);
+    }
+
+    #[test]
+    fn marshal_links_is_empty_for_concepts_without_links() {
+        // Arrange
+        let batch = vec![staged("a.md", "type: note\ntitle: A")];
+
+        // Act
+        let columns = marshal_links(&batch).expect("ordinals in range");
+
+        // Assert
+        assert!(columns.source_ids.is_empty());
+        assert!(columns.ordinals.is_empty());
     }
 }

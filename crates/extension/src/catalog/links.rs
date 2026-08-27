@@ -37,9 +37,10 @@
 
 use std::path::Path;
 
-use okf_parser::{Link, LinkKind};
+use okf_parser::LinkKind;
 use pgrx::{Spi, extension_sql};
 
+use crate::catalog::batch::{self, BATCH_SIZE};
 use crate::catalog::types::StagedConcept;
 use crate::errors::CatalogError;
 
@@ -108,79 +109,97 @@ fn spi_error(context: &str, error: &pgrx::spi::Error) -> CatalogError {
     CatalogError::internal(format!("{context}: {error}"), Path::new(""))
 }
 
-/// Delete every outgoing edge previously projected for one source concept.
-fn delete_outgoing(bundle_id: i64, source_id: &str) -> Result<(), CatalogError> {
-    Spi::run_with_args(
-        "DELETE FROM pgokf.links WHERE bundle_id = $1 AND source_id = $2",
-        &[bundle_id.into(), source_id.into()],
-    )
-    .map_err(|error| spi_error("failed to clear concept links", &error))
+/// Delete every outgoing edge previously projected for the staged source
+/// concepts, in bounded batches.
+///
+/// Each staged concept's ID is a bundle-unique source, so clearing all staged
+/// sources' edges up front is equivalent to the row-by-row
+/// `delete-then-insert` per concept: no staged source's freshly inserted edges
+/// can be deleted by another source's clear. Concept IDs are chunked at
+/// [`BATCH_SIZE`] so the `= ANY($2)` list never grows unbounded.
+fn delete_staged_outgoing(bundle_id: i64, staged: &[StagedConcept]) -> Result<(), CatalogError> {
+    for chunk in staged.chunks(BATCH_SIZE) {
+        let source_ids: Vec<&str> = chunk
+            .iter()
+            .map(|entry| entry.concept.id.as_str())
+            .collect();
+        Spi::run_with_args(
+            "DELETE FROM pgokf.links WHERE bundle_id = $1 AND source_id = ANY($2)",
+            &[bundle_id.into(), source_ids.into()],
+        )
+        .map_err(|error| spi_error("failed to clear concept links", &error))?;
+    }
+    Ok(())
 }
 
-/// Insert one link edge, resolving internal destinations against the bundle.
+/// Bulk-insert every staged concept's outgoing edges with one array-unnest
+/// `INSERT` per [`BATCH_SIZE`] chunk, computing `resolved` set-based.
 ///
-/// `resolved` is computed in SQL as `(target_id IS NOT NULL AND NOT external
-/// AND the target concept exists in this bundle)`; the concept rows for the
-/// bundle are already written when the seam runs, so the check sees the full
-/// current concept set. The inbound edges of concepts that were *not* staged
-/// this sync are corrected separately by [`reresolve_bundle`].
-fn insert_link(bundle_id: i64, source_id: &str, link: &Link) -> Result<(), CatalogError> {
+/// `resolved` is derived in SQL exactly as the row-by-row `INSERT` did — an
+/// internal (`target_id IS NOT NULL`), non-external edge whose target concept
+/// exists in this bundle — via a correlated `EXISTS` against `pgokf.concepts`
+/// evaluated per unnested row. The concept rows for the bundle are already
+/// written when the seam runs, so the check sees the full current concept set;
+/// the inbound edges of concepts that were *not* staged this sync are corrected
+/// separately by [`reresolve_bundle`].
+fn insert_staged_links(bundle_id: i64, staged: &[StagedConcept]) -> Result<(), CatalogError> {
     const INSERT: &str = "
         INSERT INTO pgokf.links
             (bundle_id, source_id, target_id, link_text, target_path,
              link_kind, resolved, is_external, ordinal)
-        VALUES
-            ($1, $2, $3, $4, $5, $6,
-             ($3 IS NOT NULL AND NOT $7 AND EXISTS (
+        SELECT
+            $1, d.source_id, d.target_id, d.link_text, d.target_path,
+            d.link_kind,
+            (d.target_id IS NOT NULL AND NOT d.is_external AND EXISTS (
                  SELECT 1 FROM pgokf.concepts c
-                 WHERE c.bundle_id = $1 AND c.id = $3)),
-             $7, $8)";
+                 WHERE c.bundle_id = $1 AND c.id = d.target_id)),
+            d.is_external, d.ordinal
+        FROM unnest(
+                 $2::text[], $3::text[], $4::text[], $5::text[],
+                 $6::text[], $7::boolean[], $8::integer[])
+             AS d(source_id, target_id, link_text, target_path,
+                   link_kind, is_external, ordinal)";
 
-    let ordinal = i32::try_from(link.ordinal).map_err(|_| {
-        CatalogError::internal(
-            format!("link ordinal {} exceeds the i32 range", link.ordinal),
-            Path::new(""),
+    let columns = batch::marshal_links(staged)?;
+    let total = columns.source_ids.len();
+    for start in (0..total).step_by(BATCH_SIZE) {
+        let end = usize::min(start + BATCH_SIZE, total);
+        Spi::run_with_args(
+            INSERT,
+            &[
+                bundle_id.into(),
+                columns.source_ids[start..end].to_vec().into(),
+                columns.target_ids[start..end].to_vec().into(),
+                columns.link_texts[start..end].to_vec().into(),
+                columns.target_paths[start..end].to_vec().into(),
+                columns.link_kinds[start..end].to_vec().into(),
+                columns.is_externals[start..end].to_vec().into(),
+                columns.ordinals[start..end].to_vec().into(),
+            ],
         )
-    })?;
-
-    Spi::run_with_args(
-        INSERT,
-        &[
-            bundle_id.into(),
-            source_id.into(),
-            link.target_id.clone().into(),
-            link.label.as_str().into(),
-            link.target_path.clone().into(),
-            link_kind_text(link.kind).into(),
-            link.is_external.into(),
-            ordinal.into(),
-        ],
-    )
-    .map_err(|error| spi_error("failed to insert concept link", &error))
+        .map_err(|error| spi_error("failed to insert concept links", &error))?;
+    }
+    Ok(())
 }
 
 /// Project the outgoing links of every staged concept into `pgokf.links`.
 ///
 /// Invoked inside the sync transaction after concept rows (and their metadata)
-/// are written and before the bundle row is finalized. For each staged
-/// concept it replaces the concept's outgoing edges: existing rows are deleted
-/// and one row is inserted per extracted [`okf_parser::Link`], preserving
-/// document order via `ordinal`. Internal edges are marked `resolved` when
-/// their target concept already exists in the bundle; unresolved internal and
-/// external edges are still retained.
+/// are written and before the bundle row is finalized. The staged sources'
+/// existing edges are cleared and one row is inserted per extracted
+/// [`okf_parser::Link`], preserving document order via `ordinal`. Internal
+/// edges are marked `resolved` when their target concept already exists in the
+/// bundle; unresolved internal and external edges are still retained. Both
+/// phases are set-based and chunked at [`BATCH_SIZE`], replacing the former
+/// per-link SPI round-trips while producing byte-identical rows.
 ///
 /// # Errors
 ///
 /// Returns a [`CatalogError`] on any SPI failure so a partial projection
 /// aborts the surrounding sync transaction.
 pub fn project(bundle_id: i64, staged: &[StagedConcept]) -> Result<(), CatalogError> {
-    for entry in staged {
-        let source_id = entry.concept.id.as_str();
-        delete_outgoing(bundle_id, source_id)?;
-        for link in &entry.concept.links {
-            insert_link(bundle_id, source_id, link)?;
-        }
-    }
+    delete_staged_outgoing(bundle_id, staged)?;
+    insert_staged_links(bundle_id, staged)?;
     Ok(())
 }
 
@@ -207,18 +226,31 @@ pub fn project(bundle_id: i64, staged: &[StagedConcept]) -> Result<(), CatalogEr
 /// Returns a [`CatalogError`] on any SPI failure so a partial projection aborts
 /// the surrounding sync transaction.
 pub fn reresolve_bundle(bundle_id: i64) -> Result<(), CatalogError> {
-    const RERESOLVE: &str = "
-        UPDATE pgokf.links
-        SET resolved = (
-            links.target_id IS NOT NULL
+    // The desired `resolved` value for a link row. Written once here and
+    // interpolated into both the `SET` and the guard so the two can never
+    // drift: the guard restricts the write to rows whose value actually
+    // changes. `resolved` is `NOT NULL` and this expression is likewise never
+    // NULL (`target_id IS NOT NULL`, `is_external`, and `EXISTS` each yield a
+    // definite boolean), so `IS DISTINCT FROM` is an exact "changed?" test.
+    const RESOLVED_EXPR: &str = "(links.target_id IS NOT NULL
             AND NOT links.is_external
             AND EXISTS (
                 SELECT 1 FROM pgokf.concepts c
                 WHERE c.bundle_id = links.bundle_id
-                  AND c.id = links.target_id))
-        WHERE links.bundle_id = $1";
+                  AND c.id = links.target_id))";
 
-    Spi::run_with_args(RERESOLVE, &[bundle_id.into()])
+    // Only rewrite rows whose resolution flips (F1/F14: adding a target flips
+    // false -> true, removing one flips true -> false). A no-op re-resolution
+    // touches zero rows, which avoids rewriting the whole heap (dead-tuple
+    // bloat) and keeps the statement's planner cost below the JIT threshold.
+    let reresolve = format!(
+        "UPDATE pgokf.links
+         SET resolved = {RESOLVED_EXPR}
+         WHERE links.bundle_id = $1
+           AND links.resolved IS DISTINCT FROM {RESOLVED_EXPR}"
+    );
+
+    Spi::run_with_args(&reresolve, &[bundle_id.into()])
         .map_err(|error| spi_error("failed to re-resolve concept links", &error))
 }
 

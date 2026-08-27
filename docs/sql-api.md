@@ -168,13 +168,27 @@ Rank catalog concepts against a `websearch_to_tsquery` query over the weighted
 
 Details:
 
-- Matching uses `websearch_to_tsquery('pg_catalog.english', query)`; ranking uses
-  `ts_rank_cd`. Weights are title `A`, tags/type/description `B`, body `D`.
+- Matching uses `websearch_to_tsquery(<cfg>, query)`; ranking uses `ts_rank_cd`.
+  Weights are title `A`, tags/type/description `B`, body `D`. `<cfg>` is the
+  configured `default_text_search_config` (default `pg_catalog.english`), the same
+  configuration that built each `body_tsv` at index time — see the retroactivity
+  warning below.
 - Only **enabled** bundles are searched (`pgokf.bundles.enabled`).
-- Each hit carries a `ts_headline` snippet over title, description, and body.
+- Each hit carries a `ts_headline` snippet over title, description, and body,
+  computed with the same configured text-search configuration.
 - Rows are ordered by descending rank, then ascending `concept_id` as a stable
   tiebreaker. Ranks are comparable **only within one query** — order by them,
   never persist them.
+
+> **⚠️ `default_text_search_config` is applied but not retroactive.** The query
+> is parsed under the current `default_text_search_config`, while each row's
+> `body_tsv` was built under whatever configuration was in effect when that file
+> was last indexed. `refresh_bundle` re-parses only files whose content hash
+> changed, so changing the configuration leaves unchanged rows with stale
+> vectors and search can return wrong or empty results for them. Set the
+> configuration before the first `register_bundle`, or re-register a bundle
+> (`unregister_bundle` + `register_bundle`) to rebuild its vectors under the new
+> configuration. See [Configuration](configuration.md).
 
 ```sql
 SELECT concept_id, title, type, round(rank::numeric, 4) AS rank

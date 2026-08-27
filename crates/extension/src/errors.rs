@@ -1,7 +1,7 @@
 //! Domain error types with stable `PostgreSQL` SQLSTATE mappings.
 //!
 //! Every catalog operation reports failures as a [`CatalogError`], which
-//! carries a bundle-relative path so SQL clients can identify the offending
+//! may carry a bundle-relative path so SQL clients can identify the offending
 //! object, and maps onto a fixed SQLSTATE per [`ErrorKind`].
 
 use std::fmt;
@@ -47,9 +47,10 @@ impl ErrorKind {
 
 /// Error returned by catalog operations.
 ///
-/// `bundle_path` is always present so SQL errors can identify the offending
-/// bundle-relative object. An empty path means the error applies to the bundle
-/// root and is rendered explicitly as `<bundle-root>`.
+/// `bundle_path` identifies the offending bundle-relative object for
+/// file-scoped errors (IO/parse failures). It is empty for errors that carry
+/// no file context — validation, configuration, and limit checks — in which
+/// case no path context is appended when the error is rendered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogError {
     kind: ErrorKind,
@@ -107,8 +108,8 @@ impl CatalogError {
         self.kind.sqlstate()
     }
 
-    /// Bundle-relative path of the object the error applies to; empty for the
-    /// bundle root.
+    /// Bundle-relative path of the object the error applies to; empty for
+    /// errors with no file context (validation, configuration, limit checks).
     #[must_use]
     pub fn bundle_path(&self) -> &Path {
         &self.bundle_path
@@ -136,16 +137,20 @@ impl CatalogError {
 
 impl fmt::Display for CatalogError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let bundle_path = if self.bundle_path.as_os_str().is_empty() {
-            "<bundle-root>".into()
+        // Only file-scoped errors carry a real path; append the bundle-relative
+        // context solely when one is present. Errors without file context
+        // (validation, configuration, limit checks) use an empty path and are
+        // rendered as the bare message, with no misleading `<bundle-root>` suffix.
+        if self.bundle_path.as_os_str().is_empty() {
+            write!(formatter, "{}", self.message)
         } else {
-            self.bundle_path.display().to_string()
-        };
-        write!(
-            formatter,
-            "{} [bundle-relative path: {bundle_path}]",
-            self.message
-        )
+            write!(
+                formatter,
+                "{} [bundle-relative path: {}]",
+                self.message,
+                self.bundle_path.display()
+            )
+        }
     }
 }
 
@@ -175,7 +180,7 @@ mod tests {
     }
 
     #[test]
-    fn display_always_contains_bundle_relative_path() {
+    fn file_scoped_error_appends_bundle_relative_path() {
         // Arrange
         let error = CatalogError::invalid_parameter("bad path", Path::new("concepts/runbook.md"));
 
@@ -185,14 +190,21 @@ mod tests {
         // Assert
         assert!(rendered.contains("concepts/runbook.md"));
         assert!(rendered.contains("bad path"));
+        assert!(rendered.contains("[bundle-relative path:"));
     }
 
     #[test]
-    fn empty_bundle_path_is_rendered_explicitly() {
-        // Arrange
-        let error = CatalogError::internal("unexpected", Path::new(""));
+    fn validation_error_without_path_has_no_suffix() {
+        // Arrange: a limit/validation error carries no file context.
+        let error =
+            CatalogError::invalid_parameter("limit_count must be between 1 and 500, got 9999", "");
 
-        // Act & Assert
-        assert!(error.to_string().contains("<bundle-root>"));
+        // Act
+        let rendered = error.to_string();
+
+        // Assert: bare message, no bundle-relative path suffix.
+        assert_eq!(rendered, "limit_count must be between 1 and 500, got 9999");
+        assert!(!rendered.contains("[bundle-relative path:"));
+        assert!(!rendered.contains("<bundle-root>"));
     }
 }

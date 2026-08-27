@@ -85,19 +85,35 @@ admin-only).
 ### Which keys the current engine consults
 
 Accuracy matters here. As of this release the engine **enforces
-`allowed_roots`**; the other four keys are validated and durably stored but are
+`allowed_roots`** and **applies `default_text_search_config`** to both indexing
+and querying; the remaining three keys are validated and durably stored but are
 **not yet consulted** by the ingest/search paths:
 
 | Key | Status in the current engine |
 | --- | ---------------------------- |
 | `allowed_roots` | **Enforced.** When non-empty, a registered bundle path must resolve inside one of the roots (symlink-escape safe), else `22023`. |
-| `default_text_search_config` | **Stored, not yet consulted.** Search and indexing currently use `pg_catalog.english` unconditionally. |
+| `default_text_search_config` | **Applied.** Used as the `regconfig` for `to_tsvector` when building each concept's `body_tsv` at index time, and for `websearch_to_tsquery`/`ts_headline` at query time, so query parsing matches the configuration that indexed the rows. See the caveat below. |
 | `default_strict` | **Stored, not yet consulted.** Sync is always strict — the first malformed file aborts the sync. |
 | `sync_log_retention_days` | **Stored, not yet consulted.** No sync-log retention is wired up yet. |
 | `default_exclude` | **Stored, not yet consulted.** Discovery does not yet apply these exclusion globs. |
 
-These four are reserved for planned functionality; setting them is safe and
-persists, but only `allowed_roots` changes behavior today.
+The remaining three are reserved for planned functionality; setting them is safe
+and persists, but does not change behavior today.
+
+> **⚠️ Warning — changing `default_text_search_config` is not retroactive.**
+> The configuration is read at the moment each concept is indexed and again at
+> the moment each query runs. Changing it does **not** re-index bundles that are
+> already synced: `refresh_bundle` only re-parses files whose content hash
+> changed, so every unchanged row keeps the `body_tsv` that was built under the
+> **previous** config. Search then parses the query under the **new** config and
+> can mismatch those stale vectors, returning wrong or empty results for the
+> affected bundles.
+>
+> Set `default_text_search_config` **before the first `register_bundle`** so the
+> whole corpus is indexed under one configuration. To move an already-registered
+> bundle to a new configuration, re-register it — `unregister_bundle` followed by
+> `register_bundle` — which is currently the only way to rebuild every `body_tsv`
+> under the new config.
 
 ### Reading the effective policy
 
@@ -126,11 +142,14 @@ or a wrong-shaped/out-of-domain value raises `22023`.
 -- Restrict registration to one or more roots (the recommended hardening step):
 SELECT pgokf.set_config('allowed_roots', '["/srv/okf-bundles", "/data/knowledge"]'::jsonb);
 
+-- Choose the text-search configuration (applied at index and query time).
+-- Set this BEFORE the first register_bundle; see the retroactivity warning above.
+SELECT pgokf.set_config('default_text_search_config', '"pg_catalog.simple"'::jsonb);
+
 -- Reserved keys (stored, not yet consulted by the engine):
 SELECT pgokf.set_config('default_strict', 'false'::jsonb);
 SELECT pgokf.set_config('sync_log_retention_days', '14'::jsonb);
 SELECT pgokf.set_config('default_exclude', '["*.tmp", "drafts/**"]'::jsonb);
-SELECT pgokf.set_config('default_text_search_config', '"pg_catalog.simple"'::jsonb);
 ```
 
 Validation examples (all `22023`):

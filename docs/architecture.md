@@ -237,8 +237,16 @@ Two configuration surfaces, described fully in
   set in `postgresql.conf`, plus a `SUSET` `log_level`. They are hard safety
   limits no SQL session can raise.
 - **Durable policy** — the singleton `pgokf_private.config` row, managed through
-  `set_config` / `reset_config` / `get_config`. `allowed_roots` is enforced by
-  the sync engine today; `default_text_search_config`, `default_strict`,
+  `set_config` / `reset_config` / `get_config`. `allowed_roots` is enforced and
+  `default_text_search_config` is applied by the sync engine today — the latter
+  is the `regconfig` for `to_tsvector` when building each concept's `body_tsv` at
+  index time and for `websearch_to_tsquery`/`ts_headline` at query time, so query
+  parsing matches the configuration that indexed the rows. Because
+  `refresh_bundle` re-parses only files whose content hash changed, changing
+  `default_text_search_config` is **not retroactive**: already-synced rows keep
+  the tsvector built under the previous configuration, so search can mismatch
+  them until the bundle is re-registered (see
+  [configuration.md](configuration.md)). `default_strict`,
   `sync_log_retention_days`, and `default_exclude` are validated and stored but
   reserved for planned functionality.
 

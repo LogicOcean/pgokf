@@ -1,9 +1,10 @@
 # pgokf troubleshooting
 
 `pgokf` reports failures as stable PostgreSQL **SQLSTATEs**, so clients can react
-programmatically instead of matching message text. Every message also carries the
-offending bundle-relative path in the form `[bundle-relative path: …]`
-(`<bundle-root>` when the error applies to the bundle as a whole).
+programmatically instead of matching message text. Errors tied to a specific
+source file also carry the offending bundle-relative path in the form
+`[bundle-relative path: …]`; validation, configuration, and limit errors that
+have no file context render as the bare message with no path suffix.
 
 See the exact SQLSTATE of the last error with `\errverbose` in `psql`, or run the
 session with `\set VERBOSITY verbose` to have the code printed inline.
@@ -232,9 +233,12 @@ Not an error — a few benign causes:
 - **The bundle is disabled.** Search skips bundles where
   `pgokf.bundles.enabled` is false. Check with `SELECT id, enabled FROM
   pgokf.list_bundles();`.
-- **The query does not match the weighted vector.** Matching is
-  `websearch_to_tsquery('pg_catalog.english', …)`; stemming and stop-words are
-  English. Try broader terms, and remember exact metadata filters
+- **The query does not match the weighted vector.** Matching uses
+  `websearch_to_tsquery(<configured text-search config>, …)` — the
+  `default_text_search_config` setting (default `pg_catalog.english`), so
+  stemming and stop-words follow that configuration. Note that changing the
+  config does not re-index already-synced bundles (see `configuration.md`). Try
+  broader terms, and remember exact metadata filters
   (`pgokf.concepts.tags`, `type`) remain available regardless of language.
 - **Nothing was ingested.** Confirm `file_count > 0` via `pgokf.bundle_info`.
   Reserved files (`index.md`, `log.md`) do not become concepts.

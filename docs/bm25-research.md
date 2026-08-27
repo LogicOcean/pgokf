@@ -43,9 +43,10 @@ claim below is verifiable in the cited source.
 **Query and ranking** — `search.rs:71-88`:
 
 - The user query is parsed with
-  `websearch_to_tsquery('pg_catalog.english', $1)` — the web-style parser that
-  tolerates unbalanced quotes and bare operators, so untrusted input never
-  raises a syntax error.
+  `websearch_to_tsquery(<configured text-search config>, $1)` (the
+  `default_text_search_config` setting, default `pg_catalog.english`) — the
+  web-style parser that tolerates unbalanced quotes and bare operators, so
+  untrusted input never raises a syntax error.
 - Matching predicate is `c.body_tsv @@ q.query`, evaluated against the GIN
   index `concepts_body_tsv_gin` (`schema.rs:72`).
 - Relevance is `ts_rank_cd(c.body_tsv, q.query)` — cover-density ranking, which

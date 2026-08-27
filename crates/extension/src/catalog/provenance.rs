@@ -51,6 +51,7 @@ use std::path::Path;
 
 use pgrx::{Spi, extension_sql};
 
+use crate::catalog::batch::BATCH_SIZE;
 use crate::catalog::types::StagedConcept;
 use crate::errors::CatalogError;
 use okf_parser::ParsedConcept;
@@ -258,66 +259,128 @@ fn spi_error(context: &str, error: &pgrx::spi::Error) -> CatalogError {
     CatalogError::internal(format!("{context}: {error}"), Path::new(""))
 }
 
-/// Delete any existing provenance row for a concept, so re-projection is
-/// idempotent and stale rows never linger after provenance is removed.
-fn delete_provenance(bundle_id: i64, concept_id: &str) -> Result<(), CatalogError> {
-    Spi::run_with_args(
-        "DELETE FROM pgokf.concept_provenance WHERE bundle_id = $1 AND concept_id = $2",
-        &[bundle_id.into(), concept_id.into()],
-    )
-    .map_err(|error| spi_error("failed to clear concept provenance", &error))
+/// The staged provenance rows, transposed into the parallel arrays bound by
+/// the bulk `concept_provenance` `INSERT`.
+///
+/// Only concepts that carry recognized provenance frontmatter contribute a row
+/// (the projection is sparse), so every `Vec` shares the same length and
+/// ordering: row `i` inserts one `concept_provenance` row. `details` holds the
+/// compact JSON text of each lossless payload, cast back to `jsonb` in SQL —
+/// the same serialization `pgrx::JsonB` performs before `jsonb_in`, so the
+/// stored `jsonb` is byte-identical to the row-by-row binding.
+#[derive(Debug, Clone, Default)]
+struct ProvenanceRows {
+    concept_ids: Vec<String>,
+    generated_by: Vec<Option<String>>,
+    verified: Vec<Option<bool>>,
+    verification_method: Vec<Option<String>>,
+    freshness: Vec<Option<String>>,
+    details: Vec<String>,
 }
 
-/// Insert one concept's provenance row via fully parameterized SPI.
-fn insert_provenance(
-    bundle_id: i64,
-    concept_id: &str,
-    columns: &ProvenanceColumns,
-    details: pgrx::JsonB,
-) -> Result<(), CatalogError> {
-    Spi::run_with_args(
-        "INSERT INTO pgokf.concept_provenance
+/// Extract the sparse provenance rows for every staged concept, in staging
+/// order, skipping concepts that carry no recognized provenance frontmatter
+/// (they produce no row, exactly as the row-by-row projection did).
+fn collect_provenance_rows(staged: &[StagedConcept]) -> ProvenanceRows {
+    let mut rows = ProvenanceRows::default();
+    for entry in staged {
+        let concept = &entry.concept;
+        let details = extract_details(concept);
+        if details_is_empty(&details) {
+            continue;
+        }
+        let columns = extract_columns(concept);
+        rows.concept_ids.push(concept.id.clone());
+        rows.generated_by.push(columns.generated_by);
+        rows.verified.push(columns.verified);
+        rows.verification_method.push(columns.verification_method);
+        rows.freshness.push(columns.freshness);
+        // Compact JSON text of the lossless payload; `serde_json::Value`'s
+        // `Display` matches what `pgrx::JsonB` serializes before `jsonb_in`, so
+        // the `::jsonb` cast below reproduces the row-by-row `JsonB` binding.
+        rows.details.push(details.0.to_string());
+    }
+    rows
+}
+
+/// Delete any existing provenance rows for the staged concepts, in bounded
+/// batches, so re-projection is idempotent and stale rows never linger after
+/// provenance is removed.
+///
+/// Every staged concept is cleared — including ones that now carry no
+/// provenance frontmatter and thus contribute no replacement row — exactly as
+/// the row-by-row `delete-then-insert` did. Concept IDs are chunked at
+/// [`BATCH_SIZE`] so the `= ANY($2)` list never grows unbounded.
+fn delete_staged_provenance(bundle_id: i64, staged: &[StagedConcept]) -> Result<(), CatalogError> {
+    for chunk in staged.chunks(BATCH_SIZE) {
+        let concept_ids: Vec<&str> = chunk
+            .iter()
+            .map(|entry| entry.concept.id.as_str())
+            .collect();
+        Spi::run_with_args(
+            "DELETE FROM pgokf.concept_provenance WHERE bundle_id = $1 AND concept_id = ANY($2)",
+            &[bundle_id.into(), concept_ids.into()],
+        )
+        .map_err(|error| spi_error("failed to clear concept provenance", &error))?;
+    }
+    Ok(())
+}
+
+/// Bulk-insert the collected provenance rows with one array-unnest `INSERT`
+/// per [`BATCH_SIZE`] chunk.
+fn insert_provenance_rows(bundle_id: i64, rows: &ProvenanceRows) -> Result<(), CatalogError> {
+    const INSERT: &str = "
+        INSERT INTO pgokf.concept_provenance
             (bundle_id, concept_id, generated_by, verified,
              verification_method, freshness, details)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)",
-        &[
-            bundle_id.into(),
-            concept_id.into(),
-            columns.generated_by.clone().into(),
-            columns.verified.into(),
-            columns.verification_method.clone().into(),
-            columns.freshness.clone().into(),
-            details.into(),
-        ],
-    )
-    .map_err(|error| spi_error("failed to insert concept provenance", &error))
+        SELECT
+            $1, d.concept_id, d.generated_by, d.verified,
+            d.verification_method, d.freshness, d.details::jsonb
+        FROM unnest(
+                 $2::text[], $3::text[], $4::boolean[],
+                 $5::text[], $6::text[], $7::text[])
+             AS d(concept_id, generated_by, verified,
+                   verification_method, freshness, details)";
+
+    let total = rows.concept_ids.len();
+    for start in (0..total).step_by(BATCH_SIZE) {
+        let end = usize::min(start + BATCH_SIZE, total);
+        Spi::run_with_args(
+            INSERT,
+            &[
+                bundle_id.into(),
+                rows.concept_ids[start..end].to_vec().into(),
+                rows.generated_by[start..end].to_vec().into(),
+                rows.verified[start..end].to_vec().into(),
+                rows.verification_method[start..end].to_vec().into(),
+                rows.freshness[start..end].to_vec().into(),
+                rows.details[start..end].to_vec().into(),
+            ],
+        )
+        .map_err(|error| spi_error("failed to insert concept provenance", &error))?;
+    }
+    Ok(())
 }
 
 /// Project provenance/trust/lifecycle data for every staged concept.
 ///
 /// Invoked inside the sync transaction after
 /// [`crate::catalog::links::project`] and before the bundle row is finalized.
-/// For each [`StagedConcept`] the concept's existing provenance row is deleted
-/// and, when the concept carries recognized provenance frontmatter, replaced
-/// with a freshly extracted row (typed columns plus the lossless `details`
-/// payload). Concepts without such frontmatter produce no row.
+/// Every staged concept's existing provenance row is cleared, and each concept
+/// that carries recognized provenance frontmatter is re-inserted with a freshly
+/// extracted row (typed columns plus the lossless `details` payload). Concepts
+/// without such frontmatter produce no row. Both phases are set-based and
+/// chunked at [`BATCH_SIZE`], replacing the former per-concept SPI round-trips
+/// while producing byte-identical rows.
 ///
 /// # Errors
 ///
 /// Returns a [`CatalogError`] on any SPI failure, aborting the surrounding
 /// sync transaction so a partial projection is never committed.
 pub fn project(bundle_id: i64, staged: &[StagedConcept]) -> Result<(), CatalogError> {
-    for entry in staged {
-        let concept = &entry.concept;
-        delete_provenance(bundle_id, &concept.id)?;
-
-        let details = extract_details(concept);
-        if details_is_empty(&details) {
-            continue;
-        }
-        let columns = extract_columns(concept);
-        insert_provenance(bundle_id, &concept.id, &columns, details)?;
-    }
+    delete_staged_provenance(bundle_id, staged)?;
+    let rows = collect_provenance_rows(staged);
+    insert_provenance_rows(bundle_id, &rows)?;
     Ok(())
 }
 
@@ -496,6 +559,36 @@ mod tests {
                 "verified".to_owned(),
             ]
         );
+    }
+
+    /// Wrap a parsed concept as a [`StagedConcept`] for the batch collectors.
+    fn stage(concept: ParsedConcept) -> StagedConcept {
+        StagedConcept {
+            concept,
+            file_hash: "hash".to_owned(),
+            modified_at_epoch: Some(1.5),
+        }
+    }
+
+    #[test]
+    fn collect_provenance_rows_emits_a_row_only_for_provenance_bearing_concepts() {
+        // Arrange: one concept with provenance frontmatter, one without.
+        let staged = vec![
+            stage(parse(
+                "type: Reference\ntitle: With provenance\ngenerated_by: pipeline/9\n",
+            )),
+            stage(parse("type: Reference\ntitle: Plain concept\n")),
+        ];
+
+        // Act
+        let rows = collect_provenance_rows(&staged);
+
+        // Assert: the plain concept is skipped (sparse projection), and the
+        // provenance-bearing one's typed column and JSON details are marshalled.
+        assert_eq!(rows.concept_ids, vec!["concept".to_owned()]);
+        assert_eq!(rows.generated_by, vec![Some("pipeline/9".to_owned())]);
+        assert_eq!(rows.details.len(), 1);
+        assert_eq!(rows.details[0], "{\"generated_by\":\"pipeline/9\"}");
     }
 
     #[test]
