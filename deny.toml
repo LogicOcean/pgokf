@@ -18,6 +18,10 @@ allow = [
   "Apache-2.0 WITH LLVM-exception",
   "BSD-2-Clause",
   "BSD-3-Clause",
+  # Public-domain dedication carried by tiny-keccak, a transitive dependency of
+  # arrow-array (arrow -> ahash -> const-random -> tiny-keccak). CC0-1.0 imposes
+  # no attribution or copyleft obligations.
+  "CC0-1.0",
   "ISC",
   "MIT",
   "MPL-2.0",

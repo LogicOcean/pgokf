@@ -15,6 +15,16 @@ license = "MIT"
 repository = "https://github.com/LogicOcean/okf-pg-catalog"
 
 [workspace.dependencies]
+# Arrow/Parquet are pure-Rust (no system libraries). default-features are
+# disabled so only the columnar-array + schema core of `arrow` and the
+# Arrow-backed Parquet writer with snappy/zstd compression of `parquet`
+# compile in; the CSV/JSON/IPC/FFI surfaces are left out.
+arrow = { version = "59", default-features = false }
+parquet = { version = "59", default-features = false, features = [
+    "arrow",
+    "snap",
+    "zstd",
+] }
 blake3 = "1.8"
 globset = "0.4"
 pgrx = { version = "0.19.2", default-features = false }

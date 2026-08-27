@@ -19,8 +19,10 @@ pg19 = ["pgrx/pg19"]
 pg_test = []
 
 [dependencies]
+arrow.workspace = true
 okf-parser = { version = "=0.1.0", path = "../okf-parser" }
 okf-sync = { version = "=0.1.0", path = "../okf-sync" }
+parquet.workspace = true
 pgrx.workspace = true
 
 [lints]
