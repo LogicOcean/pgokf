@@ -1,0 +1,19 @@
+Package: postgresql-@PG_MAJOR@-pgokf
+Version: @DEB_VERSION@
+Architecture: @ARCH@
+Maintainer: @MAINTAINER@
+Section: database
+Priority: optional
+Depends: postgresql-@PG_MAJOR@, libc6
+Homepage: @HOMEPAGE@
+Installed-Size: @INSTALLED_SIZE@
+Description: @SYNOPSIS@
+ pgokf materializes Open Knowledge Format (OKF) bundles -- directories of
+ UTF-8 Markdown concept documents with YAML frontmatter -- into a
+ transactional, queryable PostgreSQL catalog with native full-text search
+ and link-graph traversal. The on-disk bundle stays the portable source of
+ truth; PostgreSQL becomes a projection optimized for metadata queries.
+ .
+ This package contains the pgokf extension built for PostgreSQL @PG_MAJOR@.
+ After installation, run "CREATE EXTENSION pgokf;" in a database on a
+ PostgreSQL @PG_MAJOR@ cluster.

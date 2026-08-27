@@ -1,0 +1,51 @@
+{
+   "name": "pgokf",
+   "abstract": "Materialized PostgreSQL catalog for Open Knowledge Format bundles",
+   "description": "pgokf materializes Open Knowledge Format (OKF) bundles -- directories of UTF-8 Markdown concept documents with YAML frontmatter -- into a transactional, queryable PostgreSQL catalog with native full-text search and link-graph traversal. The on-disk bundle remains the portable source of truth; PostgreSQL becomes a projection optimized for metadata queries. Built with Rust and pgrx; no third-party search extension is required.",
+   "version": "0.1.0",
+   "maintainer": [
+      "David Saroka <david.saroka@gmail.com>"
+   ],
+   "license": "mit",
+   "provides": {
+      "pgokf": {
+         "abstract": "Materialized PostgreSQL catalog for Open Knowledge Format bundles",
+         "file": "crates/extension/sql/pgokf--0.1.0.sql",
+         "docfile": "docs/sql-api.md",
+         "version": "0.1.0"
+      }
+   },
+   "prereqs": {
+      "runtime": {
+         "requires": {
+            "PostgreSQL": "15.0.0"
+         }
+      }
+   },
+   "resources": {
+      "homepage": "https://github.com/LogicOcean/okf-pg-catalog",
+      "bugtracker": {
+         "web": "https://github.com/LogicOcean/okf-pg-catalog/issues"
+      },
+      "repository": {
+         "url": "https://github.com/LogicOcean/okf-pg-catalog.git",
+         "web": "https://github.com/LogicOcean/okf-pg-catalog",
+         "type": "git"
+      }
+   },
+   "generated_by": "David Saroka",
+   "meta-spec": {
+      "version": "1.0.0",
+      "url": "https://pgxn.org/meta/spec.txt"
+   },
+   "tags": [
+      "open knowledge format",
+      "okf",
+      "catalog",
+      "full text search",
+      "markdown",
+      "metadata",
+      "pgrx"
+   ],
+   "release_status": "stable"
+}

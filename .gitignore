@@ -9,3 +9,8 @@
 .idea/
 .vscode/
 .cargo-pgrx/
+
+# Packaging build output — never commit built packages or images.
+/packaging/**/build/
+*.deb
+*.rpm

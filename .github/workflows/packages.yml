@@ -1,0 +1,210 @@
+name: packages
+
+# Build the distributable artifacts for every supported PostgreSQL major.
+# Runs on tags (a release) and on demand; also on pushes touching packaging so
+# the build scripts stay green.
+on:
+  push:
+    tags:
+      - "v*"
+    paths:
+      - "packaging/**"
+      - "META.json"
+      - ".github/workflows/packages.yml"
+  pull_request:
+    paths:
+      - "packaging/**"
+      - "META.json"
+      - ".github/workflows/packages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Keep in sync with rust-toolchain.toml and the workspace pgrx dependency.
+  RUST_TOOLCHAIN: "1.96.0"
+  CARGO_PGRX_VERSION: "0.19.2"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # META.json is PG-independent; validate it once.
+  # ---------------------------------------------------------------------------
+  meta:
+    name: Validate META.json (PGXN)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: jq well-formedness + required PGXN v1 fields
+        run: |
+          jq empty META.json
+          jq -e '
+            has("name") and has("version") and has("abstract")
+            and has("maintainer") and has("license") and has("provides")
+            and has("meta-spec")
+            and (.provides | to_entries | all(.value | has("file") and has("version")))
+          ' META.json
+          echo "META.json: valid JSON, all required PGXN meta-spec v1 fields present."
+
+  # ---------------------------------------------------------------------------
+  # Per-major .deb (+ rpm spec check). PG19 is advisory until PGDG ships it.
+  # ---------------------------------------------------------------------------
+  deb:
+    name: Build .deb (PostgreSQL ${{ matrix.pg }})${{ matrix.experimental && ' (advisory)' || '' }}
+    runs-on: ubuntu-24.04
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [15, 16, 17, 18]
+        experimental: [false]
+        include:
+          - pg: 19
+            experimental: true
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned via the action ref (1.96.0), consistent with ci.yml and
+      # pgrx-test.yml; RUST_TOOLCHAIN below documents the same version for the
+      # Docker build args.
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install PostgreSQL ${{ matrix.pg }} server + dev files (PGDG)
+        id: pgdg
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo gpg --batch --yes --dearmor -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt noble-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          # PG19 is not GA as of 2026-08; PGDG publishes no postgresql-19 yet.
+          # Skip the advisory leg gracefully; a required leg fails loudly.
+          if ! apt-cache show "postgresql-${{ matrix.pg }}" > /dev/null 2>&1; then
+            if [[ "${{ matrix.experimental }}" == "true" ]]; then
+              echo "::notice::postgresql-${{ matrix.pg }} not published by PGDG yet; skipping advisory leg."
+              echo "available=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::postgresql-${{ matrix.pg }} is required but missing from PGDG."
+            exit 1
+          fi
+          sudo apt-get install -y \
+            postgresql-${{ matrix.pg }} \
+            postgresql-server-dev-${{ matrix.pg }} \
+            libclang-dev
+          echo "available=true" >> "$GITHUB_OUTPUT"
+
+      - name: Install cargo-pgrx and initialize PostgreSQL ${{ matrix.pg }}
+        if: steps.pgdg.outputs.available == 'true'
+        run: |
+          cargo install --locked cargo-pgrx --version "${CARGO_PGRX_VERSION}"
+          cargo pgrx init --pg${{ matrix.pg }}=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+
+      # Uses the single build primitive internally (cargo pgrx package for this
+      # major, package-scoped to the extension crate) then dpkg-deb --build.
+      - name: Build .deb
+        if: steps.pgdg.outputs.available == 'true'
+        run: packaging/deb/build-deb.sh ${{ matrix.pg }}
+
+      - name: Inspect .deb (metadata + payload)
+        if: steps.pgdg.outputs.available == 'true'
+        run: |
+          deb=$(ls target/packaging/deb/postgresql-${{ matrix.pg }}-pgokf_*.deb)
+          echo "== dpkg-deb -I =="; dpkg-deb -I "$deb"
+          echo "== dpkg-deb -c =="; dpkg-deb -c "$deb"
+
+      - name: Smoke test .deb (CREATE EXTENSION on a scratch cluster)
+        if: steps.pgdg.outputs.available == 'true'
+        run: |
+          deb=$(ls target/packaging/deb/postgresql-${{ matrix.pg }}-pgokf_*.deb)
+          sudo apt-get install -y "$deb"
+          PGBIN=/usr/lib/postgresql/${{ matrix.pg }}/bin
+          DATA=/tmp/pgokf-ci/data; SOCK=/tmp/pgokf-ci/s
+          rm -rf /tmp/pgokf-ci && mkdir -p "$DATA" "$SOCK"
+          "$PGBIN/initdb" -D "$DATA" -U postgres --auth=trust >/dev/null
+          "$PGBIN/pg_ctl" -D "$DATA" -o "-c listen_addresses='' -k $SOCK" -w start
+          "$PGBIN/psql" -h "$SOCK" -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c "CREATE EXTENSION pgokf;" \
+            -c "SELECT extname, extversion FROM pg_extension WHERE extname='pgokf';"
+          "$PGBIN/pg_ctl" -D "$DATA" -w stop
+
+      - name: Structurally check the RPM spec
+        if: steps.pgdg.outputs.available == 'true' && matrix.pg == 18
+        run: |
+          # rpmspec is not installed on ubuntu runners by default; use it if
+          # present (full macro parse), otherwise assert the required sections.
+          if command -v rpmspec >/dev/null 2>&1; then
+            rpmspec --parse --define 'pgmajorversion 16' packaging/rpm/pgokf.spec >/dev/null
+            echo "rpmspec --parse: OK"
+          else
+            for s in '^Name:' '^Version:' '^%build' '^%install' '^%files'; do
+              grep -qE "$s" packaging/rpm/pgokf.spec || { echo "missing $s"; exit 1; }
+            done
+            echo "rpmspec unavailable; required spec sections present."
+          fi
+
+      - name: Upload .deb artifact
+        if: steps.pgdg.outputs.available == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pgokf-deb-pg${{ matrix.pg }}
+          path: target/packaging/deb/*.deb
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Per-major Docker image. Build only (loaded locally); push happens in the
+  # release step, not here.
+  # ---------------------------------------------------------------------------
+  docker:
+    name: Build Docker image (PostgreSQL ${{ matrix.pg }})${{ matrix.experimental && ' (advisory)' || '' }}
+    runs-on: ubuntu-24.04
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [15, 16, 17, 18]
+        experimental: [false]
+        include:
+          - pg: 19
+            experimental: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Validate Dockerfile
+        run: |
+          docker build --check \
+            -f packaging/docker/Dockerfile \
+            --build-arg PG_MAJOR=${{ matrix.pg }} .
+
+      # PG19 has no postgres:19 base image yet; keep the leg advisory.
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packaging/docker/Dockerfile
+          build-args: |
+            PG_MAJOR=${{ matrix.pg }}
+            RUST_VERSION=${{ env.RUST_TOOLCHAIN }}
+            CARGO_PGRX_VERSION=${{ env.CARGO_PGRX_VERSION }}
+          tags: ghcr.io/logicocean/pgokf:0.1.0-pg${{ matrix.pg }}
+          push: false
+          load: true
+
+      - name: Smoke test image (CREATE EXTENSION)
+        run: |
+          cid=$(docker run -d -e POSTGRES_PASSWORD=postgres \
+            ghcr.io/logicocean/pgokf:0.1.0-pg${{ matrix.pg }})
+          for i in $(seq 1 30); do
+            if docker exec "$cid" pg_isready -U postgres >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          docker exec "$cid" psql -U postgres -v ON_ERROR_STOP=1 \
+            -c "SELECT extname, extversion FROM pg_extension WHERE extname='pgokf';"
+          docker rm -f "$cid"
