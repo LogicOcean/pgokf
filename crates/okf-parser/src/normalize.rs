@@ -5,7 +5,13 @@ use crate::{Error, Result};
 /// File names reserved by OKF; they describe a directory, not a concept.
 const RESERVED_FILE_NAMES: [&str; 2] = ["index.md", "log.md"];
 
-/// Normalize a bundle-relative concept path to UTF-8 slash separators.
+/// Normalize a bundle-relative concept path to UTF-8 forward-slash separators.
+///
+/// Separator handling follows the host platform: on Windows the native `\`
+/// separator is folded to `/` (a backslash can never be part of a Windows
+/// file name), while on POSIX systems `/` is the only separator and `\` is a
+/// legal file-name byte kept verbatim — folding it there would produce a
+/// normalized path that no longer names the file on disk.
 ///
 /// The result keeps its `.md` suffix (lowercased); use [`concept_id`] to
 /// derive the OKF concept ID from it.
@@ -14,27 +20,30 @@ const RESERVED_FILE_NAMES: [&str; 2] = ["index.md", "log.md"];
 /// Returns an error for empty, absolute, traversing, non-UTF-8, or
 /// non-Markdown paths.
 pub fn normalize_path(path: &Path) -> Result<String> {
-    let raw = path
-        .to_str()
-        .ok_or_else(|| Error::NonUtf8Path {
-            path: path.to_string_lossy().into_owned(),
-        })?
-        .replace('\\', "/");
+    let raw = path.to_str().ok_or_else(|| Error::NonUtf8Path {
+        path: path.to_string_lossy().into_owned(),
+    })?;
+    let raw = fold_native_separators(raw);
     if raw.is_empty() {
         return Err(Error::EmptyPath);
     }
-    if raw.starts_with('/') || has_windows_prefix(&raw) {
-        return Err(Error::AbsolutePath { path: raw });
-    }
 
     let mut parts = Vec::new();
-    for component in Path::new(&raw).components() {
+    for component in Path::new(raw.as_ref()).components() {
         match component {
             Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
             Component::CurDir => {}
-            Component::ParentDir => return Err(Error::PathTraversal { path: raw }),
+            Component::ParentDir => {
+                return Err(Error::PathTraversal {
+                    path: raw.to_string(),
+                });
+            }
+            // `Component::Prefix` only occurs on Windows (e.g. `C:`); together
+            // with `RootDir` it rejects every platform-absolute path.
             Component::RootDir | Component::Prefix(_) => {
-                return Err(Error::AbsolutePath { path: raw });
+                return Err(Error::AbsolutePath {
+                    path: raw.to_string(),
+                });
             }
         }
     }
@@ -43,6 +52,18 @@ pub fn normalize_path(path: &Path) -> Result<String> {
     }
 
     apply_markdown_extension(parts.join("/"))
+}
+
+/// Fold the native `\` separator to `/` on Windows; keep POSIX paths verbatim.
+#[cfg(windows)]
+fn fold_native_separators(raw: &str) -> std::borrow::Cow<'_, str> {
+    std::borrow::Cow::Owned(raw.replace('\\', "/"))
+}
+
+/// Fold the native `\` separator to `/` on Windows; keep POSIX paths verbatim.
+#[cfg(not(windows))]
+fn fold_native_separators(raw: &str) -> std::borrow::Cow<'_, str> {
+    std::borrow::Cow::Borrowed(raw)
 }
 
 /// Derive the OKF concept ID from a normalized bundle-relative path.
@@ -87,6 +108,13 @@ pub fn is_reserved_path(normalized_path: &str) -> bool {
 /// above the bundle root, resolves to nothing, or has a non-Markdown
 /// extension. Existence checks against actual bundle contents belong to the
 /// sync layer, not the parser.
+///
+/// Unlike [`normalize_path`], the `\` → `/` fold here applies on every
+/// platform: link destinations are document *content* and must resolve
+/// identically wherever the document is parsed, so Windows-authored `\`
+/// separators are always folded. A link that intends to target a POSIX file
+/// name containing a literal `\` is therefore unresolvable by design — OKF
+/// links use `/` separators.
 #[must_use]
 pub fn resolve_link_target(target: &str, source_path: &str) -> Option<String> {
     let without_fragment = target.replace('\\', "/");
@@ -140,11 +168,6 @@ fn parent_components(normalized_path: &str) -> Vec<String> {
         .rsplit_once('/')
         .map(|(directory, _)| directory.split('/').map(str::to_owned).collect())
         .unwrap_or_default()
-}
-
-fn has_windows_prefix(path: &str) -> bool {
-    let bytes = path.as_bytes();
-    bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/'
 }
 
 #[cfg(test)]

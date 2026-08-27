@@ -191,17 +191,30 @@ pub fn authorize<R: RoleMembership>(
 }
 
 /// [`RoleMembership`] backed by `PostgreSQL`'s `pg_has_role`, evaluated for the
-/// current user via SPI.
+/// **session user** via SPI.
+///
+/// Membership is checked against `session_user` rather than `current_user` so
+/// the policy stays correct inside `SECURITY DEFINER` functions, where
+/// `current_user` is the function owner instead of the caller. `session_user`
+/// still identifies the invoking session there, and a session can only
+/// `SET ROLE` to a role it is a member of, so this never widens access.
+/// Superusers pass `pg_has_role` for every role, as everywhere else in
+/// `PostgreSQL`.
+///
+/// The lookup runs through read-only SPI (`SpiClient::select`) so it is safe
+/// to call from `STABLE`, `PARALLEL SAFE` functions such as
+/// `pgokf.concept_search`; a writable SPI call would try to assign a
+/// transaction ID, which is an error inside a parallel worker.
 pub struct PostgresRoleMembership;
 
 impl RoleMembership for PostgresRoleMembership {
     fn is_member_of(&self, role: &str) -> Result<bool, CatalogError> {
         let query = match role {
             PGOKF_ADMIN_ROLE => {
-                "SELECT pg_catalog.pg_has_role(current_user, 'pgokf_admin', 'MEMBER')"
+                "SELECT pg_catalog.pg_has_role(session_user, 'pgokf_admin', 'MEMBER')"
             }
             PGOKF_READER_ROLE => {
-                "SELECT pg_catalog.pg_has_role(current_user, 'pgokf_reader', 'MEMBER')"
+                "SELECT pg_catalog.pg_has_role(session_user, 'pgokf_reader', 'MEMBER')"
             }
             _ => {
                 return Err(CatalogError::internal(
@@ -211,14 +224,19 @@ impl RoleMembership for PostgresRoleMembership {
             }
         };
 
-        pgrx::Spi::get_one::<bool>(query)
-            .map(|membership| membership.unwrap_or(false))
-            .map_err(|error| {
-                CatalogError::internal(
-                    format!("failed to check PostgreSQL role membership: {error}"),
-                    Path::new(""),
-                )
-            })
+        pgrx::Spi::connect(|client| {
+            client
+                .select(query, Some(1), &[])?
+                .first()
+                .get_one::<bool>()
+        })
+        .map(|membership| membership.unwrap_or(false))
+        .map_err(|error| {
+            CatalogError::internal(
+                format!("failed to check PostgreSQL role membership: {error}"),
+                Path::new(""),
+            )
+        })
     }
 }
 

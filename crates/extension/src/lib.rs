@@ -3,10 +3,13 @@
 //!
 //! This crate is the `PostgreSQL`-facing shell: it registers configuration
 //! variables ([`guc`]), installs the bootstrap schema/role hardening
-//! (`sql/bootstrap.sql`), and exposes the security ([`security`]) and error
-//! ([`errors`]) foundations used by later catalog waves. The only SQL-callable
-//! function at this stage is `pgokf.version()`.
+//! (`sql/bootstrap.sql`), exposes the security ([`security`]) and error
+//! ([`errors`]) foundations, and hosts the catalog backbone ([`catalog`]) —
+//! the base tables plus `pgokf.register_bundle`, `pgokf.refresh_bundle`, and
+//! `pgokf.concept_search`. Feature modules (links, provenance, config, admin)
+//! attach through the seams declared in [`catalog`].
 
+pub mod catalog;
 pub mod errors;
 pub mod guc;
 pub mod security;

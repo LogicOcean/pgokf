@@ -6,7 +6,7 @@ const RICH: &[u8] = include_bytes!("fixtures/rich.md");
 
 #[test]
 fn parses_known_fields_metadata_body_and_links() {
-    let parsed = parse_concept(RICH, "concepts\\failover.MD", ParserLimits::default()).unwrap();
+    let parsed = parse_concept(RICH, "concepts/failover.MD", ParserLimits::default()).unwrap();
 
     assert_eq!(parsed.id, "concepts/failover");
     assert_eq!(parsed.declared_id.as_deref(), Some("incident-db"));
@@ -169,10 +169,6 @@ fn rejects_unsafe_empty_or_non_markdown_paths() {
         Err(Error::AbsolutePath { .. })
     ));
     assert!(matches!(
-        normalize_path(Path::new("C:\\tmp\\x.md")),
-        Err(Error::AbsolutePath { .. })
-    ));
-    assert!(matches!(
         normalize_path(Path::new("x.txt")),
         Err(Error::UnsupportedExtension { .. })
     ));
@@ -181,6 +177,34 @@ fn rejects_unsafe_empty_or_non_markdown_paths() {
         Err(Error::EmptyPath)
     ));
     assert_eq!(normalize_path(Path::new("./a//b")).unwrap(), "a/b.md");
+}
+
+#[cfg(unix)]
+#[test]
+fn preserves_posix_filenames_containing_backslashes() {
+    // On POSIX `\` is a legal file-name byte, not a separator: the normalized
+    // path must keep it verbatim so it still names the file on disk.
+    assert_eq!(
+        normalize_path(Path::new(r"back\slash.md")).unwrap(),
+        r"back\slash.md"
+    );
+    assert_eq!(
+        normalize_path(Path::new(r"notes/back\slash.MD")).unwrap(),
+        r"notes/back\slash.md"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn folds_windows_separators_and_rejects_drive_absolute_paths() {
+    assert_eq!(
+        normalize_path(Path::new("concepts\\failover.MD")).unwrap(),
+        "concepts/failover.md"
+    );
+    assert!(matches!(
+        normalize_path(Path::new("C:\\tmp\\x.md")),
+        Err(Error::AbsolutePath { .. })
+    ));
 }
 
 #[cfg(unix)]
@@ -206,7 +230,7 @@ fn errors_carry_offending_path_and_category() {
         max_file_bytes: 1,
         max_frontmatter_bytes: 100,
     };
-    let too_large = parse_concept(b"four", "notes\\big.MD", limits).unwrap_err();
+    let too_large = parse_concept(b"four", "notes/big.MD", limits).unwrap_err();
     assert_eq!(too_large.path(), "notes/big.md");
     assert_eq!(too_large.category(), ErrorCategory::Limit);
 

@@ -15,7 +15,10 @@ use crate::{SyncConfig, SyncError, hash::hash_file};
 /// Content and filesystem attributes captured for one document.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileMetadata {
-    /// Path relative to the configured root, using forward slashes.
+    /// Path relative to the configured root, using forward-slash separators.
+    /// File-name bytes are preserved verbatim (a POSIX name may itself
+    /// contain `\`), so joining this path onto the root always resolves
+    /// to the discovered file.
     pub path: PathBuf,
     /// Lowercase hexadecimal BLAKE3 hash of the file contents.
     pub hash: String,
@@ -196,8 +199,22 @@ fn canonicalize(path: &Path) -> Result<PathBuf, SyncError> {
     })
 }
 
+/// Normalize a bundle-relative path so snapshot keys use forward slashes.
+///
+/// On Windows the native `\` separator is folded to `/`; a backslash can never
+/// appear inside a Windows file name, so the replacement only ever rewrites
+/// separators. On POSIX systems `/` is already the native separator and `\` is
+/// a legal file-name byte, so the path is kept verbatim — rewriting it there
+/// would produce a snapshot key that no longer resolves on disk when joined
+/// back onto the bundle root.
+#[cfg(windows)]
 fn normalized_relative_path(path: &Path) -> PathBuf {
     PathBuf::from(path.to_string_lossy().replace('\\', "/"))
+}
+
+#[cfg(not(windows))]
+fn normalized_relative_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
 }
 
 #[cfg(test)]
@@ -313,6 +330,23 @@ mod tests {
             result,
             Err(SyncError::TooManyFiles { count: 3, limit: 2 })
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_posix_filename_containing_a_backslash_is_preserved_verbatim() {
+        let root = TempDir::new().unwrap();
+        write_file(&root, r"back\slash.md", "backslash body");
+        let config = SyncConfig::new(root.path());
+
+        let snapshot = discover(&config).unwrap();
+
+        assert_eq!(snapshot.len(), 1);
+        let file = snapshot.get(r"back\slash.md").unwrap();
+        assert_eq!(file.hash, crate::hash_bytes(b"backslash body"));
+        // The snapshot key must join back onto the root to an existing file,
+        // otherwise consumers reading `root.join(key)` fail on a phantom path.
+        assert!(root.path().join(&file.path).is_file());
     }
 
     #[test]
