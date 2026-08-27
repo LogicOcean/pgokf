@@ -43,6 +43,7 @@ use okf_parser::{ParserLimits, is_reserved_path, parse_concept};
 use okf_sync::{FileMetadata, Snapshot, SyncConfig, SyncReport, discover, hash_bytes};
 use pgrx::Spi;
 
+use crate::catalog::batch::{self, BATCH_SIZE};
 use crate::catalog::types::StagedConcept;
 use crate::errors::CatalogError;
 use crate::guc;
@@ -242,6 +243,16 @@ fn parser_limits_from_gucs() -> ParserLimits {
 /// Strict policy: the first malformed file aborts the sync with SQLSTATE
 /// `22023` and the offending bundle-relative path, so a partial projection is
 /// never committed (the surrounding transaction rolls back).
+///
+/// The staged concepts are fully materialized rather than streamed: the
+/// ordered projection seam ([`crate::catalog::links::project`] /
+/// [`crate::catalog::provenance::project`]) consumes the complete slice after
+/// the concept rows are written, and the links pass resolves internal edges
+/// against the whole staged set. Peak memory is bounded by the same limits that
+/// bound the scan — `pgokf.max_bundle_files` caps the number of parsed
+/// concepts and `pgokf.max_file_bytes` caps each source file — while the SQL
+/// writes themselves are chunked ([`upsert_concepts`],
+/// [`replace_concept_metadata`]) so no single statement is unbounded.
 fn stage_changed_concepts(
     root: &Path,
     delta: &BundleDelta,
@@ -288,25 +299,58 @@ fn delete_removed_concepts(bundle_id: i64, removed_paths: &[String]) -> Result<(
     .map_err(|error| spi_error("failed to delete removed concepts", &error))
 }
 
-/// Upsert one staged concept row, recomputing the weighted `body_tsv`.
+/// Bulk-upsert every staged concept in bounded batches, recomputing each
+/// weighted `body_tsv`.
 ///
-/// The `ON CONFLICT` branch refreshes `indexed_at`; unchanged concepts never
-/// reach this statement, which is what preserves their `indexed_at`.
-fn upsert_concept(bundle_id: i64, staged: &StagedConcept) -> Result<(), CatalogError> {
+/// Concepts are processed in chunks of [`BATCH_SIZE`] so a very large bundle
+/// never builds one unbounded statement or parameter array. Each chunk runs a
+/// single array-unnest `INSERT ... SELECT` that reproduces, row for row, the
+/// same columns and `tsvector` the row-by-row upsert produced: title (weight
+/// `A`), the space-joined tags/type/description (weight `B`), and body text
+/// (weight `D`). The `ON CONFLICT` branch refreshes `indexed_at`; unchanged
+/// concepts never reach this statement, which preserves their `indexed_at`.
+///
+/// The batch relies on each `(bundle_id, id)` conflict key being unique within
+/// a chunk — guaranteed because concept IDs are derived from the bundle-unique
+/// source path (`concepts_bundle_path_key`), so `ON CONFLICT DO UPDATE` never
+/// sees a row twice in one statement.
+fn upsert_concepts(bundle_id: i64, staged: &[StagedConcept]) -> Result<(), CatalogError> {
+    // Tags are the one ragged (per-row `text[]`) column, so they cannot be bound
+    // as a single rectangular array. Instead the chunk's tags are flattened into
+    // `$7` and each row carries an inclusive 1-based slice window
+    // (`$12` lo, `$13` hi) into it; `($7)[lo:hi]` rebuilds the row's array (empty
+    // when hi < lo). The inner subquery materializes that slice once so the
+    // stored column and the weighted `body_tsv` share it.
     const UPSERT: &str = "
         INSERT INTO pgokf.concepts
             (bundle_id, id, path, type, title, description, tags, resource,
              body_text, file_hash, modified_at, body_tsv)
-        VALUES
-            ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-             pg_catalog.to_timestamp($11),
-             pg_catalog.setweight(pg_catalog.to_tsvector('pg_catalog.english', $5), 'A')
-             || pg_catalog.setweight(
-                    pg_catalog.to_tsvector(
-                        'pg_catalog.english',
-                        pg_catalog.concat_ws(' ', pg_catalog.array_to_string($7, ' '), $4, $6)),
-                    'B')
-             || pg_catalog.setweight(pg_catalog.to_tsvector('pg_catalog.english', $9), 'D'))
+        SELECT
+            $1, t.id, t.path, t.type, t.title, t.description, t.tags, t.resource,
+            t.body_text, t.file_hash, pg_catalog.to_timestamp(t.modified_at),
+            pg_catalog.setweight(
+                pg_catalog.to_tsvector('pg_catalog.english', t.title), 'A')
+            || pg_catalog.setweight(
+                   pg_catalog.to_tsvector(
+                       'pg_catalog.english',
+                       pg_catalog.concat_ws(' ',
+                           pg_catalog.array_to_string(t.tags, ' '),
+                           t.type, t.description)),
+                   'B')
+            || pg_catalog.setweight(
+                   pg_catalog.to_tsvector('pg_catalog.english', t.body_text), 'D')
+        FROM (
+            SELECT
+                d.id, d.path, d.type, d.title, d.description, d.resource,
+                d.body_text, d.file_hash, d.modified_at,
+                COALESCE(($7::text[])[d.lo:d.hi], ARRAY[]::text[]) AS tags
+            FROM unnest(
+                     $2::text[], $3::text[], $4::text[], $5::text[], $6::text[],
+                     $8::text[], $9::text[], $10::text[], $11::float8[],
+                     $12::integer[], $13::integer[])
+                 AS d(id, path, type, title, description, resource,
+                       body_text, file_hash, modified_at, lo, hi)
+        ) AS t
         ON CONFLICT (bundle_id, id) DO UPDATE SET
             path = excluded.path,
             type = excluded.type,
@@ -320,50 +364,73 @@ fn upsert_concept(bundle_id: i64, staged: &StagedConcept) -> Result<(), CatalogE
             body_tsv = excluded.body_tsv,
             indexed_at = pg_catalog.now()";
 
-    let concept = &staged.concept;
-    let resource_text = concept.resource.as_ref().map(ToString::to_string);
-    Spi::run_with_args(
-        UPSERT,
-        &[
-            bundle_id.into(),
-            concept.id.as_str().into(),
-            concept.path.as_str().into(),
-            concept.r#type.as_str().into(),
-            concept.title.as_str().into(),
-            concept.description.clone().into(),
-            concept.tags.clone().into(),
-            resource_text.into(),
-            concept.body_text.as_str().into(),
-            staged.file_hash.as_str().into(),
-            staged.modified_at_epoch.into(),
-        ],
-    )
-    .map_err(|error| spi_error("failed to upsert concept", &error))
+    for chunk in staged.chunks(BATCH_SIZE) {
+        let columns = batch::marshal_concepts(chunk);
+        Spi::run_with_args(
+            UPSERT,
+            &[
+                bundle_id.into(),
+                columns.ids.into(),
+                columns.paths.into(),
+                columns.types.into(),
+                columns.titles.into(),
+                columns.descriptions.into(),
+                columns.tags_flat.into(),
+                columns.resources.into(),
+                columns.body_texts.into(),
+                columns.file_hashes.into(),
+                columns.modified_ats.into(),
+                columns.tag_los.into(),
+                columns.tag_his.into(),
+            ],
+        )
+        .map_err(|error| spi_error("failed to upsert concepts", &error))?;
+    }
+    Ok(())
 }
 
-/// Replace the producer-metadata rows for every touched concept.
+/// Replace the producer-metadata rows for every touched concept in bounded
+/// batches.
+///
+/// First every touched concept's stored metadata is cleared (in [`BATCH_SIZE`]
+/// chunks of concept IDs, so a concept that now has no metadata still loses its
+/// stale rows), then the flattened `(concept_id, key, value)` triples are
+/// re-inserted with array-unnest bulk `INSERT`s, also chunked. Each value binds
+/// as its compact JSON text and is cast back to `jsonb` in SQL — the same
+/// serialization `pgrx::JsonB` performs — so the stored value is byte-identical
+/// to the row-by-row binding.
 fn replace_concept_metadata(bundle_id: i64, staged: &[StagedConcept]) -> Result<(), CatalogError> {
-    for entry in staged {
-        let concept_id = entry.concept.id.as_str();
+    const INSERT: &str = "
+        INSERT INTO pgokf.concept_metadata (bundle_id, concept_id, key, value)
+        SELECT $1, d.concept_id, d.key, d.value::jsonb
+        FROM unnest($2::text[], $3::text[], $4::text[])
+             AS d(concept_id, key, value)";
+
+    for chunk in staged.chunks(BATCH_SIZE) {
+        let concept_ids: Vec<&str> = chunk
+            .iter()
+            .map(|entry| entry.concept.id.as_str())
+            .collect();
         Spi::run_with_args(
-            "DELETE FROM pgokf.concept_metadata WHERE bundle_id = $1 AND concept_id = $2",
-            &[bundle_id.into(), concept_id.into()],
+            "DELETE FROM pgokf.concept_metadata WHERE bundle_id = $1 AND concept_id = ANY($2)",
+            &[bundle_id.into(), concept_ids.into()],
         )
         .map_err(|error| spi_error("failed to clear concept metadata", &error))?;
+    }
 
-        for (key, value) in &entry.concept.metadata {
-            Spi::run_with_args(
-                "INSERT INTO pgokf.concept_metadata (bundle_id, concept_id, key, value)
-                 VALUES ($1, $2, $3, $4)",
-                &[
-                    bundle_id.into(),
-                    concept_id.into(),
-                    key.as_str().into(),
-                    pgrx::JsonB(value.clone()).into(),
-                ],
-            )
-            .map_err(|error| spi_error("failed to insert concept metadata", &error))?;
-        }
+    let rows = batch::flatten_metadata(staged);
+    for start in (0..rows.concept_ids.len()).step_by(BATCH_SIZE) {
+        let end = usize::min(start + BATCH_SIZE, rows.concept_ids.len());
+        Spi::run_with_args(
+            INSERT,
+            &[
+                bundle_id.into(),
+                rows.concept_ids[start..end].to_vec().into(),
+                rows.keys[start..end].to_vec().into(),
+                rows.values[start..end].to_vec().into(),
+            ],
+        )
+        .map_err(|error| spi_error("failed to insert concept metadata", &error))?;
     }
     Ok(())
 }
@@ -397,9 +464,7 @@ fn run_bundle_sync(bundle_id: i64, canonical_root: &Path) -> Result<SyncReport, 
     let staged = stage_changed_concepts(canonical_root, &delta)?;
 
     delete_removed_concepts(bundle_id, &delta.removed_paths)?;
-    for entry in &staged {
-        upsert_concept(bundle_id, entry)?;
-    }
+    upsert_concepts(bundle_id, &staged)?;
     replace_concept_metadata(bundle_id, &staged)?;
 
     // Ordered projection seam: feature modules observe the staged concepts

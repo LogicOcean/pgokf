@@ -27,6 +27,7 @@
 //! - [`admin`] — `bundle_info`, `unregister_bundle`, `list_bundles`.
 
 pub mod admin;
+mod batch;
 pub mod config;
 pub mod export;
 pub mod links;
