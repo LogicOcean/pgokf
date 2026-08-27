@@ -1,31 +1,49 @@
+//! Path-containment and role-authorization policy for catalog operations.
+//!
+//! Filesystem access is only permitted under explicitly configured allowed
+//! roots, with both sides canonicalized so symlinks cannot escape
+//! containment. Authorization is expressed against the [`RoleMembership`]
+//! abstraction so the policy in [`authorize`] is unit-testable without a
+//! running `PostgreSQL` server; [`PostgresRoleMembership`] is the production
+//! implementation backed by `pg_has_role`.
+
+use crate::errors::CatalogError;
 use std::path::{Component, Path, PathBuf};
 
-#[cfg(test)]
-#[path = "errors.rs"]
-mod errors;
-
-#[cfg(not(test))]
-use crate::errors::CatalogError;
-#[cfg(test)]
-use errors::{CatalogError, ErrorKind};
-
+/// Role allowed to register and refresh bundles.
 pub const PGOKF_ADMIN_ROLE: &str = "pgokf_admin";
+/// Role allowed to run read-only search operations.
 pub const PGOKF_READER_ROLE: &str = "pgokf_reader";
 
+/// Catalog operations subject to role-based authorization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
+    /// Register a new bundle root.
     Register,
+    /// Re-synchronize an already registered bundle.
     Refresh,
+    /// Query the catalog.
     Search,
 }
 
 /// Abstract role lookup so authorization policy can be tested without a
-/// running PostgreSQL server.
+/// running `PostgreSQL` server.
 pub trait RoleMembership {
+    /// Report whether the current user is a member of `role`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`CatalogError`] when membership cannot be determined, for
+    /// example because the underlying lookup query failed.
     fn is_member_of(&self, role: &str) -> Result<bool, CatalogError>;
 }
 
 /// Reject unsafe path syntax before any filesystem access.
+///
+/// # Errors
+///
+/// Returns an [`crate::errors::ErrorKind::InvalidParameter`] error when the
+/// path is relative, contains NUL bytes, or contains `..` components.
 pub fn validate_path_syntax(path: &Path, bundle_relative_path: &Path) -> Result<(), CatalogError> {
     if !path.is_absolute() {
         return Err(CatalogError::invalid_parameter(
@@ -51,7 +69,13 @@ pub fn validate_path_syntax(path: &Path, bundle_relative_path: &Path) -> Result<
     Ok(())
 }
 
-/// Canonicalize and validate configured roots.
+/// Canonicalize and validate configured roots, deduplicating resolved paths.
+///
+/// # Errors
+///
+/// Returns an [`crate::errors::ErrorKind::InvalidParameter`] error when
+/// `allowed_roots` is empty, a root has unsafe syntax, a root cannot be
+/// canonicalized, or a resolved root is not a directory.
 pub fn validate_allowed_roots(
     allowed_roots: &[PathBuf],
     bundle_relative_path: &Path,
@@ -92,6 +116,12 @@ pub fn validate_allowed_roots(
 /// Canonicalize `path` and ensure its resolved target remains under one of the
 /// canonical allowed roots. Resolving both sides prevents symlinks from
 /// escaping containment.
+///
+/// # Errors
+///
+/// Returns an [`crate::errors::ErrorKind::InvalidParameter`] error when the
+/// path or roots fail validation, when canonicalization fails, or when the
+/// resolved path escapes every allowed root.
 pub fn canonicalize_contained_path(
     path: &Path,
     allowed_roots: &[PathBuf],
@@ -120,6 +150,16 @@ pub fn canonicalize_contained_path(
 }
 
 /// Enforce operation-specific role policy.
+///
+/// `Register` and `Refresh` require `pgokf_admin`; `Search` accepts
+/// `pgokf_reader` or `pgokf_admin`.
+///
+/// # Errors
+///
+/// Returns an [`crate::errors::ErrorKind::InsufficientPrivilege`] error when
+/// the user lacks the required role, or propagates the failure reported by
+/// the [`RoleMembership`] implementation with the caller's
+/// `bundle_relative_path` attached.
 pub fn authorize<R: RoleMembership>(
     operation: Operation,
     roles: &R,
@@ -150,10 +190,10 @@ pub fn authorize<R: RoleMembership>(
     }
 }
 
-#[cfg(not(test))]
+/// [`RoleMembership`] backed by `PostgreSQL`'s `pg_has_role`, evaluated for the
+/// current user via SPI.
 pub struct PostgresRoleMembership;
 
-#[cfg(not(test))]
 impl RoleMembership for PostgresRoleMembership {
     fn is_member_of(&self, role: &str) -> Result<bool, CatalogError> {
         let query = match role {
@@ -182,8 +222,12 @@ impl RoleMembership for PostgresRoleMembership {
     }
 }
 
-/// Authorize the current PostgreSQL user for an operation.
-#[cfg(not(test))]
+/// Authorize the current `PostgreSQL` user for an operation.
+///
+/// # Errors
+///
+/// See [`authorize`]; membership is resolved through
+/// [`PostgresRoleMembership`], so this must run inside a backend.
 pub fn authorize_current_user(
     operation: Operation,
     bundle_relative_path: &Path,
@@ -194,6 +238,7 @@ pub fn authorize_current_user(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::errors::ErrorKind;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -223,8 +268,11 @@ mod tests {
 
     #[test]
     fn rejects_relative_paths() {
+        // Arrange & Act
         let error = validate_path_syntax(Path::new("bundle/file.md"), Path::new("file.md"))
             .expect_err("relative paths must fail");
+
+        // Assert
         assert_eq!(error.kind(), ErrorKind::InvalidParameter);
         assert_eq!(error.bundle_path(), Path::new("file.md"));
     }
@@ -232,34 +280,47 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn rejects_paths_containing_nul() {
+        // Arrange
         use std::os::unix::ffi::OsStrExt;
         let path = Path::new(std::ffi::OsStr::from_bytes(b"/bundle/bad\0name"));
+
+        // Act & Assert
         assert!(validate_path_syntax(path, Path::new("bad.md")).is_err());
     }
 
     #[test]
     fn rejects_parent_traversal_before_canonicalization() {
+        // Arrange & Act
         let error = validate_path_syntax(
             Path::new("/srv/bundles/../secrets"),
             Path::new("../secrets"),
         )
         .expect_err("parent traversal must fail");
+
+        // Assert
         assert_eq!(error.bundle_path(), Path::new("../secrets"));
     }
 
     #[test]
     fn canonicalizes_and_accepts_a_path_within_an_allowed_root() {
+        // Arrange
         let tree = TempTree::new();
         let bundle = tree.root.join("bundle");
         fs::create_dir(&bundle).unwrap();
-        let canonical = canonicalize_contained_path(&bundle, &[tree.root.clone()], Path::new("."))
-            .expect("contained bundle should pass");
+
+        // Act
+        let canonical =
+            canonicalize_contained_path(&bundle, std::slice::from_ref(&tree.root), Path::new("."))
+                .expect("contained bundle should pass");
+
+        // Assert
         assert_eq!(canonical, fs::canonicalize(bundle).unwrap());
     }
 
     #[cfg(unix)]
     #[test]
     fn rejects_symlinks_that_escape_an_allowed_root() {
+        // Arrange
         use std::os::unix::fs::symlink;
         let tree = TempTree::new();
         let allowed = tree.root.join("allowed");
@@ -269,21 +330,29 @@ mod tests {
         fs::write(outside.join("secret.md"), "secret").unwrap();
         symlink(&outside, allowed.join("escape")).unwrap();
 
+        // Act
         let error = canonicalize_contained_path(
             &allowed.join("escape/secret.md"),
             &[allowed],
             Path::new("escape/secret.md"),
         )
         .expect_err("escaping symlink must fail");
+
+        // Assert
         assert_eq!(error.kind(), ErrorKind::InvalidParameter);
         assert_eq!(error.bundle_path(), Path::new("escape/secret.md"));
     }
 
     #[test]
     fn rejects_empty_allowed_roots() {
+        // Arrange
         let tree = TempTree::new();
+
+        // Act
         let error = canonicalize_contained_path(&tree.root, &[], Path::new("."))
             .expect_err("at least one allowed root is required");
+
+        // Assert
         assert_eq!(error.kind(), ErrorKind::InvalidParameter);
     }
 
@@ -305,19 +374,25 @@ mod tests {
 
     #[test]
     fn register_and_refresh_require_admin() {
+        // Arrange
         let reader = FakeRoles {
             reader: true,
             admin: false,
         };
+
         for operation in [Operation::Register, Operation::Refresh] {
+            // Act
             let error = authorize(operation, &reader, Path::new("bundle"))
                 .expect_err("reader must not mutate bundles");
+
+            // Assert
             assert_eq!(error.kind(), ErrorKind::InsufficientPrivilege);
         }
     }
 
     #[test]
     fn search_accepts_reader_or_admin() {
+        // Arrange
         let reader = FakeRoles {
             reader: true,
             admin: false,
@@ -326,14 +401,19 @@ mod tests {
             reader: false,
             admin: true,
         };
+
+        // Act & Assert
         assert!(authorize(Operation::Search, &reader, Path::new("query")).is_ok());
         assert!(authorize(Operation::Search, &admin, Path::new("query")).is_ok());
     }
 
     #[test]
     fn search_rejects_unprivileged_roles() {
+        // Arrange & Act
         let error = authorize(Operation::Search, &FakeRoles::default(), Path::new("query"))
             .expect_err("unprivileged role must fail");
+
+        // Assert
         assert_eq!(error.kind(), ErrorKind::InsufficientPrivilege);
         assert_eq!(error.sqlstate(), "42501");
     }

@@ -2,7 +2,7 @@
 
 ## Decision
 
-**Use PostgreSQL native full-text search as the required, primary backend and make BM25 an optional accelerator.** The baseline implementation should store a weighted `tsvector`, index it with GIN, and rank with `ts_rank_cd`. A later adapter may use ParadeDB `pg_search` when it is installed and explicitly enabled. This keeps `pgokf` installable on PostgreSQL 14–17, including environments that do not permit third-party shared-preload extensions, while leaving a path to higher-quality large-corpus retrieval.
+**Use PostgreSQL native full-text search as the required, primary backend and make BM25 an optional accelerator.** The baseline implementation should store a weighted `tsvector`, index it with GIN, and rank with `ts_rank_cd`. A later adapter may use ParadeDB `pg_search` when it is installed and explicitly enabled. This keeps `pgokf` installable on PostgreSQL 15–19, including environments that do not permit third-party shared-preload extensions, while leaving a path to higher-quality large-corpus retrieval.
 
 Do not vendor or revive the historical `pg_bm25` crate. It is an old ParadeDB product name; the maintained successor is `pg_search`.
 
@@ -12,7 +12,7 @@ Do not vendor or revive the historical `pg_bm25` crate. It is an old ParadeDB pr
 
 The historical ParadeDB `pg_bm25` extension used Tantivy through `pgrx`, required `shared_preload_libraries`, and exposed BM25 search, highlighting, filtering, fuzzy search, custom tokenizers, and hybrid search.[11] By ParadeDB v0.8.0 the component was named `pg_search`; that release's Cargo features included PostgreSQL 12–16, including 14–16.[9]
 
-The maintained ParadeDB extension is now `pg_search`. Its current development branch states that supported PGDG releases begin at PostgreSQL 15 and currently targets PostgreSQL 15–18.[8] Current prebuilt Community packages are likewise documented for PostgreSQL 15+ and require both `shared_preload_libraries = 'pg_search'` and, since 0.25.0, `pgvector`.[12] Therefore current `pg_search` does **not** satisfy a hard PG14 dependency.
+The maintained ParadeDB extension is now `pg_search`. Its current development branch states that supported PGDG releases begin at PostgreSQL 15 and currently targets PostgreSQL 15–18.[8] Current prebuilt Community packages are likewise documented for PostgreSQL 15+ and require both `shared_preload_libraries = 'pg_search'` and, since 0.25.0, `pgvector`.[12] Therefore current `pg_search` does **not** cover the full PG15–19 matrix; PG19 is not yet a supported target.
 
 ParadeDB stores an inverted and columnar index in LSM-tree segments and invokes a custom scan for its operators.[7] It exposes BM25 scores through `pdb.score(key)`; higher scores are more relevant, and deterministic result sets should add a primary-key tiebreaker.[6] Its index remains transactionally colocated with the source table, which avoids a separate search service and synchronization pipeline.[1]
 
@@ -32,21 +32,21 @@ The key difference from BM25 is corpus awareness. PostgreSQL's documentation exp
 | Property | Native `ts_rank_cd` | BM25 (`pg_search`) |
 |---|---|---|
 | Required dependency | PostgreSQL only | Additional native extension and server configuration |
-| PG14–17 coverage | Yes | Current `pg_search`: PG15–17; PG14 only in historical releases |
+| PG15–19 coverage | Yes | Current `pg_search`: PG15–18; no PG19 support yet |
 | Relevance inputs | weighted term frequency and match proximity | corpus rarity, saturated term frequency, document length; field/query boosts in ParadeDB |
 | Index | GIN/GiST over `tsvector` (ranking is evaluated separately) | custom ParadeDB inverted/columnar index with top-k execution |
 | Small OKF bundles | Usually sufficient and simple | Usually unnecessary operational weight |
 | Large heterogeneous corpora | Can over-reward repeated common terms; rank computation may become costly | Usually the stronger relevance/top-k choice; must be benchmarked on OKF data |
-| Portability | High | Lower, especially on managed PostgreSQL and PG14 |
+| Portability | High | Lower, especially on managed PostgreSQL and PG19 |
 
 `ts_rank_cd` is not "BM25-lite": proximity can make it better for phrase-like queries, while BM25's IDF and saturation can make it better for relevance across documents of very different lengths. Which produces better OKF results is empirical, so evaluation should use judged queries rather than assuming one universal winner.
 
 ### Other extensions
 
-- **Timescale `pg_textsearch`** provides a PostgreSQL-native BM25 index, configurable `k1`/`b`, PostgreSQL text-search configurations, expression/partial indexes, and Block-Max WAND top-k execution. Its current support is PostgreSQL 17–18 only, so it cannot be the Phase 1 backend for PG14–16.[13]
+- **Timescale `pg_textsearch`** provides a PostgreSQL-native BM25 index, configurable `k1`/`b`, PostgreSQL text-search configurations, expression/partial indexes, and Block-Max WAND top-k execution. Its current support is PostgreSQL 17–18 only, so it cannot be the Phase 1 backend for PG15–16 or PG19.[13]
 - **VectorChord-BM25** implements BM25 vectors and a BM25 index and is commonly paired with a separate tokenizer extension. It is useful for hybrid/vector-oriented stacks, but introduces a second representation and tokenizer lifecycle that is disproportionate for the catalog baseline.[14]
 
-Neither alternative currently offers a cleaner PG14–17 compatibility story than native FTS.
+Neither alternative currently offers a cleaner PG15–19 compatibility story than native FTS.
 
 ## Recommended `pgokf` design
 
@@ -59,16 +59,16 @@ Neither alternative currently offers a cleaner PG14–17 compatibility story tha
 
 ## Compatibility summary (as researched)
 
-| Backend/version line | PG14 | PG15 | PG16 | PG17 | Notes |
-|---|:---:|:---:|:---:|:---:|---|
-| Native `tsvector` + `ts_rank_cd` | ✓ | ✓ | ✓ | ✓ | Required baseline |
-| Historical `pg_bm25` 0.5.x | source feature | source feature | source/default | — | Obsolete product name; do not adopt |
-| ParadeDB `pg_search` 0.8.x | source feature | source feature | source/default | — | Historical, not a recommended pin |
-| Current ParadeDB `pg_search` | — | ✓ | ✓ | ✓ | Current branch targets PG15–18; packages documented for PG15+ |
-| Current Timescale `pg_textsearch` | — | — | — | ✓ | Current README supports PG17–18 |
-| VectorChord-BM25 | not selected | not selected | not selected | not selected | Separate BM25-vector/tokenizer model |
+| Backend/version line | PG15 | PG16 | PG17 | PG18 | PG19 | Notes |
+|---|:---:|:---:|:---:|:---:|:---:|---|
+| Native `tsvector` + `ts_rank_cd` | ✓ | ✓ | ✓ | ✓ | ✓ | Required baseline |
+| Historical `pg_bm25` 0.5.x | source feature | source/default | — | — | — | Obsolete product name; do not adopt |
+| ParadeDB `pg_search` 0.8.x | source feature | source/default | — | — | — | Historical, not a recommended pin |
+| Current ParadeDB `pg_search` | ✓ | ✓ | ✓ | ✓ | — | Current branch targets PG15–18; packages documented for PG15+ |
+| Current Timescale `pg_textsearch` | — | — | ✓ | ✓ | — | Current README supports PG17–18 |
+| VectorChord-BM25 | not selected | not selected | not selected | not selected | not selected | Separate BM25-vector/tokenizer model |
 
-Compatibility refers to upstream-declared build/support targets, not a `pgokf` certification. If an optional adapter is implemented, CI must test exact extension releases and OS packages independently of the core PG14–17 matrix.
+Compatibility refers to upstream-declared build/support targets, not a `pgokf` certification. If an optional adapter is implemented, CI must test exact extension releases and OS packages independently of the core PG15–19 matrix.
 
 ## Validation plan
 

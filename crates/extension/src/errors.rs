@@ -1,17 +1,28 @@
+//! Domain error types with stable `PostgreSQL` SQLSTATE mappings.
+//!
+//! Every catalog operation reports failures as a [`CatalogError`], which
+//! carries a bundle-relative path so SQL clients can identify the offending
+//! object, and maps onto a fixed SQLSTATE per [`ErrorKind`].
+
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// Domain-level error categories with stable PostgreSQL SQLSTATE mappings.
+/// Domain-level error categories with stable `PostgreSQL` SQLSTATE mappings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
+    /// A caller-supplied parameter is invalid (`22023`).
     InvalidParameter,
+    /// The current role lacks the required privilege (`42501`).
     InsufficientPrivilege,
+    /// A path collides with an already-registered one (`23505`).
     DuplicatePath,
+    /// An unexpected internal failure (`XX000`).
     Internal,
 }
 
 impl ErrorKind {
     /// Five-character SQLSTATE associated with this error category.
+    #[must_use]
     pub const fn sqlstate(self) -> &'static str {
         match self {
             Self::InvalidParameter => "22023",
@@ -21,7 +32,9 @@ impl ErrorKind {
         }
     }
 
-    #[cfg(not(test))]
+    /// The `pgrx` error code equivalent of [`Self::sqlstate`], used when
+    /// raising the error through `PostgreSQL`'s `ereport` machinery.
+    #[must_use]
     pub const fn pg_sql_error_code(self) -> pgrx::PgSqlErrorCode {
         match self {
             Self::InvalidParameter => pgrx::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
@@ -45,6 +58,8 @@ pub struct CatalogError {
 }
 
 impl CatalogError {
+    /// Build an error of an explicit [`ErrorKind`].
+    #[must_use]
     pub fn new(kind: ErrorKind, message: impl Into<String>, bundle_path: impl AsRef<Path>) -> Self {
         Self {
             kind,
@@ -53,10 +68,14 @@ impl CatalogError {
         }
     }
 
+    /// Build an [`ErrorKind::InvalidParameter`] error (SQLSTATE `22023`).
+    #[must_use]
     pub fn invalid_parameter(message: impl Into<String>, bundle_path: impl AsRef<Path>) -> Self {
         Self::new(ErrorKind::InvalidParameter, message, bundle_path)
     }
 
+    /// Build an [`ErrorKind::InsufficientPrivilege`] error (SQLSTATE `42501`).
+    #[must_use]
     pub fn insufficient_privilege(
         message: impl Into<String>,
         bundle_path: impl AsRef<Path>,
@@ -64,32 +83,47 @@ impl CatalogError {
         Self::new(ErrorKind::InsufficientPrivilege, message, bundle_path)
     }
 
+    /// Build an [`ErrorKind::DuplicatePath`] error (SQLSTATE `23505`).
+    #[must_use]
     pub fn duplicate_path(message: impl Into<String>, bundle_path: impl AsRef<Path>) -> Self {
         Self::new(ErrorKind::DuplicatePath, message, bundle_path)
     }
 
+    /// Build an [`ErrorKind::Internal`] error (SQLSTATE `XX000`).
+    #[must_use]
     pub fn internal(message: impl Into<String>, bundle_path: impl AsRef<Path>) -> Self {
         Self::new(ErrorKind::Internal, message, bundle_path)
     }
 
+    /// The error category, which determines the SQLSTATE.
+    #[must_use]
     pub const fn kind(&self) -> ErrorKind {
         self.kind
     }
 
+    /// Five-character SQLSTATE this error raises as.
+    #[must_use]
     pub const fn sqlstate(&self) -> &'static str {
         self.kind.sqlstate()
     }
 
+    /// Bundle-relative path of the object the error applies to; empty for the
+    /// bundle root.
+    #[must_use]
     pub fn bundle_path(&self) -> &Path {
         &self.bundle_path
     }
 
+    /// Human-readable message without the appended path context.
+    #[must_use]
     pub fn message(&self) -> &str {
         &self.message
     }
 
-    /// Raise this error through PostgreSQL with its mapped SQLSTATE.
-    #[cfg(not(test))]
+    /// Raise this error through `PostgreSQL` with its mapped SQLSTATE.
+    ///
+    /// This transfers control to `PostgreSQL`'s error machinery and never
+    /// returns; only call it from code running inside a backend.
     pub fn raise(self) -> ! {
         pgrx::ereport!(
             pgrx::PgLogLevel::ERROR,
@@ -124,6 +158,8 @@ mod tests {
 
     #[test]
     fn maps_domain_errors_to_required_sqlstates() {
+        // Arrange & Act: build one error per category.
+        // Assert: each maps to its contractually fixed SQLSTATE.
         assert_eq!(
             CatalogError::invalid_parameter("bad option", "bundle.md").sqlstate(),
             "22023"
@@ -140,15 +176,23 @@ mod tests {
 
     #[test]
     fn display_always_contains_bundle_relative_path() {
+        // Arrange
         let error = CatalogError::invalid_parameter("bad path", Path::new("concepts/runbook.md"));
+
+        // Act
         let rendered = error.to_string();
+
+        // Assert
         assert!(rendered.contains("concepts/runbook.md"));
         assert!(rendered.contains("bad path"));
     }
 
     #[test]
     fn empty_bundle_path_is_rendered_explicitly() {
+        // Arrange
         let error = CatalogError::internal("unexpected", Path::new(""));
+
+        // Act & Assert
         assert!(error.to_string().contains("<bundle-root>"));
     }
 }

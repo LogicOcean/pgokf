@@ -35,14 +35,23 @@ pub struct Frontmatter {
 
 /// Split and deserialize a leading `---`-delimited YAML block.
 ///
+/// `path` is the normalized bundle-relative path of the file being parsed; it
+/// is attached to every error for per-file diagnostics.
+///
 /// # Errors
 /// Returns an error for a missing delimiter, an oversized or unterminated
 /// block, invalid YAML, or metadata that cannot be represented as JSON.
-pub fn parse(source: &str, max_bytes: usize) -> Result<(Frontmatter, &str)> {
+pub fn parse<'source>(
+    source: &'source str,
+    path: &str,
+    max_bytes: usize,
+) -> Result<(Frontmatter, &'source str)> {
     let after_open = source
         .strip_prefix("---\n")
         .or_else(|| source.strip_prefix("---\r\n"))
-        .ok_or(Error::MissingFrontmatter)?;
+        .ok_or_else(|| Error::MissingFrontmatter {
+            path: path.to_owned(),
+        })?;
 
     let mut consumed = 0usize;
     let mut yaml_end = None;
@@ -57,35 +66,49 @@ pub fn parse(source: &str, max_bytes: usize) -> Result<(Frontmatter, &str)> {
         consumed += segment.len();
         if consumed > max_bytes {
             return Err(Error::FrontmatterTooLarge {
+                path: path.to_owned(),
                 actual: consumed,
                 limit: max_bytes,
             });
         }
     }
 
-    let (yaml_end, body_start) = yaml_end
-        .zip(body_start)
-        .ok_or(Error::UnterminatedFrontmatter)?;
+    let (yaml_end, body_start) =
+        yaml_end
+            .zip(body_start)
+            .ok_or_else(|| Error::UnterminatedFrontmatter {
+                path: path.to_owned(),
+            })?;
     if yaml_end > max_bytes {
         return Err(Error::FrontmatterTooLarge {
+            path: path.to_owned(),
             actual: yaml_end,
             limit: max_bytes,
         });
     }
 
-    let raw: RawFrontmatter = serde_yaml::from_str(&after_open[..yaml_end])?;
+    let raw: RawFrontmatter = serde_yaml::from_str(&after_open[..yaml_end]).map_err(|source| {
+        Error::InvalidFrontmatter {
+            path: path.to_owned(),
+            source,
+        }
+    })?;
+    let invalid_metadata = |source| Error::InvalidMetadata {
+        path: path.to_owned(),
+        source,
+    };
     let resource = raw
         .resource
         .map(serde_json::to_value)
         .transpose()
-        .map_err(Error::InvalidMetadata)?;
+        .map_err(invalid_metadata)?;
     let metadata = raw
         .extra
         .into_iter()
         .map(|(key, value)| {
             serde_json::to_value(value)
                 .map(|value| (key, value))
-                .map_err(Error::InvalidMetadata)
+                .map_err(invalid_metadata)
         })
         .collect::<Result<Map<_, _>>>()?;
 

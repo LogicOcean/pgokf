@@ -82,7 +82,7 @@ Fatal root/read/configuration errors abort the sync. Per-file malformed input is
 
 ### Search
 
-The mandatory backend is PostgreSQL native FTS so every supported PostgreSQL 14–17 installation works without another extension. A weighted document favors title, then tags/type/description, then body, with a GIN index for matching and `ts_rank_cd` for ranking. Results add concept ID as a deterministic tiebreaker.
+The mandatory backend is PostgreSQL native FTS so every supported PostgreSQL 15–19 installation works without another extension. A weighted document favors title, then tags/type/description, then body, with a GIN index for matching and `ts_rank_cd` for ranking. Results add concept ID as a deterministic tiebreaker.
 
 The public contract is `pgokf.concept_search(query)`. A future optional adapter can use ParadeDB `pg_search`/BM25 while returning the same logical result shape. ParadeDB must never be a transitive requirement of `CREATE EXTENSION pgokf`; see [BM25 research](bm25-research.md).
 
@@ -104,13 +104,14 @@ Recursive SQL traversals must be cycle-safe, bundle-scoped, depth-limited, and a
 
 ## Packaging and compatibility
 
-The target matrix is PostgreSQL 14, 15, 16, and 17. Rust feature flags and pgrx test initialization are version-specific; CI exercises each target. Distribution artifacts use names such as:
+The target matrix is PostgreSQL 15, 16, 17, 18, and 19. Rust feature flags and pgrx test initialization are version-specific; CI exercises each target. Distribution artifacts use names such as:
 
 ```text
-postgresql-14-pgokf
 postgresql-15-pgokf
 postgresql-16-pgokf
 postgresql-17-pgokf
+postgresql-18-pgokf
+postgresql-19-pgokf
 ```
 
 The core package depends only on PostgreSQL/pgrx and its bundled Rust libraries. Optional search integrations are separately detected, documented, and tested.

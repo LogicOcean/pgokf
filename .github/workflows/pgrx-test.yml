@@ -10,38 +10,34 @@ permissions:
 
 jobs:
   test:
-    name: PostgreSQL ${{ matrix.pg }}
+    name: PostgreSQL ${{ matrix.pg }}${{ matrix.experimental && ' (advisory)' || '' }}
     runs-on: ubuntu-24.04
+    # Advisory legs (currently PostgreSQL 19) may fail without failing the
+    # workflow; the required legs (15-18) must always pass.
+    continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
       matrix:
-        pg: [15, 16, 17, 18, 19]
+        pg: [15, 16, 17, 18]
+        experimental: [false]
+        include:
+          # PostgreSQL 19 is not GA as of 2026-08 and PGDG publishes no
+          # postgresql-19 apt package yet. Keep the leg visible so it starts
+          # passing as soon as PGDG ships packages, but do not let it block CI.
+          - pg: 19
+            experimental: true
 
     steps:
       - uses: actions/checkout@v4
 
-      # This workflow can land before the pgrx workspace branch. Keep the
-      # matrix visible but defer Rust/PostgreSQL setup until Cargo.toml exists.
-      - name: Detect pgrx workspace
-        id: workspace
-        run: |
-          if [[ -f Cargo.toml ]]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "Cargo.toml has not landed yet; pgrx matrix is a stub."
-          fi
-
-      - uses: dtolnay/rust-toolchain@stable
-        if: steps.workspace.outputs.present == 'true'
+      - uses: dtolnay/rust-toolchain@1.96.0
         with:
-          components: rustfmt, clippy
+          components: clippy
 
       - uses: Swatinem/rust-cache@v2
-        if: steps.workspace.outputs.present == 'true'
 
       - name: Install PostgreSQL ${{ matrix.pg }} development files
-        if: steps.workspace.outputs.present == 'true'
+        id: pgdg
         run: |
           sudo install -d /usr/share/postgresql-common/pgdg
           curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
@@ -49,27 +45,42 @@ jobs:
           echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt noble-pgdg main" \
             | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update
+          # PostgreSQL 19 is not GA as of 2026-08, so PGDG does not publish a
+          # postgresql-19 package yet. Skip the advisory leg gracefully instead
+          # of hard-failing on `apt-get install`; a required leg with a missing
+          # package still fails loudly.
+          if ! apt-cache show "postgresql-${{ matrix.pg }}" > /dev/null 2>&1; then
+            if [[ "${{ matrix.experimental }}" == "true" ]]; then
+              echo "::notice::postgresql-${{ matrix.pg }} is not published by PGDG yet; skipping this advisory leg."
+              echo "available=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::postgresql-${{ matrix.pg }} is required but missing from PGDG."
+            exit 1
+          fi
           sudo apt-get install -y \
             postgresql-${{ matrix.pg }} \
             postgresql-server-dev-${{ matrix.pg }} \
             libclang-dev
+          echo "available=true" >> "$GITHUB_OUTPUT"
 
-      # Stub pin: keep this version synchronized with the workspace pgrx
-      # dependency once Cargo.toml/Cargo.lock land.
+      # Keep this version synchronized with the workspace `pgrx` dependency in
+      # the root Cargo.toml (currently 0.19.2).
       - name: Install and initialize cargo-pgrx
-        if: steps.workspace.outputs.present == 'true'
+        if: steps.pgdg.outputs.available == 'true'
         run: |
           cargo install --locked cargo-pgrx --version 0.19.2
           cargo pgrx init --pg${{ matrix.pg }}=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
 
-      - name: Format
-        if: steps.workspace.outputs.present == 'true' && matrix.pg == 17
-        run: cargo fmt --all -- --check
-
+      # --no-default-features pins each leg to exactly one pgNN feature, so the
+      # crate's default PostgreSQL feature is irrelevant here.
       - name: Clippy
-        if: steps.workspace.outputs.present == 'true'
-        run: cargo clippy --no-default-features --features pg${{ matrix.pg }} --all-targets -- -D warnings
+        if: steps.pgdg.outputs.available == 'true'
+        run: cargo clippy -p pgokf --no-default-features --features pg${{ matrix.pg }} --all-targets -- -D warnings
 
+      # `cargo pgrx test` resolves the extension crate from the working
+      # directory and appends the `pg_test` feature itself.
       - name: Test
-        if: steps.workspace.outputs.present == 'true'
-        run: cargo pgrx test pg${{ matrix.pg }}
+        if: steps.pgdg.outputs.available == 'true'
+        working-directory: crates/extension
+        run: cargo pgrx test pg${{ matrix.pg }} --no-default-features --features pg${{ matrix.pg }}

@@ -668,14 +668,12 @@ dependencies = [
 name = "okf-parser"
 version = "0.1.0"
 dependencies = [
- "blake3",
  "pulldown-cmark",
  "serde",
  "serde_json",
  "serde_yaml",
  "stratify",
  "thiserror",
- "walkdir",
 ]
 
 [[package]]

@@ -10,7 +10,7 @@ repository.workspace = true
 crate-type = ["cdylib", "lib"]
 
 [features]
-default = ["pg17"]
+default = ["pg18"]
 pg15 = ["pgrx/pg15"]
 pg16 = ["pgrx/pg16"]
 pg17 = ["pgrx/pg17"]
@@ -23,5 +23,5 @@ okf-parser = { version = "=0.1.0", path = "../okf-parser" }
 okf-sync = { version = "=0.1.0", path = "../okf-sync" }
 pgrx.workspace = true
 
-[lints.clippy]
-all = { level = "warn", priority = -1 }
+[lints]
+workspace = true

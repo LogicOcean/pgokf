@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use okf_parser::{Error, LinkKind, ParserLimits, normalize_path, parse_concept};
+use okf_parser::{Error, ErrorCategory, LinkKind, ParserLimits, normalize_path, parse_concept};
 
 const RICH: &[u8] = include_bytes!("fixtures/rich.md");
 
@@ -8,7 +8,8 @@ const RICH: &[u8] = include_bytes!("fixtures/rich.md");
 fn parses_known_fields_metadata_body_and_links() {
     let parsed = parse_concept(RICH, "concepts\\failover.MD", ParserLimits::default()).unwrap();
 
-    assert_eq!(parsed.id, "incident-db");
+    assert_eq!(parsed.id, "concepts/failover");
+    assert_eq!(parsed.declared_id.as_deref(), Some("incident-db"));
     assert_eq!(parsed.path, "concepts/failover.md");
     assert_eq!(parsed.r#type, "Runbook");
     assert_eq!(parsed.title, "Database failover");
@@ -32,16 +33,61 @@ fn parses_known_fields_metadata_body_and_links() {
     assert_eq!(parsed.links[0].label, "replica health");
     assert_eq!(parsed.links[0].kind, LinkKind::Inline);
     assert_eq!(parsed.links[0].ordinal, 0);
+    assert!(!parsed.links[0].is_external);
+    assert_eq!(
+        parsed.links[0].target_path.as_deref(),
+        Some("concepts/replica.md")
+    );
+    assert_eq!(
+        parsed.links[0].target_id.as_deref(),
+        Some("concepts/replica")
+    );
     assert_eq!(parsed.links[1].kind, LinkKind::Autolink);
+    assert!(parsed.links[1].is_external);
+    assert_eq!(parsed.links[1].target_path, None);
+    assert_eq!(parsed.links[1].target_id, None);
     assert_eq!(parsed.links[2].kind, LinkKind::Image);
     assert_eq!(parsed.links[2].label, "topology");
+    assert!(!parsed.links[2].is_external);
+    assert_eq!(parsed.links[2].target_path, None);
 }
 
 #[test]
-fn uses_normalized_path_as_fallback_id() {
+fn derives_id_from_normalized_path_without_md_suffix() {
     let source = b"---\ntype: Note\ntitle: Hello\n---\nBody";
+
     let parsed = parse_concept(source, "notes/hello", ParserLimits::default()).unwrap();
-    assert_eq!(parsed.id, "notes/hello.md");
+
+    assert_eq!(parsed.id, "notes/hello");
+    assert_eq!(parsed.path, "notes/hello.md");
+    assert_eq!(parsed.declared_id, None);
+}
+
+#[test]
+fn never_trusts_declared_id_over_path_derived_id() {
+    let source = b"---\nid: producer-supplied\ntype: Note\ntitle: Hello\n---\nBody";
+
+    let parsed = parse_concept(source, "notes/hello.md", ParserLimits::default()).unwrap();
+
+    assert_eq!(parsed.id, "notes/hello");
+    assert_eq!(parsed.declared_id.as_deref(), Some("producer-supplied"));
+}
+
+#[test]
+fn rejects_reserved_index_and_log_files() {
+    let source = b"---\ntype: Note\ntitle: Reserved\n---\nBody";
+
+    for reserved in ["index.md", "log.md", "nested/index.md", "deep/dir/log.md"] {
+        let error = parse_concept(source, reserved, ParserLimits::default()).unwrap_err();
+        assert!(
+            matches!(&error, Error::ReservedPath { path } if path == reserved),
+            "expected ReservedPath for {reserved}, got {error:?}"
+        );
+        assert_eq!(error.category(), ErrorCategory::Reserved);
+    }
+
+    let not_reserved = parse_concept(source, "reindex.md", ParserLimits::default());
+    assert!(not_reserved.is_ok());
 }
 
 #[test]
@@ -50,13 +96,14 @@ fn supports_crlf_delimiters_and_unicode() {
     let parsed = parse_concept(source.as_bytes(), "知识/café.md", ParserLimits::default()).unwrap();
     assert_eq!(parsed.title, "Café ☕");
     assert_eq!(parsed.body_text, "Héllo");
+    assert_eq!(parsed.id, "知识/café");
 }
 
 #[test]
 fn rejects_missing_unterminated_and_malformed_frontmatter() {
     assert!(matches!(
         parse_concept(b"# no yaml", "x.md", ParserLimits::default()),
-        Err(Error::MissingFrontmatter)
+        Err(Error::MissingFrontmatter { .. })
     ));
     assert!(matches!(
         parse_concept(
@@ -64,7 +111,7 @@ fn rejects_missing_unterminated_and_malformed_frontmatter() {
             "x.md",
             ParserLimits::default()
         ),
-        Err(Error::UnterminatedFrontmatter)
+        Err(Error::UnterminatedFrontmatter { .. })
     ));
     assert!(matches!(
         parse_concept(
@@ -72,8 +119,18 @@ fn rejects_missing_unterminated_and_malformed_frontmatter() {
             "x.md",
             ParserLimits::default()
         ),
-        Err(Error::InvalidFrontmatter(_))
+        Err(Error::InvalidFrontmatter { .. })
     ));
+}
+
+#[test]
+fn rejects_metadata_that_cannot_become_json() {
+    let source = b"---\ntype: Note\ntitle: Meta\ncustom:\n  ? [a, b]\n  : sequence-key\n---\nBody";
+
+    let error = parse_concept(source, "notes/meta.md", ParserLimits::default()).unwrap_err();
+
+    assert!(matches!(&error, Error::InvalidMetadata { path, .. } if path == "notes/meta.md"));
+    assert_eq!(error.category(), ErrorCategory::Metadata);
 }
 
 #[test]
@@ -86,7 +143,8 @@ fn enforces_file_and_frontmatter_limits() {
         parse_concept(b"four", "x.md", limits),
         Err(Error::FileTooLarge {
             actual: 4,
-            limit: 3
+            limit: 3,
+            ..
         })
     ));
 
@@ -101,24 +159,68 @@ fn enforces_file_and_frontmatter_limits() {
 }
 
 #[test]
-fn rejects_unsafe_or_non_markdown_paths() {
+fn rejects_unsafe_empty_or_non_markdown_paths() {
     assert!(matches!(
         normalize_path(Path::new("../secret.md")),
-        Err(Error::PathTraversal(_))
+        Err(Error::PathTraversal { .. })
     ));
     assert!(matches!(
         normalize_path(Path::new("/tmp/x.md")),
-        Err(Error::AbsolutePath(_))
+        Err(Error::AbsolutePath { .. })
     ));
     assert!(matches!(
         normalize_path(Path::new("C:\\tmp\\x.md")),
-        Err(Error::AbsolutePath(_))
+        Err(Error::AbsolutePath { .. })
     ));
     assert!(matches!(
         normalize_path(Path::new("x.txt")),
-        Err(Error::UnsupportedExtension(_))
+        Err(Error::UnsupportedExtension { .. })
+    ));
+    assert!(matches!(
+        normalize_path(Path::new("")),
+        Err(Error::EmptyPath)
     ));
     assert_eq!(normalize_path(Path::new("./a//b")).unwrap(), "a/b.md");
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_non_utf8_paths() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let non_utf8 = OsStr::from_bytes(b"notes/bad-\xff.md");
+
+    let error = normalize_path(Path::new(non_utf8)).unwrap_err();
+
+    assert!(matches!(&error, Error::NonUtf8Path { path } if path.contains("bad-")));
+    assert_eq!(error.category(), ErrorCategory::Path);
+}
+
+#[test]
+fn errors_carry_offending_path_and_category() {
+    let missing = parse_concept(b"# no yaml", "notes/x.md", ParserLimits::default()).unwrap_err();
+    assert_eq!(missing.path(), "notes/x.md");
+    assert_eq!(missing.category(), ErrorCategory::Frontmatter);
+
+    let limits = ParserLimits {
+        max_file_bytes: 1,
+        max_frontmatter_bytes: 100,
+    };
+    let too_large = parse_concept(b"four", "notes\\big.MD", limits).unwrap_err();
+    assert_eq!(too_large.path(), "notes/big.md");
+    assert_eq!(too_large.category(), ErrorCategory::Limit);
+
+    let non_utf8 = parse_concept(&[0xff], "notes/enc.md", ParserLimits::default()).unwrap_err();
+    assert_eq!(non_utf8.path(), "notes/enc.md");
+    assert_eq!(non_utf8.category(), ErrorCategory::Encoding);
+
+    let traversal = normalize_path(Path::new("../secret.md")).unwrap_err();
+    assert_eq!(traversal.path(), "../secret.md");
+    assert_eq!(traversal.category(), ErrorCategory::Path);
+
+    let empty = normalize_path(Path::new("")).unwrap_err();
+    assert_eq!(empty.path(), "");
+    assert_eq!(empty.category(), ErrorCategory::Path);
 }
 
 #[test]
@@ -127,14 +229,65 @@ fn extracts_reference_email_and_formatted_labels() {
     let parsed = parse_concept(source, "links.md", ParserLimits::default()).unwrap();
     assert_eq!(parsed.links[0].label, "bold code");
     assert_eq!(parsed.links[0].kind, LinkKind::Reference);
+    assert_eq!(parsed.links[0].target_path.as_deref(), Some("target.md"));
     assert_eq!(parsed.links[1].kind, LinkKind::Email);
+    assert!(parsed.links[1].is_external);
+    assert_eq!(parsed.links[1].target_path, None);
+}
+
+#[test]
+fn normalizes_internal_link_targets_relative_to_source_file() {
+    let source = b"---\ntype: Note\ntitle: Links\n---\n\
+[up](../services/db.md) [root](/runbooks/failover.md) [frag](other.md#section) \
+[self](#top) [bare](sibling) [escape](../../outside.md) [proto](//cdn.example.test/x.js)";
+
+    let parsed = parse_concept(source, "dashboards/health.md", ParserLimits::default()).unwrap();
+
+    let by_target = |target: &str| {
+        parsed
+            .links
+            .iter()
+            .find(|link| link.target == target)
+            .unwrap_or_else(|| panic!("missing link {target}"))
+    };
+
+    let up = by_target("../services/db.md");
+    assert_eq!(up.target_path.as_deref(), Some("services/db.md"));
+    assert_eq!(up.target_id.as_deref(), Some("services/db"));
+
+    let root = by_target("/runbooks/failover.md");
+    assert_eq!(root.target_path.as_deref(), Some("runbooks/failover.md"));
+    assert_eq!(root.target_id.as_deref(), Some("runbooks/failover"));
+
+    let fragment = by_target("other.md#section");
+    assert_eq!(fragment.target_path.as_deref(), Some("dashboards/other.md"));
+    assert_eq!(fragment.target_id.as_deref(), Some("dashboards/other"));
+
+    let self_link = by_target("#top");
+    assert_eq!(
+        self_link.target_path.as_deref(),
+        Some("dashboards/health.md")
+    );
+    assert_eq!(self_link.target_id.as_deref(), Some("dashboards/health"));
+
+    let bare = by_target("sibling");
+    assert_eq!(bare.target_path.as_deref(), Some("dashboards/sibling.md"));
+
+    let escape = by_target("../../outside.md");
+    assert!(!escape.is_external);
+    assert_eq!(escape.target_path, None);
+    assert_eq!(escape.target_id, None);
+
+    let protocol_relative = by_target("//cdn.example.test/x.js");
+    assert!(protocol_relative.is_external);
+    assert_eq!(protocol_relative.target_path, None);
 }
 
 #[test]
 fn rejects_invalid_utf8() {
     assert!(matches!(
         parse_concept(&[0xff], "x.md", ParserLimits::default()),
-        Err(Error::InvalidUtf8(_))
+        Err(Error::InvalidUtf8 { .. })
     ));
 }
 
@@ -146,6 +299,8 @@ fn preserves_nested_image_and_outer_link_in_source_order() {
     assert_eq!(parsed.links[0].target, "details.md");
     assert_eq!(parsed.links[0].kind, LinkKind::Inline);
     assert_eq!(parsed.links[0].label, "diagram");
+    assert_eq!(parsed.links[0].target_path.as_deref(), Some("details.md"));
     assert_eq!(parsed.links[1].target, "diagram.png");
     assert_eq!(parsed.links[1].kind, LinkKind::Image);
+    assert_eq!(parsed.links[1].target_path, None);
 }

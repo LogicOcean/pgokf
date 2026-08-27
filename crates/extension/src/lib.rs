@@ -1,71 +1,47 @@
-use pgrx::guc::{GucContext, GucFlags, GucRegistry, GucSetting};
-use pgrx::prelude::*;
-use std::ffi::CStr;
+//! `pgokf` — a `PostgreSQL` extension that materializes Open Knowledge Format
+//! bundles into a queryable catalog.
+//!
+//! This crate is the `PostgreSQL`-facing shell: it registers configuration
+//! variables ([`guc`]), installs the bootstrap schema/role hardening
+//! (`sql/bootstrap.sql`), and exposes the security ([`security`]) and error
+//! ([`errors`]) foundations used by later catalog waves. The only SQL-callable
+//! function at this stage is `pgokf.version()`.
+
+pub mod errors;
+pub mod guc;
+pub mod security;
+
+use pgrx::{pg_guard, pg_schema};
 
 pgrx::pg_module_magic!();
 pgrx::extension_sql_file!("../sql/bootstrap.sql", name = "bootstrap", bootstrap);
 
-static MAX_FILE_BYTES: GucSetting<i32> = GucSetting::<i32>::new(4 * 1024 * 1024);
-static MAX_BUNDLE_FILES: GucSetting<i32> = GucSetting::<i32>::new(100_000);
-static MAX_FRONTMATTER_BYTES: GucSetting<i32> = GucSetting::<i32>::new(256 * 1024);
-static MAX_GRAPH_HOPS: GucSetting<i32> = GucSetting::<i32>::new(5);
-static LOG_LEVEL: GucSetting<Option<&'static CStr>> =
-    GucSetting::<Option<&'static CStr>>::new(Some(c"warning"));
-
+/// `PostgreSQL` entry point invoked when the shared library is loaded.
+///
+/// Registers every `pgokf.*` configuration variable exactly once per backend
+/// load, before any SQL-callable function can run.
 #[pg_guard]
 pub extern "C-unwind" fn _PG_init() {
-    GucRegistry::define_int_guc(
-        "pgokf.max_file_bytes",
-        "Maximum bytes accepted for one OKF Markdown file.",
-        "Hard parsing limit for files registered through pgokf.",
-        &MAX_FILE_BYTES,
-        1,
-        i32::MAX,
-        GucContext::Suset,
-        GucFlags::default(),
-    );
-    GucRegistry::define_int_guc(
-        "pgokf.max_bundle_files",
-        "Maximum number of files accepted in one OKF bundle.",
-        "Hard discovery limit for bundles registered through pgokf.",
-        &MAX_BUNDLE_FILES,
-        1,
-        i32::MAX,
-        GucContext::Suset,
-        GucFlags::default(),
-    );
-    GucRegistry::define_int_guc(
-        "pgokf.max_frontmatter_bytes",
-        "Maximum bytes accepted for YAML frontmatter.",
-        "Hard parsing limit for YAML frontmatter registered through pgokf.",
-        &MAX_FRONTMATTER_BYTES,
-        1,
-        i32::MAX,
-        GucContext::Suset,
-        GucFlags::default(),
-    );
-    GucRegistry::define_int_guc(
-        "pgokf.max_graph_hops",
-        "Maximum graph traversal depth.",
-        "Hard limit for future pgokf graph traversal functions.",
-        &MAX_GRAPH_HOPS,
-        1,
-        100,
-        GucContext::Suset,
-        GucFlags::default(),
-    );
-    GucRegistry::define_string_guc(
-        "pgokf.log_level",
-        "Logging level used by pgokf.",
-        "One of error, warning, notice, info, debug, or log.",
-        &LOG_LEVEL,
-        GucContext::Suset,
-        GucFlags::default(),
-    );
+    guc::register_gucs();
 }
 
-/// Confirm that the extension shared library is loaded.
-#[pg_extern(schema = "pgokf", immutable, parallel_safe)]
-fn version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+/// SQL-facing namespace of the extension.
+///
+/// Declaring the schema as a `#[pg_schema]` module registers it in pgrx's
+/// SQL entity graph, so `cargo pgrx schema`/`install`/`package` can resolve
+/// every function placed here. pgrx emits `CREATE SCHEMA IF NOT EXISTS
+/// pgokf;`, which is a no-op after `sql/bootstrap.sql` (installed first via
+/// the `bootstrap` marker) has already created and hardened the schema.
+#[pg_schema]
+mod pgokf {
+    use pgrx::pg_extern;
+
+    /// Report the version of the loaded `pgokf` shared library.
+    ///
+    /// Useful for confirming that the installed SQL extension and the loaded
+    /// module agree after an upgrade.
+    #[pg_extern(immutable, parallel_safe)]
+    fn version() -> &'static str {
+        env!("CARGO_PKG_VERSION")
+    }
 }

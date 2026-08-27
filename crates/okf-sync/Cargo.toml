@@ -9,10 +9,10 @@ description = "Filesystem discovery, content hashing, and incremental sync plann
 
 [dependencies]
 blake3.workspace = true
-globset = "0.4"
+globset.workspace = true
 stratify.workspace = true
 thiserror.workspace = true
-tracing = "0.1"
+tracing.workspace = true
 walkdir.workspace = true
 
 [dev-dependencies]

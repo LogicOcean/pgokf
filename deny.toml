@@ -1,7 +1,11 @@
 [advisories]
-# Transitive through pgrx 0.14.x; no fixed release exists. Re-evaluate when
-# upgrading pgrx or by 2027-01-31, whichever comes first.
-ignore = ["RUSTSEC-2021-0127"]
+# RUSTSEC-2021-0127: serde_cbor is unmaintained. It remains a mandatory
+# dependency of pgrx 0.19.x (pgokf -> pgrx 0.19.2 -> serde_cbor 0.11.2) and
+# the advisory offers no fixed release. Re-evaluate at the next pgrx upgrade
+# or by 2027-02-28, whichever comes first.
+ignore = [
+  { id = "RUSTSEC-2021-0127", reason = "serde_cbor is unmaintained but is a mandatory dependency of pgrx 0.19.x with no fixed release" },
+]
 
 [bans]
 multiple-versions = "warn"
