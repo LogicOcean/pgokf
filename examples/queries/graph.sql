@@ -14,7 +14,14 @@ WHERE target_id = 'services/postgresql'
   AND resolved
 ORDER BY source_id;
 
--- Cycle-safe traversal to a maximum depth of 8 within one bundle.
+-- Cycle-safe traversal within one bundle.
+-- Prefer the built-in pgokf.concept_neighbors(concept_id, max_hops, bundle_id),
+-- which caps depth at the pgokf.max_graph_hops GUC and excludes external and
+-- unresolved edges; the recursive CTE below shows the equivalent hand-written form.
+SELECT source_id, neighbor_id, hops, path, title
+FROM pgokf.concept_neighbors(:'start_concept', 8, :'bundle_id')
+ORDER BY hops, neighbor_id;
+
 WITH RECURSIVE walk AS (
   SELECT
     l.bundle_id,
@@ -23,7 +30,7 @@ WITH RECURSIVE walk AS (
     1 AS depth,
     ARRAY[l.source_id, l.target_id]::text[] AS path
   FROM pgokf.links AS l
-  WHERE l.bundle_id = :'bundle_id'::uuid
+  WHERE l.bundle_id = :'bundle_id'::bigint
     AND l.source_id = :'start_concept'
     AND l.resolved
     AND NOT l.is_external

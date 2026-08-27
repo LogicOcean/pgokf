@@ -472,6 +472,9 @@ fn register_bundle_impl(
 ) -> Result<(i64, String, SyncReport), CatalogError> {
     security::authorize_current_user(security::Operation::Register, Path::new(""))?;
     let canonical_root = resolve_bundle_root(path)?;
+    // Enforce configured allowed roots when present; a no-op under the interim
+    // policy (no roots configured). See [`crate::catalog::config`].
+    crate::catalog::config::enforce_allowed_roots(path)?;
     let canonical_text = canonical_path_text(&canonical_root)?.to_owned();
 
     acquire_bundle_lock(&canonical_text)?;
