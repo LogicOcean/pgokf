@@ -16,7 +16,10 @@
 //!    then a bundle-wide link re-resolution
 //!    ([`crate::catalog::links::reresolve_bundle`]) so inbound edges of
 //!    *unchanged* concepts reflect targets added or removed during this sync,
-//!    then [`crate::catalog::provenance::project`] — with the staged concepts;
+//!    then [`crate::catalog::provenance::project`], then
+//!    [`crate::catalog::source::project`] (opt-in verbatim source-byte
+//!    storage, a no-op under the default `store_source`-off policy) — with the
+//!    staged concepts;
 //! 8. update the bundle row (file count, `last_synced_at`, aggregate
 //!    `sync_hash`) last.
 //!
@@ -317,6 +320,7 @@ fn stage_changed_concepts(
     root: &Path,
     delta: &BundleDelta,
     strict: bool,
+    store_source: bool,
 ) -> Result<StagingOutcome, CatalogError> {
     let limits = parser_limits_from_gucs();
     let mut staged = Vec::with_capacity(delta.to_parse.len());
@@ -350,10 +354,17 @@ fn stage_changed_concepts(
             .modified_at
             .and_then(|instant| instant.duration_since(UNIX_EPOCH).ok())
             .map(|duration| duration.as_secs_f64());
+        // Retain the already-read source buffer only under the small-install
+        // `store_source` tier; otherwise drop it so default behavior is
+        // byte-for-byte unchanged and no source bytes are held or persisted.
+        // The buffer is moved rather than cloned — after `parse_concept`
+        // returns the borrow is released, so no extra allocation or I/O occurs.
+        let raw_content = if store_source { Some(bytes) } else { None };
         staged.push(StagedConcept {
             concept,
             file_hash: metadata.hash.clone(),
             modified_at_epoch,
+            raw_content,
         });
     }
     Ok(StagingOutcome { staged, skipped })
@@ -575,7 +586,12 @@ fn run_bundle_sync(bundle_id: i64, canonical_root: &Path) -> Result<SyncReport, 
         CatalogError::invalid_parameter(format!("bundle scan failed: {error}"), Path::new(""))
     })?;
     let mut delta = classify_changes(&stored, &current);
-    let outcome = stage_changed_concepts(canonical_root, &delta, defaults.strict)?;
+    let outcome = stage_changed_concepts(
+        canonical_root,
+        &delta,
+        defaults.strict,
+        defaults.store_source,
+    )?;
     // Keep the report honest: files skipped under the non-strict policy were
     // classified but never written.
     adjust_report_for_skips(&mut delta, &stored, &outcome.skipped);
@@ -595,6 +611,12 @@ fn run_bundle_sync(bundle_id: i64, canonical_root: &Path) -> Result<SyncReport, 
     crate::catalog::links::project(bundle_id, &staged)?;
     crate::catalog::links::reresolve_bundle(bundle_id)?;
     crate::catalog::provenance::project(bundle_id, &staged)?;
+    // Opt-in source-byte storage. Only concepts staged with source bytes (the
+    // `store_source` tier) upsert a `pgokf.concept_source` row; under the
+    // default policy every staged concept carries `raw_content = None`, so this
+    // writes nothing. Order relative to links/provenance is irrelevant: it only
+    // depends on the concept rows existing, which the upsert above guarantees.
+    crate::catalog::source::project(bundle_id, &staged)?;
 
     update_bundle_row(bundle_id, &bundle_sync_hash(&current))?;
     Ok(delta.report)

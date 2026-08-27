@@ -36,6 +36,16 @@ pub struct StagedConcept {
     /// Filesystem modification time as seconds since the Unix epoch, when
     /// the filesystem reported one.
     pub modified_at_epoch: Option<f64>,
+    /// The verbatim source-file bytes, carried only when the durable
+    /// `store_source` policy is enabled so the source-storage seam
+    /// ([`crate::catalog::source::project`]) can persist them into
+    /// `pgokf.concept_source`. `None` under the default policy, in which case
+    /// no `concept_source` row is written and current behavior is unchanged.
+    ///
+    /// The bytes are the exact buffer the sync engine already read from disk to
+    /// parse the concept, so enabling `store_source` adds no extra filesystem
+    /// I/O — only the retention of a buffer that would otherwise be dropped.
+    pub raw_content: Option<Vec<u8>>,
 }
 
 /// One ranked hit produced by `pgokf.concept_search`, prior to being packed

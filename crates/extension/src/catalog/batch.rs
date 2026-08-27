@@ -134,6 +134,57 @@ pub struct MetadataColumns {
     pub values: Vec<String>,
 }
 
+/// Every staged concept that carries verbatim source bytes, transposed into
+/// the parallel arrays bound by the bulk `pgokf.concept_source` `UPSERT`.
+///
+/// The three `Vec`s share length and ordering: row `i` upserts one
+/// `concept_source` row `(concept_ids[i], contents[i], sizes[i])`. Only
+/// concepts staged with [`StagedConcept::raw_content`] `= Some(..)` (the
+/// `store_source` policy is on) contribute a row; a concept whose
+/// `raw_content` is `None` is skipped entirely, so under the default policy
+/// this marshaller yields empty arrays and no rows are written. `contents`
+/// binds as `bytea[]` — every element is itself a `bytea` — preserving the
+/// source bytes exactly, and `sizes` carries each payload's byte length for the
+/// `byte_size` column so a reader can size a retrieval without detoasting the
+/// content.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SourceColumns {
+    /// Owning concept IDs, one per stored source, in staging order.
+    pub concept_ids: Vec<String>,
+    /// Verbatim source-file bytes, aligned with
+    /// [`concept_ids`](Self::concept_ids); bound as `bytea[]`.
+    pub contents: Vec<Vec<u8>>,
+    /// Byte length of each payload, aligned by position, for the `byte_size`
+    /// column.
+    pub sizes: Vec<i32>,
+}
+
+/// Flatten the verbatim source bytes of every staged concept that carries them
+/// into the column-major arrays bound by the bulk `pgokf.concept_source`
+/// `UPSERT`, in staging order.
+///
+/// A concept staged without source bytes ([`StagedConcept::raw_content`] is
+/// `None`, the default `store_source`-off path) contributes nothing, so the
+/// returned arrays hold exactly the concepts whose source is to be persisted.
+/// Each row's `byte_size` is the payload length clamped into the `integer`
+/// column range with [`count_to_i32`]; the source scan already bounds every
+/// file at `pgokf.max_file_bytes` (well under `i32::MAX`), so the clamp is
+/// unreachable in practice. The result is returned whole and chunked by the
+/// caller at [`BATCH_SIZE`] for bounded bulk upserts.
+#[must_use]
+pub fn marshal_sources(staged: &[StagedConcept]) -> SourceColumns {
+    let mut columns = SourceColumns::default();
+    for entry in staged {
+        let Some(content) = entry.raw_content.as_ref() else {
+            continue;
+        };
+        columns.concept_ids.push(entry.concept.id.clone());
+        columns.sizes.push(count_to_i32(content.len()));
+        columns.contents.push(content.clone());
+    }
+    columns
+}
+
 /// Transpose a slice of staged concepts into column-major parameter arrays.
 ///
 /// The returned [`ConceptColumns`] preserves batch order across every column.
@@ -291,6 +342,7 @@ mod tests {
             concept,
             file_hash: format!("hash-{path}"),
             modified_at_epoch: Some(1.5),
+            raw_content: None,
         }
     }
 
@@ -305,6 +357,7 @@ mod tests {
             concept,
             file_hash: format!("hash-{path}"),
             modified_at_epoch: Some(1.5),
+            raw_content: None,
         }
     }
 
@@ -513,6 +566,72 @@ mod tests {
         assert_eq!(columns.target_paths, vec![Some("b.md".to_owned()), None]);
         assert_eq!(columns.is_externals, vec![false, true]);
         assert_eq!(columns.link_kinds, vec!["inline", "inline"]);
+    }
+
+    /// Attach verbatim source bytes to a staged concept, as the sync engine
+    /// does when the `store_source` policy is enabled.
+    fn staged_with_source(path: &str, frontmatter: &str, source: &[u8]) -> StagedConcept {
+        let mut entry = staged(path, frontmatter);
+        entry.raw_content = Some(source.to_vec());
+        entry
+    }
+
+    #[test]
+    fn marshal_sources_flattens_only_concepts_carrying_source_bytes() {
+        // Arrange: a source-bearing concept between two without stored source,
+        // exactly the mix the non-strict / partial store_source path produces.
+        let source = b"---\ntype: note\ntitle: A\n---\n\nBody.\n";
+        let batch = vec![
+            staged("skip-a.md", "type: note\ntitle: SkipA"),
+            staged_with_source("keep.md", "type: note\ntitle: Keep", source),
+            staged("skip-b.md", "type: note\ntitle: SkipB"),
+        ];
+
+        // Act
+        let columns = marshal_sources(&batch);
+
+        // Assert: only the source-bearing concept is marshalled, and its bytes
+        // and byte length are carried verbatim.
+        assert_eq!(columns.concept_ids, vec!["keep".to_owned()]);
+        assert_eq!(columns.contents, vec![source.to_vec()]);
+        assert_eq!(columns.sizes, vec![count_to_i32(source.len())]);
+    }
+
+    #[test]
+    fn marshal_sources_is_empty_when_no_concept_carries_source() {
+        // Arrange: the default store_source-off path stages every concept with
+        // raw_content = None.
+        let batch = vec![
+            staged("a.md", "type: note\ntitle: A"),
+            staged("b.md", "type: note\ntitle: B"),
+        ];
+
+        // Act
+        let columns = marshal_sources(&batch);
+
+        // Assert: no rows to upsert, so no concept_source write occurs.
+        assert!(columns.concept_ids.is_empty());
+        assert!(columns.contents.is_empty());
+        assert!(columns.sizes.is_empty());
+    }
+
+    #[test]
+    fn marshal_sources_preserves_arbitrary_binary_bytes() {
+        // Arrange: source bytes including NUL and high bytes must survive as an
+        // exact bytea payload, not a lossy string.
+        let source = &[0x00_u8, 0xff, 0x10, b'#', 0x00, 0xfe];
+        let batch = vec![staged_with_source(
+            "bin.md",
+            "type: note\ntitle: Bin",
+            source,
+        )];
+
+        // Act
+        let columns = marshal_sources(&batch);
+
+        // Assert
+        assert_eq!(columns.contents, vec![source.to_vec()]);
+        assert_eq!(columns.sizes, vec![count_to_i32(source.len())]);
     }
 
     #[test]

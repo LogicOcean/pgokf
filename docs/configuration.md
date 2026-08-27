@@ -81,24 +81,57 @@ admin-only).
 | `default_strict` | boolean | `true` | must be a boolean |
 | `sync_log_retention_days` | integer | `30` | `>= 0` and fits `integer` |
 | `default_exclude` | array of strings | `[]` | each pattern non-empty and NUL-free |
+| `store_source` | boolean | `false` | must be a boolean |
 
 ### Which keys the current engine consults
 
 Accuracy matters here. As of this release the engine **enforces
-`allowed_roots`** and **applies `default_text_search_config`** to both indexing
-and querying; the remaining three keys are validated and durably stored but are
-**not yet consulted** by the ingest/search paths:
+`allowed_roots`**, **applies `default_text_search_config`** to both indexing and
+querying, and **honors `store_source`** at sync time; the remaining three keys
+are validated and durably stored but are **not yet consulted** by the
+ingest/search paths:
 
 | Key | Status in the current engine |
 | --- | ---------------------------- |
 | `allowed_roots` | **Enforced.** When non-empty, a registered bundle path must resolve inside one of the roots (symlink-escape safe), else `22023`. |
 | `default_text_search_config` | **Applied.** Used as the `regconfig` for `to_tsvector` when building each concept's `body_tsv` at index time, and for `websearch_to_tsquery`/`ts_headline` at query time, so query parsing matches the configuration that indexed the rows. See the caveat below. |
+| `store_source` | **Honored.** When `true`, sync stores each concept's verbatim source bytes in `pgokf.concept_source`; when `false` (default) it stores none. See the storage-tiers section below. |
 | `default_strict` | **Stored, not yet consulted.** Sync is always strict — the first malformed file aborts the sync. |
 | `sync_log_retention_days` | **Stored, not yet consulted.** No sync-log retention is wired up yet. |
 | `default_exclude` | **Stored, not yet consulted.** Discovery does not yet apply these exclusion globs. |
 
 The remaining three are reserved for planned functionality; setting them is safe
 and persists, but does not change behavior today.
+
+### Storage tiers — `store_source`
+
+`store_source` selects between two deployment shapes without changing any other
+behavior. It is **off by default**, so an install that never touches it behaves
+exactly as one built without the feature.
+
+- **Small, self-contained (`store_source = true`).** Sync retains the source
+  bytes it already read to parse each concept and persists them into
+  `pgokf.concept_source`, so the *original* files live inside PostgreSQL. Such an
+  install needs no external object store: the catalog is the source of truth, a
+  reader can fetch a concept's exact bytes with
+  `pgokf.get_concept_source(bundle_id, concept_id)`, and an admin can rebuild the
+  bundle on disk byte-for-byte with
+  `pgokf.export_sources(bundle_id, dest_dir)`. The cost is storage — every source
+  file is held in the database (TOAST-compressed, `lz4` where the build supports
+  it, otherwise `pglz`).
+- **Enterprise data-lake (`store_source = false`, default).** The verbatim files
+  stay in a mounted object store / data lake and PostgreSQL holds only the
+  metadata-and-search projection. No `concept_source` row is written, so the
+  database stays lean and the lake remains the system of record.
+
+> **⚠️ Warning — changing `store_source` is not retroactive.**
+> Like `default_text_search_config`, `store_source` is read at the moment each
+> concept is synced. Turning it on does **not** backfill source bytes for bundles
+> that are already synced, and `refresh_bundle` only re-reads files whose content
+> hash changed. Set `store_source` **before the first `register_bundle`** so the
+> whole corpus is stored under one policy; to add (or drop) stored source for an
+> already-registered bundle, re-register it — `unregister_bundle` followed by
+> `register_bundle`.
 
 > **⚠️ Warning — changing `default_text_search_config` is not retroactive.**
 > The configuration is read at the moment each concept is indexed and again at
@@ -123,6 +156,7 @@ and persists, but does not change behavior today.
 SELECT jsonb_pretty(pgokf.get_config());
 -- {
 --     "allowed_roots": [],
+--     "store_source": false,
 --     "default_strict": true,
 --     "default_exclude": [],
 --     "sync_log_retention_days": 30,
@@ -145,6 +179,11 @@ SELECT pgokf.set_config('allowed_roots', '["/srv/okf-bundles", "/data/knowledge"
 -- Choose the text-search configuration (applied at index and query time).
 -- Set this BEFORE the first register_bundle; see the retroactivity warning above.
 SELECT pgokf.set_config('default_text_search_config', '"pg_catalog.simple"'::jsonb);
+
+-- Opt into the small, self-contained tier: store each concept's verbatim source
+-- bytes in pgokf.concept_source. Set this BEFORE the first register_bundle; see
+-- the store_source retroactivity warning above.
+SELECT pgokf.set_config('store_source', 'true'::jsonb);
 
 -- Reserved keys (stored, not yet consulted by the engine):
 SELECT pgokf.set_config('default_strict', 'false'::jsonb);

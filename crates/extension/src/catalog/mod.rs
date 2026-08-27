@@ -23,6 +23,8 @@
 //! - [`links`] — link-graph projection (`pgokf.links`).
 //! - [`neighbors`] — recursive graph traversal APIs.
 //! - [`provenance`] — provenance/trust/lifecycle projection.
+//! - [`source`] — opt-in verbatim source-byte storage (`pgokf.concept_source`)
+//!   and retrieval, gated by the `store_source` configuration key.
 //! - [`config`] — the `pgokf.allowed_roots` style configuration surface.
 //! - [`admin`] — `bundle_info`, `unregister_bundle`, `list_bundles`.
 
@@ -35,6 +37,7 @@ pub mod neighbors;
 pub mod provenance;
 pub mod schema;
 pub mod search;
+pub mod source;
 pub mod sync;
 pub mod types;
 

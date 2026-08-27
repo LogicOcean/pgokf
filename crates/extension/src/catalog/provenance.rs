@@ -567,6 +567,7 @@ mod tests {
             concept,
             file_hash: "hash".to_owned(),
             modified_at_epoch: Some(1.5),
+            raw_content: None,
         }
     }
 

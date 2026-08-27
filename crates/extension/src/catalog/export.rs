@@ -707,7 +707,11 @@ const ELOOP: i32 = 40;
 /// closes that hole: a symlinked target is refused with `ELOOP`, reported as
 /// SQLSTATE `22023`, and nothing is written or truncated through it. A missing
 /// path is still created normally; a regular file is still truncated as before.
-fn create_export_file(path: &Path) -> Result<File, CatalogError> {
+///
+/// Exposed `pub(crate)` so the source-export seam ([`crate::catalog::source`])
+/// reconstructs bundle files through the same symlink-refusing open, rather
+/// than duplicating the security logic.
+pub(crate) fn create_export_file(path: &Path) -> Result<File, CatalogError> {
     OpenOptions::new()
         .write(true)
         .create(true)
@@ -847,7 +851,11 @@ fn ensure_writable(dir: &Path) -> Result<(), CatalogError> {
 /// Enforces the security policy documented at the module level: absolute,
 /// traversal-free, canonical, contained within `allowed_roots` when
 /// configured, an existing directory, and writable.
-fn validate_dest_dir(dest_dir: &str) -> Result<PathBuf, CatalogError> {
+///
+/// Exposed `pub(crate)` so the source-export seam ([`crate::catalog::source`])
+/// validates its destination directory through the identical policy instead of
+/// duplicating it.
+pub(crate) fn validate_dest_dir(dest_dir: &str) -> Result<PathBuf, CatalogError> {
     let requested = Path::new(dest_dir);
     security::validate_path_syntax(requested, Path::new(""))?;
 

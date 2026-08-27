@@ -37,7 +37,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The 12 stable public functions, as `(name, argument-type list)`. The pair
+/// The 14 stable public functions, as `(name, argument-type list)`. The pair
 /// renders to the exact `COMMENT ON FUNCTION pgokf.<name>(<args>)` prefix that
 /// the hardening blocks emit.
 const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
@@ -52,6 +52,8 @@ const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
     ("reset_config", "text"),
     ("get_config", ""),
     ("export_parquet", "bigint, text"),
+    ("get_concept_source", "bigint, text"),
+    ("export_sources", "bigint, text"),
     ("version", ""),
 ];
 
@@ -64,7 +66,7 @@ const PUBLIC_TYPES: &[&str] = &[
     "export_result",
 ];
 
-/// The 6 catalog tables, as fully-qualified `schema.table` identifiers. Five
+/// The 7 catalog tables, as fully-qualified `schema.table` identifiers. Six
 /// are public (`pgokf`); the singleton policy row lives in the
 /// administrator-only `pgokf_private` schema and is documented all the same.
 const CATALOG_TABLES: &[&str] = &[
@@ -73,6 +75,7 @@ const CATALOG_TABLES: &[&str] = &[
     "pgokf.concept_metadata",
     "pgokf.links",
     "pgokf.concept_provenance",
+    "pgokf.concept_source",
     "pgokf_private.config",
 ];
 
@@ -80,7 +83,7 @@ const CATALOG_TABLES: &[&str] = &[
 const API_ROLES: &[&str] = &["pgokf_reader", "pgokf_admin"];
 
 /// The number of `#[pg_extern]` functions defined under `src/catalog/`. The
-/// twelfth public function, `pgokf.version()`, is declared in `src/lib.rs`, so
+/// last public function, `pgokf.version()`, is declared in `src/lib.rs`, so
 /// the catalog count is one less than [`PUBLIC_FUNCTIONS`].
 const CATALOG_PG_EXTERN_COUNT: usize = PUBLIC_FUNCTIONS.len() - 1;
 

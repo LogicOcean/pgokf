@@ -38,8 +38,8 @@ them.
 
 | Role | Capabilities |
 | ---- | ------------ |
-| `pgokf_reader` | `USAGE` on schema `pgokf`; `SELECT` on the projection tables; `EXECUTE` on read paths: `concept_search`, `concept_neighbors`, `list_bundles`, `bundle_info`, `get_config`. |
-| `pgokf_admin` | Inherits `pgokf_reader` (it is `GRANT`ed the reader role), plus `USAGE` on `pgokf_private` and `EXECUTE` on the mutators: `register_bundle`, `refresh_bundle`, `unregister_bundle`, `set_config`, `reset_config`, and `export_parquet` (the file-writing export). |
+| `pgokf_reader` | `USAGE` on schema `pgokf`; `SELECT` on the projection tables (including `concept_source`); `EXECUTE` on read paths: `concept_search`, `concept_neighbors`, `list_bundles`, `bundle_info`, `get_config`, `get_concept_source`. |
+| `pgokf_admin` | Inherits `pgokf_reader` (it is `GRANT`ed the reader role), plus `USAGE` on `pgokf_private` and `EXECUTE` on the mutators: `register_bundle`, `refresh_bundle`, `unregister_bundle`, `set_config`, `reset_config`, and the file-writing exports `export_parquet` and `export_sources`. |
 
 `PUBLIC` is stripped: `REVOKE ALL ON SCHEMA pgokf FROM PUBLIC` and
 `REVOKE ALL ON SCHEMA pgokf_private FROM PUBLIC` run first, and every function
@@ -191,6 +191,36 @@ accepts any absolute, canonical, traversal-free, writable directory on the serve
 — which is precisely why the function is gated to `pgokf_admin`. Operators who
 want a hard filesystem boundary for exports (as for reads) should configure
 `allowed_roots`.
+
+## Source retrieval and reconstruction
+
+The opt-in `store_source` tier (`crates/extension/src/catalog/source.rs`) adds
+two retrieval functions with deliberately different authorization, because they
+have deliberately different disclosure and side-effect profiles:
+
+- **`get_concept_source` — reader-level, no filesystem side effect.** It returns
+  a concept's stored `bytea` **to the client** and writes nothing to disk, so it
+  has no path-security surface at all. Its disclosure is exactly the concept's
+  own source — the same content the reader-visible `body_text` is derived from —
+  so it is `GRANT`ed `EXECUTE` to `pgokf_reader` and calls
+  `authorize_current_user(Operation::Search, …)`, the same gate as
+  `concept_search`. It adds no privilege beyond read access to the catalog. When
+  no source was stored (the bundle was synced with `store_source` off) it raises
+  `22023` rather than inventing bytes.
+- **`export_sources` — admin-only, a server-side file write.** Reconstructing a
+  bundle on disk *writes files* from inside the backend, so it is guarded exactly
+  like `export_parquet`: `SECURITY DEFINER`, `GRANT`ed to `pgokf_admin` alone,
+  and `authorize_current_user(Operation::Register, …)` in its body. It **reuses**
+  `export.rs`'s `validate_dest_dir` (absolute, NUL-free, traversal-free,
+  canonical, `allowed_roots`-contained when configured, existing, writable) and
+  `create_export_file` (`O_NOFOLLOW`, so a symlink planted at a target file name
+  is refused with `22023` rather than redirecting the write) — the security logic
+  is shared, not duplicated. Each stored source path is additionally re-validated
+  as a plain bundle-relative path before it is joined under `dest_dir`, and every
+  written file is verified against the concept's recorded BLAKE3 `file_hash`, so
+  a corrupted stored source aborts the reconstruction (`22023`) instead of being
+  written out silently. The same **residual risk** as `export_parquet` applies
+  when no `allowed_roots` are configured, and is mitigated the same way.
 
 ## Injection safety: parameterized SPI only
 

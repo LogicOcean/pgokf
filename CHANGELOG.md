@@ -12,6 +12,49 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 Nothing yet.
 
+## [0.1.2] - 2026-08-27
+
+Additive, opt-in raw source storage. Default behavior is unchanged: the new
+`store_source` policy is **off by default**, so an install that never enables it
+is byte-for-byte identical to 0.1.1.
+
+### Added
+
+- **`store_source` configuration key** (boolean, default `false`) on
+  `pgokf_private.config`. It selects between two deployment tiers: `true` stores
+  each concept's verbatim source bytes in PostgreSQL (small, self-contained
+  install — no external storage needed); `false` keeps the source in a mounted
+  object store / data lake and PostgreSQL holds only metadata and search. Like
+  `default_text_search_config`, it is read at sync time and is **not
+  retroactive** — set it before the first `register_bundle`, or re-register.
+- **`pgokf.concept_source` table** — opt-in verbatim source bytes
+  (`raw_content bytea`, `byte_size integer`), keyed `(bundle_id, concept_id)` and
+  cascading from `pgokf.concepts`, so removals and unregistration drop the stored
+  source automatically. TOAST-compressed with `lz4` where the build supports it,
+  otherwise `pglz`. Reader-`SELECT`able.
+- **`pgokf.get_concept_source(bundle_id, concept_id) → bytea`** — reader-level
+  retrieval of a concept's exact stored bytes to the client (no filesystem
+  write). Raises `22023` when the concept exists but no source was stored, and,
+  distinctly, when no such concept exists.
+- **`pgokf.export_sources(bundle_id, dest_dir) → pgokf.export_result`** —
+  admin-only reconstruction of a bundle's stored source files on disk,
+  byte-for-byte. Reuses `export_parquet`'s destination validation and
+  `O_NOFOLLOW` file creation, recreates the bundle-relative directory tree, and
+  verifies each written file against the concept's BLAKE3 `file_hash`.
+
+### Changed
+
+- The sync engine now persists source bytes into `pgokf.concept_source` when
+  `store_source` is enabled, projected inside the same atomic, advisory-locked
+  transaction as links and provenance (no change when the key is off).
+
+### Upgrade
+
+- `ALTER EXTENSION pgokf UPDATE TO '0.1.2'` brings a 0.1.1 install fully to 0.1.2
+  with no data loss: it adds the `store_source` column (default `false`), the
+  `concept_source` table, and the two new functions, and touches no existing
+  object.
+
 ## [0.1.0] - 2026-08-27
 
 The first tagged release: a complete, transactional PostgreSQL catalog for

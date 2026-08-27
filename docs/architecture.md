@@ -227,6 +227,34 @@ peak memory is independent of catalog size, and every query is scoped to
 representation); `timestamptz` is written as UTC microseconds and `jsonb` as
 canonical JSON text. See [security.md](security.md#server-side-file-writes-export_parquet).
 
+### Storage tiers (source retention)
+
+A single durable toggle, `store_source`, lets one build serve two deployment
+shapes without any other change (`catalog/source.rs`, attached at the same
+projection seam as links and provenance — the sync engine calls
+`source::project` inside the atomic, advisory-locked transaction and is never
+edited):
+
+- **Small, self-contained (`store_source = true`).** The sync engine already
+  reads each source file into memory to parse it; under this tier it retains that
+  exact buffer (no extra I/O) and the seam upserts it into `pgokf.concept_source`
+  (`bytea`, TOAST-compressed — `lz4` where the build supports it, else `pglz`).
+  The *original* files then live inside PostgreSQL: a reader fetches a concept's
+  exact bytes with `get_concept_source`, and an admin rebuilds the bundle on disk
+  byte-for-byte with `export_sources`, which reuses `export.rs`'s destination
+  validation and `O_NOFOLLOW` file creation and verifies every written file
+  against the concept's BLAKE3 `file_hash`. No external object store is needed.
+- **Enterprise data-lake (`store_source = false`, the default).** Nothing is
+  written to `concept_source`; the verbatim files stay in a mounted object store /
+  data lake and PostgreSQL holds only the metadata-and-search projection. The
+  default is therefore byte-for-byte identical to a build without the feature.
+
+`concept_source` cascades from `pgokf.concepts` (`ON DELETE CASCADE`), so removed
+concepts and unregistered bundles drop their stored source with no extra seam.
+Like `default_text_search_config`, `store_source` is read at sync time and is not
+retroactive — see [configuration.md](configuration.md#storage-tiers--store_source)
+and [security.md](security.md#source-retrieval-and-reconstruction).
+
 ### Configuration and safety limits
 
 Two configuration surfaces, described fully in
@@ -246,9 +274,10 @@ Two configuration surfaces, described fully in
   `default_text_search_config` is **not retroactive**: already-synced rows keep
   the tsvector built under the previous configuration, so search can mismatch
   them until the bundle is re-registered (see
-  [configuration.md](configuration.md)). `default_strict`,
-  `sync_log_retention_days`, and `default_exclude` are validated and stored but
-  reserved for planned functionality.
+  [configuration.md](configuration.md)). `store_source` is also honored by the
+  sync engine — it selects the storage tier above and is likewise non-retroactive.
+  `default_strict`, `sync_log_retention_days`, and `default_exclude` are validated
+  and stored but reserved for planned functionality.
 
 ## Data and API invariants
 

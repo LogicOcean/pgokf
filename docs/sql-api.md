@@ -39,6 +39,8 @@ exercised against a live PostgreSQL 18 cluster.
 | `reset_config(key)` | `void` | VOLATILE | DEFINER | `pgokf_admin` |
 | `get_config()` | `jsonb` | VOLATILE | DEFINER | `pgokf_reader` |
 | `export_parquet(bundle_id, dest_dir)` | `export_result` | VOLATILE | DEFINER | `pgokf_admin` |
+| `get_concept_source(bundle_id, concept_id)` | `bytea` | STABLE | invoker | `pgokf_reader` |
+| `export_sources(bundle_id, dest_dir)` | `export_result` | VOLATILE | DEFINER | `pgokf_admin` |
 
 `register_bundle`, `concept_search`, `concept_neighbors`, and `reset_config`
 accept `NULL`-defaulting arguments and are therefore **not** declared `STRICT`;
@@ -341,6 +343,74 @@ SELECT * FROM pgokf.export_parquet(1, '/srv/okf-exports/sample');
 
 ---
 
+## Source retrieval
+
+These functions are only useful when the bundle was synced with the
+`store_source` policy enabled, so `pgokf.concept_source` holds the verbatim
+source bytes. See [configuration.md](configuration.md#storage-tiers--store_source)
+for the two-tier model. With `store_source` off (the default) no source is
+stored, and `get_concept_source` raises `22023`.
+
+### `pgokf.get_concept_source(bundle_id bigint, concept_id text) → bytea`
+
+Return the exact stored source bytes of one concept, delivered to the client
+(no filesystem write). `STABLE STRICT`, **reader-level** (`pgokf_reader` or
+`pgokf_admin`). This discloses the same content as the concept's `body_text`, so
+it carries no privilege beyond read access to the catalog.
+
+| Parameter | Type | Meaning |
+| --------- | ---- | ------- |
+| `bundle_id` | `bigint` | The concept's bundle. |
+| `concept_id` | `text` | The path-derived concept ID (see `pgokf.concepts.id`). |
+
+Raises `22023` when the concept exists but no source was stored (the bundle was
+synced with `store_source` disabled) and, distinctly in the message, when no such
+concept exists.
+
+```sql
+-- Byte-for-byte identical to the original file on disk.
+SELECT octet_length(pgokf.get_concept_source(1, 'alpha')) AS bytes;
+SELECT convert_from(pgokf.get_concept_source(1, 'alpha'), 'UTF8');  -- as text
+```
+
+### `pgokf.export_sources(bundle_id bigint, dest_dir text) → pgokf.export_result`
+
+Reconstruct a bundle's stored source files on the server filesystem, recreating
+the bundle-relative directory tree under `dest_dir` and writing each concept's
+verbatim bytes to `dest_dir/<concept path>`. `VOLATILE STRICT`,
+`SECURITY DEFINER`, **requires `pgokf_admin`** — like `export_parquet`, it
+**writes files** from inside the server process. See
+[security.md](security.md#source-retrieval-and-reconstruction) for the threat
+model.
+
+| Parameter | Type | Meaning |
+| --------- | ---- | ------- |
+| `bundle_id` | `bigint` | The bundle to reconstruct; an unknown id raises `22023`. |
+| `dest_dir` | `text` | Target directory, validated exactly like `export_parquet`'s: absolute, NUL-free, traversal-free, canonical, contained within `pgokf.allowed_roots` when configured, existing, and writable. Files are created with `O_NOFOLLOW` so a planted symlink cannot redirect a write. |
+
+Behavior:
+
+- Streams `pgokf.concept_source` joined to `pgokf.concepts.path` in bounded
+  keyset batches, so peak memory is one batch regardless of bundle size.
+- Verifies every written file against the concept's recorded BLAKE3 `file_hash`
+  before writing it and raises `XX000` on any mismatch (a corrupted stored
+  source — an integrity condition, not caller input), so a reconstruction is
+  either byte-for-byte faithful or it fails without writing.
+- Returns a `pgokf.export_result` in which `concepts_rows` is the number of files
+  reconstructed and `bytes_written` their total size; the other per-table
+  counters are `0` (this call reconstructs sources, not the four Parquet tables).
+- Raises `42501` for a directory the server process cannot write.
+
+```sql
+SELECT concepts_rows AS files, bytes_written, dest_dir
+FROM pgokf.export_sources(1, '/srv/okf-rebuild/sample');
+--  files | bytes_written |        dest_dir
+-- -------+---------------+-------------------------
+--      4 |         14330 | /srv/okf-rebuild/sample
+```
+
+---
+
 ## Composite types
 
 ### `pgokf.bundle_sync_result`
@@ -522,6 +592,29 @@ FROM pgokf.concept_provenance
 ORDER BY concept_id;
 ```
 
+### `pgokf.concept_source`
+
+Opt-in verbatim source bytes of each concept file. Populated **only** when the
+bundle was synced with the `store_source` policy enabled (the small,
+self-contained tier); empty otherwise. Reader-`SELECT`able.
+
+| Column | Type | Notes |
+| ------ | ---- | ----- |
+| `bundle_id` | `bigint` | `NOT NULL`, part of FK to `pgokf.concepts`. |
+| `concept_id` | `text` | `NOT NULL`, part of FK to `pgokf.concepts`. |
+| `raw_content` | `bytea` | `NOT NULL` — the exact, unmodified source-file bytes; hashes to `pgokf.concepts.file_hash` (BLAKE3). TOAST-compressed with `lz4` where the build supports it, otherwise `pglz`. |
+| `byte_size` | `integer` | `NOT NULL` — length of `raw_content`, so a reader can size a retrieval without detoasting. |
+
+Primary key `(bundle_id, concept_id)`; FK to `pgokf.concepts` `ON DELETE
+CASCADE`, so removing a concept or unregistering a bundle drops the stored source
+automatically. Retrieve bytes with `pgokf.get_concept_source`; reconstruct the
+bundle on disk with `pgokf.export_sources`.
+
+```sql
+SELECT concept_id, byte_size FROM pgokf.concept_source
+WHERE bundle_id = 1 ORDER BY concept_id;
+```
+
 ### `pgokf_private.config`
 
 Cluster-persistent policy: a single row, managed only through `set_config` /
@@ -536,6 +629,7 @@ Cluster-persistent policy: a single row, managed only through `set_config` /
 | `default_strict` | `boolean` | `true` |
 | `sync_log_retention_days` | `integer` | `30` (`CHECK >= 0`) |
 | `default_exclude` | `text[]` | `'{}'` |
+| `store_source` | `boolean` | `false` |
 
 ---
 
@@ -543,8 +637,8 @@ Cluster-persistent policy: a single row, managed only through `set_config` /
 
 | Role | Login | Grants |
 | ---- | ----- | ------ |
-| `pgokf_reader` | `NOLOGIN` | `USAGE` on schema `pgokf`; `SELECT` on the projection tables; `EXECUTE` on search/graph/list/`get_config`. |
-| `pgokf_admin` | `NOLOGIN` | Everything `pgokf_reader` has (it is `GRANT`ed `pgokf_reader`), plus `USAGE` on `pgokf_private` and `EXECUTE` on `register_bundle`, `refresh_bundle`, `unregister_bundle`, `set_config`, `reset_config`, `export_parquet`. |
+| `pgokf_reader` | `NOLOGIN` | `USAGE` on schema `pgokf`; `SELECT` on the projection tables (including `concept_source`); `EXECUTE` on search/graph/list/`get_config`/`get_concept_source`. |
+| `pgokf_admin` | `NOLOGIN` | Everything `pgokf_reader` has (it is `GRANT`ed `pgokf_reader`), plus `USAGE` on `pgokf_private` and `EXECUTE` on `register_bundle`, `refresh_bundle`, `unregister_bundle`, `set_config`, `reset_config`, `export_parquet`, `export_sources`. |
 
 Both are cluster-wide roles created idempotently at extension install. Grant them
 to real login users:

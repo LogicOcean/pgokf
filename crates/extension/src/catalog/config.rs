@@ -22,8 +22,9 @@
 //! family of typed overloads: a single polymorphic entry point keeps the SQL
 //! surface small while still letting each key carry its natural shape — a
 //! `jsonb` array of strings for `allowed_roots`/`default_exclude`, a boolean
-//! for `default_strict`, an integer for `sync_log_retention_days`, and a
-//! string for `default_text_search_config`. Every value is validated and
+//! for `default_strict`/`store_source`, an integer for
+//! `sync_log_retention_days`, and a string for `default_text_search_config`.
+//! Every value is validated and
 //! coerced per key ([`coerce`]); an unknown key or a value of the wrong shape
 //! or domain is rejected with SQLSTATE `22023`. `pgokf.get_config()` is a
 //! reader-level projection returning the effective policy as `jsonb`.
@@ -58,6 +59,8 @@ enum ConfigKey {
     SyncLogRetentionDays,
     /// Default bundle-relative glob patterns excluded from discovery.
     DefaultExclude,
+    /// Whether sync stores each concept's verbatim source bytes in Postgres.
+    StoreSource,
 }
 
 impl ConfigKey {
@@ -69,6 +72,7 @@ impl ConfigKey {
             Self::DefaultStrict => "default_strict",
             Self::SyncLogRetentionDays => "sync_log_retention_days",
             Self::DefaultExclude => "default_exclude",
+            Self::StoreSource => "store_source",
         }
     }
 
@@ -81,6 +85,7 @@ impl ConfigKey {
             "default_strict" => Ok(Self::DefaultStrict),
             "sync_log_retention_days" => Ok(Self::SyncLogRetentionDays),
             "default_exclude" => Ok(Self::DefaultExclude),
+            "store_source" => Ok(Self::StoreSource),
             other => Err(CatalogError::invalid_parameter(
                 format!("unknown configuration key: {other}"),
                 Path::new(""),
@@ -97,6 +102,7 @@ enum ConfigValue {
     DefaultStrict(bool),
     SyncLogRetentionDays(i32),
     DefaultExclude(Vec<String>),
+    StoreSource(bool),
 }
 
 fn spi_error(context: &str, error: &pgrx::spi::Error) -> CatalogError {
@@ -204,6 +210,10 @@ fn coerce(key: ConfigKey, value: pgrx::JsonB) -> Result<ConfigValue, CatalogErro
             let flag = json.as_bool().ok_or_else(|| type_error(key, "a boolean"))?;
             Ok(ConfigValue::DefaultStrict(flag))
         }
+        ConfigKey::StoreSource => {
+            let flag = json.as_bool().ok_or_else(|| type_error(key, "a boolean"))?;
+            Ok(ConfigValue::StoreSource(flag))
+        }
         ConfigKey::SyncLogRetentionDays => {
             let raw = json.as_i64().ok_or_else(|| type_error(key, "an integer"))?;
             Ok(ConfigValue::SyncLogRetentionDays(validate_retention_days(
@@ -286,6 +296,10 @@ fn persist(value: &ConfigValue) -> Result<(), CatalogError> {
             "UPDATE pgokf_private.config SET default_text_search_config = $1 WHERE singleton",
             &[name.clone().into()],
         ),
+        ConfigValue::StoreSource(flag) => Spi::run_with_args(
+            "UPDATE pgokf_private.config SET store_source = $1 WHERE singleton",
+            &[(*flag).into()],
+        ),
     }
     .map_err(|error| spi_error("failed to persist configuration", &error))
 }
@@ -308,6 +322,9 @@ fn reset_key(key: ConfigKey) -> Result<(), CatalogError> {
         ConfigKey::DefaultExclude => {
             "UPDATE pgokf_private.config SET default_exclude = DEFAULT WHERE singleton"
         }
+        ConfigKey::StoreSource => {
+            "UPDATE pgokf_private.config SET store_source = DEFAULT WHERE singleton"
+        }
     };
     Spi::run(statement).map_err(|error| spi_error("failed to reset configuration key", &error))
 }
@@ -320,7 +337,8 @@ fn reset_all() -> Result<(), CatalogError> {
              default_text_search_config = DEFAULT, \
              default_strict = DEFAULT, \
              sync_log_retention_days = DEFAULT, \
-             default_exclude = DEFAULT \
+             default_exclude = DEFAULT, \
+             store_source = DEFAULT \
          WHERE singleton",
     )
     .map_err(|error| spi_error("failed to reset configuration", &error))
@@ -352,7 +370,8 @@ fn get_config_impl() -> Result<pgrx::JsonB, CatalogError> {
              'default_text_search_config', pg_catalog.to_jsonb(default_text_search_config),
              'default_strict', pg_catalog.to_jsonb(default_strict),
              'sync_log_retention_days', pg_catalog.to_jsonb(sync_log_retention_days),
-             'default_exclude', pg_catalog.to_jsonb(default_exclude))
+             'default_exclude', pg_catalog.to_jsonb(default_exclude),
+             'store_source', pg_catalog.to_jsonb(store_source))
          FROM pgokf_private.config
          WHERE singleton",
     )
@@ -415,14 +434,18 @@ pub struct SyncDefaults {
     /// Text-search configuration used to build concept `tsvector`s at index
     /// time.
     pub text_search_config: String,
+    /// Whether the sync persists each concept's verbatim source bytes into
+    /// `pgokf.concept_source` (small self-contained tier) or leaves the source
+    /// in its external store (enterprise data-lake tier, the default).
+    pub store_source: bool,
 }
 
 /// Read the durable sync-time defaults from the singleton config row.
 ///
-/// Combines `default_strict`, `default_exclude`, and
-/// `default_text_search_config` into one round trip so the register/refresh
-/// engine can honor every knob without an N+1 read. Intended for the
-/// `SECURITY DEFINER` sync path only (it reads the admin-only config table).
+/// Combines `default_strict`, `default_exclude`, `default_text_search_config`,
+/// and `store_source` into one round trip so the register/refresh engine can
+/// honor every knob without an N+1 read. Intended for the `SECURITY DEFINER`
+/// sync path only (it reads the admin-only config table).
 ///
 /// # Errors
 ///
@@ -432,7 +455,7 @@ pub fn sync_defaults() -> Result<SyncDefaults, CatalogError> {
     Spi::connect(|client| {
         let table = client
             .select(
-                "SELECT default_strict, default_exclude, default_text_search_config
+                "SELECT default_strict, default_exclude, default_text_search_config, store_source
                  FROM pgokf_private.config
                  WHERE singleton",
                 Some(1),
@@ -459,10 +482,15 @@ pub fn sync_defaults() -> Result<SyncDefaults, CatalogError> {
             .ok_or_else(|| {
                 CatalogError::internal("default_text_search_config is NULL", Path::new(""))
             })?;
+        let store_source = row
+            .get::<bool>(4)
+            .map_err(|error| spi_error("failed to read store_source", &error))?
+            .ok_or_else(|| CatalogError::internal("store_source is NULL", Path::new("")))?;
         Ok(SyncDefaults {
             strict,
             exclude,
             text_search_config,
+            store_source,
         })
     })
 }
@@ -478,6 +506,7 @@ CREATE TABLE pgokf_private.config (
     default_strict             boolean NOT NULL DEFAULT true,
     sync_log_retention_days    integer NOT NULL DEFAULT 30,
     default_exclude            text[]  NOT NULL DEFAULT '{}',
+    store_source               boolean NOT NULL DEFAULT false,
     CONSTRAINT config_singleton_chk CHECK (singleton),
     CONSTRAINT config_retention_nonneg_chk CHECK (sync_log_retention_days >= 0)
 );
@@ -498,6 +527,8 @@ COMMENT ON COLUMN pgokf_private.config.sync_log_retention_days IS
     'Retention window in days for sync-log history; must be >= 0.';
 COMMENT ON COLUMN pgokf_private.config.default_exclude IS
     'Default bundle-relative glob patterns excluded from discovery.';
+COMMENT ON COLUMN pgokf_private.config.store_source IS
+    'Whether sync stores each concept''s verbatim source bytes in pgokf.concept_source (true = small self-contained tier: the original files live in Postgres) or leaves the source in its external object-store/data-lake (false, the default = enterprise tier: Postgres holds only metadata and search). Not retroactive: a change takes effect for bundles synced or refreshed afterward; existing rows keep their stored source (or absence of one) until refresh_bundle re-indexes them.';
 ",
     name = "config_table",
     requires = ["catalog_tables"]
@@ -514,9 +545,10 @@ mod pgokf {
     ///
     /// The `value` is `jsonb` and is validated and coerced per key: an array
     /// of strings for `allowed_roots` / `default_exclude`, a boolean for
-    /// `default_strict`, an integer for `sync_log_retention_days`, and a
-    /// string for `default_text_search_config`. Unknown keys and
-    /// wrong-shaped or out-of-domain values raise SQLSTATE `22023`.
+    /// `default_strict` / `store_source`, an integer for
+    /// `sync_log_retention_days`, and a string for
+    /// `default_text_search_config`. Unknown keys and wrong-shaped or
+    /// out-of-domain values raise SQLSTATE `22023`.
     #[pg_extern(requires = ["config_table"])]
     fn set_config(key: &str, value: pgrx::JsonB) {
         set_config_impl(key, value).unwrap_or_else(|error| error.raise());
@@ -592,6 +624,7 @@ mod tests {
             ("default_strict", ConfigKey::DefaultStrict),
             ("sync_log_retention_days", ConfigKey::SyncLogRetentionDays),
             ("default_exclude", ConfigKey::DefaultExclude),
+            ("store_source", ConfigKey::StoreSource),
         ];
 
         for (name, key) in expected {

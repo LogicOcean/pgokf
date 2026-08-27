@@ -236,6 +236,259 @@ The beta concept is the companion definition referenced by alpha.\n";
         );
     }
 
+    /// A throwaway, writable server-side directory for reconstruction tests,
+    /// created with a process/clock-unique name and removed on drop.
+    struct ExportDir {
+        root: PathBuf,
+    }
+
+    impl ExportDir {
+        fn create() -> Self {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock is after the Unix epoch")
+                .as_nanos();
+            let root = std::env::temp_dir()
+                .join(format!("pgokf-src-export-{}-{nonce}", std::process::id()));
+            fs::create_dir_all(&root).expect("export dir is creatable");
+            Self { root }
+        }
+
+        fn path(&self) -> String {
+            self.root
+                .to_str()
+                .expect("export dir path is valid UTF-8")
+                .to_owned()
+        }
+    }
+
+    impl Drop for ExportDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// Enable the `store_source` tier for the current (rolled-back) test
+    /// transaction, so a subsequent register persists verbatim source bytes.
+    fn enable_store_source() {
+        Spi::run("SELECT pgokf.set_config('store_source', 'true'::jsonb)")
+            .expect("store_source can be enabled");
+    }
+
+    #[pg_test]
+    fn store_source_on_retrieves_and_reconstructs_exact_bytes() {
+        // Arrange: enable the store_source tier, then register a fixture whose
+        // exact on-disk bytes are known (the ALPHA_CONCEPT / BETA_CONCEPT
+        // constants).
+        enable_store_source();
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+
+        // Act / Assert: get_concept_source returns the alpha file byte-for-byte.
+        let stored = Spi::get_one_with_args::<Vec<u8>>(
+            "SELECT pgokf.get_concept_source($1, 'alpha')",
+            &[bundle_id.into()],
+        )
+        .expect("get_concept_source executes")
+        .expect("alpha carries stored source bytes");
+        assert_eq!(
+            stored,
+            ALPHA_CONCEPT.as_bytes(),
+            "stored source must equal the original alpha file bytes",
+        );
+
+        // Act: reconstruct the whole bundle on disk into a fresh directory.
+        let dest = ExportDir::create();
+        let files_written = Spi::get_one_with_args::<i64>(
+            "SELECT concepts_rows FROM pgokf.export_sources($1, $2)",
+            &[bundle_id.into(), dest.path().into()],
+        )
+        .expect("export_sources executes")
+        .expect("concepts_rows is not NULL");
+
+        // Assert: both concept files were reconstructed, byte-for-byte, and
+        // their BLAKE3 digests equal the originals' digests.
+        assert_eq!(files_written, 2, "both stored sources are reconstructed");
+        let alpha_bytes = fs::read(bundle.root.join("alpha.md")).expect("original alpha readable");
+        let rebuilt_alpha =
+            fs::read(dest.root.join("alpha.md")).expect("reconstructed alpha readable");
+        assert_eq!(
+            rebuilt_alpha, alpha_bytes,
+            "reconstructed alpha must be byte-for-byte identical",
+        );
+        assert_eq!(
+            okf_sync::hash_bytes(&rebuilt_alpha),
+            okf_sync::hash_bytes(&alpha_bytes),
+            "reconstructed alpha must hash identically to the original",
+        );
+        let rebuilt_beta =
+            fs::read(dest.root.join("beta.md")).expect("reconstructed beta readable");
+        assert_eq!(
+            rebuilt_beta,
+            BETA_CONCEPT.as_bytes(),
+            "reconstructed beta must be byte-for-byte identical",
+        );
+    }
+
+    #[pg_test]
+    fn store_source_off_stores_no_source_rows() {
+        // Arrange: the default policy (store_source disabled) — register without
+        // enabling it.
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+
+        // Act: count the stored sources for the bundle.
+        let rows = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concept_source WHERE bundle_id = $1",
+            &[bundle_id.into()],
+        )
+        .expect("concept_source count executes")
+        .expect("count is not NULL");
+
+        // Assert: default behavior is unchanged — no source bytes are stored.
+        assert_eq!(rows, 0, "the default policy stores no concept_source rows");
+    }
+
+    #[pg_test]
+    fn reader_can_retrieve_source_but_is_denied_export() {
+        // Arrange: a role granted pgokf_reader, and a store_source-backed
+        // bundle it can read.
+        enable_store_source();
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        Spi::run("CREATE ROLE pgokf_src_reader").expect("reader role is creatable");
+        Spi::run("GRANT pgokf_reader TO pgokf_src_reader").expect("reader role is grantable");
+
+        // A function-local `SET role` scopes each probe to the reader identity
+        // while the surrounding session stays privileged.
+        Spi::run(
+            "CREATE FUNCTION pg_temp.reader_get_source(bid bigint) RETURNS text
+             LANGUAGE plpgsql
+             SET role TO pgokf_src_reader
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.get_concept_source(bid, 'alpha');
+                 RETURN 'ok';
+             EXCEPTION WHEN insufficient_privilege THEN
+                 RETURN 'denied';
+             END
+             $probe$;",
+        )
+        .expect("reader get probe is creatable");
+        Spi::run(
+            "CREATE FUNCTION pg_temp.reader_export_sources(bid bigint, dst text) RETURNS text
+             LANGUAGE plpgsql
+             SET role TO pgokf_src_reader
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.export_sources(bid, dst);
+                 RETURN 'not-denied';
+             EXCEPTION WHEN insufficient_privilege THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("reader export probe is creatable");
+
+        // Act: the reader retrieves a concept source, then attempts an export.
+        let get_outcome = Spi::get_one_with_args::<String>(
+            "SELECT pg_temp.reader_get_source($1)",
+            &[bundle_id.into()],
+        )
+        .expect("reader get probe executes")
+        .expect("probe reports an outcome");
+        let dest = ExportDir::create();
+        let export_sqlstate = Spi::get_one_with_args::<String>(
+            "SELECT pg_temp.reader_export_sources($1, $2)",
+            &[bundle_id.into(), dest.path().into()],
+        )
+        .expect("reader export probe executes")
+        .expect("probe reports a SQLSTATE");
+
+        // Assert: retrieval is a reader-level disclosure (allowed), while
+        // reconstruction is admin-only (denied with 42501).
+        assert_eq!(get_outcome, "ok", "a reader may retrieve a concept source");
+        assert_eq!(
+            export_sqlstate, "42501",
+            "a reader must be denied export_sources with SQLSTATE 42501",
+        );
+    }
+
+    #[pg_test]
+    fn unregister_bundle_cascades_concept_source_to_zero_rows() {
+        // Arrange: a store_source-backed bundle with stored source rows.
+        enable_store_source();
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        let before = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concept_source WHERE bundle_id = $1",
+            &[bundle_id.into()],
+        )
+        .expect("pre-count executes")
+        .expect("count is not NULL");
+        assert_eq!(before, 2, "the store_source bundle has two stored sources");
+
+        // Act: unregister the bundle.
+        Spi::run_with_args("SELECT pgokf.unregister_bundle($1)", &[bundle_id.into()])
+            .expect("unregister_bundle executes");
+
+        // Assert: the foreign key cascade removed every concept_source row.
+        let after = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concept_source WHERE bundle_id = $1",
+            &[bundle_id.into()],
+        )
+        .expect("post-count executes")
+        .expect("count is not NULL");
+        assert_eq!(after, 0, "unregister cascades concept_source to zero rows");
+    }
+
+    #[pg_test]
+    fn get_concept_source_raises_22023_for_absent_source_and_concept() {
+        // Arrange: the default policy (store_source disabled), so the concepts
+        // exist but no source was stored.
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        Spi::run(
+            "CREATE FUNCTION pg_temp.get_source_sqlstate(bid bigint, cid text) RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.get_concept_source(bid, cid);
+                 RETURN 'no-error';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("get_concept_source probe is creatable");
+
+        // Act: a concept that exists but has no stored source, and a concept
+        // that does not exist at all.
+        let absent_source = Spi::get_one_with_args::<String>(
+            "SELECT pg_temp.get_source_sqlstate($1, 'alpha')",
+            &[bundle_id.into()],
+        )
+        .expect("absent-source probe executes")
+        .expect("probe reports a SQLSTATE");
+        let absent_concept = Spi::get_one_with_args::<String>(
+            "SELECT pg_temp.get_source_sqlstate($1, 'ghost')",
+            &[bundle_id.into()],
+        )
+        .expect("absent-concept probe executes")
+        .expect("probe reports a SQLSTATE");
+
+        // Assert: both are invalid-parameter (22023), distinguishing "no source
+        // stored" from "no such concept" only in the message, never the class.
+        assert_eq!(
+            absent_source, "22023",
+            "a stored-source miss must raise invalid_parameter (22023)",
+        );
+        assert_eq!(
+            absent_concept, "22023",
+            "an unknown concept must raise invalid_parameter (22023)",
+        );
+    }
+
     #[pg_test]
     fn every_catalog_object_carries_a_comment() {
         // This is the runtime, database-truth counterpart of the source-level
