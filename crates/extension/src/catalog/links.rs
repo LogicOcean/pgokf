@@ -19,11 +19,17 @@
 //!    `label`, `kind`, `ordinal`, `is_external`, and the normalized
 //!    `target_path` / `target_id` for internal destinations, so no re-parsing
 //!    is required. An internal edge is marked `resolved` only when its
-//!    `target_id` matches a concept that already exists in the same bundle;
-//!    unresolved internal links are retained (OKF permits broken links, and a
-//!    later sync may resolve them). External links carry `target_id = NULL`
-//!    and `resolved = false`.
-//! 3. Uses parameterized SPI only, surfacing failures as [`CatalogError`] so
+//!    `target_id` matches a concept that exists in the same bundle; unresolved
+//!    internal links are retained (OKF permits broken links). External links
+//!    carry `target_id = NULL` and `resolved = false`.
+//! 3. In [`reresolve_bundle`], run once by the sync engine after the concept
+//!    set is finalized, recomputes `resolved` bundle-wide against the current
+//!    concepts. Because [`project`] only reprojects *staged* sources, this pass
+//!    is what keeps the inbound edges of *unchanged* concepts correct: an edge
+//!    to a target added this sync flips `false` → `true`, and an edge to a
+//!    target removed this sync flips `true` → `false` — so the graph
+//!    self-corrects and never emits phantom neighbors for deleted targets.
+//! 4. Uses parameterized SPI only, surfacing failures as [`CatalogError`] so
 //!    the surrounding sync transaction rolls back atomically.
 //!
 //! Traversal APIs (recursive neighbors) belong in
@@ -71,7 +77,7 @@ COMMENT ON COLUMN pgokf.links.target_path IS
 COMMENT ON COLUMN pgokf.links.link_kind IS
     'Markdown construct that produced the link: inline, reference, autolink, email, or image.';
 COMMENT ON COLUMN pgokf.links.resolved IS
-    'True only for an internal link whose target_id matched an existing concept in the same bundle at sync time.';
+    'True only for an internal link whose target_id matches an existing concept in the same bundle; recomputed bundle-wide after every sync so it stays correct as targets are added or removed.';
 COMMENT ON COLUMN pgokf.links.is_external IS
     'True when the destination is a scheme-qualified or protocol-relative URL; external links never become graph edges.';
 COMMENT ON COLUMN pgokf.links.ordinal IS
@@ -116,7 +122,8 @@ fn delete_outgoing(bundle_id: i64, source_id: &str) -> Result<(), CatalogError> 
 /// `resolved` is computed in SQL as `(target_id IS NOT NULL AND NOT external
 /// AND the target concept exists in this bundle)`; the concept rows for the
 /// bundle are already written when the seam runs, so the check sees the full
-/// current concept set.
+/// current concept set. The inbound edges of concepts that were *not* staged
+/// this sync are corrected separately by [`reresolve_bundle`].
 fn insert_link(bundle_id: i64, source_id: &str, link: &Link) -> Result<(), CatalogError> {
     const INSERT: &str = "
         INSERT INTO pgokf.links
@@ -175,6 +182,44 @@ pub fn project(bundle_id: i64, staged: &[StagedConcept]) -> Result<(), CatalogEr
         }
     }
     Ok(())
+}
+
+/// Re-evaluate `resolved` for every internal link in one bundle against the
+/// finalized concept set.
+///
+/// [`project`] only reprojects the outgoing edges of *staged* (added or
+/// updated) sources, so the inbound edges of an *unchanged* concept keep the
+/// `resolved` value they were given when their source was last written — even
+/// after this sync added or removed the target they point at. Run once inside
+/// the sync transaction after the concept set is finalized (post upsert and
+/// delete), this bundle-wide pass recomputes `resolved` from the current
+/// concepts, so:
+///
+/// - an edge to a target *added* this sync flips stale `false` → `true`, and
+/// - an edge to a target *removed* this sync flips `true` → `false` (so a
+///   dangling `target_id` can no longer produce a phantom graph edge).
+///
+/// External edges (`is_external`) and edges without a `target_id` are always
+/// left `false`, matching the per-insert rule in [`insert_link`].
+///
+/// # Errors
+///
+/// Returns a [`CatalogError`] on any SPI failure so a partial projection aborts
+/// the surrounding sync transaction.
+pub fn reresolve_bundle(bundle_id: i64) -> Result<(), CatalogError> {
+    const RERESOLVE: &str = "
+        UPDATE pgokf.links
+        SET resolved = (
+            links.target_id IS NOT NULL
+            AND NOT links.is_external
+            AND EXISTS (
+                SELECT 1 FROM pgokf.concepts c
+                WHERE c.bundle_id = links.bundle_id
+                  AND c.id = links.target_id))
+        WHERE links.bundle_id = $1";
+
+    Spi::run_with_args(RERESOLVE, &[bundle_id.into()])
+        .map_err(|error| spi_error("failed to re-resolve concept links", &error))
 }
 
 #[cfg(test)]

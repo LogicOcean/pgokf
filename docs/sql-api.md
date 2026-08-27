@@ -27,7 +27,7 @@ exercised against a live PostgreSQL 18 cluster.
 
 | Function | Returns | Volatility | Security | Required role |
 | -------- | ------- | ---------- | -------- | ------------- |
-| `version()` | `text` | IMMUTABLE | invoker | none (PUBLIC) |
+| `version()` | `text` | IMMUTABLE | invoker | `pgokf_reader` |
 | `register_bundle(path, name, options)` | `bundle_sync_result` | VOLATILE | DEFINER | `pgokf_admin` |
 | `refresh_bundle(bundle_id)` | `bundle_sync_result` | VOLATILE | DEFINER | `pgokf_admin` |
 | `unregister_bundle(bundle_id)` | `bundle_info` | VOLATILE | DEFINER | `pgokf_admin` |
@@ -53,7 +53,10 @@ every other function — including `list_bundles` and `bundle_info`, which take 
 ### `pgokf.version() → text`
 
 Report the version of the loaded `pgokf` shared library (the crate version).
-`IMMUTABLE STRICT PARALLEL SAFE`, invoker rights, executable by everyone. Useful
+`IMMUTABLE STRICT PARALLEL SAFE`, invoker rights. Although the function itself
+carries no role check, `USAGE` on schema `pgokf` is revoked from `PUBLIC`, so a
+caller needs membership in `pgokf_reader` or `pgokf_admin` (or superuser);
+a role with neither gets `42501` (`permission denied for schema pgokf`). Useful
 to confirm the installed SQL and the loaded module agree after an upgrade.
 
 ```sql

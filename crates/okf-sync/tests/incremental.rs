@@ -57,13 +57,17 @@ fn file_hash_matches_memory_hash_and_changes_with_content() {
 
 #[cfg(unix)]
 #[test]
-fn rejects_followed_symlinks_that_escape_the_bundle() {
+fn rejects_a_candidate_markdown_symlink_that_escapes_the_bundle() {
     use std::os::unix::fs::symlink;
 
     let bundle = tempdir().unwrap();
     let outside = tempdir().unwrap();
     fs::write(outside.path().join("outside.md"), "outside").unwrap();
-    symlink(outside.path(), bundle.path().join("escape")).unwrap();
+    symlink(
+        outside.path().join("outside.md"),
+        bundle.path().join("escape.md"),
+    )
+    .unwrap();
     let config = SyncConfig::new(bundle.path());
 
     let result = discover(&config);
@@ -71,7 +75,7 @@ fn rejects_followed_symlinks_that_escape_the_bundle() {
     assert!(matches!(
         result,
         Err(SyncError::SymlinkEscape { path, root })
-            if path == bundle.path().join("escape") && root == bundle.path()
+            if path == bundle.path().join("escape.md") && root == bundle.path()
     ));
 }
 
@@ -114,10 +118,11 @@ fn excluded_symlinks_are_skipped_without_being_resolved() {
 
 #[cfg(unix)]
 #[test]
-fn a_broken_symlink_surfaces_a_metadata_error() {
+fn a_dangling_candidate_markdown_symlink_is_ignored() {
     use std::os::unix::fs::symlink;
 
     let bundle = tempdir().unwrap();
+    write(&bundle, "real.md", "content");
     symlink(
         bundle.path().join("missing-target.md"),
         bundle.path().join("broken.md"),
@@ -125,12 +130,48 @@ fn a_broken_symlink_surfaces_a_metadata_error() {
     .unwrap();
     let config = SyncConfig::new(bundle.path());
 
-    let result = discover(&config);
+    let snapshot = discover(&config).unwrap();
 
-    assert!(matches!(
-        result,
-        Err(SyncError::Metadata { path, .. }) if path == bundle.path().join("broken.md")
-    ));
+    assert_eq!(snapshot.len(), 1);
+    assert!(snapshot.get("real.md").is_some());
+    assert!(snapshot.get("broken.md").is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_dangling_non_markdown_symlink_is_ignored_and_real_documents_are_indexed() {
+    use std::os::unix::fs::symlink;
+
+    let bundle = tempdir().unwrap();
+    write(&bundle, "real.md", "content");
+    symlink(
+        bundle.path().join("missing-target.txt"),
+        bundle.path().join("dangling.txt"),
+    )
+    .unwrap();
+    let config = SyncConfig::new(bundle.path());
+
+    let snapshot = discover(&config).unwrap();
+
+    assert_eq!(snapshot.len(), 1);
+    assert!(snapshot.get("real.md").is_some());
+}
+
+#[cfg(unix)]
+#[test]
+fn an_irrelevant_symlink_to_an_outside_directory_does_not_abort_discovery() {
+    use std::os::unix::fs::symlink;
+
+    let bundle = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    write(&bundle, "real.md", "content");
+    symlink(outside.path(), bundle.path().join("vendor")).unwrap();
+    let config = SyncConfig::new(bundle.path());
+
+    let snapshot = discover(&config).unwrap();
+
+    assert_eq!(snapshot.len(), 1);
+    assert!(snapshot.get("real.md").is_some());
 }
 
 #[test]

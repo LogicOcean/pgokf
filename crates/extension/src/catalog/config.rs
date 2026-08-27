@@ -399,6 +399,74 @@ pub fn enforce_allowed_roots(requested_path: &str) -> Result<(), CatalogError> {
     Ok(())
 }
 
+/// The durable, sync-time defaults consumed by the register/refresh engine.
+///
+/// Read once per sync from the singleton `pgokf_private.config` row through the
+/// `SECURITY DEFINER` sync path, which holds privileges on the administrator-only
+/// table. Reader-level callers cannot read the table directly and must instead
+/// obtain the effective policy through the `pgokf.get_config` function.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncDefaults {
+    /// Whether a malformed file aborts the sync (`true`) or is logged and
+    /// skipped (`false`).
+    pub strict: bool,
+    /// Bundle-relative glob patterns excluded from discovery.
+    pub exclude: Vec<String>,
+    /// Text-search configuration used to build concept `tsvector`s at index
+    /// time.
+    pub text_search_config: String,
+}
+
+/// Read the durable sync-time defaults from the singleton config row.
+///
+/// Combines `default_strict`, `default_exclude`, and
+/// `default_text_search_config` into one round trip so the register/refresh
+/// engine can honor every knob without an N+1 read. Intended for the
+/// `SECURITY DEFINER` sync path only (it reads the admin-only config table).
+///
+/// # Errors
+///
+/// Returns a [`CatalogError`] when the configuration row cannot be read or is
+/// missing.
+pub fn sync_defaults() -> Result<SyncDefaults, CatalogError> {
+    Spi::connect(|client| {
+        let table = client
+            .select(
+                "SELECT default_strict, default_exclude, default_text_search_config
+                 FROM pgokf_private.config
+                 WHERE singleton",
+                Some(1),
+                &[],
+            )
+            .map_err(|error| spi_error("failed to read sync defaults", &error))?;
+        let Some(row) = table.into_iter().next() else {
+            return Err(CatalogError::internal(
+                "configuration row is missing",
+                Path::new(""),
+            ));
+        };
+        let strict = row
+            .get::<bool>(1)
+            .map_err(|error| spi_error("failed to read default_strict", &error))?
+            .ok_or_else(|| CatalogError::internal("default_strict is NULL", Path::new("")))?;
+        let exclude = row
+            .get::<Vec<String>>(2)
+            .map_err(|error| spi_error("failed to read default_exclude", &error))?
+            .unwrap_or_default();
+        let text_search_config = row
+            .get::<String>(3)
+            .map_err(|error| spi_error("failed to read default_text_search_config", &error))?
+            .ok_or_else(|| {
+                CatalogError::internal("default_text_search_config is NULL", Path::new(""))
+            })?;
+        Ok(SyncDefaults {
+            strict,
+            exclude,
+            text_search_config,
+        })
+    })
+}
+
 // Durable configuration storage: one typed, singleton policy row in the
 // administrator-only `pgokf_private` schema.
 pgrx::extension_sql!(
@@ -423,7 +491,7 @@ COMMENT ON TABLE pgokf_private.config IS
 COMMENT ON COLUMN pgokf_private.config.allowed_roots IS
     'Absolute directory roots that a registered bundle path must resolve inside; empty means the interim any-absolute-path policy applies.';
 COMMENT ON COLUMN pgokf_private.config.default_text_search_config IS
-    'Default text-search configuration; must name an installed configuration (verified against pg_catalog.pg_ts_config).';
+    'Default text-search configuration used to build concept tsvectors at index time and to parse search queries; must name an installed configuration (verified against pg_catalog.pg_ts_config). A change takes effect for bundles synced or refreshed afterward; existing rows keep their tsvector until refresh_bundle re-indexes them.';
 COMMENT ON COLUMN pgokf_private.config.default_strict IS
     'Whether sync rejects malformed files (true) instead of skipping them.';
 COMMENT ON COLUMN pgokf_private.config.sync_log_retention_days IS

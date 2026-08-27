@@ -69,7 +69,8 @@
 //! side reads a plain `i64`; the `tsvector` search column carries no portable
 //! value and is deliberately excluded from the export.
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -681,6 +682,56 @@ fn read_batch(
     })
 }
 
+/// `open(2)` flag that refuses to traverse a symbolic link at the final path
+/// component (`O_NOFOLLOW`). On Linux this is the fixed constant `0x2_0000`;
+/// declaring it locally keeps the crate free of a `libc` dependency, and it is
+/// applied through the safe [`OpenOptionsExt::custom_flags`] so no `unsafe` is
+/// required. Its effect: if the target already exists and is a symlink, the
+/// open fails with `ELOOP` instead of following the link to write elsewhere.
+const O_NOFOLLOW: i32 = 0x2_0000;
+
+/// Linux `errno` value returned by an `O_NOFOLLOW` open whose final component
+/// is a symbolic link (`ELOOP`). Used to translate that specific failure into
+/// a caller-facing `22023` refusal rather than an opaque internal error.
+const ELOOP: i32 = 40;
+
+/// Create (truncating) a fresh output file **without following a symlink** at
+/// the final path component.
+///
+/// The destination directory is already validated and canonicalized, but a
+/// canonical directory does not stop an attacker who can place files inside it
+/// from planting a symlink at the exact output file name (for example
+/// `concepts.parquet` → `postgresql.auto.conf`). A plain [`File::create`]
+/// follows that link and redirects the write — and its `O_TRUNC` — onto an
+/// arbitrary file the server process can write. Opening with [`O_NOFOLLOW`]
+/// closes that hole: a symlinked target is refused with `ELOOP`, reported as
+/// SQLSTATE `22023`, and nothing is written or truncated through it. A missing
+/// path is still created normally; a regular file is still truncated as before.
+fn create_export_file(path: &Path) -> Result<File, CatalogError> {
+    OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)
+        .map_err(|error| {
+            if error.raw_os_error() == Some(ELOOP) {
+                CatalogError::invalid_parameter(
+                    format!(
+                        "refusing to write export file through a symbolic link: {}",
+                        path.display()
+                    ),
+                    Path::new(""),
+                )
+            } else {
+                CatalogError::internal(
+                    format!("failed to create export file {}: {error}", path.display()),
+                    Path::new(""),
+                )
+            }
+        })
+}
+
 /// Stream one table to a Parquet file, returning `(rows_written, bytes)`.
 ///
 /// Rows are read in keyset batches and written incrementally; each batch is
@@ -693,12 +744,7 @@ fn export_table(
 ) -> Result<(usize, u64), CatalogError> {
     let schema = build_schema(spec);
     let path = dir.join(spec.file_name);
-    let file = File::create(&path).map_err(|error| {
-        CatalogError::internal(
-            format!("failed to create export file {}: {error}", path.display()),
-            Path::new(""),
-        )
-    })?;
+    let file = create_export_file(&path)?;
     let properties = WriterProperties::builder()
         .set_compression(Compression::ZSTD(ZstdLevel::default()))
         .build();
@@ -775,7 +821,16 @@ fn probe_name() -> String {
 /// but cannot be written.
 fn ensure_writable(dir: &Path) -> Result<(), CatalogError> {
     let probe = dir.join(probe_name());
-    match File::create(&probe) {
+    // The probe is created with `O_NOFOLLOW` for the same reason the export
+    // files are (see [`create_export_file`]): a symlink planted at the probe
+    // path must never redirect this create/truncate onto another file.
+    match OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(&probe)
+    {
         Ok(_) => {
             let _ = std::fs::remove_file(&probe);
             Ok(())
@@ -1164,6 +1219,81 @@ mod tests {
                 Some(1_700_000_000_000_001),
             ]),
         ]
+    }
+
+    #[test]
+    fn create_export_file_refuses_symlink_at_output_path() {
+        use std::os::unix::fs::symlink;
+
+        // Arrange: a validated destination directory into which an attacker has
+        // planted a symlink at the exact output file name, pointing at a
+        // pre-existing "sensitive" file (standing in for postgresql.auto.conf).
+        let base = std::env::temp_dir().join(format!(
+            "pgokf-export-nofollow-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or_default()
+        ));
+        let dir = base.join("dest");
+        std::fs::create_dir_all(&dir).expect("create dest dir");
+        let target = base.join("sensitive.conf");
+        std::fs::write(&target, b"original").expect("seed sensitive target");
+        let link = dir.join("concepts.parquet");
+        symlink(&target, &link).expect("plant symlink at output path");
+
+        // Act: attempt to create the export file at the symlinked path.
+        let result = create_export_file(&link);
+
+        // Assert: the create is refused, the symlink target is byte-for-byte
+        // untouched (no write and, crucially, no O_TRUNC escaped through it),
+        // and the planted link itself is left in place rather than followed.
+        assert!(result.is_err(), "a symlinked output path must be refused");
+        let after = std::fs::read(&target).expect("target still readable");
+        assert_eq!(
+            after, b"original",
+            "no write or truncation escaped through the symlink"
+        );
+        let link_meta = std::fs::symlink_metadata(&link).expect("link still present");
+        assert!(
+            link_meta.file_type().is_symlink(),
+            "the planted link must remain a symlink, not be replaced by a file"
+        );
+
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_file(&target);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn create_export_file_creates_a_fresh_regular_file() {
+        // Arrange: a clean directory with no file at the output path.
+        let base = std::env::temp_dir().join(format!(
+            "pgokf-export-fresh-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&base).expect("create dir");
+        let path = base.join("concepts.parquet");
+
+        // Act
+        let file = create_export_file(&path);
+
+        // Assert: a real, regular file is created at exactly the requested path.
+        assert!(file.is_ok(), "a fresh output path must be creatable");
+        let meta = std::fs::metadata(&path).expect("created file present");
+        assert!(
+            meta.file_type().is_file(),
+            "the output must be a regular file"
+        );
+
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

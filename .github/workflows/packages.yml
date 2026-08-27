@@ -35,6 +35,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+
       - name: jq well-formedness + required PGXN v1 fields
         run: |
           jq empty META.json
@@ -45,6 +46,49 @@ jobs:
             and (.provides | to_entries | all(.value | has("file") and has("version")))
           ' META.json
           echo "META.json: valid JSON, all required PGXN meta-spec v1 fields present."
+
+      # The main SQL named by provides.*.file is a generated build artifact
+      # (target/, gitignored); the PGXN release process emits it into the tree
+      # before zipping (see docs/packaging.md). Reproduce that emit here so the
+      # manifest's promised file is proven to exist at dist-build time, rather
+      # than only when a human runs the release steps.
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install PostgreSQL 18 dev files (PGDG)
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo gpg --batch --yes --dearmor -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt noble-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y postgresql-18 postgresql-server-dev-18 libclang-dev
+
+      - name: Install cargo-pgrx and initialize PostgreSQL 18
+        run: |
+          cargo install --locked cargo-pgrx --version "${CARGO_PGRX_VERSION}"
+          cargo pgrx init --pg18=/usr/lib/postgresql/18/bin/pg_config
+
+      - name: Emit generated SQL and assert every provides.file exists
+        run: |
+          # Emit the main SQL exactly as the PGXN release process does
+          # (docs/packaging.md), targeting the path the manifest promises.
+          target=$(jq -r '.provides.pgokf.file' META.json)
+          mkdir -p "$(dirname "$target")"
+          ( cd crates/extension && cargo pgrx schema pg18 ) > "$target"
+          # Every path named by provides.*.file must now exist in the tree.
+          mapfile -t provided_files < <(jq -r '.provides[].file' META.json)
+          for f in "${provided_files[@]}"; do
+            if [[ ! -f "$f" ]]; then
+              echo "::error::provides.file '$f' does not exist at dist-build time"
+              exit 1
+            fi
+            echo "provides.file present: $f"
+          done
 
   # ---------------------------------------------------------------------------
   # Per-major .deb (+ rpm spec check). PG19 is advisory until PGDG ships it.

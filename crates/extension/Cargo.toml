@@ -25,5 +25,12 @@ okf-sync = { version = "=0.1.0", path = "../okf-sync" }
 parquet.workspace = true
 pgrx.workspace = true
 
+[dev-dependencies]
+# In-database (`#[pg_test]`) harness. Pinned to the same version as `pgrx`
+# (0.19.2, via the workspace) so the test runner and the extension ABI agree;
+# `default-features = false` mirrors the workspace `pgrx` dependency, and the
+# active `pgNN` feature is threaded through by `cargo pgrx test` at run time.
+pgrx-tests = { version = "=0.19.2", default-features = false }
+
 [lints]
 workspace = true

@@ -73,7 +73,10 @@ struct NeighborHit {
 /// The recursive CTE seeds from the start concept's outgoing resolved edges
 /// and walks forward, guarding against cycles by refusing to revisit a
 /// concept already on the current path. The outer query keeps the shortest
-/// path per neighbor.
+/// path per neighbor, and its `JOIN pgokf.concepts` is an inner join so a
+/// neighbor whose concept no longer exists is never emitted — defense in depth
+/// alongside the bundle-wide link re-resolution that already clears `resolved`
+/// on edges to deleted targets ([`crate::catalog::links::reresolve_bundle`]).
 const TRAVERSAL_QUERY: &str = "
     WITH RECURSIVE walk AS (
         SELECT l.source_id,
@@ -108,7 +111,7 @@ const TRAVERSAL_QUERY: &str = "
                w.path,
                c.title
         FROM walk w
-        LEFT JOIN pgokf.concepts c
+        JOIN pgokf.concepts c
           ON c.bundle_id = $1 AND c.id = w.neighbor_id
         ORDER BY w.neighbor_id, w.hops
     ) s

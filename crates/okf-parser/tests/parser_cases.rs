@@ -328,3 +328,88 @@ fn preserves_nested_image_and_outer_link_in_source_order() {
     assert_eq!(parsed.links[1].kind, LinkKind::Image);
     assert_eq!(parsed.links[1].target_path, None);
 }
+
+#[test]
+fn empty_inline_link_destination_produces_no_edge() {
+    // Regression (F12): `[label]()` has a genuinely empty destination. The
+    // link is still recorded (with an empty raw target), but it must resolve to
+    // no target path or id rather than fabricating a self-referential edge.
+    let source = b"---\ntype: Note\ntitle: Empty\n---\nSee [label]() here.";
+
+    let parsed = parse_concept(source, "notes/a.md", ParserLimits::default()).unwrap();
+
+    let empty = parsed
+        .links
+        .iter()
+        .find(|link| link.target.is_empty())
+        .expect("empty inline destination should still be recorded as a link");
+    assert!(!empty.is_external);
+    assert_eq!(empty.target_path, None);
+    assert_eq!(empty.target_id, None);
+}
+
+#[test]
+fn fragment_only_link_self_references_but_named_target_does_not() {
+    // Regression (F12): a fragment-only `[label](#frag)` resolves to the source
+    // concept, while `[label](other.md)` resolves to a sibling — neither path
+    // should collapse the other's behavior.
+    let source = b"---\ntype: Note\ntitle: Links\n---\n[here](#frag) and [there](other.md)";
+
+    let parsed = parse_concept(source, "notes/a.md", ParserLimits::default()).unwrap();
+
+    let by_target = |target: &str| {
+        parsed
+            .links
+            .iter()
+            .find(|link| link.target == target)
+            .unwrap_or_else(|| panic!("missing link {target}"))
+    };
+
+    let fragment = by_target("#frag");
+    assert_eq!(fragment.target_path.as_deref(), Some("notes/a.md"));
+    assert_eq!(fragment.target_id.as_deref(), Some("notes/a"));
+
+    let named = by_target("other.md");
+    assert_eq!(named.target_path.as_deref(), Some("notes/other.md"));
+    assert_eq!(named.target_id.as_deref(), Some("notes/other"));
+}
+
+#[test]
+fn leading_utf8_bom_parses_identically_to_bom_free_input() {
+    // Regression (F13): a leading U+FEFF BOM before the `---` delimiter must be
+    // stripped so the file parses instead of being rejected as
+    // MissingFrontmatter, and it must yield the same concept as the BOM-free
+    // input.
+    let plain = "---\ntype: Note\ntitle: Bommed\n---\nBody \u{feff}mid".as_bytes();
+    let bommed = "\u{feff}---\ntype: Note\ntitle: Bommed\n---\nBody \u{feff}mid".as_bytes();
+
+    let from_plain = parse_concept(plain, "notes/bom.md", ParserLimits::default()).unwrap();
+    let from_bommed = parse_concept(bommed, "notes/bom.md", ParserLimits::default()).unwrap();
+
+    assert_eq!(from_bommed, from_plain);
+    // A mid-body U+FEFF is genuine content and must survive untouched.
+    assert!(from_bommed.body_text.contains('\u{feff}'));
+}
+
+#[test]
+fn column_zero_delimiter_inside_quoted_scalar_reports_invalid_frontmatter() {
+    // Documented behavior (F16): a bare `---` on its own line inside a
+    // multiline quoted scalar closes the frontmatter block early. The line
+    // split does not re-implement YAML, so `serde_yaml` sees an unterminated
+    // quoted scalar and the failure surfaces as InvalidFrontmatter whose
+    // message pinpoints the offending line/column.
+    let source = b"---\ntype: Note\ntitle: \"line one\n---\nline two\"\n---\nBody";
+
+    let error = parse_concept(source, "notes/q.md", ParserLimits::default()).unwrap_err();
+
+    assert!(
+        matches!(&error, Error::InvalidFrontmatter { path, .. } if path == "notes/q.md"),
+        "expected InvalidFrontmatter, got {error:?}"
+    );
+    assert_eq!(error.category(), ErrorCategory::Frontmatter);
+    let message = error.to_string();
+    assert!(
+        message.contains("invalid YAML frontmatter") && message.contains("quoted scalar"),
+        "error message should surface the unterminated quoted scalar: {message}"
+    );
+}

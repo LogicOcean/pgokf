@@ -68,6 +68,10 @@ pub fn validate_query(query: &str) -> Result<(), CatalogError> {
     }
 }
 
+// The text-search regconfig is bound as `$4` (text, cast to `regconfig` in SQL
+// so no identifier is interpolated) and drives both `websearch_to_tsquery` and
+// `ts_headline`, so query parsing uses the same configuration that built each
+// row's `body_tsv` at index time. `ts_rank_cd` takes no configuration.
 const SEARCH_QUERY: &str = "
     SELECT c.bundle_id,
            c.id,
@@ -76,12 +80,12 @@ const SEARCH_QUERY: &str = "
            c.type,
            pg_catalog.ts_rank_cd(c.body_tsv, q.query),
            pg_catalog.ts_headline(
-               'pg_catalog.english',
+               $4::pg_catalog.regconfig,
                pg_catalog.concat_ws(' ', c.title, c.description, c.body_text),
                q.query)
     FROM pgokf.concepts c
     JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled,
-         pg_catalog.websearch_to_tsquery('pg_catalog.english', $1) AS q(query)
+         pg_catalog.websearch_to_tsquery($4::pg_catalog.regconfig, $1) AS q(query)
     WHERE c.body_tsv @@ q.query
       AND ($2 IS NULL OR c.bundle_id = $2)
     ORDER BY pg_catalog.ts_rank_cd(c.body_tsv, q.query) DESC, c.id ASC
@@ -89,6 +93,24 @@ const SEARCH_QUERY: &str = "
 
 fn spi_error(context: &'static str) -> impl Fn(pgrx::spi::Error) -> CatalogError {
     move |error| CatalogError::internal(format!("{context}: {error}"), Path::new(""))
+}
+
+/// Resolve the effective `default_text_search_config` for query parsing.
+///
+/// `concept_search` runs with invoker rights, so it cannot read the
+/// administrator-only `pgokf_private.config` table directly. It instead reads
+/// the effective value through the reader-granted `SECURITY DEFINER`
+/// `pgokf.get_config` function, so query parsing uses the very configuration
+/// that indexed the rows.
+fn effective_text_search_config() -> Result<String, CatalogError> {
+    Spi::get_one::<String>("SELECT pgokf.get_config() ->> 'default_text_search_config'")
+        .map_err(spi_error("failed to read text search configuration"))?
+        .ok_or_else(|| {
+            CatalogError::internal(
+                "default_text_search_config is missing from configuration",
+                Path::new(""),
+            )
+        })
 }
 
 fn concept_search_impl(
@@ -99,13 +121,19 @@ fn concept_search_impl(
     security::authorize_current_user(security::Operation::Search, Path::new(""))?;
     validate_query(query)?;
     let limit = validate_limit_count(limit_count)?;
+    let text_search_config = effective_text_search_config()?;
 
     Spi::connect(|client| {
         let table = client
             .select(
                 SEARCH_QUERY,
                 None,
-                &[query.into(), bundle_id.into(), limit.into()],
+                &[
+                    query.into(),
+                    bundle_id.into(),
+                    limit.into(),
+                    text_search_config.as_str().into(),
+                ],
             )
             .map_err(spi_error("concept search query failed"))?;
         let mut hits = Vec::with_capacity(table.len());

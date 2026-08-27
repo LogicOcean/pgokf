@@ -36,7 +36,7 @@ the database. Complete comment coverage is a release gate (see
 | `pgokf.reset_config(text)` | `pgokf_admin` | Reset one/all configuration keys |
 | `pgokf.get_config()` | `pgokf_reader` | Effective configuration as jsonb |
 | `pgokf.export_parquet(bigint, text)` | `pgokf_admin` | Export a bundle projection to Parquet |
-| `pgokf.version()` | public | Loaded shared-library version |
+| `pgokf.version()` | `pgokf_reader` | Loaded shared-library version |
 
 The function **name, schema, argument types, argument order, and result shape**
 are all part of the contract. Default values that let callers omit trailing

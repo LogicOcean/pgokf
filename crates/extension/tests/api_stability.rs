@@ -19,6 +19,20 @@
 //! in one of those blocks. These tests read that source directly, so the
 //! contract encoded below IS the stable public surface: adding a public object
 //! without both listing it here and giving it a `COMMENT ON` fails the build.
+//!
+//! # Relationship to the in-database coverage test
+//!
+//! Because these checks are raw source-substring matches, they are blind to
+//! signature drift and to the real installed catalog: a `COMMENT ON` whose
+//! argument list no longer matches the generated function, or an object that
+//! only exists once pgrx assembles the SQL, would slip past them. The
+//! *authoritative* comment-coverage check therefore now also runs in-database,
+//! as the `every_catalog_object_carries_a_comment` `#[pg_test]` in
+//! `src/pg_tests.rs`: it queries `obj_description` for every `pgokf.*` /
+//! `pgokf_private.*` function, standalone composite type, and table in the live
+//! database and fails on any gap. These build-time contract tests remain the
+//! fast, backend-free first line of defense; the in-DB test verifies coverage
+//! against database truth.
 
 use std::fs;
 use std::path::{Path, PathBuf};

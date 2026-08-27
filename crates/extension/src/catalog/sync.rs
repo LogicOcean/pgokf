@@ -13,27 +13,34 @@
 //! 6. delete removed rows, upsert changed rows (recomputing the weighted
 //!    `body_tsv`), and replace `concept_metadata` for touched concepts;
 //! 7. run the ordered projection seam — [`crate::catalog::links::project`],
-//!    then [`crate::catalog::provenance::project`] — with the staged
-//!    concepts;
+//!    then a bundle-wide link re-resolution
+//!    ([`crate::catalog::links::reresolve_bundle`]) so inbound edges of
+//!    *unchanged* concepts reflect targets added or removed during this sync,
+//!    then [`crate::catalog::provenance::project`] — with the staged concepts;
 //! 8. update the bundle row (file count, `last_synced_at`, aggregate
 //!    `sync_hash`) last.
 //!
 //! Because `pgrx` functions execute inside the caller's transaction and every
 //! failure is raised as a `PostgreSQL` error, a failed sync rolls back
-//! atomically; strict per-file parse failures therefore never commit a
-//! partial projection.
+//! atomically. Under the default `default_strict` policy the first malformed
+//! file aborts the sync, so a partial projection is never committed; when
+//! `default_strict` is disabled a malformed file is instead logged as a
+//! warning and skipped, and the rest of the bundle registers.
 //!
 //! # Path containment
 //!
 //! Bundle roots are validated with [`crate::security::validate_path_syntax`]
 //! (absolute, no NUL, no `..`) and canonicalized before use, and
 //! [`okf_sync::discover`] rejects symlinks that escape the canonical root.
-//! Allowed-roots containment ([`crate::security::canonicalize_contained_path`])
-//! is intentionally not enforced yet: the configuration surface that stores
-//! `allowed_roots` lands with [`crate::catalog::config`], which will tighten
-//! registration to configured roots without touching this engine. Until
-//! then, any absolute, canonical, traversal-free path is accepted — and
-//! registration remains restricted to `pgokf_admin`.
+//! Allowed-roots containment is enforced at registration: [`register_bundle_impl`]
+//! calls [`crate::catalog::config::enforce_allowed_roots`], so when an
+//! administrator has configured `allowed_roots` a candidate path must resolve
+//! inside one of them (symlink-escape-safe containment via
+//! [`crate::security::canonicalize_contained_path`]); a path that escapes every
+//! configured root is rejected with SQLSTATE `22023`. When no roots are
+//! configured the interim policy applies — any absolute, canonical,
+//! traversal-free path is accepted — and in both cases registration remains
+//! restricted to `pgokf_admin`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -52,6 +59,23 @@ use crate::security;
 /// Namespace prefix mixed into every advisory-lock key so `pgokf` locks
 /// cannot collide with another subsystem hashing similar strings.
 const ADVISORY_LOCK_NAMESPACE: &str = "pgokf.bundle";
+
+/// Maximum number of leading characters of a concept body fed to `to_tsvector`
+/// when building `body_tsv`.
+///
+/// `PostgreSQL` caps a `tsvector`'s lexeme pool at `MAXSTRPOS` (`2^20 - 1` =
+/// `1_048_575` bytes) and raises SQLSTATE `54000` ("string is too long for
+/// tsvector") when a single document exceeds it — which can happen for a body
+/// with hundreds of thousands of distinct tokens even while it stays well within
+/// `pgokf.max_file_bytes`. Left unbounded, one such file would abort the whole
+/// sync and the bundle could never register. The lexeme pool can never exceed
+/// the byte length of the input text, and a UTF-8 character is at most four
+/// bytes, so bounding the input to this many characters keeps the worst case
+/// (`4 × 262_143 = 1_048_572` bytes) strictly under the limit. Normal concept
+/// documents are far smaller than this bound, so full-text quality is
+/// unaffected; only a pathologically large body has its *indexing* input
+/// truncated — `body_text` is still stored and returned in full.
+const BODY_TSV_CHAR_LIMIT: i32 = 262_143;
 
 /// Derive the stable, bundle-scoped `pg_advisory_xact_lock` key for a
 /// canonical bundle path.
@@ -158,8 +182,8 @@ fn spi_error(context: &str, error: &pgrx::spi::Error) -> CatalogError {
 /// Enforces [`security::validate_path_syntax`] (absolute path, no NUL bytes,
 /// no `..` components) and then canonicalizes, so the value stored on
 /// `pgokf.bundles.path` — and used for advisory-lock keying — is always the
-/// resolved filesystem path. See the module docs for why allowed-roots
-/// containment is deferred to the config wave.
+/// resolved filesystem path. Allowed-roots containment is enforced separately
+/// by [`crate::catalog::config::enforce_allowed_roots`]; see the module docs.
 fn resolve_bundle_root(path: &str) -> Result<PathBuf, CatalogError> {
     let requested = Path::new(path);
     security::validate_path_syntax(requested, Path::new(""))?;
@@ -225,10 +249,18 @@ fn load_stored_hashes(bundle_id: i64) -> Result<BTreeMap<String, String>, Catalo
     })
 }
 
-fn sync_config_from_gucs(root: &Path) -> SyncConfig {
+/// Build the discovery configuration from the per-session GUC ceilings and the
+/// durable `default_exclude` globs.
+///
+/// The resource ceilings come from the `pgokf.*` GUCs; the exclude patterns are
+/// the configured `default_exclude` list (combined with any per-call excludes,
+/// of which there are currently none in the SQL surface). Excludes always win
+/// over includes in [`okf_sync::discover`].
+fn sync_config_from_gucs(root: &Path, exclude: &[String]) -> SyncConfig {
     SyncConfig::new(root)
         .with_max_file_bytes(u64::try_from(guc::max_file_bytes()).unwrap_or(u64::MAX))
         .with_max_files(guc::max_bundle_files())
+        .with_exclude(exclude.iter().cloned())
 }
 
 fn parser_limits_from_gucs() -> ParserLimits {
@@ -238,11 +270,30 @@ fn parser_limits_from_gucs() -> ParserLimits {
     }
 }
 
+/// The concepts staged for the projection seam plus the files skipped over.
+///
+/// `skipped` is always empty under the strict policy (a malformed file aborts
+/// the sync instead); under the non-strict policy it collects the
+/// bundle-relative paths of files that failed to parse and were logged and
+/// passed over, so the caller can reconcile the sync report with what was
+/// actually indexed.
+struct StagingOutcome {
+    staged: Vec<StagedConcept>,
+    skipped: Vec<PathBuf>,
+}
+
 /// Read and parse every added/updated file into the seam payload.
 ///
-/// Strict policy: the first malformed file aborts the sync with SQLSTATE
-/// `22023` and the offending bundle-relative path, so a partial projection is
-/// never committed (the surrounding transaction rolls back).
+/// The `strict` flag threads the durable `default_strict` policy through the
+/// staging loop:
+///
+/// - `strict == true` (default): the first malformed file aborts the sync with
+///   SQLSTATE `22023` and the offending bundle-relative path, so a partial
+///   projection is never committed (the surrounding transaction rolls back);
+/// - `strict == false`: a malformed file is logged as a warning, recorded in
+///   [`StagingOutcome::skipped`], and passed over, so the rest of the bundle
+///   still registers. A file that cannot be *read* (an I/O failure, not a parse
+///   failure) remains a hard error in both modes.
 ///
 /// The staged concepts are fully materialized rather than streamed: the
 /// ordered projection seam ([`crate::catalog::links::project`] /
@@ -256,36 +307,70 @@ fn parser_limits_from_gucs() -> ParserLimits {
 fn stage_changed_concepts(
     root: &Path,
     delta: &BundleDelta,
-) -> Result<Vec<StagedConcept>, CatalogError> {
+    strict: bool,
+) -> Result<StagingOutcome, CatalogError> {
     let limits = parser_limits_from_gucs();
-    delta
-        .to_parse
-        .iter()
-        .map(|metadata| {
-            let absolute = root.join(&metadata.path);
-            let bytes = std::fs::read(&absolute).map_err(|error| {
-                CatalogError::internal(
-                    format!("failed to read bundle file: {error}"),
-                    &metadata.path,
-                )
-            })?;
-            let concept = parse_concept(&bytes, &metadata.path, limits).map_err(|error| {
-                CatalogError::invalid_parameter(
+    let mut staged = Vec::with_capacity(delta.to_parse.len());
+    let mut skipped = Vec::new();
+    for metadata in &delta.to_parse {
+        let absolute = root.join(&metadata.path);
+        let bytes = std::fs::read(&absolute).map_err(|error| {
+            CatalogError::internal(
+                format!("failed to read bundle file: {error}"),
+                &metadata.path,
+            )
+        })?;
+        let concept = match parse_concept(&bytes, &metadata.path, limits) {
+            Ok(concept) => concept,
+            Err(error) if strict => {
+                return Err(CatalogError::invalid_parameter(
                     format!("failed to parse OKF concept: {error}"),
                     &metadata.path,
-                )
-            })?;
-            let modified_at_epoch = metadata
-                .modified_at
-                .and_then(|instant| instant.duration_since(UNIX_EPOCH).ok())
-                .map(|duration| duration.as_secs_f64());
-            Ok(StagedConcept {
-                concept,
-                file_hash: metadata.hash.clone(),
-                modified_at_epoch,
-            })
-        })
-        .collect()
+                ));
+            }
+            Err(error) => {
+                pgrx::warning!(
+                    "pgokf: skipping malformed OKF concept {} (default_strict is off): {error}",
+                    metadata.path.display()
+                );
+                skipped.push(metadata.path.clone());
+                continue;
+            }
+        };
+        let modified_at_epoch = metadata
+            .modified_at
+            .and_then(|instant| instant.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs_f64());
+        staged.push(StagedConcept {
+            concept,
+            file_hash: metadata.hash.clone(),
+            modified_at_epoch,
+        });
+    }
+    Ok(StagingOutcome { staged, skipped })
+}
+
+/// Reconcile the sync report with the files skipped under the non-strict
+/// policy.
+///
+/// Each skipped path was classified as `added` or `updated` (it was staged for
+/// parsing) but was never written, so the corresponding bucket is decremented
+/// to keep the returned report an honest account of what was actually indexed.
+/// A path present in the stored projection was an `updated`; one absent was an
+/// `added`.
+fn adjust_report_for_skips(
+    delta: &mut BundleDelta,
+    stored: &BTreeMap<String, String>,
+    skipped: &[PathBuf],
+) {
+    for path in skipped {
+        let key = path.to_string_lossy();
+        if stored.contains_key(key.as_ref()) {
+            delta.report.updated = delta.report.updated.saturating_sub(1);
+        } else {
+            delta.report.added = delta.report.added.saturating_sub(1);
+        }
+    }
 }
 
 fn delete_removed_concepts(bundle_id: i64, removed_paths: &[String]) -> Result<(), CatalogError> {
@@ -314,14 +399,24 @@ fn delete_removed_concepts(bundle_id: i64, removed_paths: &[String]) -> Result<(
 /// a chunk — guaranteed because concept IDs are derived from the bundle-unique
 /// source path (`concepts_bundle_path_key`), so `ON CONFLICT DO UPDATE` never
 /// sees a row twice in one statement.
-fn upsert_concepts(bundle_id: i64, staged: &[StagedConcept]) -> Result<(), CatalogError> {
+fn upsert_concepts(
+    bundle_id: i64,
+    staged: &[StagedConcept],
+    text_search_config: &str,
+) -> Result<(), CatalogError> {
     // Tags are the one ragged (per-row `text[]`) column, so they cannot be bound
     // as a single rectangular array. Instead the chunk's tags are flattened into
     // `$7` and each row carries an inclusive 1-based slice window
     // (`$12` lo, `$13` hi) into it; `($7)[lo:hi]` rebuilds the row's array (empty
     // when hi < lo). The inner subquery materializes that slice once so the
     // stored column and the weighted `body_tsv` share it.
-    const UPSERT: &str = "
+    //
+    // `$14` is the configured text-search regconfig (bound as text and cast in
+    // SQL so no identifier is interpolated), and the body input is bounded with
+    // `left(..., BODY_TSV_CHAR_LIMIT)` so a single oversized body cannot make
+    // `to_tsvector` exceed the `tsvector` lexeme-pool limit and abort the sync.
+    let upsert = format!(
+        "
         INSERT INTO pgokf.concepts
             (bundle_id, id, path, type, title, description, tags, resource,
              body_text, file_hash, modified_at, body_tsv)
@@ -329,16 +424,19 @@ fn upsert_concepts(bundle_id: i64, staged: &[StagedConcept]) -> Result<(), Catal
             $1, t.id, t.path, t.type, t.title, t.description, t.tags, t.resource,
             t.body_text, t.file_hash, pg_catalog.to_timestamp(t.modified_at),
             pg_catalog.setweight(
-                pg_catalog.to_tsvector('pg_catalog.english', t.title), 'A')
+                pg_catalog.to_tsvector($14::pg_catalog.regconfig, t.title), 'A')
             || pg_catalog.setweight(
                    pg_catalog.to_tsvector(
-                       'pg_catalog.english',
+                       $14::pg_catalog.regconfig,
                        pg_catalog.concat_ws(' ',
                            pg_catalog.array_to_string(t.tags, ' '),
                            t.type, t.description)),
                    'B')
             || pg_catalog.setweight(
-                   pg_catalog.to_tsvector('pg_catalog.english', t.body_text), 'D')
+                   pg_catalog.to_tsvector(
+                       $14::pg_catalog.regconfig,
+                       pg_catalog.left(t.body_text, {BODY_TSV_CHAR_LIMIT})),
+                   'D')
         FROM (
             SELECT
                 d.id, d.path, d.type, d.title, d.description, d.resource,
@@ -362,12 +460,13 @@ fn upsert_concepts(bundle_id: i64, staged: &[StagedConcept]) -> Result<(), Catal
             file_hash = excluded.file_hash,
             modified_at = excluded.modified_at,
             body_tsv = excluded.body_tsv,
-            indexed_at = pg_catalog.now()";
+            indexed_at = pg_catalog.now()"
+    );
 
     for chunk in staged.chunks(BATCH_SIZE) {
         let columns = batch::marshal_concepts(chunk);
         Spi::run_with_args(
-            UPSERT,
+            &upsert,
             &[
                 bundle_id.into(),
                 columns.ids.into(),
@@ -382,6 +481,7 @@ fn upsert_concepts(bundle_id: i64, staged: &[StagedConcept]) -> Result<(), Catal
                 columns.modified_ats.into(),
                 columns.tag_los.into(),
                 columns.tag_his.into(),
+                text_search_config.into(),
             ],
         )
         .map_err(|error| spi_error("failed to upsert concepts", &error))?;
@@ -455,22 +555,32 @@ fn update_bundle_row(bundle_id: i64, sync_hash: &str) -> Result<(), CatalogError
 /// Callers must already hold the bundle advisory lock and have authorized
 /// the operation.
 fn run_bundle_sync(bundle_id: i64, canonical_root: &Path) -> Result<SyncReport, CatalogError> {
+    let defaults = crate::catalog::config::sync_defaults()?;
     let stored = load_stored_hashes(bundle_id)?;
-    let config = sync_config_from_gucs(canonical_root);
+    let config = sync_config_from_gucs(canonical_root, &defaults.exclude);
     let current = discover(&config).map_err(|error| {
         CatalogError::invalid_parameter(format!("bundle scan failed: {error}"), Path::new(""))
     })?;
-    let delta = classify_changes(&stored, &current);
-    let staged = stage_changed_concepts(canonical_root, &delta)?;
+    let mut delta = classify_changes(&stored, &current);
+    let outcome = stage_changed_concepts(canonical_root, &delta, defaults.strict)?;
+    // Keep the report honest: files skipped under the non-strict policy were
+    // classified but never written.
+    adjust_report_for_skips(&mut delta, &stored, &outcome.skipped);
+    let staged = outcome.staged;
 
     delete_removed_concepts(bundle_id, &delta.removed_paths)?;
-    upsert_concepts(bundle_id, &staged)?;
+    upsert_concepts(bundle_id, &staged, &defaults.text_search_config)?;
     replace_concept_metadata(bundle_id, &staged)?;
 
     // Ordered projection seam: feature modules observe the staged concepts
-    // here. Each is a documented no-op until its wave lands; removals need no
-    // seam because feature tables cascade from pgokf.concepts.
+    // here. Removals need no per-source seam because feature tables cascade
+    // from pgokf.concepts, but the link graph still needs a bundle-wide
+    // re-resolution: only staged (added/updated) sources are re-projected, so
+    // the inbound edges of *unchanged* concepts must be re-evaluated against
+    // the finalized concept set (post upsert + delete) to flip stale
+    // resolutions as targets appear or disappear.
     crate::catalog::links::project(bundle_id, &staged)?;
+    crate::catalog::links::reresolve_bundle(bundle_id)?;
     crate::catalog::provenance::project(bundle_id, &staged)?;
 
     update_bundle_row(bundle_id, &bundle_sync_hash(&current))?;
@@ -784,6 +894,88 @@ mod tests {
         // Assert
         assert_eq!(first, repeat);
         assert_ne!(first, after);
+    }
+
+    #[test]
+    fn body_tsv_char_limit_keeps_worst_case_under_the_tsvector_bound() {
+        // Arrange: Postgres caps a tsvector's lexeme pool at MAXSTRPOS bytes
+        // and a UTF-8 character encodes to at most four bytes.
+        const MAX_TSVECTOR_STRPOS_BYTES: i64 = (1 << 20) - 1; // 1_048_575
+        const MAX_UTF8_BYTES_PER_CHAR: i64 = 4;
+
+        // Act: the worst-case byte length of the truncated body input.
+        let worst_case_bytes = i64::from(BODY_TSV_CHAR_LIMIT) * MAX_UTF8_BYTES_PER_CHAR;
+
+        // Assert: it stays strictly under the limit that raises SQLSTATE 54000.
+        assert!(worst_case_bytes <= MAX_TSVECTOR_STRPOS_BYTES);
+    }
+
+    #[test]
+    fn adjust_report_for_skips_decrements_added_for_a_new_file() {
+        // Arrange: a skipped file with no stored hash was classified as added.
+        let mut delta = BundleDelta {
+            report: SyncReport {
+                added: 3,
+                updated: 1,
+                removed: 0,
+                unchanged: 0,
+            },
+            ..Default::default()
+        };
+        let stored = BTreeMap::new();
+        let skipped = vec![PathBuf::from("brand-new.md")];
+
+        // Act
+        adjust_report_for_skips(&mut delta, &stored, &skipped);
+
+        // Assert
+        assert_eq!(delta.report.added, 2);
+        assert_eq!(delta.report.updated, 1);
+    }
+
+    #[test]
+    fn adjust_report_for_skips_decrements_updated_for_a_known_file() {
+        // Arrange: a skipped file with a stored hash was classified as updated.
+        let mut delta = BundleDelta {
+            report: SyncReport {
+                added: 2,
+                updated: 2,
+                removed: 0,
+                unchanged: 0,
+            },
+            ..Default::default()
+        };
+        let stored = BTreeMap::from([("known.md".to_owned(), hash_bytes(b"old"))]);
+        let skipped = vec![PathBuf::from("known.md")];
+
+        // Act
+        adjust_report_for_skips(&mut delta, &stored, &skipped);
+
+        // Assert
+        assert_eq!(delta.report.updated, 1);
+        assert_eq!(delta.report.added, 2);
+    }
+
+    #[test]
+    fn adjust_report_for_skips_saturates_at_zero() {
+        // Arrange: more skips than counted (defensive; never happens in sync).
+        let mut delta = BundleDelta {
+            report: SyncReport {
+                added: 0,
+                updated: 0,
+                removed: 0,
+                unchanged: 0,
+            },
+            ..Default::default()
+        };
+        let stored = BTreeMap::new();
+        let skipped = vec![PathBuf::from("a.md"), PathBuf::from("b.md")];
+
+        // Act
+        adjust_report_for_skips(&mut delta, &stored, &skipped);
+
+        // Assert
+        assert_eq!(delta.report.added, 0);
     }
 
     #[test]

@@ -39,7 +39,7 @@ Source0:        %{sname}-%{version}.tar.gz
 
 BuildRequires:  postgresql%{pgmajorversion}-devel
 BuildRequires:  cargo
-BuildRequires:  rust >= 1.88
+BuildRequires:  rust >= 1.96
 BuildRequires:  clang
 BuildRequires:  gcc
 BuildRequires:  pkgconfig

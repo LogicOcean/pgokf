@@ -15,7 +15,7 @@ Markdown remains the portable source of truth, while PostgreSQL is a transaction
 projection optimized for discovery.
 
 The target matrix is **PostgreSQL 15, 16, 17, 18, and 19**. The extension is built
-in Rust (**edition 2024**, workspace `rust-version` 1.88) with
+in Rust (**edition 2024**, workspace `rust-version` 1.96) with
 [**pgrx 0.19**](https://github.com/pgcentralfoundation/pgrx); the workspace forbids
 `unsafe_code` and treats Clippy `all` + `pedantic` as warnings that CI escalates to
 errors.

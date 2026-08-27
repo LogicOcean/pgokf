@@ -101,13 +101,13 @@ pub fn is_reserved_path(normalized_path: &str) -> bool {
 /// link. Destinations starting with `/` resolve from the bundle root; all
 /// others resolve from the source document's directory. Fragments (`#...`)
 /// are stripped and never change the target; a fragment-only destination
-/// resolves to the source document itself. The `.md` suffix is preserved and
-/// appended when the destination has no extension.
+/// (`#section`) resolves to the source document itself. The `.md` suffix is
+/// preserved and appended when the destination has no extension.
 ///
-/// Returns `None` when the destination cannot name a concept: it escapes
-/// above the bundle root, resolves to nothing, or has a non-Markdown
-/// extension. Existence checks against actual bundle contents belong to the
-/// sync layer, not the parser.
+/// Returns `None` when the destination cannot name a concept: it is genuinely
+/// empty (`[label]()`), escapes above the bundle root, resolves to nothing, or
+/// has a non-Markdown extension. Existence checks against actual bundle
+/// contents belong to the sync layer, not the parser.
 ///
 /// Unlike [`normalize_path`], the `\` → `/` fold here applies on every
 /// platform: link destinations are document *content* and must resolve
@@ -117,11 +117,13 @@ pub fn is_reserved_path(normalized_path: &str) -> bool {
 /// links use `/` separators.
 #[must_use]
 pub fn resolve_link_target(target: &str, source_path: &str) -> Option<String> {
-    let without_fragment = target.replace('\\', "/");
-    let without_fragment = without_fragment.split('#').next().unwrap_or_default();
+    let folded = target.replace('\\', "/");
+    let without_fragment = folded.split('#').next().unwrap_or_default();
     if without_fragment.is_empty() {
-        // Fragment-only (or empty) destinations point at the source document.
-        return Some(source_path.to_owned());
+        // A fragment-only destination (`#section`) points at the source
+        // document itself; a genuinely empty destination (`[label]()`) names
+        // no concept and must not fabricate a self-referential edge.
+        return folded.starts_with('#').then(|| source_path.to_owned());
     }
 
     let (mut parts, remainder) = match without_fragment.strip_prefix('/') {
@@ -215,6 +217,29 @@ mod tests {
         assert_eq!(
             resolve_link_target("#top", "notes/a.md").as_deref(),
             Some("notes/a.md")
+        );
+    }
+
+    #[test]
+    fn resolve_link_target_empty_destination_yields_no_edge() {
+        // `[label]()` has a genuinely empty destination and must not become a
+        // spurious self-referential edge.
+        assert_eq!(resolve_link_target("", "notes/a.md"), None);
+    }
+
+    #[test]
+    fn resolve_link_target_fragment_only_resolves_to_self() {
+        assert_eq!(
+            resolve_link_target("#frag", "notes/a.md").as_deref(),
+            Some("notes/a.md")
+        );
+    }
+
+    #[test]
+    fn resolve_link_target_sibling_document_resolves_relative_to_source() {
+        assert_eq!(
+            resolve_link_target("other.md", "notes/a.md").as_deref(),
+            Some("notes/other.md")
         );
     }
 

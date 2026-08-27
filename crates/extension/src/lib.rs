@@ -14,6 +14,12 @@ pub mod errors;
 pub mod guc;
 pub mod security;
 
+// Gated on the `pg_test` feature alone (not `test`) so a plain
+// `cargo test -p pgokf` stays green: `#[pg_test]`s require a managed cluster
+// and only run under `cargo pgrx test`, which enables this feature.
+#[cfg(feature = "pg_test")]
+mod pg_tests;
+
 use pgrx::{pg_guard, pg_schema};
 
 pgrx::pg_module_magic!();
@@ -46,5 +52,26 @@ mod pgokf {
     #[pg_extern(immutable, parallel_safe)]
     fn version() -> &'static str {
         env!("CARGO_PKG_VERSION")
+    }
+}
+
+/// Control module required by the pgrx test framework.
+///
+/// `cargo pgrx test` compiles the crate with the `pg_test` feature, starts a
+/// throwaway `PostgreSQL` instance, installs the extension, and then calls
+/// `pgrx_tests::run_test` for every `#[pg_test]` in [`pg_tests`]. Each test
+/// consults these two hooks: [`setup`] runs once before the suite (nothing to
+/// prepare here — every `#[pg_test]` builds its own fixtures), and
+/// [`postgresql_conf_options`] contributes extra `postgresql.conf` lines (none
+/// are needed; the defaults exercise the stable SQL surface).
+#[cfg(test)]
+pub mod pg_test {
+    /// Per-suite setup hook; the suite needs no global preparation.
+    pub fn setup(_options: Vec<&str>) {}
+
+    /// Extra `postgresql.conf` options for the test instance; none required.
+    #[must_use]
+    pub fn postgresql_conf_options() -> Vec<&'static str> {
+        Vec::new()
     }
 }

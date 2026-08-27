@@ -38,6 +38,15 @@ pub struct Frontmatter {
 /// `path` is the normalized bundle-relative path of the file being parsed; it
 /// is attached to every error for per-file diagnostics.
 ///
+/// The block is delimited by the first line whose entire content is `---`.
+/// This line-based split intentionally avoids a YAML re-implementation, so a
+/// bare `---` on its own line is always treated as the closing delimiter —
+/// even when it appears inside a multiline quoted scalar. In that (rare) case
+/// the YAML block is cut short and `serde_yaml` reports an unterminated
+/// scalar, surfaced here as [`Error::InvalidFrontmatter`] whose message points
+/// at the offending line and column. Author such values on a single line or
+/// with a block scalar (`|`/`>`) to avoid the ambiguity.
+///
 /// # Errors
 /// Returns an error for a missing delimiter, an oversized or unterminated
 /// block, invalid YAML, or metadata that cannot be represented as JSON.

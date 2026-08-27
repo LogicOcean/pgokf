@@ -34,7 +34,7 @@ queries, native full-text search, and link-graph traversal.
   ranked hits with `ts_headline` snippets over a weighted `tsvector` (title A,
   tags/type/description B, body D). Native PostgreSQL FTS only — no third-party
   search extension is required.
-- **Link-graph traversal.** `pgokf.concept_neighbors(concept_path, max_hops,
+- **Link-graph traversal.** `pgokf.concept_neighbors(concept_id, max_hops,
   bundle_id)` walks the resolved link graph outward from a concept.
 - **Administration.** `pgokf.list_bundles()` and `pgokf.bundle_info(bundle_id)`
   expose the registered-bundle inventory as the `pgokf.bundle_info` type.
@@ -43,8 +43,10 @@ queries, native full-text search, and link-graph traversal.
   (`allowed_roots`, `default_text_search_config`, `default_strict`,
   `sync_log_retention_days`, `default_exclude`) stored in the
   administrator-only `pgokf_private.config` table.
-- **Parquet export.** `pgokf.export_parquet(bundle_id, path)` writes a bundle's
-  concept projection to a Parquet file for downstream analytics.
+- **Parquet export.** `pgokf.export_parquet(bundle_id, dest_dir)` writes a
+  bundle's catalog projection to four Parquet files — `concepts.parquet`,
+  `concept_metadata.parquet`, `links.parquet`, and `concept_provenance.parquet`
+  — inside `dest_dir` for downstream analytics.
 - **Version introspection.** `pgokf.version()` reports the loaded shared
   library's version for post-upgrade agreement checks.
 - **Composite result types.** `pgokf.bundle_sync_result`,

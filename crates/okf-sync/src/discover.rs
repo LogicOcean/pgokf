@@ -66,12 +66,15 @@ impl Snapshot {
 
 /// Discover Markdown files under `config.root` and calculate their BLAKE3 hashes.
 ///
-/// Symbolic links are never followed while walking. A symlink entry whose resolved
-/// target stays inside the bundle root is skipped, because its target is (or would
-/// be, if it matched the globs) discovered at its canonical path; a symlink whose
-/// target resolves outside the root is rejected so a bundle can never pull content
-/// from elsewhere on the filesystem. Symlinks matching an exclude pattern are
-/// outside the sync contract and are skipped without being resolved.
+/// Symbolic links are never followed while walking. Containment is enforced only on
+/// links that are themselves candidate documents — a Markdown name selected by the
+/// include globs and not excluded — because only those could contribute content. A
+/// candidate link whose target stays inside the bundle root is skipped, since that
+/// target is discovered at its own canonical path; a candidate link whose target
+/// resolves outside the root is rejected so a bundle can never pull content from
+/// elsewhere on the filesystem. Any other link — the wrong extension, unmatched by
+/// the globs, excluded, or dangling — is ignored without being resolved, so a stray
+/// or broken link anywhere in the tree can never abort discovery.
 ///
 /// When [`SyncConfig::max_file_bytes`] is set, each candidate's size is checked via
 /// filesystem metadata before its contents are read. When [`SyncConfig::max_files`]
@@ -80,8 +83,8 @@ impl Snapshot {
 /// # Errors
 ///
 /// Returns [`SyncError`] if a glob pattern is invalid, the walk fails, a file cannot
-/// be inspected or read, a symlink escapes the root, or a configured resource limit
-/// is exceeded.
+/// be inspected or read, a candidate symlink escapes the root, or a configured
+/// resource limit is exceeded.
 pub fn discover(config: &SyncConfig) -> Result<Snapshot, SyncError> {
     let includes = build_glob_set(&config.include, "include")?;
     let excludes = build_glob_set(&config.exclude, "exclude")?;
@@ -102,23 +105,31 @@ pub fn discover(config: &SyncConfig) -> Result<Snapshot, SyncError> {
         let path = normalized_relative_path(relative);
 
         if entry.path_is_symlink() {
-            if !excludes.is_match(&path) {
-                ensure_symlink_containment(absolute, &config.root)?;
+            // Containment is a contract on candidate documents only. A link that is
+            // not selectable as an OKF document — the wrong extension, unmatched by
+            // the include globs, or excluded — is ignored without being resolved, so
+            // a stray link elsewhere in the tree can never abort discovery.
+            if is_candidate(&path, config, &includes, &excludes) {
+                match ensure_symlink_containment(absolute, &config.root) {
+                    Ok(()) => {}
+                    Err(SyncError::Metadata { source, .. })
+                        if source.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        // The link dangles: its target resolves to nothing, so there
+                        // is no in-bundle content to index and nothing to escape.
+                    }
+                    Err(other) => return Err(other),
+                }
             }
-            // An in-root link contributes nothing new: its target is discovered
-            // at the target's own canonical path.
+            // A resolvable in-root link contributes nothing new: its target is
+            // discovered at the target's own canonical path.
             continue;
         }
         if !entry.file_type().is_file() {
             continue;
         }
 
-        // Guarding on the extension makes the Markdown-only contract independent of
-        // whether a caller supplies a broad include such as `docs/**`.
-        if path.extension().and_then(|extension| extension.to_str()) != Some("md")
-            || (!config.include.is_empty() && !includes.is_match(&path))
-            || excludes.is_match(&path)
-        {
+        if !is_candidate(&path, config, &includes, &excludes) {
             continue;
         }
 
@@ -174,11 +185,26 @@ fn build_glob_set(patterns: &[String], kind: &'static str) -> Result<GlobSet, Sy
     })
 }
 
-/// Reject a symlink whose fully resolved target lies outside the bundle root.
+/// Whether a bundle-relative path is a candidate OKF document: a Markdown file
+/// selected by the include globs and not excluded.
 ///
-/// The check applies to file and directory links alike: an escaping directory link
-/// would otherwise silently hide content, and an escaping file link would let
-/// [`hash_file`] read content from outside the bundle.
+/// Membership depends only on the path, so it can be decided for a symlink without
+/// resolving its target. Guarding on the extension makes the Markdown-only contract
+/// independent of whether a caller supplies a broad include such as `docs/**`.
+fn is_candidate(path: &Path, config: &SyncConfig, includes: &GlobSet, excludes: &GlobSet) -> bool {
+    path.extension().and_then(|extension| extension.to_str()) == Some("md")
+        && (config.include.is_empty() || includes.is_match(path))
+        && !excludes.is_match(path)
+}
+
+/// Reject a candidate symlink whose fully resolved target lies outside the bundle
+/// root.
+///
+/// Only candidate Markdown links reach this check: an escaping file link would
+/// otherwise let [`hash_file`] read content from outside the bundle. A target that
+/// cannot be resolved surfaces as a [`SyncError::Metadata`] error carrying the
+/// underlying I/O error, which the caller inspects to distinguish a dangling link
+/// (ignored) from a genuine escape.
 fn ensure_symlink_containment(link: &Path, root: &Path) -> Result<(), SyncError> {
     let canonical_root = canonicalize(root)?;
     let target = canonicalize(link)?;

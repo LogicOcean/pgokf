@@ -51,6 +51,11 @@ pub fn parse_concept(
         path: path.clone(),
         source,
     })?;
+    // A single leading UTF-8 BOM (U+FEFF) is a legal encoding artifact many
+    // editors prepend; strip it so it cannot mask the `---` frontmatter
+    // delimiter. Only the very first BOM is removed — any later U+FEFF is
+    // genuine content and left untouched.
+    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
     let (frontmatter, body) = frontmatter::parse(source, &path, limits.max_frontmatter_bytes)?;
     let links = links::extract(body, &path);
     let body_text = markdown::plain_text(body);
