@@ -54,10 +54,12 @@ The set of columns, their names, and their types are stable. New columns are
 `SELECT *` and positional row expansion would break; a new field ships as a new
 type or a new function instead.
 
-### Tables (5 public + 1 documented-internal)
+### Tables (8 public + 1 documented-internal)
 
 Public, `SELECT`-able by `pgokf_reader`: `pgokf.bundles`, `pgokf.concepts`,
-`pgokf.concept_metadata`, `pgokf.links`, `pgokf.concept_provenance`.
+`pgokf.concept_metadata`, `pgokf.links`, `pgokf.concept_provenance`,
+`pgokf.concept_verification`, `pgokf.concept_provenance_source`,
+`pgokf.concept_source`.
 
 These are a **read projection**. Callers may `SELECT` from them and depend on
 existing column names and types; the columns listed in

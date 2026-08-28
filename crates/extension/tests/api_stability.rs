@@ -66,7 +66,7 @@ const PUBLIC_TYPES: &[&str] = &[
     "export_result",
 ];
 
-/// The 7 catalog tables, as fully-qualified `schema.table` identifiers. Six
+/// The 9 catalog tables, as fully-qualified `schema.table` identifiers. Eight
 /// are public (`pgokf`); the singleton policy row lives in the
 /// administrator-only `pgokf_private` schema and is documented all the same.
 const CATALOG_TABLES: &[&str] = &[
@@ -75,6 +75,8 @@ const CATALOG_TABLES: &[&str] = &[
     "pgokf.concept_metadata",
     "pgokf.links",
     "pgokf.concept_provenance",
+    "pgokf.concept_verification",
+    "pgokf.concept_provenance_source",
     "pgokf.concept_source",
     "pgokf_private.config",
 ];

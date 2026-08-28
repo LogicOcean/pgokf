@@ -369,8 +369,10 @@ static LINKS_SPEC: TableSpec = TableSpec {
     key_indices: &[1, 8],
 };
 
-/// `pgokf.concept_provenance` projection, keyed by `concept_id` within the
-/// bundle; `details` is exported as its canonical JSON text.
+/// `pgokf.concept_provenance` scalar projection, keyed by `concept_id` within
+/// the bundle; `details` is exported as its canonical JSON text. The `verified[]`
+/// event list and `sources[]` materials live in their own child tables and are
+/// not part of this scalar export.
 static PROVENANCE_SPEC: TableSpec = TableSpec {
     file_name: "concept_provenance.parquet",
     table: "pgokf.concept_provenance",
@@ -394,22 +396,40 @@ static PROVENANCE_SPEC: TableSpec = TableSpec {
             select_expr: "generated_by",
         },
         ColumnSpec {
-            name: "verified",
-            pg_type: PgType::Boolean,
+            name: "generated_at",
+            pg_type: PgType::TimestamptzMicros,
             nullable: true,
-            select_expr: "verified",
+            select_expr: "generated_at",
         },
         ColumnSpec {
-            name: "verification_method",
+            name: "status",
             pg_type: PgType::Text,
             nullable: true,
-            select_expr: "verification_method",
+            select_expr: "status",
         },
         ColumnSpec {
-            name: "freshness",
+            name: "stale_after",
+            pg_type: PgType::TimestamptzMicros,
+            nullable: true,
+            select_expr: "stale_after",
+        },
+        ColumnSpec {
+            name: "usage_window_from",
+            pg_type: PgType::TimestamptzMicros,
+            nullable: true,
+            select_expr: "usage_window_from",
+        },
+        ColumnSpec {
+            name: "usage_window_to",
+            pg_type: PgType::TimestamptzMicros,
+            nullable: true,
+            select_expr: "usage_window_to",
+        },
+        ColumnSpec {
+            name: "trust_tier",
             pg_type: PgType::Text,
             nullable: true,
-            select_expr: "freshness",
+            select_expr: "trust_tier",
         },
         ColumnSpec {
             name: "details",

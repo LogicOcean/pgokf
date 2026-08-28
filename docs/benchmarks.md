@@ -46,8 +46,8 @@ exported file. See "Parquet read leg" below.
 - three resolvable internal links per concept (root-relative, guaranteed to
   point at concepts that exist), plus one external link, plus an occasional
   deliberately unresolved internal link;
-- provenance/trust/lifecycle frontmatter (`generated`, `verified`,
-  `verification_method`, `status`, `sources`) on 30% of files.
+- OKF v0.2 provenance/trust/lifecycle frontmatter (`generated`, `verified`,
+  `status`, `stale_after`, `sources`) on 30% of files.
 
 The generator writes a `manifest.json` carrying the exact expected row counts
 for the type and tag filters, a traversal seed concept, and the FTS query, so

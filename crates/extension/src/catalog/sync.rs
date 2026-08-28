@@ -559,16 +559,40 @@ fn replace_concept_metadata(bundle_id: i64, staged: &[StagedConcept]) -> Result<
     Ok(())
 }
 
-fn update_bundle_row(bundle_id: i64, sync_hash: &str) -> Result<(), CatalogError> {
+/// Read the OKF format version declared in the bundle-root `index.md`.
+///
+/// The bundle-root `index.md` is a reserved OKF file (never a concept); its
+/// frontmatter may carry an optional `okf_version`. This read is fully
+/// defensive — an absent, oversized, unreadable, or malformed `index.md`, or an
+/// absent/invalid `okf_version`, yields `None`, so it can never abort a sync.
+/// Only the bundle-root `index.md` is consulted; nested `index.md` files carry
+/// per-directory bookkeeping and never set the bundle version.
+fn read_root_okf_version(root: &Path) -> Option<String> {
+    let index_path = root.join("index.md");
+    let metadata = std::fs::metadata(&index_path).ok()?;
+    let max_file_bytes = u64::try_from(guc::max_file_bytes()).unwrap_or(u64::MAX);
+    if !metadata.is_file() || metadata.len() > max_file_bytes {
+        return None;
+    }
+    let bytes = std::fs::read(&index_path).ok()?;
+    okf_parser::index_okf_version(&bytes, guc::max_frontmatter_bytes())
+}
+
+fn update_bundle_row(
+    bundle_id: i64,
+    sync_hash: &str,
+    okf_version: Option<&str>,
+) -> Result<(), CatalogError> {
     Spi::run_with_args(
         "UPDATE pgokf.bundles b
          SET file_count = (SELECT count(*)::integer
                            FROM pgokf.concepts c
                            WHERE c.bundle_id = b.id),
              last_synced_at = pg_catalog.now(),
-             sync_hash = $2
+             sync_hash = $2,
+             okf_version = $3
          WHERE b.id = $1",
-        &[bundle_id.into(), sync_hash.into()],
+        &[bundle_id.into(), sync_hash.into(), okf_version.into()],
     )
     .map_err(|error| spi_error("failed to update bundle sync state", &error))
 }
@@ -618,7 +642,12 @@ fn run_bundle_sync(bundle_id: i64, canonical_root: &Path) -> Result<SyncReport, 
     // depends on the concept rows existing, which the upsert above guarantees.
     crate::catalog::source::project(bundle_id, &staged)?;
 
-    update_bundle_row(bundle_id, &bundle_sync_hash(&current))?;
+    let okf_version = read_root_okf_version(canonical_root);
+    update_bundle_row(
+        bundle_id,
+        &bundle_sync_hash(&current),
+        okf_version.as_deref(),
+    )?;
     Ok(delta.report)
 }
 

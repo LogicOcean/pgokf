@@ -451,7 +451,7 @@ Returned by `list_bundles`, `bundle_info`, and `unregister_bundle`.
 | `id` | `bigint` | Bundle identity. |
 | `path` | `text` | Canonical bundle path. |
 | `name` | `text` | Optional label (may be `NULL`). |
-| `okf_version` | `text` | Bundle OKF version; currently always `NULL` (not yet populated by the engine). |
+| `okf_version` | `text` | Bundle OKF version, from the reserved root `index.md` `okf_version` frontmatter (may be `NULL` when unset). |
 | `file_count` | `integer` | Concept count. |
 | `last_synced_at` | `timestamptz` | Last successful sync (may be `NULL`). |
 | `enabled` | `boolean` | Whether the bundle is searched. |
@@ -501,7 +501,7 @@ One registered OKF bundle root.
 | `id` | `bigint` | Primary key, `GENERATED ALWAYS AS IDENTITY`. |
 | `path` | `text` | `NOT NULL`, `UNIQUE` — the canonical path. |
 | `name` | `text` | Optional label. |
-| `okf_version` | `text` | Currently always `NULL`. |
+| `okf_version` | `text` | The bundle's declared OKF version, read from the reserved bundle-root `index.md` `okf_version` frontmatter (e.g. `0.2`). `NULL` when the bundle has no root `index.md` or it declares no `okf_version`. |
 | `file_count` | `integer` | `NOT NULL DEFAULT 0`. |
 | `last_synced_at` | `timestamptz` | Last successful sync. |
 | `sync_hash` | `text` | Aggregate BLAKE3 digest over sorted `(path, file_hash)` pairs of the last sync. |
@@ -570,26 +570,82 @@ retained (OKF permits broken links).
 
 ### `pgokf.concept_provenance`
 
-Sparse projection of OKF v0.2 provenance/trust/lifecycle frontmatter. Only
-concepts that carry such frontmatter get a row.
+Sparse scalar projection of OKF v0.2 provenance / trust / lifecycle frontmatter.
+Only concepts that carry such frontmatter get a row. The `verified[]` events and
+the `sources[]` materials live in the two child tables below.
 
 | Column | Type | Notes |
 | ------ | ---- | ----- |
 | `bundle_id` | `bigint` | `NOT NULL`, part of FK to `pgokf.concepts`. |
 | `concept_id` | `text` | `NOT NULL`, part of FK to `pgokf.concepts`. |
-| `generated_by` | `text` | From `generated_by`, bare `generated`, or `generated.by`. |
-| `verified` | `boolean` | Truthy `verified` flag, or a non-empty set of verification records. |
-| `verification_method` | `text` | From `verification_method`, bare `verification`, or `verification.method`. |
-| `freshness` | `text` | From `freshness`, falling back to the lifecycle `status`. |
-| `details` | `jsonb` | `NOT NULL DEFAULT '{}'` — lossless copy of every recognized provenance key (`sources`, `generated`, `verified`, `usage_window`, `stale_after`, `parameters`, …). |
+| `generated_by` | `text` | OKF `generated.by` (tolerates a bare `generated_by`) — the actor that produced the current content. `NULL` when absent. |
+| `generated_at` | `timestamptz` | OKF `generated.at`, ISO 8601 (tolerates a bare `generated_at`). `NULL` when absent/unparseable (raw value kept in `details`). |
+| `status` | `text` | OKF lifecycle `status` (`draft`/`stable`/`deprecated`). `NULL` when absent; the spec default for an absent status is `stable`. |
+| `stale_after` | `timestamptz` | OKF `stale_after` — the absolute ISO 8601 instant after which content is stale. `NULL` when absent/unparseable. |
+| `usage_window_from` | `timestamptz` | Top-level `usage_window.from` framing all source usage counts. `NULL` when absent/unparseable. |
+| `usage_window_to` | `timestamptz` | Top-level `usage_window.to`. `NULL` when absent/unparseable. |
+| `trust_tier` | `text` | **Derived**: `human-reviewed` if any `verified[]` actor is a `human:`, else `machine-confirmed` with ≥1 event, else `unverified`. |
+| `details` | `jsonb` | `NOT NULL DEFAULT '{}'` — lossless copy of the recognized provenance/trust/lifecycle keys (`generated`, `verified`, `sources`, `usage_window`, `stale_after`, `status`, and the `generated_by`/`generated_at` aliases). |
 
 Primary key `(bundle_id, concept_id)`; FK to `pgokf.concepts` `ON DELETE
-CASCADE`. Partial index on `verified WHERE verified`.
+CASCADE`. Index on `trust_tier`.
 
 ```sql
-SELECT concept_id, generated_by, verified, verification_method, freshness
+SELECT concept_id, generated_by, generated_at, status, stale_after, trust_tier
 FROM pgokf.concept_provenance
 ORDER BY concept_id;
+```
+
+### `pgokf.concept_verification`
+
+The ordered OKF v0.2 `verified[]` event list — one row per verification event.
+`verified` is a list of `{by, at}` mappings; a single mapping is stored as one
+`ordinal = 0` row. Events with no actor are skipped (never stored as `NULL`).
+
+| Column | Type | Notes |
+| ------ | ---- | ----- |
+| `bundle_id` | `bigint` | `NOT NULL`, part of FK to `pgokf.concepts`. |
+| `concept_id` | `text` | `NOT NULL`, part of FK to `pgokf.concepts`. |
+| `ordinal` | `integer` | `NOT NULL` — zero-based position in the `verified[]` list. |
+| `verified_by` | `text` | `NOT NULL` — OKF `verified[].by`, the verifying actor (`<producer>/<version>`, `human:<id>`, or `process:<id>`). |
+| `verified_at` | `timestamptz` | OKF `verified[].at`, ISO 8601. `NULL` when absent/unparseable. |
+
+Primary key `(bundle_id, concept_id, ordinal)`; FK `(bundle_id, concept_id)` to
+`pgokf.concepts(bundle_id, id)` `ON DELETE CASCADE`.
+
+```sql
+SELECT concept_id, ordinal, verified_by, verified_at
+FROM pgokf.concept_verification
+WHERE bundle_id = 1 ORDER BY concept_id, ordinal;
+```
+
+### `pgokf.concept_provenance_source`
+
+The OKF v0.2 `sources[]` provenance materials — one row per source entry, the
+inputs the content was derived from. Distinct from `pgokf.concept_source`, which
+holds the concept's own raw source bytes. Non-object entries are skipped.
+
+| Column | Type | Notes |
+| ------ | ---- | ----- |
+| `bundle_id` | `bigint` | `NOT NULL`, part of FK to `pgokf.concepts`. |
+| `concept_id` | `text` | `NOT NULL`, part of FK to `pgokf.concepts`. |
+| `ordinal` | `integer` | `NOT NULL` — zero-based position in the `sources[]` list. |
+| `source_id` | `text` | OKF `sources[].id` — optional producer-defined identifier. |
+| `resource` | `text` | OKF `sources[].resource` — the source URI. Spec-required per entry, stored leniently (`NULL` when absent) so a malformed source never aborts a sync. |
+| `title` | `text` | OKF `sources[].title` — optional human-readable title. |
+| `author` | `text` | OKF `sources[].author` — the actor credited with the source. |
+| `usage_count` | `bigint` | OKF `sources[].usage_count` — uses within the usage window. `NULL` when absent/non-numeric. |
+| `last_modified` | `timestamptz` | OKF `sources[].last_modified`, ISO 8601. `NULL` when absent/unparseable. |
+| `usage_window_from` | `timestamptz` | Per-source `usage_window.from`, overriding the top-level window. `NULL` when absent. |
+| `usage_window_to` | `timestamptz` | Per-source `usage_window.to`. `NULL` when absent. |
+
+Primary key `(bundle_id, concept_id, ordinal)`; FK `(bundle_id, concept_id)` to
+`pgokf.concepts(bundle_id, id)` `ON DELETE CASCADE`.
+
+```sql
+SELECT concept_id, ordinal, source_id, resource, author, usage_count
+FROM pgokf.concept_provenance_source
+WHERE bundle_id = 1 ORDER BY concept_id, ordinal;
 ```
 
 ### `pgokf.concept_source`

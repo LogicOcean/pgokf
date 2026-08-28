@@ -224,24 +224,32 @@ def frontmatter_lines(index: int, rng: random.Random, tags: list[str]) -> list[s
         ("tags", tags),
     ]
 
-    # Sparse provenance/trust/lifecycle frontmatter on a fixed fraction.
+    # Sparse OKF v0.2 provenance/trust/lifecycle frontmatter on a fixed fraction.
     if index % PROVENANCE_MODULUS < PROVENANCE_THRESHOLD:
-        fields.append(("status", rng.choice(["stable", "beta", "deprecated"])))
+        fields.append(("status", rng.choice(["draft", "stable", "deprecated"])))
+        fields.append(("stale_after", "2027-01-01T00:00:00Z"))
         fields.append((
             "generated",
             {"by": f"catalog-agent/{1 + index % 3}.{index % 10}", "at": "2026-07-01T12:00:00Z"},
         ))
         if index % 2 == 0:
+            # OKF `verified` is a list of {by, at} events, not a boolean.
             fields.append((
                 "verified",
-                [{"by": "process:automated-drill"}, {"by": "human:oncall-lead"}],
+                [
+                    {"by": "process:automated-drill", "at": "2026-07-02T02:00:00Z"},
+                    {"by": "human:oncall-lead", "at": "2026-07-03T09:30:00Z"},
+                ],
             ))
-            fields.append(("verification_method", "quarterly-drill"))
-        else:
-            fields.append(("verified", bool(index % 4)))
         fields.append((
             "sources",
-            [{"id": f"source-{index % 500}", "url": f"https://example.test/source/{index % 500}"}],
+            [{
+                "id": f"source-{index % 500}",
+                "resource": f"https://example.test/source/{index % 500}",
+                "author": "process:warehouse-catalog",
+                "usage_count": 100 + index % 900,
+                "last_modified": "2026-06-30T23:00:00Z",
+            }],
         ))
 
     return [f"{key}: {json.dumps(value)}" for key, value in fields]

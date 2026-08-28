@@ -121,7 +121,8 @@ future OKF versions and producer extensions do not lose data.
 The physical model (full column detail in [sql-api.md](sql-api.md)):
 
 - **`pgokf.bundles`** — one registered root: identity, canonical path, sync state,
-  timestamps, the aggregate `sync_hash` digest, producer `options`, and an
+  timestamps, the aggregate `sync_hash` digest, producer `options`, the declared
+  `okf_version` (read from the reserved bundle-root `index.md`), and an
   `enabled` flag.
 - **`pgokf.concepts`** — one row per `(bundle_id, id)`: path, type, title,
   description, resource, tags, plain-text body, BLAKE3 `file_hash`, timestamps,
@@ -130,9 +131,15 @@ The physical model (full column detail in [sql-api.md](sql-api.md)):
   retained as `jsonb`.
 - **`pgokf.links`** — directed Markdown edges extracted per concept: source, raw
   and normalized target, label, kind, and the `resolved` / `is_external` flags.
-- **`pgokf.concept_provenance`** — a sparse projection of OKF v0.2 provenance /
-  trust / lifecycle frontmatter: typed columns (`generated_by`, `verified`,
-  `verification_method`, `freshness`) plus a lossless `details` `jsonb`.
+- **`pgokf.concept_provenance`** — a sparse scalar projection of OKF v0.2
+  provenance / trust / lifecycle frontmatter: typed columns (`generated_by`,
+  `generated_at`, `status`, `stale_after`, `usage_window_from`/`_to`) plus a
+  `trust_tier` **derived** from the verification actors and a lossless `details`
+  `jsonb`.
+- **`pgokf.concept_verification`** — one row per OKF `verified[]` event (the
+  ordered `{by, at}` verification list); **`pgokf.concept_provenance_source`** —
+  one row per OKF `sources[]` provenance material. Both cascade from
+  `pgokf.concepts`.
 
 `(bundle_id, id)` is the concept key, so concepts with the same path in different
 bundles stay distinct. The composite result types (`bundle_sync_result`,

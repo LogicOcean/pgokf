@@ -9,10 +9,17 @@ pub mod model;
 pub mod normalize;
 
 pub use error::{Error, ErrorCategory, Result};
+pub use frontmatter::index_okf_version;
 pub use limits::ParserLimits;
 pub use links::{Link, LinkKind};
 pub use model::ParsedConcept;
 pub use normalize::{concept_id, is_reserved_path, normalize_path, resolve_link_target};
+// The parsed frontmatter's producer metadata is already exposed as
+// `ParsedConcept::metadata: serde_json::Map<String, Value>`, so these JSON
+// types are part of this crate's public surface. Re-exporting them lets
+// downstream catalog projections read that metadata without taking their own
+// direct `serde_json` dependency.
+pub use serde_json::{Map, Value};
 
 use std::path::Path;
 use stratify::logging::tracing;

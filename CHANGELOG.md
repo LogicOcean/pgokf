@@ -12,6 +12,51 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 Nothing yet.
 
+## [0.1.3] - 2026-08-28
+
+OKF v0.2 conformance re-model of the provenance / trust / lifecycle projection,
+and population of `pgokf.bundles.okf_version`. This is a **breaking change** to
+the `pgokf.concept_provenance` shape; because the extension is pre-release (no
+tagged release, no external installs), the schema is changed in place with no
+compatibility shim.
+
+### Changed
+
+- **`pgokf.concept_provenance` re-modeled to OKF v0.2 (breaking).** The invented,
+  non-OKF columns `verified` (a flattened bool), `verification_method`, and
+  `freshness` are removed. The table now carries the real OKF v0.2 fields:
+  `generated_by` (`generated.by`), `generated_at` (`generated.at`), `status`
+  (LIFECYCLE `status`), `stale_after`, `usage_window_from` / `usage_window_to`
+  (top-level `usage_window`), and a `trust_tier` **derived** from the
+  verification actors (`unverified` → `machine-confirmed` → `human-reviewed`).
+  Timestamps are ISO 8601, parsed defensively (a malformed instant projects
+  `NULL`, never aborting the sync); the recognized key subset is kept losslessly
+  in `details`. The index on `verified` is replaced by an index on `trust_tier`.
+- **`pgokf.bundles.okf_version` is now populated.** The sync engine reads the
+  optional `okf_version` from the reserved bundle-root `index.md` frontmatter
+  (string or number, e.g. `0.2`) and stores it; an absent or malformed value
+  leaves the column `NULL`. It surfaces unchanged through `bundle_info` /
+  `list_bundles`.
+
+### Added
+
+- **`pgokf.concept_verification` table** — the ordered OKF `verified[]` event
+  list, one `(bundle_id, concept_id, ordinal)` row per `{by, at}` event (a single
+  `verified` mapping is stored as one `ordinal = 0` row; actorless events are
+  skipped). Cascades from `pgokf.concepts`; reader-`SELECT`able.
+- **`pgokf.concept_provenance_source` table** — the OKF `sources[]` provenance
+  materials, one row per entry (`source_id`, `resource`, `title`, `author`,
+  `usage_count`, `last_modified`, per-source `usage_window_from` / `_to`).
+  Distinct from the raw-bytes `pgokf.concept_source`. Cascades from
+  `pgokf.concepts`; reader-`SELECT`able.
+
+### Upgrade
+
+- No supported in-place upgrade from `0.1.2`: this pre-release drops and
+  re-creates the provenance projection. Re-`CREATE EXTENSION` and re-register
+  bundles; because the on-disk bundle is the source of truth, the projection is
+  fully rebuilt from a sync.
+
 ## [0.1.2] - 2026-08-27
 
 Additive, opt-in raw source storage. Default behavior is unchanged: the new

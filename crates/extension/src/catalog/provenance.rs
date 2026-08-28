@@ -1,71 +1,85 @@
-//! Provenance/trust/lifecycle projection seam.
+//! OKF v0.2 provenance / trust / lifecycle projection seam.
 //!
 //! # Seam contract for the provenance feature wave
 //!
-//! Implement everything in **this file only** — the sync engine already
-//! calls [`project`] and must not be edited. This wave:
+//! Everything lives in **this file only** — the sync engine already calls
+//! [`project`] inside the advisory-locked atomic transaction and must not be
+//! edited. This wave owns three tables, all keyed on
+//! `(bundle_id, concept_id) REFERENCES pgokf.concepts (bundle_id, id)
+//! ON DELETE CASCADE` so a removed concept drops its provenance automatically
+//! (which is why removals need no seam call):
 //!
-//! 1. Adds the `pgokf.concept_provenance` table in the `provenance_table`
-//!    `extension_sql!` block (`requires = ["catalog_tables"]`), keyed by
-//!    `(bundle_id, concept_id) REFERENCES pgokf.concepts (bundle_id, id)
-//!    ON DELETE CASCADE` so removed concepts drop their provenance row
-//!    automatically (which is why removals need no seam call).
-//! 2. In [`project`], extracts the OKF v0.2 provenance, trust, and lifecycle
-//!    frontmatter the core parser leaves unmodeled in
-//!    [`okf_parser::ParsedConcept::metadata`], maps the well-known keys onto
-//!    typed columns, and stashes the complete provenance-related subset into
-//!    the `details` `jsonb` column for lossless retention.
-//! 3. Uses parameterized SPI only and surfaces failures as [`CatalogError`]
-//!    so the surrounding sync transaction rolls back atomically.
+//! 1. `pgokf.concept_provenance` — one scalar generation/trust/lifecycle row
+//!    per provenance-bearing concept.
+//! 2. `pgokf.concept_verification` — the ordered `verified[]` event list.
+//! 3. `pgokf.concept_provenance_source` — the `sources[]` provenance
+//!    materials (distinct from the raw-bytes `pgokf.concept_source`).
 //!
-//! # OKF v0.2 key mapping
+//! # OKF v0.2 field mapping
 //!
-//! The typed columns are derived defensively — a key may be absent,
-//! wrong-typed, or nested, and any such case is coerced or skipped, never
-//! panicked on:
+//! The typed columns are derived defensively from the frontmatter the core
+//! parser leaves unmodeled in [`okf_parser::ParsedConcept::metadata`]; every
+//! value may be absent, wrong-typed, or nested, and any such case is coerced or
+//! skipped, never panicked on, and never aborts the surrounding sync.
 //!
-//! | Column                | Source frontmatter                                            |
-//! | --------------------- | ------------------------------------------------------------- |
-//! | `generated_by`        | scalar `generated_by`, bare `generated`, or `generated.by`    |
-//! | `verified`            | `verified` as a bool, or the presence of verification records |
-//! | `verification_method` | scalar `verification_method`, bare `verification`, or `verification.method` |
-//! | `freshness`           | scalar `freshness`, falling back to the lifecycle `status`     |
+//! | Column                                | OKF v0.2 source                                             |
+//! | ------------------------------------- | ----------------------------------------------------------- |
+//! | `concept_provenance.generated_by`     | `generated.by` (tolerates a bare `generated_by`)            |
+//! | `concept_provenance.generated_at`     | `generated.at` (ISO 8601, tolerates a bare `generated_at`)  |
+//! | `concept_provenance.status`           | `status` (LIFECYCLE; spec default when absent is `stable`)  |
+//! | `concept_provenance.stale_after`      | `stale_after` (ISO 8601 absolute instant)                  |
+//! | `concept_provenance.usage_window_*`   | top-level `usage_window {from,to}`                          |
+//! | `concept_provenance.trust_tier`       | DERIVED from the `verified[]` actors (see [`trust_tier`])   |
+//! | `concept_verification.*`              | each `verified[]` event `{by,at}`                          |
+//! | `concept_provenance_source.*`         | each `sources[]` entry `{id,resource,title,author,…}`      |
 //!
-//! Every recognized provenance/trust/lifecycle key (see [`PROVENANCE_KEYS`])
-//! is retained verbatim in `details`; keys outside that set are already
-//! preserved per-key in `pgokf.concept_metadata` by the core engine, so no
-//! producer data is lost.
+//! # Trust-tier derivation
+//!
+//! `verified` is a LIST of events; a single mapping is treated as a
+//! one-element list. The derived tier is `unverified` with no events,
+//! `machine-confirmed` with at least one event whose actor is non-human, and
+//! `human-reviewed` as soon as any event actor is a `human:` actor.
+//!
+//! # Timestamp handling
+//!
+//! ISO 8601 instants are parsed to Unix-epoch seconds entirely in Rust
+//! ([`parse_iso8601_epoch`]) and converted to `timestamptz` in SQL with
+//! `to_timestamp`, exactly as the sync engine already handles filesystem
+//! modification times. A malformed or calendar-invalid instant yields `None`
+//! → SQL `NULL`; the raw string is still retained losslessly in `details`.
+//! Parsing in Rust means no cast can ever throw and abort the sync.
 //!
 //! # Row semantics
 //!
-//! A concept carrying **no** recognized provenance/trust/lifecycle key
-//! produces **no** `concept_provenance` row: the projection is sparse, so a
-//! `LEFT JOIN` distinguishes "concept has no provenance frontmatter" from
-//! "concept has provenance but no verification". A concept that carries some
-//! provenance keys but none that map to a typed column produces a row with
-//! all-`NULL` typed columns and a populated `details`. Projection is
-//! delete-then-insert per concept, so re-syncing a concept whose provenance
-//! frontmatter was removed correctly drops its stale row.
+//! The projection is **sparse**: a concept carrying no recognized
+//! provenance/trust/lifecycle key produces no `concept_provenance` row and no
+//! child rows, so a `LEFT JOIN` distinguishes "no provenance frontmatter" from
+//! "provenance present but unverified". Projection is delete-then-insert per
+//! staged concept across all three tables, so re-syncing a concept whose
+//! provenance frontmatter was removed correctly drops its stale rows.
 
 use std::path::Path;
 
 use pgrx::{Spi, extension_sql};
 
 use crate::catalog::batch::BATCH_SIZE;
-use crate::catalog::types::StagedConcept;
+use crate::catalog::types::{StagedConcept, count_to_i32};
 use crate::errors::CatalogError;
-use okf_parser::ParsedConcept;
+use okf_parser::{ParsedConcept, Value};
 
 extension_sql!(
     r"
 CREATE TABLE pgokf.concept_provenance (
-    bundle_id           bigint NOT NULL,
-    concept_id          text NOT NULL,
-    generated_by        text,
-    verified            boolean,
-    verification_method text,
-    freshness           text,
-    details             jsonb NOT NULL DEFAULT '{}'::jsonb,
+    bundle_id         bigint NOT NULL,
+    concept_id        text   NOT NULL,
+    generated_by      text,
+    generated_at      timestamptz,
+    status            text,
+    stale_after       timestamptz,
+    usage_window_from timestamptz,
+    usage_window_to   timestamptz,
+    trust_tier        text,
+    details           jsonb  NOT NULL DEFAULT '{}'::jsonb,
     CONSTRAINT concept_provenance_pkey PRIMARY KEY (bundle_id, concept_id),
     CONSTRAINT concept_provenance_concept_fk
         FOREIGN KEY (bundle_id, concept_id)
@@ -73,24 +87,93 @@ CREATE TABLE pgokf.concept_provenance (
         ON DELETE CASCADE
 );
 
-CREATE INDEX concept_provenance_verified_idx
-    ON pgokf.concept_provenance (verified)
-    WHERE verified;
+CREATE TABLE pgokf.concept_verification (
+    bundle_id   bigint  NOT NULL,
+    concept_id  text    NOT NULL,
+    ordinal     integer NOT NULL,
+    verified_by text    NOT NULL,
+    verified_at timestamptz,
+    CONSTRAINT concept_verification_pkey PRIMARY KEY (bundle_id, concept_id, ordinal),
+    CONSTRAINT concept_verification_concept_fk
+        FOREIGN KEY (bundle_id, concept_id)
+        REFERENCES pgokf.concepts (bundle_id, id)
+        ON DELETE CASCADE
+);
+
+CREATE TABLE pgokf.concept_provenance_source (
+    bundle_id         bigint  NOT NULL,
+    concept_id        text    NOT NULL,
+    ordinal           integer NOT NULL,
+    source_id         text,
+    resource          text,
+    title             text,
+    author            text,
+    usage_count       bigint,
+    last_modified     timestamptz,
+    usage_window_from timestamptz,
+    usage_window_to   timestamptz,
+    CONSTRAINT concept_provenance_source_pkey PRIMARY KEY (bundle_id, concept_id, ordinal),
+    CONSTRAINT concept_provenance_source_concept_fk
+        FOREIGN KEY (bundle_id, concept_id)
+        REFERENCES pgokf.concepts (bundle_id, id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX concept_provenance_trust_tier_idx
+    ON pgokf.concept_provenance (trust_tier);
 
 COMMENT ON TABLE pgokf.concept_provenance IS
-    'Provenance, trust, and lifecycle projection of OKF v0.2 concept frontmatter: typed columns plus the full provenance-related key subset as jsonb. Sparse — only concepts carrying such frontmatter have a row.';
+    'Scalar OKF v0.2 generation/trust/lifecycle projection: one row per concept that carries any provenance, trust, or lifecycle frontmatter (sparse). The verified[] event list and the sources[] materials live in pgokf.concept_verification and pgokf.concept_provenance_source; the full lossless key subset is in details.';
 COMMENT ON COLUMN pgokf.concept_provenance.generated_by IS
-    'Producer/agent that generated the concept, from generated_by, generated, or generated.by; NULL when absent or not a string.';
-COMMENT ON COLUMN pgokf.concept_provenance.verified IS
-    'True when the concept carries a truthy verified flag or a non-empty set of verification records; NULL when the frontmatter has no verified key.';
-COMMENT ON COLUMN pgokf.concept_provenance.verification_method IS
-    'Declared verification method, from verification_method, verification, or verification.method; NULL when absent or not a string.';
-COMMENT ON COLUMN pgokf.concept_provenance.freshness IS
-    'Lifecycle freshness signal, from the freshness key or the lifecycle status; NULL when neither is a string.';
+    'OKF generated.by: the actor (agent/human/process) that produced the current content; tolerates a bare generated_by. NULL when absent or not a string.';
+COMMENT ON COLUMN pgokf.concept_provenance.generated_at IS
+    'OKF generated.at: when the current content was produced, parsed from ISO 8601; tolerates a bare generated_at. NULL when absent or unparseable (the raw value stays in details).';
+COMMENT ON COLUMN pgokf.concept_provenance.status IS
+    'OKF lifecycle status (draft|stable|deprecated). NULL when absent; the OKF v0.2 spec default for an absent status is stable.';
+COMMENT ON COLUMN pgokf.concept_provenance.stale_after IS
+    'OKF stale_after: the absolute ISO 8601 instant after which the content is considered stale. NULL when absent or unparseable.';
+COMMENT ON COLUMN pgokf.concept_provenance.usage_window_from IS
+    'OKF top-level usage_window.from: start of the window framing all source usage_counts. NULL when absent or unparseable.';
+COMMENT ON COLUMN pgokf.concept_provenance.usage_window_to IS
+    'OKF top-level usage_window.to: end of the window framing all source usage_counts. NULL when absent or unparseable.';
+COMMENT ON COLUMN pgokf.concept_provenance.trust_tier IS
+    'Derived OKF trust tier: human-reviewed when any verified[] actor is a human:, else machine-confirmed with >=1 verified event, else unverified.';
 COMMENT ON COLUMN pgokf.concept_provenance.details IS
-    'Lossless jsonb copy of every recognized provenance/trust/lifecycle frontmatter key (sources, generated, verified, usage_window, stale_after, parameters, and peers).';
+    'Lossless jsonb copy of the recognized OKF provenance/trust/lifecycle key subset (generated, verified, sources, usage_window, stale_after, status, and the generated_by alias).';
+
+COMMENT ON TABLE pgokf.concept_verification IS
+    'One row per OKF v0.2 verified[] event for a concept: the ordered list of verification events (a single mapping is stored as one 0-ordinal row). Cascades from pgokf.concepts.';
+COMMENT ON COLUMN pgokf.concept_verification.ordinal IS
+    'Zero-based position of the event in the concept''s verified[] list; forms the primary key with (bundle_id, concept_id).';
+COMMENT ON COLUMN pgokf.concept_verification.verified_by IS
+    'OKF verified[].by: the actor that performed the verification (agent/human:/process:). Events with no actor are skipped, never stored as NULL.';
+COMMENT ON COLUMN pgokf.concept_verification.verified_at IS
+    'OKF verified[].at, parsed from ISO 8601. NULL when the at value is absent or unparseable.';
+
+COMMENT ON TABLE pgokf.concept_provenance_source IS
+    'One row per OKF v0.2 sources[] provenance material for a concept — the inputs the content was derived from. Distinct from pgokf.concept_source, which holds the concept''s own raw source bytes. Cascades from pgokf.concepts.';
+COMMENT ON COLUMN pgokf.concept_provenance_source.ordinal IS
+    'Zero-based position of the entry in the concept''s sources[] list; forms the primary key with (bundle_id, concept_id).';
+COMMENT ON COLUMN pgokf.concept_provenance_source.source_id IS
+    'OKF sources[].id: an optional producer-defined identifier for the source. NULL when absent.';
+COMMENT ON COLUMN pgokf.concept_provenance_source.resource IS
+    'OKF sources[].resource: the source URI. Spec-required per entry but stored leniently (NULL when absent) so a malformed source never aborts the sync.';
+COMMENT ON COLUMN pgokf.concept_provenance_source.title IS
+    'OKF sources[].title: an optional human-readable title for the source.';
+COMMENT ON COLUMN pgokf.concept_provenance_source.author IS
+    'OKF sources[].author: the actor credited with the source.';
+COMMENT ON COLUMN pgokf.concept_provenance_source.usage_count IS
+    'OKF sources[].usage_count: how many times the source was used within the usage_window. NULL when absent or non-numeric.';
+COMMENT ON COLUMN pgokf.concept_provenance_source.last_modified IS
+    'OKF sources[].last_modified, parsed from ISO 8601. NULL when absent or unparseable.';
+COMMENT ON COLUMN pgokf.concept_provenance_source.usage_window_from IS
+    'OKF sources[].usage_window.from: start of this source''s own usage window, overriding the top-level window. NULL when absent or unparseable.';
+COMMENT ON COLUMN pgokf.concept_provenance_source.usage_window_to IS
+    'OKF sources[].usage_window.to: end of this source''s own usage window. NULL when absent or unparseable.';
 
 GRANT SELECT ON pgokf.concept_provenance TO pgokf_reader;
+GRANT SELECT ON pgokf.concept_verification TO pgokf_reader;
+GRANT SELECT ON pgokf.concept_provenance_source TO pgokf_reader;
 ",
     name = "provenance_table",
     requires = ["catalog_tables"]
@@ -99,35 +182,21 @@ GRANT SELECT ON pgokf.concept_provenance TO pgokf_reader;
 /// OKF v0.2 frontmatter keys treated as provenance/trust/lifecycle data and
 /// retained verbatim in `concept_provenance.details`.
 ///
-/// The set intentionally mirrors the OKF v0.2 provenance surface (origin,
-/// verification, freshness window, and declared inputs). Keys outside it stay
-/// in `pgokf.concept_metadata`, so restricting the subset never loses data.
+/// The set mirrors the OKF v0.2 PROVENANCE, TRUST, and LIFECYCLE families
+/// (origin, verification, usage window, lifecycle status, and declared
+/// sources) plus the tolerated `generated_by` alias. Type-specific keys (`runtime`,
+/// `parameters`, `computation`, …) are not provenance data and stay in
+/// `pgokf.concept_metadata`, so restricting the subset never loses data.
 const PROVENANCE_KEYS: &[&str] = &[
-    "sources",
     "generated",
+    "generated_at",
     "generated_by",
     "verified",
-    "verification",
-    "verification_method",
-    "freshness",
+    "sources",
     "usage_window",
     "stale_after",
     "status",
-    "parameters",
 ];
-
-/// The typed provenance columns extracted from one concept's frontmatter.
-///
-/// Each field is `None` when the corresponding key is absent or cannot be
-/// coerced to the column's type; the projection never panics on malformed
-/// input.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct ProvenanceColumns {
-    generated_by: Option<String>,
-    verified: Option<bool>,
-    verification_method: Option<String>,
-    freshness: Option<String>,
-}
 
 /// Trim a string value, returning an owned copy only when it is non-empty.
 fn non_empty(text: &str) -> Option<String> {
@@ -144,87 +213,375 @@ fn is_provenance_key(key: &str) -> bool {
     PROVENANCE_KEYS.contains(&key)
 }
 
-/// Resolve `generated_by` from the scalar `generated_by`, a bare string
-/// `generated`, or the `generated.by` object member, in that order.
+/// Read `object[key]` as a string, tolerating a non-object `value` (yields
+/// `None`). `serde_json::Value::get` returns `None` for any non-object, so this
+/// is safe on scalars and arrays alike.
+fn json_str<'value>(value: &'value Value, key: &str) -> Option<&'value str> {
+    value.get(key).and_then(Value::as_str)
+}
+
+/// Coerce a JSON value to `i64` across the numeric shapes producers ship
+/// (signed, unsigned, or a numeric string). Non-numeric values yield `None`.
+fn coerce_i64(value: &Value) -> Option<i64> {
+    if let Some(number) = value.as_i64() {
+        return Some(number);
+    }
+    if let Some(number) = value.as_u64() {
+        return i64::try_from(number).ok();
+    }
+    value.as_str().and_then(|text| text.trim().parse().ok())
+}
+
+/// Whether a Gregorian year is a leap year.
+fn is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+/// Number of days in a month, honoring leap years; `None` for an invalid month.
+fn days_in_month(year: i64, month: u32) -> Option<u32> {
+    Some(match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => return None,
+    })
+}
+
+/// Days from the Unix epoch (1970-01-01) to a valid civil date, via Howard
+/// Hinnant's `days_from_civil` algorithm (valid across the full proleptic
+/// Gregorian range).
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = (if year >= 0 { year } else { year - 399 }) / 400;
+    let year_of_era = year - era * 400;
+    let month = i64::from(month);
+    let day = i64::from(day);
+    let day_of_year = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+/// Split the time-and-zone remainder into its time and zone substrings at the
+/// first zone marker (`Z`, `z`, `+`, or `-`).
+fn split_time_zone(remainder: &str) -> (&str, &str) {
+    match remainder.find(['Z', 'z', '+', '-']) {
+        Some(index) => (&remainder[..index], &remainder[index..]),
+        None => (remainder, ""),
+    }
+}
+
+/// Parse an ISO 8601 zone designator into an offset in seconds east of UTC.
+///
+/// Accepts `Z`/`z`, `±HH`, `±HHMM`, and `±HH:MM`. An empty designator (a naive
+/// timestamp) is treated as UTC. Returns `None` for any malformed zone.
+fn parse_zone_offset_secs(zone: &str) -> Option<i64> {
+    match zone {
+        "" | "Z" | "z" => Some(0),
+        _ => {
+            let sign = match zone.as_bytes()[0] {
+                b'+' => 1,
+                b'-' => -1,
+                _ => return None,
+            };
+            let body = &zone[1..];
+            let (hours, minutes) = if let Some((hours, minutes)) = body.split_once(':') {
+                (hours, minutes)
+            } else if body.len() == 4 {
+                (&body[..2], &body[2..])
+            } else if body.len() == 2 {
+                (body, "0")
+            } else {
+                return None;
+            };
+            let hours: i64 = hours.parse().ok()?;
+            let minutes: i64 = minutes.parse().ok()?;
+            if !(0..=23).contains(&hours) || !(0..=59).contains(&minutes) {
+                return None;
+            }
+            Some(sign * (hours * 3600 + minutes * 60))
+        }
+    }
+}
+
+/// The parsed clock time plus zone offset of an ISO 8601 timestamp.
+struct ClockTime {
+    hour: i64,
+    minute: i64,
+    second: i64,
+    fraction: f64,
+    offset_secs: i64,
+}
+
+/// Parse the `HH:MM[:SS[.fff]][zone]` portion following the date.
+fn parse_clock_time(time_and_zone: &str) -> Option<ClockTime> {
+    let (time, zone) = split_time_zone(time_and_zone);
+    let mut fields = time.split(':');
+    let hour: i64 = fields.next()?.parse().ok()?;
+    let minute: i64 = fields.next()?.parse().ok()?;
+    let (second, fraction) = match fields.next() {
+        Some(seconds) => {
+            let (whole, frac) = match seconds.split_once('.') {
+                Some((whole, frac)) => {
+                    if frac.is_empty() || !frac.bytes().all(|byte| byte.is_ascii_digit()) {
+                        return None;
+                    }
+                    (whole, format!("0.{frac}").parse().ok()?)
+                }
+                None => (seconds, 0.0),
+            };
+            (whole.parse().ok()?, frac)
+        }
+        None => (0, 0.0),
+    };
+    if fields.next().is_some() {
+        return None;
+    }
+    if !(0..=23).contains(&hour) || !(0..=59).contains(&minute) || !(0..=60).contains(&second) {
+        return None;
+    }
+    Some(ClockTime {
+        hour,
+        minute,
+        second,
+        fraction,
+        offset_secs: parse_zone_offset_secs(zone)?,
+    })
+}
+
+/// Parse a restricted ISO 8601 / RFC 3339 timestamp into seconds since the Unix
+/// epoch, defensively.
+///
+/// Accepts a zero-padded `YYYY-MM-DD` date, optionally followed by a `T`/`t`/
+/// space separator and an `HH:MM[:SS[.fff]]` time with an optional zone
+/// (`Z`, `±HH`, `±HHMM`, `±HH:MM`). A bare date is midnight UTC; a naive time is
+/// treated as UTC. Every calendar field is range-checked (month, day-of-month
+/// with leap years, hour, minute, second), so a shape-valid but impossible
+/// instant such as `2026-02-30` yields `None`. Returning `None` rather than
+/// throwing guarantees a malformed producer timestamp projects a SQL `NULL` and
+/// never aborts the sync.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "epoch seconds fit f64 exactly across every timestamp OKF can carry; \
+              the value is only ever passed to SQL to_timestamp"
+)]
+fn parse_iso8601_epoch(value: &str) -> Option<f64> {
+    let text = value.trim();
+    if text.len() < 10 {
+        return None;
+    }
+    let bytes = text.as_bytes();
+    if bytes[4] != b'-' || bytes[7] != b'-' {
+        return None;
+    }
+    let year: i64 = text.get(0..4)?.parse().ok()?;
+    let month: u32 = text.get(5..7)?.parse().ok()?;
+    let day: u32 = text.get(8..10)?.parse().ok()?;
+    if !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month)? {
+        return None;
+    }
+
+    let clock = match &text[10..] {
+        "" => ClockTime {
+            hour: 0,
+            minute: 0,
+            second: 0,
+            fraction: 0.0,
+            offset_secs: 0,
+        },
+        rest => {
+            let separator = rest.as_bytes()[0];
+            if separator != b'T' && separator != b't' && separator != b' ' {
+                return None;
+            }
+            parse_clock_time(&rest[1..])?
+        }
+    };
+
+    let seconds = days_from_civil(year, month, day) * 86_400
+        + clock.hour * 3600
+        + clock.minute * 60
+        + clock.second
+        - clock.offset_secs;
+    Some(seconds as f64 + clock.fraction)
+}
+
+/// One verification event extracted from the `verified[]` list.
+#[derive(Debug, Clone, PartialEq)]
+struct VerificationEvent {
+    ordinal: i32,
+    verified_by: String,
+    verified_at: Option<f64>,
+}
+
+/// Extract the ordered `verified[]` events, tolerating a single mapping as a
+/// one-element list and skipping any event that carries no actor (the
+/// `verified_by` column is `NOT NULL`). The `ordinal` is the event's position
+/// in the source list, so a skipped malformed entry leaves a gap rather than
+/// renumbering its peers.
+///
+/// The JSON values reach us only through `pgrx::JsonB` / `okf_parser`, so this
+/// crate never names `serde_json`; every field is read through the inherent
+/// [`Value::get`](https://docs.rs/serde_json)/`as_*` accessors instead.
+fn extract_verification_events(concept: &ParsedConcept) -> Vec<VerificationEvent> {
+    let Some(value) = concept.metadata.get("verified") else {
+        return Vec::new();
+    };
+
+    let mut events = Vec::new();
+    let mut consider = |index: usize, item: &_| {
+        let Some(verified_by) = json_str(item, "by").and_then(non_empty) else {
+            return;
+        };
+        events.push(VerificationEvent {
+            ordinal: count_to_i32(index),
+            verified_by,
+            verified_at: json_str(item, "at").and_then(parse_iso8601_epoch),
+        });
+    };
+
+    if let Some(array) = value.as_array() {
+        for (index, item) in array.iter().enumerate() {
+            consider(index, item);
+        }
+    } else if value.is_object() {
+        // OKF v0.2: a single verified mapping is a one-element list.
+        consider(0, value);
+    }
+    events
+}
+
+/// Derive the OKF trust tier from a concept's recorded verification events.
+///
+/// `human-reviewed` as soon as any event actor is a `human:` actor, else
+/// `machine-confirmed` with at least one event, else `unverified`.
+fn trust_tier(events: &[VerificationEvent]) -> &'static str {
+    if events
+        .iter()
+        .any(|event| event.verified_by.starts_with("human:"))
+    {
+        "human-reviewed"
+    } else if events.is_empty() {
+        "unverified"
+    } else {
+        "machine-confirmed"
+    }
+}
+
+/// One provenance-source entry extracted from the `sources[]` list.
+#[derive(Debug, Clone, PartialEq)]
+struct ProvenanceSourceEntry {
+    ordinal: i32,
+    source_id: Option<String>,
+    resource: Option<String>,
+    title: Option<String>,
+    author: Option<String>,
+    usage_count: Option<i64>,
+    last_modified: Option<f64>,
+    usage_window_from: Option<f64>,
+    usage_window_to: Option<f64>,
+}
+
+/// Extract the ordered `sources[]` provenance materials, skipping any entry
+/// that is not an object. The `ordinal` is the entry's position in the source
+/// list.
+fn extract_provenance_sources(concept: &ParsedConcept) -> Vec<ProvenanceSourceEntry> {
+    let Some(array) = concept.metadata.get("sources").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+
+    let mut sources = Vec::new();
+    for (index, item) in array.iter().enumerate() {
+        if !item.is_object() {
+            continue;
+        }
+        let window = item.get("usage_window");
+        let window_bound = |bound: &str| {
+            window
+                .and_then(|window| json_str(window, bound))
+                .and_then(parse_iso8601_epoch)
+        };
+        sources.push(ProvenanceSourceEntry {
+            ordinal: count_to_i32(index),
+            source_id: json_str(item, "id").and_then(non_empty),
+            resource: json_str(item, "resource").and_then(non_empty),
+            title: json_str(item, "title").and_then(non_empty),
+            author: json_str(item, "author").and_then(non_empty),
+            usage_count: item.get("usage_count").and_then(coerce_i64),
+            last_modified: json_str(item, "last_modified").and_then(parse_iso8601_epoch),
+            usage_window_from: window_bound("from"),
+            usage_window_to: window_bound("to"),
+        });
+    }
+    sources
+}
+
+/// The scalar generation/trust/lifecycle columns of one concept.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct ScalarProvenance {
+    generated_by: Option<String>,
+    generated_at: Option<f64>,
+    status: Option<String>,
+    stale_after: Option<f64>,
+    usage_window_from: Option<f64>,
+    usage_window_to: Option<f64>,
+    trust_tier: String,
+}
+
+/// Resolve `generated.by`, tolerating a bare scalar `generated_by` or a bare
+/// string `generated`.
 fn extract_generated_by(concept: &ParsedConcept) -> Option<String> {
     let metadata = &concept.metadata;
-    if let Some(text) = metadata
-        .get("generated_by")
-        .and_then(|value| value.as_str())
-    {
+    if let Some(text) = metadata.get("generated_by").and_then(Value::as_str) {
         return non_empty(text);
     }
     let generated = metadata.get("generated")?;
     if let Some(text) = generated.as_str() {
         return non_empty(text);
     }
-    let by = generated
-        .as_object()
-        .and_then(|object| object.get("by"))
-        .and_then(|value| value.as_str())?;
-    non_empty(by)
+    json_str(generated, "by").and_then(non_empty)
 }
 
-/// Resolve the `verified` flag defensively across its OKF shapes:
-/// an explicit bool, a non-empty array/object of verification records, or a
-/// non-empty verification note. Absent, null, or numeric values yield `None`.
-fn extract_verified(concept: &ParsedConcept) -> Option<bool> {
-    let value = concept.metadata.get("verified")?;
-    if let Some(flag) = value.as_bool() {
-        return Some(flag);
-    }
-    if let Some(records) = value.as_array() {
-        return Some(!records.is_empty());
-    }
-    if let Some(object) = value.as_object() {
-        return Some(!object.is_empty());
-    }
-    if let Some(text) = value.as_str() {
-        return Some(!text.trim().is_empty());
-    }
-    None
-}
-
-/// Resolve `verification_method` from the scalar `verification_method`, a bare
-/// string `verification`, or the `verification.method` object member.
-fn extract_verification_method(concept: &ParsedConcept) -> Option<String> {
+/// Resolve `generated.at`, tolerating a bare scalar `generated_at`.
+fn extract_generated_at(concept: &ParsedConcept) -> Option<f64> {
     let metadata = &concept.metadata;
-    if let Some(text) = metadata
-        .get("verification_method")
-        .and_then(|value| value.as_str())
+    if let Some(epoch) = metadata
+        .get("generated_at")
+        .and_then(Value::as_str)
+        .and_then(parse_iso8601_epoch)
     {
-        return non_empty(text);
+        return Some(epoch);
     }
-    let verification = metadata.get("verification")?;
-    if let Some(text) = verification.as_str() {
-        return non_empty(text);
-    }
-    let method = verification
-        .as_object()
-        .and_then(|object| object.get("method"))
-        .and_then(|value| value.as_str())?;
-    non_empty(method)
+    metadata
+        .get("generated")
+        .and_then(|generated| json_str(generated, "at"))
+        .and_then(parse_iso8601_epoch)
 }
 
-/// Resolve the `freshness` lifecycle signal from the `freshness` key, falling
-/// back to the lifecycle `status` — the single-value freshness signal OKF
-/// v0.2 producers most commonly ship (for example `status: stable`).
-fn extract_freshness(concept: &ParsedConcept) -> Option<String> {
+/// Extract the scalar provenance columns, given the concept's already-parsed
+/// verification events (from which the trust tier is derived).
+fn extract_scalar(concept: &ParsedConcept, events: &[VerificationEvent]) -> ScalarProvenance {
     let metadata = &concept.metadata;
-    if let Some(text) = metadata.get("freshness").and_then(|value| value.as_str()) {
-        return non_empty(text);
-    }
-    let status = metadata.get("status").and_then(|value| value.as_str())?;
-    non_empty(status)
-}
-
-/// Extract the typed provenance columns from a concept's frontmatter.
-fn extract_columns(concept: &ParsedConcept) -> ProvenanceColumns {
-    ProvenanceColumns {
+    let window = metadata.get("usage_window");
+    let window_bound = |bound: &str| {
+        window
+            .and_then(|window| json_str(window, bound))
+            .and_then(parse_iso8601_epoch)
+    };
+    ScalarProvenance {
         generated_by: extract_generated_by(concept),
-        verified: extract_verified(concept),
-        verification_method: extract_verification_method(concept),
-        freshness: extract_freshness(concept),
+        generated_at: extract_generated_at(concept),
+        status: metadata
+            .get("status")
+            .and_then(Value::as_str)
+            .and_then(non_empty),
+        stale_after: metadata
+            .get("stale_after")
+            .and_then(Value::as_str)
+            .and_then(parse_iso8601_epoch),
+        usage_window_from: window_bound("from"),
+        usage_window_to: window_bound("to"),
+        trust_tier: trust_tier(events).to_owned(),
     }
 }
 
@@ -259,28 +616,42 @@ fn spi_error(context: &str, error: &pgrx::spi::Error) -> CatalogError {
     CatalogError::internal(format!("{context}: {error}"), Path::new(""))
 }
 
-/// The staged provenance rows, transposed into the parallel arrays bound by
-/// the bulk `concept_provenance` `INSERT`.
-///
-/// Only concepts that carry recognized provenance frontmatter contribute a row
-/// (the projection is sparse), so every `Vec` shares the same length and
-/// ordering: row `i` inserts one `concept_provenance` row. `details` holds the
-/// compact JSON text of each lossless payload, cast back to `jsonb` in SQL —
-/// the same serialization `pgrx::JsonB` performs before `jsonb_in`, so the
-/// stored `jsonb` is byte-identical to the row-by-row binding.
+/// Every provenance table's rows for a bundle, transposed into the parallel
+/// arrays bound by the bulk array-unnest `INSERT`s. Each group of `Vec`s shares
+/// length and ordering: row `i` of a group is one row of that table.
 #[derive(Debug, Clone, Default)]
 struct ProvenanceRows {
-    concept_ids: Vec<String>,
+    // pgokf.concept_provenance (scalar; one row per provenance-bearing concept)
+    scalar_concept_ids: Vec<String>,
     generated_by: Vec<Option<String>>,
-    verified: Vec<Option<bool>>,
-    verification_method: Vec<Option<String>>,
-    freshness: Vec<Option<String>>,
+    generated_at: Vec<Option<f64>>,
+    status: Vec<Option<String>>,
+    stale_after: Vec<Option<f64>>,
+    usage_window_from: Vec<Option<f64>>,
+    usage_window_to: Vec<Option<f64>>,
+    trust_tier: Vec<String>,
     details: Vec<String>,
+    // pgokf.concept_verification (one row per verified[] event)
+    verification_concept_ids: Vec<String>,
+    verification_ordinals: Vec<i32>,
+    verified_by: Vec<String>,
+    verified_at: Vec<Option<f64>>,
+    // pgokf.concept_provenance_source (one row per sources[] entry)
+    source_concept_ids: Vec<String>,
+    source_ordinals: Vec<i32>,
+    source_ids: Vec<Option<String>>,
+    source_resources: Vec<Option<String>>,
+    source_titles: Vec<Option<String>>,
+    source_authors: Vec<Option<String>>,
+    source_usage_counts: Vec<Option<i64>>,
+    source_last_modified: Vec<Option<f64>>,
+    source_usage_window_from: Vec<Option<f64>>,
+    source_usage_window_to: Vec<Option<f64>>,
 }
 
-/// Extract the sparse provenance rows for every staged concept, in staging
+/// Collect every provenance table's rows for the staged concepts, in staging
 /// order, skipping concepts that carry no recognized provenance frontmatter
-/// (they produce no row, exactly as the row-by-row projection did).
+/// (the projection is sparse).
 fn collect_provenance_rows(staged: &[StagedConcept]) -> ProvenanceRows {
     let mut rows = ProvenanceRows::default();
     for entry in staged {
@@ -289,71 +660,111 @@ fn collect_provenance_rows(staged: &[StagedConcept]) -> ProvenanceRows {
         if details_is_empty(&details) {
             continue;
         }
-        let columns = extract_columns(concept);
-        rows.concept_ids.push(concept.id.clone());
-        rows.generated_by.push(columns.generated_by);
-        rows.verified.push(columns.verified);
-        rows.verification_method.push(columns.verification_method);
-        rows.freshness.push(columns.freshness);
+
+        let events = extract_verification_events(concept);
+        let scalar = extract_scalar(concept, &events);
+
+        rows.scalar_concept_ids.push(concept.id.clone());
+        rows.generated_by.push(scalar.generated_by);
+        rows.generated_at.push(scalar.generated_at);
+        rows.status.push(scalar.status);
+        rows.stale_after.push(scalar.stale_after);
+        rows.usage_window_from.push(scalar.usage_window_from);
+        rows.usage_window_to.push(scalar.usage_window_to);
+        rows.trust_tier.push(scalar.trust_tier);
         // Compact JSON text of the lossless payload; `serde_json::Value`'s
         // `Display` matches what `pgrx::JsonB` serializes before `jsonb_in`, so
-        // the `::jsonb` cast below reproduces the row-by-row `JsonB` binding.
+        // the `::jsonb` cast below reproduces a row-by-row `JsonB` binding.
         rows.details.push(details.0.to_string());
+
+        for event in events {
+            rows.verification_concept_ids.push(concept.id.clone());
+            rows.verification_ordinals.push(event.ordinal);
+            rows.verified_by.push(event.verified_by);
+            rows.verified_at.push(event.verified_at);
+        }
+
+        for source in extract_provenance_sources(concept) {
+            rows.source_concept_ids.push(concept.id.clone());
+            rows.source_ordinals.push(source.ordinal);
+            rows.source_ids.push(source.source_id);
+            rows.source_resources.push(source.resource);
+            rows.source_titles.push(source.title);
+            rows.source_authors.push(source.author);
+            rows.source_usage_counts.push(source.usage_count);
+            rows.source_last_modified.push(source.last_modified);
+            rows.source_usage_window_from.push(source.usage_window_from);
+            rows.source_usage_window_to.push(source.usage_window_to);
+        }
     }
     rows
 }
 
-/// Delete any existing provenance rows for the staged concepts, in bounded
-/// batches, so re-projection is idempotent and stale rows never linger after
-/// provenance is removed.
+/// Statements that clear one staged concept's rows from each provenance table,
+/// so re-projection is idempotent and stale rows never linger.
+const DELETE_STATEMENTS: [&str; 3] = [
+    "DELETE FROM pgokf.concept_provenance WHERE bundle_id = $1 AND concept_id = ANY($2)",
+    "DELETE FROM pgokf.concept_verification WHERE bundle_id = $1 AND concept_id = ANY($2)",
+    "DELETE FROM pgokf.concept_provenance_source WHERE bundle_id = $1 AND concept_id = ANY($2)",
+];
+
+/// Clear every staged concept's existing provenance rows, in bounded batches.
 ///
-/// Every staged concept is cleared — including ones that now carry no
-/// provenance frontmatter and thus contribute no replacement row — exactly as
-/// the row-by-row `delete-then-insert` did. Concept IDs are chunked at
-/// [`BATCH_SIZE`] so the `= ANY($2)` list never grows unbounded.
+/// Every staged concept is cleared across all three tables — including ones that
+/// now carry no provenance frontmatter and thus contribute no replacement row —
+/// so removing provenance from a concept correctly drops its stale rows. Concept
+/// IDs are chunked at [`BATCH_SIZE`] so the `= ANY($2)` list never grows
+/// unbounded.
 fn delete_staged_provenance(bundle_id: i64, staged: &[StagedConcept]) -> Result<(), CatalogError> {
     for chunk in staged.chunks(BATCH_SIZE) {
         let concept_ids: Vec<&str> = chunk
             .iter()
             .map(|entry| entry.concept.id.as_str())
             .collect();
-        Spi::run_with_args(
-            "DELETE FROM pgokf.concept_provenance WHERE bundle_id = $1 AND concept_id = ANY($2)",
-            &[bundle_id.into(), concept_ids.into()],
-        )
-        .map_err(|error| spi_error("failed to clear concept provenance", &error))?;
+        for statement in DELETE_STATEMENTS {
+            Spi::run_with_args(statement, &[bundle_id.into(), concept_ids.clone().into()])
+                .map_err(|error| spi_error("failed to clear concept provenance", &error))?;
+        }
     }
     Ok(())
 }
 
-/// Bulk-insert the collected provenance rows with one array-unnest `INSERT`
-/// per [`BATCH_SIZE`] chunk.
-fn insert_provenance_rows(bundle_id: i64, rows: &ProvenanceRows) -> Result<(), CatalogError> {
+/// Bulk-insert the scalar `concept_provenance` rows, one array-unnest `INSERT`
+/// per [`BATCH_SIZE`] chunk. Epoch-second timestamps are converted to
+/// `timestamptz` with `to_timestamp` (a `NULL` epoch yields a `NULL` instant).
+fn insert_scalar_rows(bundle_id: i64, rows: &ProvenanceRows) -> Result<(), CatalogError> {
     const INSERT: &str = "
         INSERT INTO pgokf.concept_provenance
-            (bundle_id, concept_id, generated_by, verified,
-             verification_method, freshness, details)
+            (bundle_id, concept_id, generated_by, generated_at, status,
+             stale_after, usage_window_from, usage_window_to, trust_tier, details)
         SELECT
-            $1, d.concept_id, d.generated_by, d.verified,
-            d.verification_method, d.freshness, d.details::jsonb
+            $1, d.concept_id, d.generated_by,
+            pg_catalog.to_timestamp(d.generated_at), d.status,
+            pg_catalog.to_timestamp(d.stale_after),
+            pg_catalog.to_timestamp(d.usage_window_from),
+            pg_catalog.to_timestamp(d.usage_window_to),
+            d.trust_tier, d.details::jsonb
         FROM unnest(
-                 $2::text[], $3::text[], $4::boolean[],
-                 $5::text[], $6::text[], $7::text[])
-             AS d(concept_id, generated_by, verified,
-                   verification_method, freshness, details)";
+                 $2::text[], $3::text[], $4::float8[], $5::text[], $6::float8[],
+                 $7::float8[], $8::float8[], $9::text[], $10::text[])
+             AS d(concept_id, generated_by, generated_at, status, stale_after,
+                   usage_window_from, usage_window_to, trust_tier, details)";
 
-    let total = rows.concept_ids.len();
+    let total = rows.scalar_concept_ids.len();
     for start in (0..total).step_by(BATCH_SIZE) {
         let end = usize::min(start + BATCH_SIZE, total);
         Spi::run_with_args(
             INSERT,
             &[
                 bundle_id.into(),
-                rows.concept_ids[start..end].to_vec().into(),
+                rows.scalar_concept_ids[start..end].to_vec().into(),
                 rows.generated_by[start..end].to_vec().into(),
-                rows.verified[start..end].to_vec().into(),
-                rows.verification_method[start..end].to_vec().into(),
-                rows.freshness[start..end].to_vec().into(),
+                rows.generated_at[start..end].to_vec().into(),
+                rows.status[start..end].to_vec().into(),
+                rows.stale_after[start..end].to_vec().into(),
+                rows.usage_window_from[start..end].to_vec().into(),
+                rows.usage_window_to[start..end].to_vec().into(),
+                rows.trust_tier[start..end].to_vec().into(),
                 rows.details[start..end].to_vec().into(),
             ],
         )
@@ -362,25 +773,102 @@ fn insert_provenance_rows(bundle_id: i64, rows: &ProvenanceRows) -> Result<(), C
     Ok(())
 }
 
-/// Project provenance/trust/lifecycle data for every staged concept.
+/// Bulk-insert the `concept_verification` event rows, one array-unnest `INSERT`
+/// per [`BATCH_SIZE`] chunk.
+fn insert_verification_rows(bundle_id: i64, rows: &ProvenanceRows) -> Result<(), CatalogError> {
+    const INSERT: &str = "
+        INSERT INTO pgokf.concept_verification
+            (bundle_id, concept_id, ordinal, verified_by, verified_at)
+        SELECT
+            $1, d.concept_id, d.ordinal, d.verified_by,
+            pg_catalog.to_timestamp(d.verified_at)
+        FROM unnest($2::text[], $3::integer[], $4::text[], $5::float8[])
+             AS d(concept_id, ordinal, verified_by, verified_at)";
+
+    let total = rows.verification_concept_ids.len();
+    for start in (0..total).step_by(BATCH_SIZE) {
+        let end = usize::min(start + BATCH_SIZE, total);
+        Spi::run_with_args(
+            INSERT,
+            &[
+                bundle_id.into(),
+                rows.verification_concept_ids[start..end].to_vec().into(),
+                rows.verification_ordinals[start..end].to_vec().into(),
+                rows.verified_by[start..end].to_vec().into(),
+                rows.verified_at[start..end].to_vec().into(),
+            ],
+        )
+        .map_err(|error| spi_error("failed to insert concept verification", &error))?;
+    }
+    Ok(())
+}
+
+/// Bulk-insert the `concept_provenance_source` rows, one array-unnest `INSERT`
+/// per [`BATCH_SIZE`] chunk.
+fn insert_source_rows(bundle_id: i64, rows: &ProvenanceRows) -> Result<(), CatalogError> {
+    const INSERT: &str = "
+        INSERT INTO pgokf.concept_provenance_source
+            (bundle_id, concept_id, ordinal, source_id, resource, title, author,
+             usage_count, last_modified, usage_window_from, usage_window_to)
+        SELECT
+            $1, d.concept_id, d.ordinal, d.source_id, d.resource, d.title,
+            d.author, d.usage_count,
+            pg_catalog.to_timestamp(d.last_modified),
+            pg_catalog.to_timestamp(d.usage_window_from),
+            pg_catalog.to_timestamp(d.usage_window_to)
+        FROM unnest(
+                 $2::text[], $3::integer[], $4::text[], $5::text[], $6::text[],
+                 $7::text[], $8::bigint[], $9::float8[], $10::float8[], $11::float8[])
+             AS d(concept_id, ordinal, source_id, resource, title, author,
+                   usage_count, last_modified, usage_window_from, usage_window_to)";
+
+    let total = rows.source_concept_ids.len();
+    for start in (0..total).step_by(BATCH_SIZE) {
+        let end = usize::min(start + BATCH_SIZE, total);
+        Spi::run_with_args(
+            INSERT,
+            &[
+                bundle_id.into(),
+                rows.source_concept_ids[start..end].to_vec().into(),
+                rows.source_ordinals[start..end].to_vec().into(),
+                rows.source_ids[start..end].to_vec().into(),
+                rows.source_resources[start..end].to_vec().into(),
+                rows.source_titles[start..end].to_vec().into(),
+                rows.source_authors[start..end].to_vec().into(),
+                rows.source_usage_counts[start..end].to_vec().into(),
+                rows.source_last_modified[start..end].to_vec().into(),
+                rows.source_usage_window_from[start..end].to_vec().into(),
+                rows.source_usage_window_to[start..end].to_vec().into(),
+            ],
+        )
+        .map_err(|error| spi_error("failed to insert concept provenance source", &error))?;
+    }
+    Ok(())
+}
+
+/// Project OKF v0.2 provenance/trust/lifecycle data for every staged concept.
 ///
 /// Invoked inside the sync transaction after
 /// [`crate::catalog::links::project`] and before the bundle row is finalized.
-/// Every staged concept's existing provenance row is cleared, and each concept
-/// that carries recognized provenance frontmatter is re-inserted with a freshly
-/// extracted row (typed columns plus the lossless `details` payload). Concepts
-/// without such frontmatter produce no row. Both phases are set-based and
-/// chunked at [`BATCH_SIZE`], replacing the former per-concept SPI round-trips
-/// while producing byte-identical rows.
+/// Every staged concept's existing rows are cleared from all three provenance
+/// tables, and each concept that carries recognized provenance frontmatter is
+/// re-inserted: one scalar `concept_provenance` row (typed columns, derived
+/// trust tier, and the lossless `details` payload), plus one
+/// `concept_verification` row per `verified[]` event and one
+/// `concept_provenance_source` row per `sources[]` entry. Concepts without such
+/// frontmatter produce no rows. Both phases are set-based and chunked at
+/// [`BATCH_SIZE`].
 ///
 /// # Errors
 ///
-/// Returns a [`CatalogError`] on any SPI failure, aborting the surrounding
-/// sync transaction so a partial projection is never committed.
+/// Returns a [`CatalogError`] on any SPI failure, aborting the surrounding sync
+/// transaction so a partial projection is never committed.
 pub fn project(bundle_id: i64, staged: &[StagedConcept]) -> Result<(), CatalogError> {
     delete_staged_provenance(bundle_id, staged)?;
     let rows = collect_provenance_rows(staged);
-    insert_provenance_rows(bundle_id, &rows)?;
+    insert_scalar_rows(bundle_id, &rows)?;
+    insert_verification_rows(bundle_id, &rows)?;
+    insert_source_rows(bundle_id, &rows)?;
     Ok(())
 }
 
@@ -395,6 +883,16 @@ mod tests {
         let markdown = format!("---\n{frontmatter}---\n\nBody text.\n");
         parse_concept(markdown.as_bytes(), "concept.md", ParserLimits::default())
             .expect("representative fixture parses")
+    }
+
+    /// Wrap a parsed concept as a [`StagedConcept`] for the batch collectors.
+    fn stage(concept: ParsedConcept) -> StagedConcept {
+        StagedConcept {
+            concept,
+            file_hash: "hash".to_owned(),
+            modified_at_epoch: Some(1.5),
+            raw_content: None,
+        }
     }
 
     /// Sorted keys retained in a `details` payload, for order-independent
@@ -412,122 +910,290 @@ mod tests {
     }
 
     #[test]
-    fn extract_columns_maps_rich_okf_v0_2_frontmatter() {
-        // Arrange: nested `generated`, a list of `verified` records, and a
-        // lifecycle `status`, as OKF v0.2 producers ship them.
+    fn parse_iso8601_epoch_reads_a_utc_instant() {
+        // Arrange: the OKF unix epoch reference plus a known non-zero instant.
+        // Act / Assert
+        assert_eq!(parse_iso8601_epoch("1970-01-01T00:00:00Z"), Some(0.0));
+        // 2026-07-01T12:00:00Z = 1_782_907_200 seconds since the epoch.
+        assert_eq!(
+            parse_iso8601_epoch("2026-07-01T12:00:00Z"),
+            Some(1_782_907_200.0)
+        );
+    }
+
+    #[test]
+    fn parse_iso8601_epoch_applies_the_zone_offset() {
+        // Arrange: the same wall clock in UTC and in +02:00 differ by 7200s.
+        // Act
+        let utc = parse_iso8601_epoch("2026-07-01T12:00:00Z").expect("utc parses");
+        let plus_two = parse_iso8601_epoch("2026-07-01T12:00:00+02:00").expect("offset parses");
+
+        // Assert: an eastern offset is earlier in absolute time.
+        assert!((utc - plus_two - 7200.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn parse_iso8601_epoch_accepts_a_bare_date_as_utc_midnight() {
+        // Arrange / Act / Assert
+        assert_eq!(
+            parse_iso8601_epoch("2026-01-01"),
+            parse_iso8601_epoch("2026-01-01T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn parse_iso8601_epoch_keeps_fractional_seconds() {
+        // Arrange / Act
+        let epoch = parse_iso8601_epoch("1970-01-01T00:00:00.5Z").expect("fraction parses");
+
+        // Assert
+        assert!((epoch - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn parse_iso8601_epoch_rejects_calendar_invalid_instants() {
+        // Arrange: shape-valid but impossible dates and out-of-range fields must
+        // degrade to None, never throw — a NULL column, not an aborted sync.
+        // Act / Assert
+        assert_eq!(parse_iso8601_epoch("2026-02-30T00:00:00Z"), None);
+        assert_eq!(parse_iso8601_epoch("2026-13-01T00:00:00Z"), None);
+        assert_eq!(parse_iso8601_epoch("2026-07-01T25:00:00Z"), None);
+        assert_eq!(parse_iso8601_epoch("not-a-timestamp"), None);
+        assert_eq!(parse_iso8601_epoch(""), None);
+    }
+
+    #[test]
+    fn parse_iso8601_epoch_honors_leap_day() {
+        // Arrange: 2024 is a leap year, 2026 is not.
+        // Act / Assert
+        assert!(parse_iso8601_epoch("2024-02-29T00:00:00Z").is_some());
+        assert_eq!(parse_iso8601_epoch("2026-02-29T00:00:00Z"), None);
+    }
+
+    #[test]
+    fn extract_scalar_maps_full_okf_v0_2_frontmatter() {
+        // Arrange: the rich OKF v0.2 shape — nested generated, a usage_window,
+        // a lifecycle status, and a stale_after instant.
         let concept = parse(
             "type: Attested Computation\n\
              title: Monthly active accounts\n\
              status: stable\n\
+             stale_after: 2027-01-01T00:00:00Z\n\
              generated:\n  by: catalog-agent/1.0\n  at: 2026-07-01T12:00:00Z\n\
-             verified:\n  - by: process:metric-validation\n  - by: human:reviewer\n",
+             usage_window:\n  from: 2026-06-01T00:00:00Z\n  to: 2026-06-30T23:59:59Z\n",
         );
+        let events = extract_verification_events(&concept);
 
         // Act
-        let columns = extract_columns(&concept);
+        let scalar = extract_scalar(&concept, &events);
 
         // Assert
-        assert_eq!(columns.generated_by.as_deref(), Some("catalog-agent/1.0"));
-        assert_eq!(columns.verified, Some(true));
-        assert_eq!(columns.freshness.as_deref(), Some("stable"));
-        assert_eq!(columns.verification_method, None);
+        assert_eq!(scalar.generated_by.as_deref(), Some("catalog-agent/1.0"));
+        assert_eq!(
+            scalar.generated_at,
+            parse_iso8601_epoch("2026-07-01T12:00:00Z")
+        );
+        assert_eq!(scalar.status.as_deref(), Some("stable"));
+        assert_eq!(
+            scalar.stale_after,
+            parse_iso8601_epoch("2027-01-01T00:00:00Z")
+        );
+        assert_eq!(
+            scalar.usage_window_from,
+            parse_iso8601_epoch("2026-06-01T00:00:00Z")
+        );
+        assert_eq!(
+            scalar.usage_window_to,
+            parse_iso8601_epoch("2026-06-30T23:59:59Z")
+        );
     }
 
     #[test]
-    fn extract_columns_reads_scalar_producer_keys() {
-        // Arrange: flat scalar spellings of every column.
+    fn extract_scalar_tolerates_bare_producer_spellings() {
+        // Arrange: flat scalar spellings of generated.by / generated.at.
         let concept = parse(
             "type: Reference\n\
              title: Scalar provenance\n\
              generated_by: pipeline/9\n\
-             verified: true\n\
-             verification_method: sql-equality\n\
-             freshness: fresh\n",
+             generated_at: 2026-05-05T05:05:05Z\n",
         );
+        let events = extract_verification_events(&concept);
 
         // Act
-        let columns = extract_columns(&concept);
+        let scalar = extract_scalar(&concept, &events);
 
         // Assert
+        assert_eq!(scalar.generated_by.as_deref(), Some("pipeline/9"));
         assert_eq!(
-            columns,
-            ProvenanceColumns {
-                generated_by: Some("pipeline/9".to_owned()),
-                verified: Some(true),
-                verification_method: Some("sql-equality".to_owned()),
-                freshness: Some("fresh".to_owned()),
-            }
+            scalar.generated_at,
+            parse_iso8601_epoch("2026-05-05T05:05:05Z")
         );
     }
 
     #[test]
-    fn extract_columns_reads_nested_verification_method() {
-        // Arrange: `verification.method` object member.
-        let concept = parse(
-            "type: Reference\n\
-             title: Nested verification\n\
-             verification:\n  method: replayed-receipt\n",
-        );
-
-        // Act
-        let columns = extract_columns(&concept);
-
-        // Assert
-        assert_eq!(
-            columns.verification_method.as_deref(),
-            Some("replayed-receipt")
-        );
-    }
-
-    #[test]
-    fn extract_columns_is_all_none_without_provenance() {
-        // Arrange: a concept with only the required core frontmatter.
-        let concept = parse("type: Reference\ntitle: Plain concept\n");
-
-        // Act
-        let columns = extract_columns(&concept);
-
-        // Assert
-        assert_eq!(columns, ProvenanceColumns::default());
-    }
-
-    #[test]
-    fn extract_verified_treats_empty_records_as_unverified() {
-        // Arrange: an empty verification list is not a verification.
-        let concept = parse("type: Reference\ntitle: Empty verified\nverified: []\n");
-
-        // Act
-        let verified = extract_verified(&concept);
-
-        // Assert
-        assert_eq!(verified, Some(false));
-    }
-
-    #[test]
-    fn extract_columns_coerces_wrong_typed_values_without_panicking() {
-        // Arrange: `generated` as a number and `verified` as null — malformed
-        // producer data that must degrade to NULL columns, never a panic.
+    fn extract_scalar_coerces_wrong_typed_values_without_panicking() {
+        // Arrange: generated as a number, a malformed stale_after — malformed
+        // producer data that must degrade to None columns, never a panic.
         let concept = parse(
             "type: Reference\n\
              title: Malformed provenance\n\
              generated: 42\n\
-             verified: null\n\
-             freshness: []\n",
+             stale_after: soon\n\
+             status: []\n",
+        );
+        let events = extract_verification_events(&concept);
+
+        // Act
+        let scalar = extract_scalar(&concept, &events);
+
+        // Assert
+        assert_eq!(scalar.generated_by, None);
+        assert_eq!(scalar.generated_at, None);
+        assert_eq!(scalar.stale_after, None);
+        assert_eq!(scalar.status, None);
+    }
+
+    #[test]
+    fn trust_tier_is_human_reviewed_when_a_human_verifies() {
+        // Arrange: a process event followed by a human event.
+        let concept = parse(
+            "type: Reference\ntitle: Reviewed\n\
+             verified:\n  - by: process:metric-validation\n    at: 2026-07-02T02:00:00Z\n\
+             \x20\x20- by: human:fixture-reviewer\n    at: 2026-07-03T09:30:00Z\n",
         );
 
         // Act
-        let columns = extract_columns(&concept);
+        let events = extract_verification_events(&concept);
+
+        // Assert: two events, ordered, with a human present → human-reviewed.
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].verified_by, "process:metric-validation");
+        assert_eq!(events[1].verified_by, "human:fixture-reviewer");
+        assert_eq!(trust_tier(&events), "human-reviewed");
+    }
+
+    #[test]
+    fn trust_tier_is_machine_confirmed_without_a_human() {
+        // Arrange: only a non-human verifier.
+        let concept = parse(
+            "type: Reference\ntitle: Machine checked\n\
+             verified:\n  - by: process:metric-validation\n",
+        );
+
+        // Act
+        let events = extract_verification_events(&concept);
 
         // Assert
-        assert_eq!(columns.generated_by, None);
-        assert_eq!(columns.verified, None);
-        assert_eq!(columns.freshness, None);
+        assert_eq!(trust_tier(&events), "machine-confirmed");
+    }
+
+    #[test]
+    fn trust_tier_is_unverified_without_events() {
+        // Arrange: provenance present but no verification.
+        let concept = parse("type: Reference\ntitle: Unverified\nstatus: draft\n");
+
+        // Act
+        let events = extract_verification_events(&concept);
+
+        // Assert
+        assert!(events.is_empty());
+        assert_eq!(trust_tier(&events), "unverified");
+    }
+
+    #[test]
+    fn extract_verification_events_treats_a_single_mapping_as_one_event() {
+        // Arrange: OKF v0.2 says a single verified mapping is a one-element list.
+        let concept = parse(
+            "type: Reference\ntitle: Single verify\n\
+             verified:\n  by: human:solo\n  at: 2026-07-01T00:00:00Z\n",
+        );
+
+        // Act
+        let events = extract_verification_events(&concept);
+
+        // Assert
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].ordinal, 0);
+        assert_eq!(events[0].verified_by, "human:solo");
+    }
+
+    #[test]
+    fn extract_verification_events_skips_events_without_an_actor() {
+        // Arrange: the second event has no `by`; verified_by is NOT NULL, so it
+        // must be skipped, leaving its ordinal gap rather than renumbering.
+        let concept = parse(
+            "type: Reference\ntitle: Partial verify\n\
+             verified:\n  - by: process:one\n  - at: 2026-07-01T00:00:00Z\n\
+             \x20\x20- by: human:three\n",
+        );
+
+        // Act
+        let events = extract_verification_events(&concept);
+
+        // Assert: the actorless middle event is dropped; ordinals reflect source
+        // position (0 and 2), never a fabricated NULL actor.
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].ordinal, 0);
+        assert_eq!(events[1].ordinal, 2);
+        assert_eq!(events[1].verified_by, "human:three");
+    }
+
+    #[test]
+    fn extract_provenance_sources_maps_each_entry() {
+        // Arrange: two sources, the second with a per-source usage_window.
+        let concept = parse(
+            "type: Reference\ntitle: Sourced\n\
+             sources:\n\
+             \x20\x20- id: account-policy\n    resource: https://docs.example.test/p\n\
+             \x20\x20\x20\x20title: Active account policy\n    author: human:data-governance\n\
+             \x20\x20\x20\x20usage_count: 4200\n    last_modified: 2026-06-15T08:00:00Z\n\
+             \x20\x20- id: events-table\n    resource: /source-events.md\n\
+             \x20\x20\x20\x20author: process:warehouse-catalog\n    usage_count: 18000\n\
+             \x20\x20\x20\x20usage_window:\n      from: 2026-06-24T00:00:00Z\n      to: 2026-06-30T23:59:59Z\n",
+        );
+
+        // Act
+        let sources = extract_provenance_sources(&concept);
+
+        // Assert
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[0].ordinal, 0);
+        assert_eq!(sources[0].source_id.as_deref(), Some("account-policy"));
+        assert_eq!(sources[0].author.as_deref(), Some("human:data-governance"));
+        assert_eq!(sources[0].usage_count, Some(4200));
+        assert_eq!(
+            sources[0].last_modified,
+            parse_iso8601_epoch("2026-06-15T08:00:00Z")
+        );
+        assert_eq!(sources[1].usage_count, Some(18_000));
+        assert_eq!(
+            sources[1].usage_window_from,
+            parse_iso8601_epoch("2026-06-24T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn extract_provenance_sources_skips_non_object_entries() {
+        // Arrange: a bare-string source entry is not a structured material.
+        let concept = parse(
+            "type: Reference\ntitle: Loose sources\n\
+             sources:\n  - just-a-string\n  - id: real\n    resource: https://example.test\n",
+        );
+
+        // Act
+        let sources = extract_provenance_sources(&concept);
+
+        // Assert: only the object entry is materialized, keeping its source
+        // position as the ordinal.
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].ordinal, 1);
+        assert_eq!(sources[0].source_id.as_deref(), Some("real"));
     }
 
     #[test]
     fn extract_details_retains_only_provenance_keys() {
-        // Arrange: provenance keys mixed with producer-namespaced extras that
-        // belong in concept_metadata, not the provenance details.
+        // Arrange: provenance keys mixed with type-specific and producer extras
+        // that belong in concept_metadata, not the provenance details.
         let concept = parse(
             "type: Attested Computation\n\
              title: Subset retention\n\
@@ -546,12 +1212,12 @@ mod tests {
         // Act
         let details = extract_details(&concept);
 
-        // Assert
+        // Assert: only the provenance/trust/lifecycle subset survives; type-
+        // specific keys (parameters, runtime, computation) are not retained.
         assert_eq!(
             detail_keys(&details),
             vec![
                 "generated".to_owned(),
-                "parameters".to_owned(),
                 "sources".to_owned(),
                 "stale_after".to_owned(),
                 "status".to_owned(),
@@ -559,37 +1225,6 @@ mod tests {
                 "verified".to_owned(),
             ]
         );
-    }
-
-    /// Wrap a parsed concept as a [`StagedConcept`] for the batch collectors.
-    fn stage(concept: ParsedConcept) -> StagedConcept {
-        StagedConcept {
-            concept,
-            file_hash: "hash".to_owned(),
-            modified_at_epoch: Some(1.5),
-            raw_content: None,
-        }
-    }
-
-    #[test]
-    fn collect_provenance_rows_emits_a_row_only_for_provenance_bearing_concepts() {
-        // Arrange: one concept with provenance frontmatter, one without.
-        let staged = vec![
-            stage(parse(
-                "type: Reference\ntitle: With provenance\ngenerated_by: pipeline/9\n",
-            )),
-            stage(parse("type: Reference\ntitle: Plain concept\n")),
-        ];
-
-        // Act
-        let rows = collect_provenance_rows(&staged);
-
-        // Assert: the plain concept is skipped (sparse projection), and the
-        // provenance-bearing one's typed column and JSON details are marshalled.
-        assert_eq!(rows.concept_ids, vec!["concept".to_owned()]);
-        assert_eq!(rows.generated_by, vec![Some("pipeline/9".to_owned())]);
-        assert_eq!(rows.details.len(), 1);
-        assert_eq!(rows.details[0], "{\"generated_by\":\"pipeline/9\"}");
     }
 
     #[test]
@@ -605,29 +1240,55 @@ mod tests {
     }
 
     #[test]
-    fn extract_details_preserves_nested_source_structure_losslessly() {
-        // Arrange: a structured source entry must survive verbatim.
-        let concept = parse(
-            "type: Reference\n\
-             title: Lossless sources\n\
-             sources:\n  - id: events-table\n    usage_count: 18000\n",
-        );
+    fn collect_provenance_rows_is_sparse_and_populates_child_rows() {
+        // Arrange: one rich concept, one plain concept.
+        let staged = vec![
+            stage(parse(
+                "type: Attested Computation\ntitle: Rich\n\
+                 status: stable\n\
+                 generated:\n  by: catalog-agent/1.0\n  at: 2026-07-01T12:00:00Z\n\
+                 verified:\n  - by: process:metric-validation\n    at: 2026-07-02T02:00:00Z\n\
+                 \x20\x20- by: human:fixture-reviewer\n    at: 2026-07-03T09:30:00Z\n\
+                 sources:\n  - id: account-policy\n    resource: https://docs.example.test/p\n\
+                 \x20\x20- id: events-table\n    resource: /source-events.md\n",
+            )),
+            stage(parse("type: Reference\ntitle: Plain\n")),
+        ];
 
         // Act
-        let details = extract_details(&concept);
+        let rows = collect_provenance_rows(&staged);
 
-        // Assert
-        let source = details
-            .0
-            .as_object()
-            .and_then(|object| object.get("sources"))
-            .and_then(|value| value.as_array())
-            .and_then(|records| records.first())
-            .and_then(|value| value.as_object())
-            .expect("first source entry is an object");
-        let id = source.get("id").expect("source id present");
-        assert_eq!(id.as_str(), Some("events-table"));
-        let usage_count = source.get("usage_count").expect("usage_count present");
-        assert_eq!(usage_count.as_u64(), Some(18_000));
+        // Assert: only the rich concept produces a scalar row, with two
+        // verification events and two provenance sources.
+        assert_eq!(rows.scalar_concept_ids, vec!["concept".to_owned()]);
+        assert_eq!(
+            rows.generated_by,
+            vec![Some("catalog-agent/1.0".to_owned())]
+        );
+        assert_eq!(rows.trust_tier, vec!["human-reviewed".to_owned()]);
+        assert_eq!(rows.verification_concept_ids.len(), 2);
+        assert_eq!(
+            rows.verified_by,
+            vec![
+                "process:metric-validation".to_owned(),
+                "human:fixture-reviewer".to_owned(),
+            ]
+        );
+        assert_eq!(rows.source_concept_ids.len(), 2);
+        assert_eq!(rows.source_ordinals, vec![0, 1]);
+    }
+
+    #[test]
+    fn collect_provenance_rows_skips_concepts_without_provenance() {
+        // Arrange: only core frontmatter, no provenance keys.
+        let staged = vec![stage(parse("type: Reference\ntitle: Plain concept\n"))];
+
+        // Act
+        let rows = collect_provenance_rows(&staged);
+
+        // Assert: no scalar row and no child rows.
+        assert!(rows.scalar_concept_ids.is_empty());
+        assert!(rows.verification_concept_ids.is_empty());
+        assert!(rows.source_concept_ids.is_empty());
     }
 }
