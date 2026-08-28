@@ -38,7 +38,12 @@ exercised against a live PostgreSQL 18 cluster.
 | `set_bundle_enabled(bundle_id, enabled)` | `bundle_info` | VOLATILE | DEFINER | `pgokf_writer` |
 | `list_bundles()` | `SETOF bundle_info` | STABLE | invoker | `pgokf_reader` |
 | `bundle_info(bundle_id)` | `bundle_info` | STABLE | invoker | `pgokf_reader` |
-| `concept_search(query, bundle_id, limit_count)` | `SETOF concept_search_result` | STABLE | invoker | `pgokf_reader` |
+| `concept_search(query, bundle_id, limit_count, concept_type, tags, status, trust_tier)` | `SETOF concept_search_result` | STABLE | invoker | `pgokf_reader` |
+| `find_similar(concept_id, bundle_id, limit_count)` | `SETOF concept_search_result` | STABLE | invoker | `pgokf_reader` |
+| `concept_search_semantic(query_embedding, bundle_id, limit_count)` | `SETOF concept_search_result` | STABLE | invoker | `pgokf_reader` |
+| `concept_search_hybrid(query, query_embedding, bundle_id, limit_count)` | `SETOF concept_search_result` | STABLE | invoker | `pgokf_reader` |
+| `set_concept_embedding(bundle_id, concept_id, embedding)` | `void` | VOLATILE | DEFINER | `pgokf_writer` |
+| `rebuild_embedding_index()` | `boolean` | VOLATILE | DEFINER | `pgokf_admin` |
 | `concept_neighbors(concept_id, max_hops, bundle_id)` | `SETOF concept_neighbor` | STABLE | invoker | `pgokf_reader` |
 | `set_config(key, value)` | `void` | VOLATILE | DEFINER | `pgokf_admin` |
 | `reset_config(key)` | `void` | VOLATILE | DEFINER | `pgokf_admin` |
@@ -52,11 +57,14 @@ exercised against a live PostgreSQL 18 cluster.
 | `get_concept_source(bundle_id, concept_id)` | `bytea` | STABLE | invoker | `pgokf_reader` |
 | `export_sources(bundle_id, dest_dir)` | `export_result` | VOLATILE | DEFINER | `pgokf_admin` |
 
-`register_bundle`, `concept_search`, `concept_neighbors`, `reset_config`,
-`list_sync_log`, and `stale_concepts` accept `NULL`-defaulting arguments and are
-therefore **not** declared `STRICT`; every other function — including
-`list_bundles`, `bundle_info`, `catalog_stats`, and `health`, which take no
-`NULL`-defaulting argument — is `STRICT`. `concept_search`, `concept_neighbors`,
+`register_bundle`, `concept_search`, `find_similar`,
+`concept_search_semantic`, `concept_search_hybrid`, `concept_neighbors`,
+`reset_config`, `list_sync_log`, and `stale_concepts` accept `NULL`-defaulting
+arguments and are therefore **not** declared `STRICT`; every other function —
+including `list_bundles`, `bundle_info`, `catalog_stats`, `health`,
+`set_concept_embedding`, and `rebuild_embedding_index`, which take no
+`NULL`-defaulting argument — is `STRICT`. `concept_search`, `find_similar`,
+`concept_search_semantic`, `concept_search_hybrid`, `concept_neighbors`,
 `catalog_stats`, and `stale_concepts` are also `PARALLEL SAFE`.
 
 The `register_bundle` / `refresh_bundle` / `unregister_bundle` /
@@ -236,17 +244,27 @@ SELECT id, file_count, last_synced_at FROM pgokf.bundle_info(1);
 
 ## Search
 
-### `pgokf.concept_search(query text, bundle_id bigint DEFAULT NULL, limit_count int DEFAULT 20) → SETOF pgokf.concept_search_result`
+### `pgokf.concept_search(query text, bundle_id bigint DEFAULT NULL, limit_count int DEFAULT 20, concept_type text DEFAULT NULL, tags text[] DEFAULT NULL, status text DEFAULT NULL, trust_tier text DEFAULT NULL) → SETOF pgokf.concept_search_result`
 
 Rank catalog concepts against a `websearch_to_tsquery` query over the weighted
-`body_tsv` column. `STABLE PARALLEL SAFE`, invoker rights, **requires
-`pgokf_reader`**.
+`body_tsv` column, with optional structured filters. `STABLE PARALLEL SAFE`,
+invoker rights, **requires `pgokf_reader`**.
 
 | Parameter | Type | Default | Meaning |
 | --------- | ---- | ------- | ------- |
 | `query` | `text` | — | Free-text query; must contain a non-whitespace character (`22023` otherwise). |
 | `bundle_id` | `bigint` | `NULL` | Scope the search to one bundle; `NULL` searches all enabled bundles. |
 | `limit_count` | `int` | `20` | Maximum hits; must be in `1..=500` (`22023` otherwise). |
+| `concept_type` | `text` | `NULL` | Keep only hits whose `type` equals this exactly. `NULL` = no filter. |
+| `tags` | `text[]` | `NULL` | Keep only hits whose `tags` contain **every** listed tag (ALL-of, `tags @> filter`). `NULL` or empty = no filter. |
+| `status` | `text` | `NULL` | Keep only hits whose `concept_provenance.status` equals this. `NULL` = no filter. |
+| `trust_tier` | `text` | `NULL` | Keep only hits whose derived `concept_provenance.trust_tier` equals this (`unverified` / `machine-confirmed` / `human-reviewed`). `NULL` = no filter. |
+
+> **Backward compatible.** The four trailing filters are optional and each a
+> no-op when `NULL`, so the historical `concept_search(query, bundle_id,
+> limit_count)` call is unchanged. Concepts with no `concept_provenance` row have
+> a `NULL` `status`/`trust_tier` and are therefore excluded by a non-`NULL`
+> `status`/`trust_tier` filter.
 
 Details:
 
@@ -293,6 +311,99 @@ JOIN pgokf.concepts AS c
 WHERE c.type = 'Runbook'
 ORDER BY s.rank DESC, s.concept_id ASC;
 ```
+
+### `pgokf.find_similar(concept_id text, bundle_id bigint DEFAULT NULL, limit_count int DEFAULT 10) → SETOF pgokf.concept_search_result`
+
+Content "more-like-this": rank the concepts whose body content is most similar to
+a seed concept. `STABLE PARALLEL SAFE`, invoker rights, **requires
+`pgokf_reader`**. This is distinct from `concept_neighbors`, which walks the
+authored link graph — `find_similar` looks at what a concept *says*, not what it
+*links to*.
+
+| Parameter | Type | Default | Meaning |
+| --------- | ---- | ------- | ------- |
+| `concept_id` | `text` | — | The seed concept's id. If it exists in more than one bundle and `bundle_id` is `NULL`, the call raises `22023`; pass `bundle_id` to disambiguate. |
+| `bundle_id` | `bigint` | `NULL` | Bundle scope for the seed. |
+| `limit_count` | `int` | `10` | Maximum similar concepts; must be in `1..=500`. |
+
+It extracts the seed's most salient `body_tsv` lexemes (highest term
+frequencies), runs them as an `OR` query through the configured `search_backend`
+(native FTS or BM25), and excludes the seed itself. Results are
+`concept_search_result` rows ordered by relevance.
+
+```sql
+SELECT concept_id, round(rank::numeric, 4) AS rank
+FROM pgokf.find_similar('runbooks/database-failover');
+```
+
+---
+
+## Semantic and hybrid search (optional, pgvector)
+
+These surfaces rank by **embedding similarity** and require the external
+[`pgvector`](https://github.com/pgvector/pgvector) extension. Like the optional
+BM25 backend, `pgokf` takes **no static dependency** on it: `CREATE EXTENSION
+pgokf` succeeds without pgvector, embeddings are stored as the builtin `real[]`
+in `pgokf.concept_embedding`, and the `vector` type is used only at query and
+index time. `pgokf` never computes embeddings — a companion embedder streams
+caller-computed vectors in via `set_concept_embedding` (see
+[search-guide.md](search-guide.md)).
+
+### `pgokf.set_concept_embedding(bundle_id bigint, concept_id text, embedding real[]) → void`
+
+Store or replace one concept's embedding. `STRICT`, `SECURITY DEFINER`,
+**requires `pgokf_writer`**. Validates that the concept exists and that
+`length(embedding)` equals the durable `embedding_dim` config key (`22023`
+otherwise), then upserts into `pgokf.concept_embedding`.
+
+```sql
+SELECT pgokf.set_concept_embedding(1, 'runbooks/database-failover',
+                                   ARRAY[0.0123, -0.0456, ...]::real[]);
+```
+
+### `pgokf.concept_search_semantic(query_embedding real[], bundle_id bigint DEFAULT NULL, limit_count int DEFAULT 10) → SETOF pgokf.concept_search_result`
+
+Nearest-neighbor search by pgvector cosine distance (`<=>`). `STABLE PARALLEL
+SAFE`, invoker rights, **requires `pgokf_reader`**. The `rank` column is the
+normalized cosine similarity (`1 - distance`, `1.0` for an identical vector); the
+`headline` column is `NULL`. `query_embedding` must have `embedding_dim`
+dimensions.
+
+**Requires pgvector.** Because semantic search has no lexical equivalent, when
+pgvector is not installed this raises `22023` naming the missing dependency
+(`CREATE EXTENSION vector`) rather than silently returning nothing. Only enabled
+bundles are searched.
+
+```sql
+SELECT concept_id, round(rank::numeric, 4) AS cosine_similarity
+FROM pgokf.concept_search_semantic(ARRAY[0.0123, -0.0456, ...]::real[]);
+```
+
+### `pgokf.concept_search_hybrid(query text, query_embedding real[], bundle_id bigint DEFAULT NULL, limit_count int DEFAULT 10) → SETOF pgokf.concept_search_result`
+
+Fuse the **lexical** result of `query` (through the configured `search_backend`)
+with the **semantic** result of `query_embedding` using **Reciprocal Rank
+Fusion** (RRF, k = 60), entirely in SQL. `STABLE PARALLEL SAFE`, invoker rights,
+**requires `pgokf_reader`**. The `rank` column is the fused RRF score; a concept
+strong in *both* lists outranks one strong in only one. When pgvector is not
+installed, hybrid **degrades to lexical-only** with a `WARNING` (RRF needs no
+model, so this fallback is sensible — unlike pure semantic search).
+
+```sql
+SELECT concept_id, round(rank::numeric, 6) AS rrf
+FROM pgokf.concept_search_hybrid('database failover',
+                                 ARRAY[0.0123, -0.0456, ...]::real[]);
+```
+
+### `pgokf.rebuild_embedding_index() → boolean`
+
+(Re)build the pgvector HNSW cosine index on `pgokf.concept_embedding` for the
+configured `embedding_dim`. `STRICT`, `SECURITY DEFINER`, **requires
+`pgokf_admin`**. Mirrors `rebuild_search_index`: returns `true` when built, or
+`false` (with a `NOTICE`) when pgvector is absent or `embedding_dim` exceeds
+pgvector's 2000-dimension HNSW limit (semantic search then uses an exact scan).
+Run it after enabling pgvector, after bulk-loading embeddings, or after changing
+`embedding_dim`.
 
 ---
 
@@ -377,6 +488,7 @@ SELECT jsonb_pretty(pgokf.get_config());
 --     "default_exclude": [],
 --     "search_backend": "native",
 --     "okf_version_policy": "warn",
+--     "embedding_dim": 1536,
 --     "sync_log_retention_days": 30,
 --     "default_text_search_config": "pg_catalog.english"
 -- }
@@ -881,6 +993,28 @@ SELECT concept_id, byte_size FROM pgokf.concept_source
 WHERE bundle_id = 1 ORDER BY concept_id;
 ```
 
+### `pgokf.concept_embedding`
+
+Opt-in per-concept embedding vectors, populated by `pgokf.set_concept_embedding`.
+Reader-`SELECT`able. The vector is stored as the builtin **`real[]`** — never a
+pgvector `vector` column — so `CREATE EXTENSION pgokf` succeeds without pgvector;
+it is cast to `vector(dim)` at query and index time only when pgvector is
+present.
+
+| Column | Type | Notes |
+| ------ | ---- | ----- |
+| `bundle_id` | `bigint` | `NOT NULL`, part of FK to `pgokf.concepts`. |
+| `concept_id` | `text` | `NOT NULL`, part of FK to `pgokf.concepts`. |
+| `embedding` | `real[]` | `NOT NULL` — the caller-computed vector; length must equal `embedding_dim` at ingest. |
+| `dim` | `integer` | `NOT NULL`, constrained equal to `cardinality(embedding)`. |
+| `model` | `text` | Optional embedding-model/producer identifier for provenance. |
+| `updated_at` | `timestamptz` | `NOT NULL DEFAULT now()` — when the row was last written. |
+
+Primary key `(bundle_id, concept_id)`; FK to `pgokf.concepts` `ON DELETE
+CASCADE`, so removing a concept or unregistering a bundle drops its embedding
+automatically. Build the HNSW search index with `pgokf.rebuild_embedding_index`;
+query with `pgokf.concept_search_semantic` / `pgokf.concept_search_hybrid`.
+
 ### `pgokf_private.config`
 
 Cluster-persistent policy: a single row, managed only through `set_config` /
@@ -899,6 +1033,7 @@ Cluster-persistent policy: a single row, managed only through `set_config` /
 | `search_backend` | `text` | `'native'` (`CHECK IN ('native','bm25')`) |
 | `notify_channel` | `text` | `''` (empty disables) |
 | `okf_version_policy` | `text` | `'warn'` (`CHECK IN ('warn','reject')`) |
+| `embedding_dim` | `integer` | `1536` (`CHECK BETWEEN 1 AND 16000`) |
 
 ### `pgokf_private.sync_log`
 

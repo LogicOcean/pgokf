@@ -191,6 +191,40 @@ The dictionary is the `default_text_search_config` policy key — see
 
 Both were captured live. `22023` is `invalid_parameter_value`.
 
+### Structured filters (built in)
+
+`concept_search` takes four optional trailing filters, each a no-op when `NULL`,
+so the ranked hit set can be narrowed without a separate join. They are applied
+as parameter-bound `AND` clauses inside the ranking query (reusing the `type`,
+`tags`, and provenance indexes), so ranking still happens over the *filtered*
+set:
+
+```sql
+pgokf.concept_search(
+    query        text,
+    bundle_id    bigint  DEFAULT NULL,
+    limit_count  int     DEFAULT 20,
+    concept_type text    DEFAULT NULL,  -- exact type match
+    tags         text[]  DEFAULT NULL,  -- ALL-of: hit must carry every listed tag
+    status       text    DEFAULT NULL,  -- concept_provenance.status
+    trust_tier   text    DEFAULT NULL   -- concept_provenance.trust_tier
+) RETURNS SETOF pgokf.concept_search_result
+```
+
+```sql
+-- broad query, narrowed to human-reviewed runbooks tagged both 'payments' and 'oncall'
+SELECT concept_id, round(rank::numeric, 4) AS rank
+FROM pgokf.concept_search(
+        'payments restart', NULL, 20,
+        'Runbook', ARRAY['payments','oncall'], NULL, 'human-reviewed');
+```
+
+The tag filter is **ALL-of** (`tags @> filter`): a hit must carry *every* listed
+tag. `status` and `trust_tier` match the concept's `pgokf.concept_provenance`
+row, so a concept with no provenance frontmatter (no provenance row) is excluded
+by a non-`NULL` `status`/`trust_tier` filter. The historical three-argument call
+is unchanged.
+
 ---
 
 ## Selective vs. broad queries
@@ -535,6 +569,104 @@ broad relevance ranking, native for dictionary-faithful matching.
 
 Keep broad queries fast on native, when you are not on BM25, with the
 [pre-filter-then-rank pattern](#the-pattern-pre-filter-then-rank) above.
+
+---
+
+## Content similarity: `pgokf.find_similar`
+
+`find_similar(concept_id, bundle_id, limit_count)` answers "what else reads like
+this one?" — content similarity, **not** the authored link graph
+(`concept_neighbors`). It extracts the seed concept's most salient `body_tsv`
+lexemes (highest term frequencies), runs them as an `OR` query through the
+configured `search_backend` (native FTS or BM25), and excludes the seed itself.
+
+```sql
+SELECT concept_id, round(rank::numeric, 4) AS rank
+FROM pgokf.find_similar('runbooks/database-failover');
+```
+
+Because it dispatches through the same backend seam as `concept_search`, turning
+on the BM25 backend makes `find_similar` a BM25 more-like-this automatically. If
+the seed id exists in more than one bundle, pass `bundle_id` to disambiguate
+(otherwise `22023`).
+
+---
+
+## Semantic and hybrid search (optional, pgvector)
+
+For "find things that *mean* the same" — where the words differ but the meaning
+matches — `pgokf` offers an optional **semantic** surface backed by
+[`pgvector`](https://github.com/pgvector/pgvector), and a **hybrid** surface that
+fuses lexical and semantic ranking. Both are opt-in and, exactly like the BM25
+backend, add **no static dependency**: `CREATE EXTENSION pgokf` succeeds without
+pgvector, and the `pgokf.concept_embedding` table stores vectors as the builtin
+`real[]`, cast to `vector` only at query and index time.
+
+### The embedding companion (how vectors get in)
+
+`pgokf` **never computes embeddings and never does network I/O.** Embeddings are
+produced by *your* embedder — the same mountless-companion pattern as
+[`pgokf-ingest`](https://github.com/LogicOcean/pgokf/tree/main/crates/pgokf-ingest):
+a process you run computes each concept's vector (from its `body_text`, which you
+can read with `pgokf.get_concept_source` or from your own source of truth) and
+streams it in as `pgokf_writer`:
+
+```sql
+-- one row per concept, from your embedder
+SELECT pgokf.set_concept_embedding(1, 'runbooks/database-failover',
+                                   ARRAY[0.0123, -0.0456, ...]::real[]);
+```
+
+Set `embedding_dim` to match your model first (default `1536`):
+
+```sql
+SELECT pgokf.set_config('embedding_dim', '768'::jsonb);   -- admin
+```
+
+`set_concept_embedding` rejects any vector whose length differs from
+`embedding_dim` (`22023`). After a bulk load, build the ANN index:
+
+```sql
+SELECT pgokf.rebuild_embedding_index();   -- admin; pgvector HNSW cosine
+```
+
+### Semantic search
+
+```sql
+-- query_embedding is your query text run through the SAME embedder
+SELECT concept_id, round(rank::numeric, 4) AS cosine_similarity
+FROM pgokf.concept_search_semantic(ARRAY[0.0201, -0.0388, ...]::real[]);
+```
+
+The `rank` column is the normalized cosine similarity (`1.0` for an identical
+vector). **Semantic search requires pgvector**: because it has no lexical
+equivalent, it raises `22023` naming the missing dependency (`CREATE EXTENSION
+vector`) when pgvector is absent — never a silent empty result.
+
+### Hybrid search (RRF)
+
+Hybrid fuses the lexical result of a text `query` (through the configured
+`search_backend`) with the semantic result of a `query_embedding`, using
+**Reciprocal Rank Fusion** (RRF, k = 60), entirely in SQL — no model is involved
+in the fusion itself:
+
+```sql
+SELECT concept_id, round(rank::numeric, 6) AS rrf
+FROM pgokf.concept_search_hybrid('database failover',
+                                 ARRAY[0.0201, -0.0388, ...]::real[]);
+```
+
+RRF sums `1 / (60 + rank)` across the two lists, so a concept that ranks well in
+*both* the lexical and semantic lists outranks one strong in only one — the
+common case where a query is strong lexically *and* semantically. When pgvector
+is absent, hybrid **degrades to lexical-only with a `WARNING`** (unlike pure
+semantic search, a lexical-only answer is still sensible).
+
+> **Which surface when?** Use `concept_search` (optionally with BM25) for keyword
+> and filtered search; `find_similar` for "more like this document";
+> `concept_search_semantic` for meaning-based recall where wording differs; and
+> `concept_search_hybrid` when you want the best of lexical precision and semantic
+> recall in one ranked list.
 
 ---
 

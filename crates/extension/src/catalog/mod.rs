@@ -20,6 +20,13 @@
 //! - [`search_backend`] — the `SearchBackend` Strategy seam: the native FTS
 //!   backend (default) and the optional `ParadeDB` `pg_search` BM25 adapter
 //!   reached only through runtime SPI, plus `pgokf.rebuild_search_index`.
+//! - [`similar`] — `pgokf.find_similar`, content more-like-this over the seed's
+//!   `body_tsv` dispatched through the same `SearchBackend` seam.
+//! - [`embedding`] — the optional pgvector semantic/hybrid surface
+//!   (`pgokf.concept_embedding`, `set_concept_embedding`,
+//!   `concept_search_semantic`, `concept_search_hybrid`,
+//!   `rebuild_embedding_index`), reached only through runtime SQL and storing
+//!   the vector as `real[]` so `CREATE EXTENSION` needs no pgvector.
 //!
 //! Feature-extension stubs, each to be filled by a later wave without
 //! touching [`sync`]:
@@ -48,6 +55,7 @@ pub mod audit;
 mod batch;
 pub mod config;
 pub mod content;
+pub mod embedding;
 pub mod export;
 pub mod links;
 pub mod neighbors;
@@ -55,6 +63,7 @@ pub mod provenance;
 pub mod schema;
 pub mod search;
 pub mod search_backend;
+pub mod similar;
 pub mod source;
 pub(crate) mod spi_read;
 pub mod stats;

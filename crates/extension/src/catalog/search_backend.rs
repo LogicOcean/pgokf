@@ -39,6 +39,7 @@
 use std::path::Path;
 
 use pgrx::Spi;
+use pgrx::datum::DatumWithOid;
 use pgrx::spi::SpiTupleTable;
 
 use crate::catalog::spi_read::RowReader;
@@ -85,6 +86,18 @@ pub struct SearchRequest<'a> {
     /// Effective text-search configuration name for query parsing and
     /// `ts_headline` snippet generation.
     pub text_search_config: &'a str,
+    /// Optional exact `concept.type` filter; `None` is a no-op.
+    pub concept_type: Option<&'a str>,
+    /// Optional tag filter with **ALL-of** semantics: a hit's `concepts.tags`
+    /// must contain every listed tag (`tags @> $filter`). `None` (or empty) is
+    /// a no-op.
+    pub tags: Option<&'a [String]>,
+    /// Optional OKF lifecycle `status` filter, matched against
+    /// `concept_provenance.status`; `None` is a no-op.
+    pub status: Option<&'a str>,
+    /// Optional derived `trust_tier` filter, matched against
+    /// `concept_provenance.trust_tier`; `None` is a no-op.
+    pub trust_tier: Option<&'a str>,
 }
 
 /// A ranked-search execution strategy.
@@ -120,6 +133,29 @@ pub fn select(configured: &str) -> Box<dyn SearchBackend> {
 
 fn spi_error(context: &'static str) -> impl Fn(pgrx::spi::Error) -> CatalogError {
     move |error| CatalogError::internal(format!("{context}: {error}"), Path::new(""))
+}
+
+/// Bind one [`SearchRequest`] to the eight positional parameters both backend
+/// queries share (`$1`..`$8`), so the native and BM25 strategies stay in lockstep
+/// on argument order and the structured-filter binding lives in one place.
+///
+/// A `NULL`-typed parameter still carries its column type OID (pgrx supplies it
+/// from the Rust type), so a `NULL` filter binds as a correctly typed `NULL` and
+/// its `$n IS NULL OR ...` guard short-circuits. An empty `tags` slice is treated
+/// as no filter — `Some([])` would otherwise bind `'{}'::text[]`, which every
+/// non-NULL `tags` array contains but a `NULL` `tags` column does not, silently
+/// dropping untagged concepts — so the caller normalizes it to `None` upstream.
+fn bind_search_args<'a>(request: &'a SearchRequest) -> [DatumWithOid<'a>; 8] {
+    [
+        request.query.into(),
+        request.bundle_id.into(),
+        request.limit.into(),
+        request.text_search_config.into(),
+        request.concept_type.into(),
+        request.tags.map(<[String]>::to_vec).into(),
+        request.status.into(),
+        request.trust_tier.into(),
+    ]
 }
 
 /// Read the shared `pgokf.concept_search_result`-shaped rows from a `SPI`
@@ -158,6 +194,16 @@ pub struct NativeBackend;
 
 // `ts_rank_cd` takes no configuration; the regconfig `$4` drives both
 // `websearch_to_tsquery` and `ts_headline`.
+//
+// The structured filters bind as $5..$8 and each is a no-op when its bound
+// value is NULL (`$n IS NULL OR ...`), so the three-argument and filtered calls
+// share one plan. `concept_type` matches `c.type` ($5), `tags` matches with
+// ALL-of containment against the `tags` GIN index ($6 as `c.tags @> $6`), and
+// `status`/`trust_tier` ($7/$8) match the `LEFT JOIN`ed provenance row (a
+// concept with no provenance row has NULL status/tier and is excluded by a
+// non-NULL filter, as intended). The LEFT JOIN never multiplies rows —
+// `concept_provenance`'s primary key is `(bundle_id, concept_id)` — so an
+// all-NULL-filter call returns exactly what it did before.
 const NATIVE_QUERY: &str = "
     SELECT c.bundle_id,
            c.id,
@@ -170,10 +216,16 @@ const NATIVE_QUERY: &str = "
                pg_catalog.concat_ws(' ', c.title, c.description, c.body_text),
                q.query)
     FROM pgokf.concepts c
-    JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled,
+    JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled
+    LEFT JOIN pgokf.concept_provenance cp
+           ON cp.bundle_id = c.bundle_id AND cp.concept_id = c.id,
          pg_catalog.websearch_to_tsquery($4::pg_catalog.regconfig, $1) AS q(query)
     WHERE c.body_tsv @@ q.query
       AND ($2 IS NULL OR c.bundle_id = $2)
+      AND ($5 IS NULL OR c.type = $5)
+      AND ($6 IS NULL OR c.tags @> $6)
+      AND ($7 IS NULL OR cp.status = $7)
+      AND ($8 IS NULL OR cp.trust_tier = $8)
     ORDER BY pg_catalog.ts_rank_cd(c.body_tsv, q.query) DESC, c.id ASC
     LIMIT $3";
 
@@ -181,16 +233,7 @@ impl SearchBackend for NativeBackend {
     fn search(&self, request: &SearchRequest) -> Result<Vec<SearchHit>, CatalogError> {
         Spi::connect(|client| {
             let table = client
-                .select(
-                    NATIVE_QUERY,
-                    None,
-                    &[
-                        request.query.into(),
-                        request.bundle_id.into(),
-                        request.limit.into(),
-                        request.text_search_config.into(),
-                    ],
-                )
+                .select(NATIVE_QUERY, None, &bind_search_args(request))
                 .map_err(spi_error("native search query failed"))?;
             read_hits(table)
         })
@@ -234,11 +277,17 @@ const BM25_QUERY: &str = "
                pg_catalog.websearch_to_tsquery($4::pg_catalog.regconfig, $1))
     FROM pgokf.concepts c
     JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled
+    LEFT JOIN pgokf.concept_provenance cp
+           ON cp.bundle_id = c.bundle_id AND cp.concept_id = c.id
     WHERE c.id @@@ paradedb.boolean(should => ARRAY[
               paradedb.match('title', $1),
               paradedb.match('description', $1),
               paradedb.match('body_text', $1)])
       AND ($2 IS NULL OR c.bundle_id = $2)
+      AND ($5 IS NULL OR c.type = $5)
+      AND ($6 IS NULL OR c.tags @> $6)
+      AND ($7 IS NULL OR cp.status = $7)
+      AND ($8 IS NULL OR cp.trust_tier = $8)
     ORDER BY paradedb.score(c) DESC, c.id ASC
     LIMIT $3";
 
@@ -253,16 +302,7 @@ impl Bm25Backend {
     fn run_bm25(request: &SearchRequest) -> Result<Vec<SearchHit>, CatalogError> {
         Spi::connect(|client| {
             let table = client
-                .select(
-                    BM25_QUERY,
-                    None,
-                    &[
-                        request.query.into(),
-                        request.bundle_id.into(),
-                        request.limit.into(),
-                        request.text_search_config.into(),
-                    ],
-                )
+                .select(BM25_QUERY, None, &bind_search_args(request))
                 .map_err(spi_error("bm25 search query failed"))?;
             read_hits(table)
         })

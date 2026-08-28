@@ -70,6 +70,10 @@ enum ConfigKey {
     /// How sync treats a declared-but-unsupported bundle `okf_version`
     /// (`warn` or `reject`).
     OkfVersionPolicy,
+    /// Expected dimension of caller-supplied concept embeddings; governs the
+    /// `set_concept_embedding` length check and the `rebuild_embedding_index`
+    /// HNSW index typmod.
+    EmbeddingDim,
 }
 
 impl ConfigKey {
@@ -85,6 +89,7 @@ impl ConfigKey {
             Self::SearchBackend => "search_backend",
             Self::NotifyChannel => "notify_channel",
             Self::OkfVersionPolicy => "okf_version_policy",
+            Self::EmbeddingDim => "embedding_dim",
         }
     }
 
@@ -101,6 +106,7 @@ impl ConfigKey {
             "search_backend" => Ok(Self::SearchBackend),
             "notify_channel" => Ok(Self::NotifyChannel),
             "okf_version_policy" => Ok(Self::OkfVersionPolicy),
+            "embedding_dim" => Ok(Self::EmbeddingDim),
             other => Err(CatalogError::invalid_parameter(
                 format!("unknown configuration key: {other}"),
                 Path::new(""),
@@ -121,6 +127,7 @@ enum ConfigValue {
     SearchBackend(String),
     NotifyChannel(String),
     OkfVersionPolicy(String),
+    EmbeddingDim(i32),
 }
 
 /// The two accepted values of the `okf_version_policy` key.
@@ -131,6 +138,14 @@ const OKF_VERSION_POLICY_REJECT: &str = "reject";
 /// capped at 63 bytes (`NAMEDATALEN - 1`); a channel name is validated to the
 /// same bound so it names a legal, un-truncated `LISTEN`/`NOTIFY` channel.
 const MAX_NOTIFY_CHANNEL_LEN: usize = 63;
+
+/// Inclusive bounds accepted for `embedding_dim`. The upper bound is pgvector's
+/// hard `vector` dimension ceiling (16000); embeddings up to that dimension can
+/// be stored and searched exactly, while `rebuild_embedding_index` only builds
+/// an HNSW index up to pgvector's index limit (2000 dims) and emits a NOTICE
+/// above it (semantic search then falls back to an exact scan).
+const MIN_EMBEDDING_DIM: i64 = 1;
+const MAX_EMBEDDING_DIM: i64 = 16_000;
 
 fn spi_error(context: &str, error: &pgrx::spi::Error) -> CatalogError {
     CatalogError::internal(format!("{context}: {error}"), Path::new(""))
@@ -274,6 +289,33 @@ fn validate_okf_version_policy(policy: &str) -> Result<(), CatalogError> {
     }
 }
 
+/// Validate `embedding_dim`: an integer within [`MIN_EMBEDDING_DIM`]..=
+/// [`MAX_EMBEDDING_DIM`], representable as the `integer` column that stores it.
+fn validate_embedding_dim(dim: i64) -> Result<i32, CatalogError> {
+    if !(MIN_EMBEDDING_DIM..=MAX_EMBEDDING_DIM).contains(&dim) {
+        return Err(CatalogError::invalid_parameter(
+            format!(
+                "embedding_dim must be between {MIN_EMBEDDING_DIM} and {MAX_EMBEDDING_DIM}, got {dim}"
+            ),
+            Path::new(""),
+        ));
+    }
+    // The bounds already fit an i32, so this conversion cannot fail.
+    i32::try_from(dim).map_err(|_| {
+        CatalogError::invalid_parameter(
+            format!("embedding_dim is out of range: {dim}"),
+            Path::new(""),
+        )
+    })
+}
+
+/// Coerce the `embedding_dim` integer key.
+fn coerce_embedding_dim(value: pgrx::JsonB, key: ConfigKey) -> Result<ConfigValue, CatalogError> {
+    let json = value.0;
+    let raw = json.as_i64().ok_or_else(|| type_error(key, "an integer"))?;
+    Ok(ConfigValue::EmbeddingDim(validate_embedding_dim(raw)?))
+}
+
 /// Read a `jsonb` value as an array of strings, or the shared shape error for
 /// `key`. Consumes the wrapper (moving out its inner value) and never names
 /// `serde_json`: shape inspection goes through the inherent accessors.
@@ -385,6 +427,7 @@ fn coerce(key: ConfigKey, value: pgrx::JsonB) -> Result<ConfigValue, CatalogErro
             validate_okf_version_policy,
             ConfigValue::OkfVersionPolicy,
         ),
+        ConfigKey::EmbeddingDim => coerce_embedding_dim(value, key),
     }
 }
 
@@ -472,6 +515,10 @@ fn persist(value: &ConfigValue) -> Result<(), CatalogError> {
             "UPDATE pgokf_private.config SET okf_version_policy = $1 WHERE singleton",
             &[policy.clone().into()],
         ),
+        ConfigValue::EmbeddingDim(dim) => Spi::run_with_args(
+            "UPDATE pgokf_private.config SET embedding_dim = $1 WHERE singleton",
+            &[(*dim).into()],
+        ),
     }
     .map_err(|error| spi_error("failed to persist configuration", &error))
 }
@@ -506,6 +553,9 @@ fn reset_key(key: ConfigKey) -> Result<(), CatalogError> {
         ConfigKey::OkfVersionPolicy => {
             "UPDATE pgokf_private.config SET okf_version_policy = DEFAULT WHERE singleton"
         }
+        ConfigKey::EmbeddingDim => {
+            "UPDATE pgokf_private.config SET embedding_dim = DEFAULT WHERE singleton"
+        }
     };
     Spi::run(statement).map_err(|error| spi_error("failed to reset configuration key", &error))
 }
@@ -522,7 +572,8 @@ fn reset_all() -> Result<(), CatalogError> {
              store_source = DEFAULT, \
              search_backend = DEFAULT, \
              notify_channel = DEFAULT, \
-             okf_version_policy = DEFAULT \
+             okf_version_policy = DEFAULT, \
+             embedding_dim = DEFAULT \
          WHERE singleton",
     )
     .map_err(|error| spi_error("failed to reset configuration", &error))
@@ -558,7 +609,8 @@ fn get_config_impl() -> Result<pgrx::JsonB, CatalogError> {
              'store_source', pg_catalog.to_jsonb(store_source),
              'search_backend', pg_catalog.to_jsonb(search_backend),
              'notify_channel', pg_catalog.to_jsonb(notify_channel),
-             'okf_version_policy', pg_catalog.to_jsonb(okf_version_policy))
+             'okf_version_policy', pg_catalog.to_jsonb(okf_version_policy),
+             'embedding_dim', pg_catalog.to_jsonb(embedding_dim))
          FROM pgokf_private.config
          WHERE singleton",
     )
@@ -620,6 +672,24 @@ pub fn sync_log_retention_days() -> Result<i32, CatalogError> {
     Spi::get_one::<i32>("SELECT sync_log_retention_days FROM pgokf_private.config WHERE singleton")
         .map_err(|error| spi_error("failed to read sync_log_retention_days", &error))?
         .ok_or_else(|| CatalogError::internal("sync_log_retention_days is missing", Path::new("")))
+}
+
+/// The durable expected embedding dimension.
+///
+/// Read from the singleton config row for the embedding-ingestion and
+/// index-build paths (`set_concept_embedding`, `rebuild_embedding_index`), which
+/// run `SECURITY DEFINER` and hold privileges on the admin-only config table.
+/// Reader-level search callers cannot read the table directly and instead obtain
+/// the value through the `pgokf.get_config` projection.
+///
+/// # Errors
+///
+/// Returns a [`CatalogError`] when the configuration row cannot be read or is
+/// missing.
+pub fn embedding_dim() -> Result<i32, CatalogError> {
+    Spi::get_one::<i32>("SELECT embedding_dim FROM pgokf_private.config WHERE singleton")
+        .map_err(|error| spi_error("failed to read embedding_dim", &error))?
+        .ok_or_else(|| CatalogError::internal("embedding_dim is missing", Path::new("")))
 }
 
 /// The durable, sync-time defaults consumed by the register/refresh engine.
@@ -738,10 +808,12 @@ CREATE TABLE pgokf_private.config (
     search_backend             text    NOT NULL DEFAULT 'native',
     notify_channel             text    NOT NULL DEFAULT '',
     okf_version_policy         text    NOT NULL DEFAULT 'warn',
+    embedding_dim              integer NOT NULL DEFAULT 1536,
     CONSTRAINT config_singleton_chk CHECK (singleton),
     CONSTRAINT config_retention_nonneg_chk CHECK (sync_log_retention_days >= 0),
     CONSTRAINT config_search_backend_chk CHECK (search_backend IN ('native', 'bm25')),
-    CONSTRAINT config_okf_version_policy_chk CHECK (okf_version_policy IN ('warn', 'reject'))
+    CONSTRAINT config_okf_version_policy_chk CHECK (okf_version_policy IN ('warn', 'reject')),
+    CONSTRAINT config_embedding_dim_chk CHECK (embedding_dim BETWEEN 1 AND 16000)
 );
 
 INSERT INTO pgokf_private.config DEFAULT VALUES;
@@ -768,6 +840,8 @@ COMMENT ON COLUMN pgokf_private.config.notify_channel IS
     'LISTEN/NOTIFY channel that a successful sync (register/refresh/register_bundle_content) announces on with a JSON payload {bundle_id, op, added, updated, removed, total}. Empty (the default) disables notification, with zero overhead. A non-empty value must be a safe channel identifier (letters, digits, underscore; leading letter or underscore; <= 63 bytes).';
 COMMENT ON COLUMN pgokf_private.config.okf_version_policy IS
     'How sync treats a bundle-root index.md that declares an okf_version this build does not support (only 0.2 / 0.2.x is supported): ''warn'' (the default) logs a WARNING and indexes anyway, ''reject'' aborts the sync with 22023. An absent okf_version is always accepted and leaves pgokf.bundles.okf_version NULL.';
+COMMENT ON COLUMN pgokf_private.config.embedding_dim IS
+    'Expected dimension (1..=16000) of the caller-computed concept embeddings streamed in via pgokf.set_concept_embedding: the setter rejects any real[] whose length differs, and pgokf.rebuild_embedding_index builds its pgvector HNSW index with this typmod (vector(embedding_dim)). Default 1536. The extension never computes embeddings; a change is not retroactive to already-stored rows and should be followed by re-ingestion and pgokf.rebuild_embedding_index. HNSW indexing applies only up to pgvector''s 2000-dimension index limit; above it semantic search still works via an exact scan.';
 ",
     name = "config_table",
     requires = ["catalog_tables"]
@@ -788,9 +862,10 @@ mod pgokf {
     /// `sync_log_retention_days`, and a string for
     /// `default_text_search_config` (any installed configuration),
     /// `search_backend` (`native` or `bm25`), `notify_channel` (a safe
-    /// `LISTEN`/`NOTIFY` identifier, or empty to disable), and
-    /// `okf_version_policy` (`warn` or `reject`). Unknown keys and wrong-shaped
-    /// or out-of-domain values raise SQLSTATE `22023`.
+    /// `LISTEN`/`NOTIFY` identifier, or empty to disable),
+    /// `okf_version_policy` (`warn` or `reject`), and an integer for
+    /// `sync_log_retention_days` and `embedding_dim` (1..=16000). Unknown keys
+    /// and wrong-shaped or out-of-domain values raise SQLSTATE `22023`.
     #[pg_extern(requires = ["config_table"])]
     fn set_config(key: &str, value: pgrx::JsonB) {
         set_config_impl(key, value).unwrap_or_else(|error| error.raise());
@@ -870,6 +945,7 @@ mod tests {
             ("search_backend", ConfigKey::SearchBackend),
             ("notify_channel", ConfigKey::NotifyChannel),
             ("okf_version_policy", ConfigKey::OkfVersionPolicy),
+            ("embedding_dim", ConfigKey::EmbeddingDim),
         ];
 
         for (name, key) in expected {
@@ -1061,6 +1137,34 @@ mod tests {
         // Assert
         assert_eq!(error.sqlstate(), "22023");
         assert!(error.message().contains("ignore"));
+    }
+
+    #[test]
+    fn validate_embedding_dim_accepts_in_range_values() {
+        // Arrange / Act / Assert: the default, the lower bound, and the upper
+        // bound all coerce cleanly.
+        assert_eq!(
+            validate_embedding_dim(1536).expect("default is valid"),
+            1536
+        );
+        assert_eq!(validate_embedding_dim(1).expect("lower bound is valid"), 1);
+        assert_eq!(
+            validate_embedding_dim(16_000).expect("upper bound is valid"),
+            16_000
+        );
+    }
+
+    #[test]
+    fn validate_embedding_dim_rejects_out_of_range_values() {
+        // Arrange: zero, negative, and past the pgvector ceiling.
+        for invalid in [0_i64, -1, 16_001, i64::from(i32::MAX)] {
+            // Act
+            let error =
+                validate_embedding_dim(invalid).expect_err("out-of-range dims must be rejected");
+
+            // Assert
+            assert_eq!(error.sqlstate(), "22023");
+        }
     }
 
     #[test]

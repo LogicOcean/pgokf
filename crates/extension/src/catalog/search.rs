@@ -89,7 +89,7 @@ fn spi_error(context: &'static str) -> impl Fn(pgrx::spi::Error) -> CatalogError
 /// the effective value through the reader-granted `SECURITY DEFINER`
 /// `pgokf.get_config` function, so query parsing uses the very configuration
 /// that indexed the rows.
-fn effective_text_search_config() -> Result<String, CatalogError> {
+pub(crate) fn effective_text_search_config() -> Result<String, CatalogError> {
     Spi::get_one::<String>("SELECT pgokf.get_config() ->> 'default_text_search_config'")
         .map_err(spi_error("failed to read text search configuration"))?
         .ok_or_else(|| {
@@ -106,7 +106,7 @@ fn effective_text_search_config() -> Result<String, CatalogError> {
 /// `SECURITY DEFINER` `pgokf.get_config` projection, because `concept_search`
 /// runs with invoker rights and cannot read the administrator-only
 /// `pgokf_private.config` table directly.
-fn effective_search_backend() -> Result<String, CatalogError> {
+pub(crate) fn effective_search_backend() -> Result<String, CatalogError> {
     Spi::get_one::<String>("SELECT pgokf.get_config() ->> 'search_backend'")
         .map_err(spi_error("failed to read search backend configuration"))?
         .ok_or_else(|| {
@@ -117,23 +117,68 @@ fn effective_search_backend() -> Result<String, CatalogError> {
         })
 }
 
-fn concept_search_impl(
+/// The validated, borrow-ready structured filters for one `concept_search`
+/// call. An empty `tags` slice is normalized to `None` by [`Filters::new`] so it
+/// binds as no filter rather than `'{}'::text[]`.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Filters<'a> {
+    pub concept_type: Option<&'a str>,
+    pub tags: Option<&'a [String]>,
+    pub status: Option<&'a str>,
+    pub trust_tier: Option<&'a str>,
+}
+
+impl<'a> Filters<'a> {
+    /// Build the filter set, treating an empty `tags` slice as no tag filter
+    /// (`tags @> '{}'` matches every non-NULL `tags` array but excludes untagged
+    /// concepts, so an empty request must be a true no-op).
+    pub(crate) fn new(
+        concept_type: Option<&'a str>,
+        tags: Option<&'a [String]>,
+        status: Option<&'a str>,
+        trust_tier: Option<&'a str>,
+    ) -> Self {
+        Self {
+            concept_type,
+            tags: tags.filter(|slice| !slice.is_empty()),
+            status,
+            trust_tier,
+        }
+    }
+}
+
+/// Authorize, validate, and dispatch one ranked search through the configured
+/// backend. Shared by `concept_search` and the hybrid fusion path.
+pub(crate) fn run_ranked_search(
     query: &str,
     bundle_id: Option<i64>,
-    limit_count: i32,
+    limit: i64,
+    filters: Filters,
 ) -> Result<Vec<SearchHit>, CatalogError> {
-    security::authorize_current_user(security::Operation::Search, Path::new(""))?;
-    validate_query(query)?;
-    let limit = validate_limit_count(limit_count)?;
     let text_search_config = effective_text_search_config()?;
     let backend = search_backend::select(&effective_search_backend()?);
-
     backend.search(&SearchRequest {
         query,
         bundle_id,
         limit,
         text_search_config: &text_search_config,
+        concept_type: filters.concept_type,
+        tags: filters.tags,
+        status: filters.status,
+        trust_tier: filters.trust_tier,
     })
+}
+
+fn concept_search_impl(
+    query: &str,
+    bundle_id: Option<i64>,
+    limit_count: i32,
+    filters: Filters,
+) -> Result<Vec<SearchHit>, CatalogError> {
+    security::authorize_current_user(security::Operation::Search, Path::new(""))?;
+    validate_query(query)?;
+    let limit = validate_limit_count(limit_count)?;
+    run_ranked_search(query, bundle_id, limit, filters)
 }
 
 /// SQL-facing search entry point, installed into the `pgokf` schema.
@@ -142,28 +187,44 @@ mod pgokf {
     use pgrx::iter::SetOfIterator;
     use pgrx::{default, extension_sql, pg_extern};
 
-    use super::concept_search_impl;
+    use super::{Filters, concept_search_impl};
     use crate::catalog::types;
 
-    /// Rank catalog concepts against a search query.
+    /// Rank catalog concepts against a search query, with optional structured
+    /// filters.
     ///
     /// Requires membership in `pgokf_reader` (or `pgokf_admin`). Searches
     /// only enabled bundles; pass `bundle_id` to scope the search to one
     /// bundle. `limit_count` must lie in `1..=500` (SQLSTATE `22023`
     /// otherwise).
     ///
+    /// The four trailing filters are each a no-op when `NULL` (the default), so
+    /// the historical three-argument call is unchanged: `concept_type` matches
+    /// the concept type exactly, `tags` matches with **ALL-of** containment (a
+    /// hit must carry every listed tag), and `status` / `trust_tier` match the
+    /// OKF lifecycle status and derived trust tier from `concept_provenance`.
+    ///
     /// The ranking backend follows the durable `search_backend` configuration
     /// key: `native` `PostgreSQL` FTS by default, or `ParadeDB` `pg_search`
     /// BM25 when set to `bm25` (which falls back to native, with a warning, if
     /// `pg_search` or its index is absent). The result shape is identical
     /// either way.
-    #[pg_extern(stable, parallel_safe, requires = ["catalog_tables"])]
+    // `tags` is a `Vec<String>` because that is the SQL `text[]` boundary type;
+    // it is only borrowed (`as_deref`) into the filter set, so pass-by-value is
+    // inherent to the pgrx signature rather than a smell.
+    #[allow(clippy::needless_pass_by_value)]
+    #[pg_extern(stable, parallel_safe, requires = ["catalog_tables", "provenance_table"])]
     fn concept_search(
         query: &str,
         bundle_id: default!(Option<i64>, "NULL"),
         limit_count: default!(i32, 20),
+        concept_type: default!(Option<&str>, "NULL"),
+        tags: default!(Option<Vec<String>>, "NULL"),
+        status: default!(Option<&str>, "NULL"),
+        trust_tier: default!(Option<&str>, "NULL"),
     ) -> SetOfIterator<'static, pgrx::composite_type!('static, "pgokf.concept_search_result")> {
-        let hits = concept_search_impl(query, bundle_id, limit_count)
+        let filters = Filters::new(concept_type, tags.as_deref(), status, trust_tier);
+        let hits = concept_search_impl(query, bundle_id, limit_count, filters)
             .unwrap_or_else(|error| error.raise());
         let rows: Vec<_> = hits
             .into_iter()
@@ -174,10 +235,10 @@ mod pgokf {
 
     extension_sql!(
         r"
-REVOKE ALL ON FUNCTION pgokf.concept_search(text, bigint, integer) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION pgokf.concept_search(text, bigint, integer) TO pgokf_reader;
-COMMENT ON FUNCTION pgokf.concept_search(text, bigint, integer) IS
-    'Rank catalog concepts. Reader-level; searches enabled bundles only. Uses the search_backend configuration: native full-text search (websearch_to_tsquery + ts_rank_cd) by default, or ParadeDB pg_search BM25 when set to bm25 (falling back to native if pg_search or its index is absent).';
+REVOKE ALL ON FUNCTION pgokf.concept_search(text, bigint, integer, text, text[], text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pgokf.concept_search(text, bigint, integer, text, text[], text, text) TO pgokf_reader;
+COMMENT ON FUNCTION pgokf.concept_search(text, bigint, integer, text, text[], text, text) IS
+    'Rank catalog concepts. Reader-level; searches enabled bundles only. Optional trailing filters (each a no-op when NULL): concept_type (exact type), tags (ALL-of containment), status and trust_tier (from concept_provenance). Uses the search_backend configuration: native full-text search (websearch_to_tsquery + ts_rank_cd) by default, or ParadeDB pg_search BM25 when set to bm25 (falling back to native if pg_search or its index is absent).';
 ",
         name = "search_function_hardening",
         requires = [concept_search]
@@ -228,5 +289,33 @@ mod tests {
     fn validate_query_accepts_normal_text() {
         // Arrange & Act & Assert
         assert!(validate_query("postgres indexing").is_ok());
+    }
+
+    #[test]
+    fn filters_new_normalizes_an_empty_tag_slice_to_no_filter() {
+        // Arrange: an empty tags slice must not become `tags @> '{}'` (which
+        // would exclude untagged concepts); it is a true no-op instead.
+        let empty: Vec<String> = Vec::new();
+
+        // Act
+        let filters = Filters::new(None, Some(&empty), None, None);
+
+        // Assert
+        assert!(filters.tags.is_none(), "an empty tag filter is dropped");
+    }
+
+    #[test]
+    fn filters_new_keeps_a_non_empty_tag_slice() {
+        // Arrange
+        let tags = vec!["widgets".to_owned()];
+
+        // Act
+        let filters = Filters::new(Some("Reference"), Some(&tags), Some("stable"), None);
+
+        // Assert
+        assert_eq!(filters.concept_type, Some("Reference"));
+        assert_eq!(filters.tags.map(<[String]>::len), Some(1));
+        assert_eq!(filters.status, Some("stable"));
+        assert_eq!(filters.trust_tier, None);
     }
 }

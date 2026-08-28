@@ -1187,7 +1187,7 @@ The gamma concept is introduced during the refresh cycle.\n";
         // an existing install can be stepped up to this release.
         let upgrade_script = manifest_dir
             .join("sql")
-            .join(format!("pgokf--0.1.4--{crate_version}.sql"));
+            .join(format!("pgokf--0.1.5--{crate_version}.sql"));
         let metadata =
             fs::metadata(&upgrade_script).expect("the current upgrade script ships on disk");
         assert!(
@@ -1932,6 +1932,371 @@ An added concept for the resync diff.\n";
         assert_eq!(
             sqlstate, "22023",
             "the reject policy aborts a bundle with an unsupported okf_version",
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // 0.1.6 S1: structured filters on concept_search (backward compatible).
+    // ---------------------------------------------------------------------
+
+    #[pg_test]
+    fn concept_search_structured_filters_are_backward_compatible_and_additive() {
+        // Arrange: the two-concept fixture. alpha is type Reference, tags
+        // [widgets, indexing], and carries provenance (status stable, derived
+        // trust_tier unverified); beta is tags [widgets] with no provenance.
+        // Both match the term 'widgets' (alpha in body, beta via its tag/title,
+        // which are weighted into body_tsv).
+        let bundle = FixtureBundle::create();
+        let _bundle_id = register_fixture(&bundle);
+
+        // The historical three-argument call is unchanged: both concepts match.
+        let unfiltered =
+            Spi::get_one::<i64>("SELECT count(*) FROM pgokf.concept_search('widgets')")
+                .expect("unfiltered search executes")
+                .expect("count is not NULL");
+        assert_eq!(unfiltered, 2, "the 3-arg call still matches both concepts");
+
+        // concept_type filter: both are Reference, so the type filter keeps both;
+        // a non-matching type keeps none.
+        let reference = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgokf.concept_search('widgets', NULL, 20, 'Reference')",
+        )
+        .expect("type-filtered search executes")
+        .expect("count is not NULL");
+        assert_eq!(reference, 2, "type=Reference keeps both Reference concepts");
+        let wrong_type = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgokf.concept_search('widgets', NULL, 20, 'Runbook')",
+        )
+        .expect("wrong-type search executes")
+        .expect("count is not NULL");
+        assert_eq!(wrong_type, 0, "a non-matching type filter returns nothing");
+
+        // tags filter is ALL-of: only alpha carries the 'indexing' tag.
+        let indexing = Spi::get_one::<String>(
+            "SELECT concept_id FROM pgokf.concept_search(
+                 'widgets', NULL, 20, NULL, ARRAY['indexing']::text[]) LIMIT 1",
+        )
+        .expect("tag-filtered search executes")
+        .expect("alpha carries the indexing tag");
+        assert_eq!(indexing, "alpha", "the indexing tag filter selects alpha");
+        let all_of = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgokf.concept_search(
+                 'widgets', NULL, 20, NULL, ARRAY['widgets','indexing']::text[])",
+        )
+        .expect("ALL-of tag search executes")
+        .expect("count is not NULL");
+        assert_eq!(all_of, 1, "ALL-of tags requires every tag (only alpha)");
+
+        // status filter: alpha's provenance status is stable; beta has no
+        // provenance row, so a status filter excludes it.
+        let stable = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgokf.concept_search('widgets', NULL, 20, NULL, NULL, 'stable')",
+        )
+        .expect("status-filtered search executes")
+        .expect("count is not NULL");
+        assert_eq!(
+            stable, 1,
+            "status=stable selects only the provenance-bearing alpha"
+        );
+
+        // trust_tier filter: alpha derives 'unverified' (provenance, no verified
+        // events); the filter selects it and excludes the provenance-less beta.
+        let unverified = Spi::get_one::<String>(
+            "SELECT concept_id FROM pgokf.concept_search(
+                 'widgets', NULL, 20, NULL, NULL, NULL, 'unverified') LIMIT 1",
+        )
+        .expect("trust-tier-filtered search executes")
+        .expect("alpha derives the unverified tier");
+        assert_eq!(unverified, "alpha", "trust_tier=unverified selects alpha");
+    }
+
+    // ---------------------------------------------------------------------
+    // 0.1.6 S2: find_similar content more-like-this.
+    // ---------------------------------------------------------------------
+
+    #[pg_test]
+    fn find_similar_ranks_content_neighbors_and_excludes_the_seed() {
+        // Arrange: alpha and beta share salient vocabulary (concept, companion,
+        // widget), so beta is alpha's content neighbor.
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+
+        // Act: find concepts similar to alpha.
+        let similar = Spi::get_one_with_args::<String>(
+            "SELECT concept_id FROM pgokf.find_similar('alpha', $1) LIMIT 1",
+            &[bundle_id.into()],
+        )
+        .expect("find_similar executes")
+        .expect("alpha has a content neighbor");
+
+        // Assert: beta surfaces, and the seed alpha is excluded from its own
+        // more-like-this result.
+        assert_eq!(similar, "beta", "beta is alpha's nearest content neighbor");
+        let includes_seed = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.find_similar('alpha', $1) WHERE concept_id = 'alpha'",
+            &[bundle_id.into()],
+        )
+        .expect("seed-exclusion query executes")
+        .expect("count is not NULL");
+        assert_eq!(includes_seed, 0, "find_similar excludes the seed concept");
+    }
+
+    // ---------------------------------------------------------------------
+    // 0.1.6 S3: optional pgvector semantic + hybrid search.
+    //
+    // These tests use tiny, deterministic synthetic embeddings (embedding_dim
+    // lowered to 4) so the vector path is provable with no model. The semantic
+    // and hybrid tests are guarded to run only when the pgvector extension is
+    // installable on the test cluster; the smoke test proves pgokf takes no
+    // static dependency on it.
+    // ---------------------------------------------------------------------
+
+    /// Whether the `vector` extension can be created on this cluster.
+    fn pgvector_available() -> bool {
+        Spi::get_one::<i64>(
+            "SELECT count(*) FROM pg_catalog.pg_available_extensions WHERE name = 'vector'",
+        )
+        .expect("available-extensions query executes")
+        .expect("count is not NULL")
+            > 0
+    }
+
+    #[pg_test]
+    fn semantic_search_raises_a_clear_error_without_pgvector() {
+        // Arrange: this test asserts the no-pgvector behavior, so only run the
+        // negative assertion when pgvector is genuinely absent from the session.
+        let installed = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pg_catalog.pg_extension WHERE extname = 'vector'",
+        )
+        .expect("pg_extension probe executes")
+        .expect("count is not NULL");
+        if installed > 0 {
+            return;
+        }
+        Spi::run(
+            "CREATE FUNCTION pg_temp.semantic_sqlstate() RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.concept_search_semantic(ARRAY[1,0,0,0]::real[]);
+                 RETURN 'no-error';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("semantic probe is creatable");
+
+        // Act
+        let sqlstate = Spi::get_one::<String>("SELECT pg_temp.semantic_sqlstate()")
+            .expect("semantic probe executes")
+            .expect("the probe reports a SQLSTATE");
+
+        // Assert: semantic search names the missing dependency (22023), never a
+        // silent empty result — it has no lexical fallback.
+        assert_eq!(
+            sqlstate, "22023",
+            "concept_search_semantic must raise 22023 when pgvector is absent",
+        );
+    }
+
+    #[pg_test]
+    fn hybrid_search_degrades_to_lexical_without_pgvector() {
+        // Arrange: with pgvector absent, hybrid must still return the lexical
+        // result (degrading with a warning), never error.
+        let installed = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pg_catalog.pg_extension WHERE extname = 'vector'",
+        )
+        .expect("pg_extension probe executes")
+        .expect("count is not NULL");
+        if installed > 0 {
+            return;
+        }
+        let bundle = FixtureBundle::create();
+        let _bundle_id = register_fixture(&bundle);
+
+        // Act: a hybrid query whose lexical side matches alpha, with an ignored
+        // embedding (pgvector absent).
+        let hit = Spi::get_one::<String>(
+            "SELECT concept_id FROM pgokf.concept_search_hybrid('peregrine', ARRAY[1,0,0,0]::real[])
+             LIMIT 1",
+        )
+        .expect("hybrid search executes")
+        .expect("the lexical side matches alpha");
+
+        // Assert: the lexical result survives the degradation.
+        assert_eq!(hit, "alpha", "hybrid degrades to lexical-only alpha match");
+    }
+
+    #[pg_test]
+    fn semantic_and_hybrid_search_rank_by_synthetic_embeddings() {
+        // Arrange: only meaningful where pgvector is installable.
+        if !pgvector_available() {
+            return;
+        }
+        Spi::run("CREATE EXTENSION IF NOT EXISTS vector").expect("pgvector is creatable");
+        // Tiny deterministic embeddings keep the vector path provable with no
+        // model.
+        Spi::run("SELECT pgokf.set_config('embedding_dim', '4'::jsonb)")
+            .expect("embedding_dim is configurable");
+
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+
+        // alpha points along axis 1, beta along axis 2 — orthogonal unit vectors.
+        Spi::run_with_args(
+            "SELECT pgokf.set_concept_embedding($1, 'alpha', ARRAY[1,0,0,0]::real[])",
+            &[bundle_id.into()],
+        )
+        .expect("alpha embedding is settable");
+        Spi::run_with_args(
+            "SELECT pgokf.set_concept_embedding($1, 'beta', ARRAY[0,1,0,0]::real[])",
+            &[bundle_id.into()],
+        )
+        .expect("beta embedding is settable");
+
+        // The HNSW index builds for the small dimension.
+        let built = Spi::get_one::<bool>("SELECT pgokf.rebuild_embedding_index()")
+            .expect("rebuild_embedding_index executes")
+            .expect("result is not NULL");
+        assert!(built, "the HNSW index builds when pgvector is present");
+
+        // Act/Assert: a query vector near axis 1 ranks alpha first by cosine.
+        let nearest = Spi::get_one::<String>(
+            "SELECT concept_id FROM pgokf.concept_search_semantic(ARRAY[0.9,0.1,0,0]::real[])
+             LIMIT 1",
+        )
+        .expect("semantic search executes")
+        .expect("a nearest concept exists");
+        assert_eq!(
+            nearest, "alpha",
+            "the axis-1 query vector is nearest to alpha"
+        );
+
+        // A normalized cosine-similarity score is returned as rank.
+        let score = Spi::get_one::<f32>(
+            "SELECT rank FROM pgokf.concept_search_semantic(ARRAY[1,0,0,0]::real[])
+             WHERE concept_id = 'alpha'",
+        )
+        .expect("semantic score query executes")
+        .expect("alpha carries a similarity score");
+        assert!(
+            (score - 1.0).abs() < 1e-4,
+            "an identical query vector scores ~1.0 cosine similarity, got {score}",
+        );
+
+        // Hybrid: a query strong lexically (peregrine → alpha) AND semantically
+        // (axis-1 vector → alpha) ranks alpha first via RRF.
+        let fused = Spi::get_one::<String>(
+            "SELECT concept_id FROM pgokf.concept_search_hybrid(
+                 'peregrine', ARRAY[0.9,0.1,0,0]::real[]) LIMIT 1",
+        )
+        .expect("hybrid search executes")
+        .expect("a fused top result exists");
+        assert_eq!(
+            fused, "alpha",
+            "RRF fuses lexical+semantic to rank alpha first"
+        );
+    }
+
+    #[pg_test]
+    fn set_concept_embedding_validates_dimension_and_concept() {
+        // Arrange: embedding_dim lowered to 4; a real bundle for a valid concept.
+        Spi::run("SELECT pgokf.set_config('embedding_dim', '4'::jsonb)")
+            .expect("embedding_dim is configurable");
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        Spi::run(
+            "CREATE FUNCTION pg_temp.set_embedding_sqlstate(bid bigint, cid text, dims int)
+                 RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             DECLARE
+                 v real[];
+             BEGIN
+                 SELECT array_agg(1.0::real) INTO v FROM generate_series(1, dims);
+                 PERFORM pgokf.set_concept_embedding(bid, cid, v);
+                 RETURN 'ok';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("embedding probe is creatable");
+
+        // Act/Assert: a correctly-sized vector for an existing concept succeeds.
+        let ok = Spi::get_one_with_args::<String>(
+            "SELECT pg_temp.set_embedding_sqlstate($1, 'alpha', 4)",
+            &[bundle_id.into()],
+        )
+        .expect("valid embedding probe executes")
+        .expect("probe reports an outcome");
+        assert_eq!(
+            ok, "ok",
+            "a 4-dim vector for an existing concept is accepted"
+        );
+
+        // A wrong dimension is rejected with 22023.
+        let wrong_dim = Spi::get_one_with_args::<String>(
+            "SELECT pg_temp.set_embedding_sqlstate($1, 'alpha', 8)",
+            &[bundle_id.into()],
+        )
+        .expect("wrong-dim probe executes")
+        .expect("probe reports a SQLSTATE");
+        assert_eq!(
+            wrong_dim, "22023",
+            "a dimension mismatch is rejected with 22023"
+        );
+
+        // An unknown concept is rejected with 22023.
+        let unknown = Spi::get_one_with_args::<String>(
+            "SELECT pg_temp.set_embedding_sqlstate($1, 'ghost', 4)",
+            &[bundle_id.into()],
+        )
+        .expect("unknown-concept probe executes")
+        .expect("probe reports a SQLSTATE");
+        assert_eq!(
+            unknown, "22023",
+            "an unknown concept is rejected with 22023"
+        );
+    }
+
+    #[pg_test]
+    fn set_concept_embedding_denies_a_reader_role() {
+        // Arrange: a role granted only pgokf_reader.
+        Spi::run("SELECT pgokf.set_config('embedding_dim', '4'::jsonb)")
+            .expect("embedding_dim is configurable");
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        Spi::run("CREATE ROLE pgokf_embed_reader").expect("reader role is creatable");
+        Spi::run("GRANT pgokf_reader TO pgokf_embed_reader").expect("reader role is grantable");
+        Spi::run(
+            "CREATE FUNCTION pg_temp.embed_denied_sqlstate(bid bigint) RETURNS text
+             LANGUAGE plpgsql
+             SET role TO pgokf_embed_reader
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.set_concept_embedding(bid, 'alpha', ARRAY[1,0,0,0]::real[]);
+                 RETURN 'not-denied';
+             EXCEPTION WHEN insufficient_privilege THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("embedding authz probe is creatable");
+
+        // Act
+        let sqlstate = Spi::get_one_with_args::<String>(
+            "SELECT pg_temp.embed_denied_sqlstate($1)",
+            &[bundle_id.into()],
+        )
+        .expect("embedding authz probe executes")
+        .expect("the probe reports a SQLSTATE");
+
+        // Assert: a plain reader is denied the writer-tier setter with 42501.
+        assert_eq!(
+            sqlstate, "42501",
+            "a reader role must be denied set_concept_embedding with 42501",
         );
     }
 }

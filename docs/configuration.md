@@ -85,6 +85,7 @@ admin-only).
 | `search_backend` | string | `"native"` | one of `"native"`, `"bm25"` |
 | `notify_channel` | string | `""` | empty (disabled) or a safe channel identifier (letters, digits, underscore; leading letter/underscore; ≤ 63 bytes) |
 | `okf_version_policy` | string | `"warn"` | one of `"warn"`, `"reject"` |
+| `embedding_dim` | integer | `1536` | between `1` and `16000` |
 
 ### Which keys the current engine consults
 
@@ -103,6 +104,7 @@ querying, **honors `store_source`** and `search_backend`, and — new in 0.1.5 �
 | `sync_log_retention_days` | **Applied (new in 0.1.5).** After each successful sync appends its `pgokf_private.sync_log` audit row, history older than `now() - this many days` is pruned in the same transaction. `0` (or no older rows) keeps history indefinitely. See the audit-log section below. |
 | `notify_channel` | **Applied (new in 0.1.5).** When non-empty, a successful sync emits `pg_notify(<channel>, <json>)`; empty (default) disables it with zero overhead. See the change-notification section below. |
 | `okf_version_policy` | **Applied (new in 0.1.5).** Governs how sync treats a bundle that declares an unsupported OKF `okf_version`: `warn` (default) logs a `WARNING` and indexes anyway, `reject` aborts with `22023`. See the version-policy section below. |
+| `embedding_dim` | **Applied (new in 0.1.6).** The expected length of caller-supplied embeddings: `pgokf.set_concept_embedding` rejects any `real[]` whose length differs, and `pgokf.rebuild_embedding_index` builds its pgvector HNSW index with the `vector(embedding_dim)` typmod. See the embeddings section below. |
 | `default_strict` | **Stored, not yet consulted.** Sync is always strict — the first malformed file aborts the sync. |
 | `default_exclude` | **Stored, not yet consulted.** Discovery does not yet apply these exclusion globs. |
 
@@ -184,6 +186,33 @@ the tokenizer differences between the two backends.
 > `shared_preload_libraries` entry). If you cannot or do not want that
 > dependency, stay on `native`.
 
+### Embedding dimension — `embedding_dim`
+
+`embedding_dim` (default `1536`) is the expected length of the caller-computed
+embedding vectors streamed in through `pgokf.set_concept_embedding`, and the
+typmod (`vector(embedding_dim)`) that `pgokf.rebuild_embedding_index` builds its
+pgvector HNSW index with.
+
+```sql
+-- match your embedding model (e.g. a 768-dim model)
+SELECT pgokf.set_config('embedding_dim', '768'::jsonb);
+```
+
+`pgokf` **never computes embeddings** and takes **no static dependency on
+pgvector** — the `pgokf.concept_embedding` table stores each vector as the
+builtin `real[]`, so `CREATE EXTENSION pgokf` succeeds on a cluster without
+pgvector. The optional semantic (`concept_search_semantic`) and hybrid
+(`concept_search_hybrid`) surfaces cast that `real[]` to `vector(embedding_dim)`
+only at query time, and only when pgvector is installed. See
+[`search-guide.md`](search-guide.md) for the embedding-companion integration and
+the full semantic/hybrid walkthrough.
+
+> **Not retroactive.** Changing `embedding_dim` does not rewrite already-stored
+> embeddings; re-ingest them at the new dimension and re-run
+> `pgokf.rebuild_embedding_index()`. HNSW indexing applies up to pgvector's
+> 2000-dimension index limit; above it semantic search still works via an exact
+> scan.
+
 ### Audit-log retention — `sync_log_retention_days`
 
 Every successful `register` / `refresh` / `register_bundle_content` sync, and
@@ -254,6 +283,7 @@ SELECT jsonb_pretty(pgokf.get_config());
 --     "default_strict": true,
 --     "default_exclude": [],
 --     "okf_version_policy": "warn",
+--     "embedding_dim": 1536,
 --     "sync_log_retention_days": 30,
 --     "default_text_search_config": "pg_catalog.english"
 -- }

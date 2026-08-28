@@ -21,7 +21,7 @@ the database. Complete comment coverage is a release gate (see
 
 ## The stable surface
 
-### Functions (21)
+### Functions (26)
 
 | Function | Role required | Purpose |
 | -------- | ------------- | ------- |
@@ -32,7 +32,12 @@ the database. Complete comment coverage is a release gate (see
 | `pgokf.set_bundle_enabled(bigint, boolean)` | `pgokf_writer` | Enable/disable a bundle (hides it from search and graph without deleting rows; reversible) |
 | `pgokf.list_bundles()` | `pgokf_reader` | List registered bundles |
 | `pgokf.bundle_info(bigint)` | `pgokf_reader` | Info for one registered bundle |
-| `pgokf.concept_search(text, bigint, integer)` | `pgokf_reader` | Ranked full-text search |
+| `pgokf.concept_search(text, bigint, integer, text, text[], text, text)` | `pgokf_reader` | Ranked full-text search with optional `concept_type`/`tags`/`status`/`trust_tier` filters (trailing args default `NULL`; the historical 3-arg call still resolves) |
+| `pgokf.find_similar(text, bigint, integer)` | `pgokf_reader` | Content more-like-this for a seed concept (distinct from the link graph) |
+| `pgokf.concept_search_semantic(real[], bigint, integer)` | `pgokf_reader` | Vector nearest-neighbor search by a caller-supplied query embedding (requires pgvector) |
+| `pgokf.concept_search_hybrid(text, real[], bigint, integer)` | `pgokf_reader` | RRF fusion of lexical + semantic (degrades to lexical when pgvector absent) |
+| `pgokf.set_concept_embedding(bigint, text, real[])` | `pgokf_writer` | Store a caller-computed embedding for a concept (no bundled model) |
+| `pgokf.rebuild_embedding_index()` | `pgokf_admin` | (Re)build the optional pgvector HNSW index; a no-op with a notice when pgvector is not installed |
 | `pgokf.concept_neighbors(text, integer, bigint)` | `pgokf_reader` | Walk the resolved link graph |
 | `pgokf.set_config(text, jsonb)` | `pgokf_admin` | Set a durable configuration key |
 | `pgokf.reset_config(text)` | `pgokf_admin` | Reset one/all configuration keys |
@@ -64,12 +69,12 @@ The set of columns, their names, and their types are stable. New columns are
 `SELECT *` and positional row expansion would break; a new field ships as a new
 type or a new function instead.
 
-### Tables (8 public + 2 documented-internal)
+### Tables (9 public + 2 documented-internal)
 
 Public, `SELECT`-able by `pgokf_reader`: `pgokf.bundles`, `pgokf.concepts`,
 `pgokf.concept_metadata`, `pgokf.links`, `pgokf.concept_provenance`,
 `pgokf.concept_verification`, `pgokf.concept_provenance_source`,
-`pgokf.concept_source`.
+`pgokf.concept_source`, `pgokf.concept_embedding`.
 
 These are a **read projection**. Callers may `SELECT` from them and depend on
 existing column names and types; the columns listed in

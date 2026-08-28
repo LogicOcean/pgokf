@@ -12,6 +12,60 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 Nothing yet.
 
+## [0.1.6] - 2026-08-28
+
+An additive **search-enhancement** batch: structured filters on ranked search, a
+content more-like-this, and an optional pgvector semantic / hybrid surface.
+Everything is backward compatible — the historical `concept_search(query,
+bundle_id, limit_count)` call is unchanged — so `ALTER EXTENSION pgokf UPDATE TO
+'0.1.6'` migrates an existing install in a single transaction and yields a
+catalog byte-identical to a fresh `0.1.6` (verified by diffing the two).
+
+### Added
+
+- **Structured filters on `pgokf.concept_search`.** Four optional trailing
+  arguments, each a no-op when `NULL`: `concept_type text`, `tags text[]`
+  (**ALL-of** containment — a hit must carry every listed tag), `status text`,
+  and `trust_tier text` (matched against `pgokf.concept_provenance`). The filters
+  are parameter-bound `AND` clauses applied in both the native and BM25 backends,
+  reusing the existing `tags`, `type`, and provenance indexes.
+- **`pgokf.find_similar(concept_id text, bundle_id bigint DEFAULT NULL,
+  limit_count int DEFAULT 10)`** — content more-like-this. It extracts a seed
+  concept's most salient `body_tsv` lexemes and ranks other concepts against them
+  through the configured `search_backend` (native FTS or BM25), excluding the
+  seed. Distinct from `concept_neighbors` (the authored link graph).
+- **Optional semantic + hybrid search via pgvector** (mirroring the optional
+  BM25 seam exactly — `CREATE EXTENSION pgokf` still succeeds without pgvector):
+  - **`pgokf.concept_embedding`** stores per-concept vectors as the builtin
+    `real[]` (never a `vector` column, so the extension takes no static pgvector
+    dependency), cast to `vector(embedding_dim)` only at query and index time.
+  - **`pgokf.set_concept_embedding(bundle_id, concept_id, embedding real[])`**
+    (writer-tier) is how a companion embedder streams caller-computed vectors in;
+    the extension never computes embeddings or performs network I/O.
+  - **`pgokf.concept_search_semantic(query_embedding real[], …)`** ranks by
+    pgvector cosine distance; the `rank` column is the normalized cosine
+    similarity. It **requires pgvector** and raises `22023` naming the missing
+    dependency when it is absent (semantic search has no lexical fallback).
+  - **`pgokf.concept_search_hybrid(query text, query_embedding real[], …)`** fuses
+    the lexical and semantic results with **Reciprocal Rank Fusion** (RRF,
+    k = 60) entirely in SQL. When pgvector is absent it degrades to lexical-only
+    with a `WARNING`.
+  - **`pgokf.rebuild_embedding_index()`** (admin-tier, mirroring
+    `rebuild_search_index`) builds a pgvector HNSW cosine index for the configured
+    dimension; a logged no-op when pgvector is absent or the dimension exceeds
+    pgvector's 2000-dim HNSW limit.
+  - New config key **`embedding_dim`** (integer, default 1536) governs the
+    expected embedding length and the HNSW index typmod.
+
+### Changed
+
+- `pgokf.concept_search` gained the four trailing filter arguments (a new
+  function *identity* in `pg_proc`). The upgrade script removes the superseded
+  three-argument overload and creates the seven-argument one, so an upgraded
+  catalog carries exactly one `concept_search` overload — identical to a fresh
+  install — and every historical one-, two-, and three-argument call still
+  resolves through the new defaults.
+
 ## [0.1.5] - 2026-08-28
 
 An additive **audit, lifecycle, and observability** batch. Everything is
