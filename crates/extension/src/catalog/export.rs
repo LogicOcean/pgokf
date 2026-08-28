@@ -399,7 +399,7 @@ static PROVENANCE_SPEC: TableSpec = TableSpec {
             name: "generated_at",
             pg_type: PgType::TimestamptzMicros,
             nullable: true,
-            select_expr: "generated_at",
+            select_expr: "(EXTRACT(EPOCH FROM generated_at) * 1000000)::bigint",
         },
         ColumnSpec {
             name: "status",
@@ -411,19 +411,19 @@ static PROVENANCE_SPEC: TableSpec = TableSpec {
             name: "stale_after",
             pg_type: PgType::TimestamptzMicros,
             nullable: true,
-            select_expr: "stale_after",
+            select_expr: "(EXTRACT(EPOCH FROM stale_after) * 1000000)::bigint",
         },
         ColumnSpec {
             name: "usage_window_from",
             pg_type: PgType::TimestamptzMicros,
             nullable: true,
-            select_expr: "usage_window_from",
+            select_expr: "(EXTRACT(EPOCH FROM usage_window_from) * 1000000)::bigint",
         },
         ColumnSpec {
             name: "usage_window_to",
             pg_type: PgType::TimestamptzMicros,
             nullable: true,
-            select_expr: "usage_window_to",
+            select_expr: "(EXTRACT(EPOCH FROM usage_window_to) * 1000000)::bigint",
         },
         ColumnSpec {
             name: "trust_tier",

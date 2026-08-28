@@ -538,6 +538,41 @@ The beta concept is the companion definition referenced by alpha.\n";
     }
 
     #[pg_test]
+    fn export_parquet_writes_every_table_including_provenance_timestamps() {
+        // Arrange: register the OKF v0.2 fixture. Its provenance carries
+        // timestamptz columns (generated_at, stale_after, usage_window_*) that
+        // export as epoch microseconds — a live path with no in-DB coverage
+        // until now, where a missing epoch cast silently broke export_parquet.
+        let fixture = RichFixture::create();
+        let bundle_id = register_rich(&fixture);
+        let dir = ExportDir::create();
+
+        // Act: export the whole bundle to Parquet.
+        let concepts_rows = Spi::get_one_with_args::<i64>(
+            "SELECT concepts_rows FROM pgokf.export_parquet($1, $2)",
+            &[bundle_id.into(), dir.path().into()],
+        )
+        .expect("export_parquet executes")
+        .expect("concepts_rows is not NULL");
+
+        // Assert: rows were written (the provenance read succeeded) and every
+        // table's Parquet file exists on disk.
+        assert!(concepts_rows > 0, "the fixture has concepts to export");
+        let base = PathBuf::from(dir.path());
+        for file in [
+            "concepts.parquet",
+            "concept_metadata.parquet",
+            "links.parquet",
+            "concept_provenance.parquet",
+        ] {
+            assert!(
+                base.join(file).is_file(),
+                "export_parquet must write {file}"
+            );
+        }
+    }
+
+    #[pg_test]
     fn store_source_on_retrieves_and_reconstructs_exact_bytes() {
         // Arrange: enable the store_source tier, then register a fixture whose
         // exact on-disk bytes are known (the ALPHA_CONCEPT / BETA_CONCEPT
