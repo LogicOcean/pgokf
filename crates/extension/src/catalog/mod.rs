@@ -41,7 +41,15 @@
 //!   `set_bundle_enabled`.
 //! - [`audit`] — the `pgokf_private.sync_log` audit trail and
 //!   `pgokf.list_sync_log`; the sync engine appends one row at its successful
-//!   tail and prunes to the `sync_log_retention_days` policy.
+//!   tail and prunes to the `sync_log_retention_days` policy. The per-concept
+//!   change manifest (`pgokf_private.sync_log_change`, `pgokf.list_sync_changes`)
+//!   hangs off each audit row.
+//! - [`access`] — the exfiltration/access audit
+//!   (`pgokf_private.access_log`, `pgokf.list_access_log`): one row per
+//!   content-exporting operation (`export_parquet`, `export_sources`,
+//!   `get_concept_source`).
+//! - [`dedup`] — `pgokf.duplicate_concepts`, cross-bundle content-duplicate
+//!   detection over the stored BLAKE3 `file_hash`.
 //! - [`stats`] — reader-level observability: `catalog_stats`, `health`, and
 //!   `stale_concepts`.
 //! - [`content`] — `pgokf.register_bundle_content`, the mountless
@@ -50,11 +58,13 @@
 //!   companion process can stream an object store into the catalog without the
 //!   extension performing any network or filesystem I/O.
 
+pub mod access;
 pub mod admin;
 pub mod audit;
 mod batch;
 pub mod config;
 pub mod content;
+pub mod dedup;
 pub mod embedding;
 pub mod export;
 pub mod links;

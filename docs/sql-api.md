@@ -36,6 +36,9 @@ exercised against a live PostgreSQL 18 cluster.
 | `refresh_bundle(bundle_id)` | `bundle_sync_result` | VOLATILE | DEFINER | `pgokf_writer` |
 | `unregister_bundle(bundle_id)` | `bundle_info` | VOLATILE | DEFINER | `pgokf_writer` |
 | `set_bundle_enabled(bundle_id, enabled)` | `bundle_info` | VOLATILE | DEFINER | `pgokf_writer` |
+| `retire_bundle(bundle_id)` | `bundle_info` | VOLATILE | DEFINER | `pgokf_writer` |
+| `unretire_bundle(bundle_id)` | `bundle_info` | VOLATILE | DEFINER | `pgokf_writer` |
+| `purge_retired(older_than)` | `bigint` | VOLATILE | DEFINER | `pgokf_admin` |
 | `list_bundles()` | `SETOF bundle_info` | STABLE | invoker | `pgokf_reader` |
 | `bundle_info(bundle_id)` | `bundle_info` | STABLE | invoker | `pgokf_reader` |
 | `concept_search(query, bundle_id, limit_count, concept_type, tags, status, trust_tier)` | `SETOF concept_search_result` | STABLE | invoker | `pgokf_reader` |
@@ -49,27 +52,32 @@ exercised against a live PostgreSQL 18 cluster.
 | `reset_config(key)` | `void` | VOLATILE | DEFINER | `pgokf_admin` |
 | `get_config()` | `jsonb` | VOLATILE | DEFINER | `pgokf_reader` |
 | `list_sync_log(bundle_id, max_rows)` | `SETOF sync_log_entry` | VOLATILE | DEFINER | `pgokf_reader` |
+| `list_sync_changes(sync_id, max_rows)` | `SETOF sync_change` | VOLATILE | DEFINER | `pgokf_reader` |
+| `list_access_log(bundle_id, max_rows)` | `SETOF access_log_entry` | VOLATILE | DEFINER | `pgokf_admin` |
 | `catalog_stats()` | `SETOF catalog_stat` | STABLE | invoker | `pgokf_reader` |
 | `health()` | `jsonb` | STABLE | DEFINER | `pgokf_reader` |
 | `stale_concepts(bundle_id, as_of)` | `SETOF stale_concept` | STABLE | invoker | `pgokf_reader` |
+| `duplicate_concepts(bundle_id, min_group)` | `SETOF duplicate_group` | STABLE | invoker | `pgokf_reader` |
 | `rebuild_search_index()` | `boolean` | VOLATILE | DEFINER | `pgokf_admin` |
 | `export_parquet(bundle_id, dest_dir)` | `export_result` | VOLATILE | DEFINER | `pgokf_admin` |
-| `get_concept_source(bundle_id, concept_id)` | `bytea` | STABLE | invoker | `pgokf_reader` |
+| `get_concept_source(bundle_id, concept_id)` | `bytea` | STABLE | DEFINER | `pgokf_reader` |
 | `export_sources(bundle_id, dest_dir)` | `export_result` | VOLATILE | DEFINER | `pgokf_admin` |
 
 `register_bundle`, `concept_search`, `find_similar`,
 `concept_search_semantic`, `concept_search_hybrid`, `concept_neighbors`,
-`reset_config`, `list_sync_log`, and `stale_concepts` accept `NULL`-defaulting
-arguments and are therefore **not** declared `STRICT`; every other function —
-including `list_bundles`, `bundle_info`, `catalog_stats`, `health`,
-`set_concept_embedding`, and `rebuild_embedding_index`, which take no
-`NULL`-defaulting argument — is `STRICT`. `concept_search`, `find_similar`,
-`concept_search_semantic`, `concept_search_hybrid`, `concept_neighbors`,
-`catalog_stats`, and `stale_concepts` are also `PARALLEL SAFE`.
+`reset_config`, `list_sync_log`, `list_access_log`, `duplicate_concepts`,
+`purge_retired`, and `stale_concepts` accept `NULL`-defaulting (or
+default-valued) arguments and are therefore **not** declared `STRICT`; every
+other function — including `list_bundles`, `bundle_info`, `catalog_stats`,
+`health`, `retire_bundle`, `unretire_bundle`, `list_sync_changes`,
+`set_concept_embedding`, and `rebuild_embedding_index` — is `STRICT`.
+`concept_search`, `find_similar`, `concept_search_semantic`,
+`concept_search_hybrid`, `concept_neighbors`, `catalog_stats`,
+`duplicate_concepts`, and `stale_concepts` are also `PARALLEL SAFE`.
 
 The `register_bundle` / `refresh_bundle` / `unregister_bundle` /
-`set_bundle_enabled` ingestion functions require `pgokf_writer` (an admin
-qualifies by inheritance).
+`set_bundle_enabled` / `retire_bundle` / `unretire_bundle` ingestion functions
+require `pgokf_writer` (an admin qualifies by inheritance).
 
 ---
 
@@ -219,10 +227,60 @@ SELECT id, enabled FROM pgokf.set_bundle_enabled(1, false);  -- hide bundle 1
 SELECT id, enabled FROM pgokf.set_bundle_enabled(1, true);   -- and restore it
 ```
 
+### `pgokf.retire_bundle(bundle_id bigint) → pgokf.bundle_info`
+
+Retire (soft-delete) a bundle, returning the updated `bundle_info`.
+`VOLATILE STRICT`, `SECURITY DEFINER`, **requires `pgokf_writer`**.
+
+Retirement sets `bundles.retired_at = now()`. A bundle is *active* only when
+`enabled AND retired_at IS NULL`, so a retired bundle is excluded from
+`concept_search`, `concept_neighbors`, semantic/hybrid search, and the default
+`list_bundles` — **without deleting any catalog rows**, so it is a reversible undo
+window for the hard `unregister_bundle` cascade. It does **not** touch the
+independent `enabled` flag, and it is idempotent: re-retiring keeps the original
+`retired_at` instant (so the `purge_retired` age window measures from the first
+retirement). Serializes on the bundle advisory lock. An unknown `bundle_id` raises
+`22023`. Retired bundles remain reachable by id via `bundle_info` and visible,
+with their `retired_at`, in `catalog_stats`.
+
+```sql
+SELECT id FROM pgokf.retire_bundle(1);   -- hide bundle 1, keep every row
+```
+
+### `pgokf.unretire_bundle(bundle_id bigint) → pgokf.bundle_info`
+
+Clear `retired_at`, fully reversing `retire_bundle`, and return the updated
+`bundle_info`. `VOLATILE STRICT`, `SECURITY DEFINER`, **requires `pgokf_writer`**.
+An unknown `bundle_id` raises `22023`.
+
+```sql
+SELECT id FROM pgokf.unretire_bundle(1);  -- restore bundle 1
+```
+
+### `pgokf.purge_retired(older_than interval DEFAULT '7 days') → bigint`
+
+Hard-delete every bundle whose `retired_at` is older than `now() - older_than`,
+returning the count purged. `VOLATILE`, `SECURITY DEFINER`, **requires
+`pgokf_admin`**.
+
+Each purged bundle is deleted exactly like `unregister_bundle` — concepts,
+metadata, and every feature projection cascade — and one `unregister` audit row is
+written per purged bundle. A bundle retired *within* the window stays recoverable
+via `unretire_bundle`; `unregister_bundle` remains a separate immediate hard
+delete. Tenant-scoped: a session that set `pgokf.tenant` purges only its own
+tenant's retired bundles.
+
+```sql
+SELECT pgokf.purge_retired();               -- purge bundles retired > 7 days ago
+SELECT pgokf.purge_retired('30 days');      -- longer grace window
+```
+
 ### `pgokf.list_bundles() → SETOF pgokf.bundle_info`
 
-List every registered bundle, ordered by `id`. `STABLE`, invoker rights,
-**requires `pgokf_reader`**.
+List every **active** (non-retired) registered bundle, ordered by `id`. `STABLE`,
+invoker rights, **requires `pgokf_reader`**. Retired bundles are excluded
+(reachable by id via `bundle_info`, and visible with their `retired_at` in
+`catalog_stats`); disabled-but-not-retired bundles are still listed.
 
 ```sql
 SELECT id, path, name, file_count, enabled FROM pgokf.list_bundles();
@@ -522,18 +580,87 @@ FROM pgokf.list_sync_log();
 History is pruned to the `sync_log_retention_days` policy after each append; see
 [configuration.md](configuration.md).
 
+### `pgokf.list_sync_changes(sync_id bigint, max_rows int DEFAULT 1000) → SETOF pgokf.sync_change`
+
+List the **per-concept change manifest** of one sync, ordered stably by
+`change_kind` then `concept_id`. `VOLATILE`, `SECURITY DEFINER`, **requires
+`pgokf_reader`**.
+
+Alongside the aggregate counts in `sync_log`, every `register` / `refresh` /
+`content` sync records the concrete concepts it added, updated, or removed into
+the administrator-only `pgokf_private.sync_log_change` (a child of `sync_log`,
+cascading on delete so it shares the same retention window). `sync_id` is a
+`pgokf_private.sync_log.id` (as shown in `list_sync_log`); `max_rows` bounds the
+rows (must be `>= 0`, else `22023`). Tenant-scoped like `list_sync_log`.
+
+```sql
+-- The concepts changed by the most recent refresh of bundle 1:
+SELECT concept_id, change_kind
+FROM pgokf.list_sync_changes(
+    (SELECT id FROM pgokf.list_sync_log(1, 1)));
+--     concept_id      | change_kind
+-- ---------------------+-------------
+--  dashboards/health2  | added
+--  runbooks/appendix   | removed
+--  services/postgresql | updated
+```
+
+### `pgokf.list_access_log(bundle_id bigint DEFAULT NULL, max_rows int DEFAULT 100) → SETOF pgokf.access_log_entry`
+
+List recent **exfiltration/access-audit** entries, newest first. `VOLATILE`,
+`SECURITY DEFINER`, **admin-only — requires `pgokf_admin`** (an exfiltration
+audit is sensitive).
+
+The three content-exporting operations — `export_parquet`, `export_sources`, and
+`get_concept_source` — each append one row to the administrator-only
+`pgokf_private.access_log` (who read or exported what, and when). Pass `bundle_id`
+to scope the listing; `max_rows` bounds the rows (must be `>= 0`, else `22023`).
+Tenant-scoped. The log shares the `sync_log_retention_days` retention window.
+
+```sql
+SELECT at, actor, op, bundle_id, concept_id, detail
+FROM pgokf.list_access_log();
+--             at            | actor | op                 | bundle_id | concept_id        | detail
+-- --------------------------+-------+--------------------+-----------+-------------------+--------
+--  2026-08-28 20:55:...+00  | app   | export_parquet     |         1 |                   | /srv/…
+--  2026-08-28 20:54:...+00  | app   | get_concept_source |         1 | dashboards/health |
+```
+
+### `pgokf.duplicate_concepts(bundle_id bigint DEFAULT NULL, min_group int DEFAULT 2) → SETOF pgokf.duplicate_group`
+
+Find groups of byte-identical concepts (same BLAKE3 `file_hash`) — the same
+runbook or reference copied across bundles. `STABLE`, `PARALLEL SAFE`, invoker
+rights, **requires `pgokf_reader`**.
+
+Groups `pgokf.concepts` by `file_hash`, keeping groups with at least `min_group`
+members (default 2, must be `>= 1` else `22023`). Each group reports the shared
+hash, the occurrence count, and the parallel `bundle_ids` / `concept_ids` arrays
+of every occurrence. When `bundle_id` is given, only groups that *touch* that
+bundle are returned — but they still list occurrences in every bundle. RLS-filtered
+to the session's tenant.
+
+```sql
+SELECT left(file_hash, 12) AS hash, occurrences, bundle_ids, concept_ids
+FROM pgokf.duplicate_concepts();
+--     hash      | occurrences | bundle_ids |            concept_ids
+-- --------------+-------------+------------+-----------------------------------
+--  55540a4529f0 |           2 | {1,2}      | {dashboards/health,dashboards/health}
+```
+
 ### `pgokf.catalog_stats() → SETOF pgokf.catalog_stat`
 
 Per-bundle operational statistics for monitoring. `STABLE`, `PARALLEL SAFE`,
 invoker rights, **requires `pgokf_reader`**.
 
 One row per registered bundle with its indexed-concept, link, and resolved-link
-counts, sync recency (`last_synced_at`, `sync_age`), and an `is_stale` flag
-(true when the last sync is more than 24 hours old).
+counts, sync recency (`last_synced_at`, `sync_age`), an `is_stale` flag (true when
+the last sync is more than 24 hours old), and `retired_at` (the soft-delete
+instant, `NULL` when active) — so retired bundles, which `list_bundles` hides,
+stay visible here.
 
 ```sql
 SELECT bundle_id, enabled, indexed_concepts, link_count, resolved_link_count,
-       sync_age, is_stale
+       sync_age, is_stale, retired_at
 FROM pgokf.catalog_stats();
 ```
 
@@ -609,6 +736,8 @@ Behavior:
   can leak into the export.
 - Raises `22023` for a missing bundle or a bad/missing/non-contained directory,
   and `42501` for a directory the server process cannot write.
+- Appends one `export_parquet` row to the exfiltration access log
+  (`pgokf.list_access_log`).
 
 ```sql
 -- Counts below are the sample bundle in examples/sample-bundle.
@@ -631,9 +760,12 @@ stored, and `get_concept_source` raises `22023`.
 ### `pgokf.get_concept_source(bundle_id bigint, concept_id text) → bytea`
 
 Return the exact stored source bytes of one concept, delivered to the client
-(no filesystem write). `STABLE STRICT`, **reader-level** (`pgokf_reader` or
-`pgokf_admin`). This discloses the same content as the concept's `body_text`, so
-it carries no privilege beyond read access to the catalog.
+(no filesystem write). `STABLE STRICT`, `SECURITY DEFINER`, **reader-level**
+(`pgokf_reader` or `pgokf_admin`). This discloses the same content as the
+concept's `body_text`, so it carries no privilege beyond read access to the
+catalog; it is `SECURITY DEFINER` (and tenant-scoped) only so each successful
+read can append one `get_concept_source` row to the exfiltration access log
+(`pgokf.list_access_log`).
 
 | Parameter | Type | Meaning |
 | --------- | ---- | ------- |
@@ -673,6 +805,8 @@ Behavior:
   before writing it and raises `XX000` on any mismatch (a corrupted stored
   source — an integrity condition, not caller input), so a reconstruction is
   either byte-for-byte faithful or it fails without writing.
+- Appends one `export_sources` row to the exfiltration access log
+  (`pgokf.list_access_log`).
 - Returns a `pgokf.export_result` in which `concepts_rows` is the number of files
   reconstructed and `bytes_written` their total size; the other per-table
   counters are `0` (this call reconstructs sources, not the four Parquet tables).
@@ -773,6 +907,42 @@ Returned by `list_sync_log`.
 | `synced_at` | `timestamptz` | When the operation committed. |
 | `added` / `updated` / `removed` / `unchanged` / `total` | `integer` | Per-bucket change counts (`NULL` for an `unregister`). |
 
+### `pgokf.sync_change`
+
+Returned by `list_sync_changes`.
+
+| Column | Type | Meaning |
+| ------ | ---- | ------- |
+| `sync_id` | `bigint` | Parent `sync_log` entry. |
+| `bundle_id` | `bigint` | Affected bundle. |
+| `concept_id` | `text` | The affected concept's path-derived id. |
+| `change_kind` | `text` | `added` / `updated` / `removed`. |
+
+### `pgokf.access_log_entry`
+
+Returned by `list_access_log`.
+
+| Column | Type | Meaning |
+| ------ | ---- | ------- |
+| `id` | `bigint` | Access-entry identity. |
+| `actor` | `text` | The `session_user` that ran the operation. |
+| `at` | `timestamptz` | When the operation committed. |
+| `op` | `text` | `export_parquet` / `export_sources` / `get_concept_source`. |
+| `bundle_id` | `bigint` | Bundle whose content was read/exported. |
+| `concept_id` | `text` | The concept read (for `get_concept_source`); `NULL` for the whole-bundle exports. |
+| `detail` | `text` | Optional context (for the exports, the resolved destination directory). |
+
+### `pgokf.duplicate_group`
+
+Returned by `duplicate_concepts`.
+
+| Column | Type | Meaning |
+| ------ | ---- | ------- |
+| `file_hash` | `text` | The shared BLAKE3 digest. |
+| `occurrences` | `bigint` | How many concepts share it (`>= min_group`). |
+| `bundle_ids` | `bigint[]` | The bundle of every occurrence (ordered by bundle, then concept). |
+| `concept_ids` | `text[]` | The id of every occurrence (parallel to `bundle_ids`). |
+
 ### `pgokf.catalog_stat`
 
 Returned by `catalog_stats`.
@@ -790,6 +960,7 @@ Returned by `catalog_stats`.
 | `last_synced_at` | `timestamptz` | Last successful sync (may be `NULL`). |
 | `sync_age` | `interval` | `now() - last_synced_at` (may be `NULL`). |
 | `is_stale` | `boolean` | True when the last sync is more than 24 hours old. |
+| `retired_at` | `timestamptz` | The soft-delete/retirement instant, or `NULL` when active. |
 
 ### `pgokf.stale_concept`
 
@@ -829,6 +1000,7 @@ One registered OKF bundle root.
 | `sync_hash` | `text` | Aggregate BLAKE3 digest over sorted `(path, file_hash)` pairs of the last sync. |
 | `options` | `jsonb` | `NOT NULL DEFAULT '{}'` — producer options from `register_bundle`. |
 | `enabled` | `boolean` | `NOT NULL DEFAULT true` — search skips disabled bundles. |
+| `retired_at` | `timestamptz` | `DEFAULT NULL` — the retirement (soft-delete) instant, set by `retire_bundle`. A bundle is *active* only when `enabled AND retired_at IS NULL`; a retired bundle is hidden from search, traversal, and the default `list_bundles` until `unretire_bundle` or hard-deleted by `purge_retired`. |
 
 ### `pgokf.concepts`
 

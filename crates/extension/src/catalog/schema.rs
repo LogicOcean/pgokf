@@ -39,6 +39,9 @@ CREATE TABLE pgokf.bundles (
     -- tenant_id is appended last so a fresh install matches, column-for-column, an
     -- existing install upgraded via ADD COLUMN (see sql/pgokf--0.1.6--0.1.7.sql).
     tenant_id      text NOT NULL DEFAULT 'default',
+    -- retired_at is appended after tenant_id for the same reason: a fresh install
+    -- matches an existing install upgraded via ADD COLUMN (sql/pgokf--0.1.7--0.1.8.sql).
+    retired_at     timestamptz DEFAULT NULL,
     CONSTRAINT bundles_tenant_path_key UNIQUE (tenant_id, path),
     CONSTRAINT bundles_source_type_chk CHECK (source_type IN ('filesystem', 'content'))
 );
@@ -160,6 +163,8 @@ COMMENT ON COLUMN pgokf.concepts.body_tsv IS
     'Weighted search vector: title (A), tags/type/description (B), body text (D).';
 COMMENT ON COLUMN pgokf.bundles.sync_hash IS
     'Aggregate BLAKE3 digest over the sorted (path, file_hash) pairs of the last successful sync.';
+COMMENT ON COLUMN pgokf.bundles.retired_at IS
+    'When the bundle was retired (soft-deleted) via pgokf.retire_bundle, or NULL when active. A bundle is ''active'' only when enabled AND retired_at IS NULL: a retired bundle is excluded from concept_search, concept_neighbors, and the default list_bundles listing without deleting any rows, so pgokf.unretire_bundle fully restores it. Retirement is an undo window for the hard unregister cascade; pgokf.purge_retired hard-deletes bundles retired longer than a chosen interval. Set once and preserved across re-retirement (the original instant governs the purge window).';
 COMMENT ON COLUMN pgokf.bundles.source_type IS
     'How the bundle bytes reach the catalog: ''filesystem'' (registered from a canonical on-disk root via pgokf.register_bundle and refreshed from disk via pgokf.refresh_bundle) or ''content'' (streamed in memory via pgokf.register_bundle_content — a mountless object-store companion or any client — where path is the synthetic key ''content:''||name and refresh_bundle is rejected).';
 COMMENT ON COLUMN pgokf.bundles.tenant_id IS

@@ -1187,7 +1187,7 @@ The gamma concept is introduced during the refresh cycle.\n";
         // an existing install can be stepped up to this release.
         let upgrade_script = manifest_dir
             .join("sql")
-            .join(format!("pgokf--0.1.6--{crate_version}.sql"));
+            .join(format!("pgokf--0.1.7--{crate_version}.sql"));
         let metadata =
             fs::metadata(&upgrade_script).expect("the current upgrade script ships on disk");
         assert!(
@@ -2813,5 +2813,354 @@ An added concept for the resync diff.\n";
         );
 
         let _ = fs::remove_dir_all(&export_root);
+    }
+
+    // ---------------------------------------------------------------------
+    // 0.1.8 F1: per-sync concept-level change manifest.
+    // ---------------------------------------------------------------------
+
+    /// The `pgokf_private.sync_log.id` of the newest row for a bundle and op.
+    fn latest_sync_id(bundle_id: i64, op: &str) -> i64 {
+        Spi::get_one_with_args::<i64>(
+            "SELECT id FROM pgokf_private.sync_log
+             WHERE bundle_id = $1 AND op = $2 ORDER BY id DESC LIMIT 1",
+            &[bundle_id.into(), op.into()],
+        )
+        .expect("sync_log id query executes")
+        .expect("a matching sync_log row exists")
+    }
+
+    /// The change_kind recorded for one concept under a sync, via the reader.
+    fn change_kind_of(sync_id: i64, concept_id: &str) -> Option<String> {
+        Spi::get_one_with_args::<String>(
+            "SELECT change_kind FROM pgokf.list_sync_changes($1) WHERE concept_id = $2",
+            &[sync_id.into(), concept_id.into()],
+        )
+        .expect("list_sync_changes executes")
+    }
+
+    #[pg_test]
+    fn sync_change_manifest_records_added_updated_removed() {
+        // Arrange: registering the two-concept fixture appends a change manifest
+        // of two 'added' rows hung off the register audit row.
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        let register_sync_id = latest_sync_id(bundle_id, "register");
+
+        // Assert: both concepts are recorded as added, readable via the reader.
+        let added_count = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.list_sync_changes($1) WHERE change_kind = 'added'",
+            &[register_sync_id.into()],
+        )
+        .expect("list_sync_changes executes")
+        .expect("count is not NULL");
+        assert_eq!(
+            added_count, 2,
+            "the register manifest lists two added concepts"
+        );
+        assert_eq!(
+            change_kind_of(register_sync_id, "alpha").as_deref(),
+            Some("added")
+        );
+        assert_eq!(
+            change_kind_of(register_sync_id, "beta").as_deref(),
+            Some("added")
+        );
+
+        // Act: mutate the bundle so a refresh sees one update, one add, one remove.
+        fs::write(bundle.root.join("beta.md"), ALPHA_CONCEPT).expect("beta is rewritable");
+        fs::write(bundle.root.join("gamma.md"), BETA_CONCEPT).expect("gamma is writable");
+        fs::remove_file(bundle.root.join("alpha.md")).expect("alpha is removable");
+        Spi::run_with_args("SELECT pgokf.refresh_bundle($1)", &[bundle_id.into()])
+            .expect("refresh executes");
+        let refresh_sync_id = latest_sync_id(bundle_id, "refresh");
+
+        // Assert: the refresh manifest names the concrete change to each concept.
+        assert_eq!(
+            change_kind_of(refresh_sync_id, "beta").as_deref(),
+            Some("updated"),
+            "the rewritten beta is recorded as updated",
+        );
+        assert_eq!(
+            change_kind_of(refresh_sync_id, "gamma").as_deref(),
+            Some("added"),
+            "the new gamma is recorded as added",
+        );
+        assert_eq!(
+            change_kind_of(refresh_sync_id, "alpha").as_deref(),
+            Some("removed"),
+            "the deleted alpha is recorded as removed",
+        );
+    }
+
+    #[pg_test]
+    fn list_sync_changes_is_tenant_scoped() {
+        // Arrange: acme and globex each register a bundle, so each has a register
+        // sync with its own change manifest. list_sync_changes is SECURITY DEFINER
+        // (bypasses RLS) yet applies the same opt-in tenant filter explicitly.
+        let acme_bundle = FixtureBundle::create();
+        let globex_bundle = FixtureBundle::create();
+        Spi::run("SET pgokf.tenant = 'acme'").expect("pgokf.tenant is settable");
+        let acme_id = register_fixture(&acme_bundle);
+        let acme_sync_id = latest_sync_id(acme_id, "register");
+        Spi::run("SET pgokf.tenant = 'globex'").expect("pgokf.tenant is settable");
+        let globex_id = register_fixture(&globex_bundle);
+        let globex_sync_id = latest_sync_id(globex_id, "register");
+
+        // As acme: its own manifest is visible, globex's is not.
+        Spi::run("SET pgokf.tenant = 'acme'").expect("pgokf.tenant is settable");
+        let own = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.list_sync_changes($1)",
+            &[acme_sync_id.into()],
+        )
+        .expect("list_sync_changes executes")
+        .expect("count is not NULL");
+        assert_eq!(own, 2, "acme sees its own change manifest");
+        let cross = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.list_sync_changes($1)",
+            &[globex_sync_id.into()],
+        )
+        .expect("list_sync_changes executes")
+        .expect("count is not NULL");
+        assert_eq!(cross, 0, "acme cannot read globex's change manifest");
+    }
+
+    // ---------------------------------------------------------------------
+    // 0.1.8 F2: soft-delete / retirement window.
+    // ---------------------------------------------------------------------
+
+    #[pg_test]
+    fn retire_hides_from_search_and_neighbors_unretire_restores_purge_deletes() {
+        // Arrange: a registered bundle is active, so search and traversal see it.
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        let search_hits = || {
+            Spi::get_one::<i64>("SELECT count(*) FROM pgokf.concept_search('peregrine')")
+                .expect("search executes")
+                .expect("count is not NULL")
+        };
+        let neighbor_hits = || {
+            Spi::get_one_with_args::<i64>(
+                "SELECT count(*) FROM pgokf.concept_neighbors('alpha', 2, $1)",
+                &[bundle_id.into()],
+            )
+            .expect("traversal executes")
+            .expect("count is not NULL")
+        };
+        assert_eq!(search_hits(), 1, "an active bundle is searchable");
+        assert_eq!(neighbor_hits(), 1, "an active bundle is traversable");
+
+        // Act: retire the bundle.
+        Spi::run_with_args("SELECT pgokf.retire_bundle($1)", &[bundle_id.into()])
+            .expect("retire_bundle executes");
+
+        // Assert: retirement hides it from search AND traversal AND list_bundles,
+        // while bundle_info (by id) and catalog_stats still surface it.
+        assert_eq!(search_hits(), 0, "a retired bundle is hidden from search");
+        assert_eq!(neighbor_hits(), 0, "a retired bundle is not traversed");
+        let listed = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.list_bundles() WHERE id = $1",
+            &[bundle_id.into()],
+        )
+        .expect("list_bundles executes")
+        .expect("count is not NULL");
+        assert_eq!(listed, 0, "a retired bundle is excluded from list_bundles");
+        let stat_retired = Spi::get_one_with_args::<bool>(
+            "SELECT retired_at IS NOT NULL FROM pgokf.catalog_stats() WHERE bundle_id = $1",
+            &[bundle_id.into()],
+        )
+        .expect("catalog_stats executes")
+        .expect("row is present");
+        assert!(
+            stat_retired,
+            "catalog_stats surfaces the retired_at instant"
+        );
+
+        // Act/Assert: un-retiring fully restores both surfaces.
+        Spi::run_with_args("SELECT pgokf.unretire_bundle($1)", &[bundle_id.into()])
+            .expect("unretire_bundle executes");
+        assert_eq!(search_hits(), 1, "un-retiring restores search visibility");
+        assert_eq!(neighbor_hits(), 1, "un-retiring restores traversal");
+
+        // Act: retire again, then purge. This whole pg_test runs in one
+        // transaction where now() is constant, so retired_at = now() would never
+        // be "older than now()"; backdate it to simulate an elapsed window (in
+        // real multi-statement use now() advances, so a small window suffices).
+        Spi::run_with_args("SELECT pgokf.retire_bundle($1)", &[bundle_id.into()])
+            .expect("re-retire executes");
+        Spi::run_with_args(
+            "UPDATE pgokf.bundles SET retired_at = pg_catalog.now() - interval '10 minutes'
+             WHERE id = $1",
+            &[bundle_id.into()],
+        )
+        .expect("backdating retired_at executes");
+        let purged = Spi::get_one::<i64>("SELECT pgokf.purge_retired('1 minute')")
+            .expect("purge_retired executes")
+            .expect("count is not NULL");
+        assert!(purged >= 1, "purge_retired hard-deletes the retired bundle");
+
+        // Assert: the bundle row is gone, and an unregister audit row was written.
+        let remaining = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.bundles WHERE id = $1",
+            &[bundle_id.into()],
+        )
+        .expect("bundles query executes")
+        .expect("count is not NULL");
+        assert_eq!(remaining, 0, "the purged bundle row is hard-deleted");
+        let unregister_rows = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf_private.sync_log
+             WHERE bundle_id = $1 AND op = 'unregister'",
+            &[bundle_id.into()],
+        )
+        .expect("audit query executes")
+        .expect("count is not NULL");
+        assert_eq!(unregister_rows, 1, "purge writes one unregister audit row");
+    }
+
+    #[pg_test]
+    fn retire_bundle_is_idempotent_on_the_first_instant() {
+        // Arrange: a registered bundle.
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+
+        // Act: retire twice, capturing the retired_at each time.
+        Spi::run_with_args("SELECT pgokf.retire_bundle($1)", &[bundle_id.into()])
+            .expect("first retire executes");
+        let first = Spi::get_one_with_args::<TimestampWithTimeZone>(
+            "SELECT retired_at FROM pgokf.bundles WHERE id = $1",
+            &[bundle_id.into()],
+        )
+        .expect("retired_at query executes")
+        .expect("retired_at is set");
+        Spi::run_with_args("SELECT pgokf.retire_bundle($1)", &[bundle_id.into()])
+            .expect("second retire executes");
+        let second = Spi::get_one_with_args::<TimestampWithTimeZone>(
+            "SELECT retired_at FROM pgokf.bundles WHERE id = $1",
+            &[bundle_id.into()],
+        )
+        .expect("retired_at query executes")
+        .expect("retired_at is still set");
+
+        // Assert: re-retiring preserves the original instant.
+        assert_eq!(first, second, "re-retiring keeps the first retired_at");
+    }
+
+    // ---------------------------------------------------------------------
+    // 0.1.8 F3: exfiltration / access audit.
+    // ---------------------------------------------------------------------
+
+    #[pg_test]
+    fn access_log_records_exports_and_source_reads_and_list_is_admin_only() {
+        // Arrange: with store_source on, register a fixture (so get_concept_source
+        // has bytes) and prepare a writable export directory.
+        enable_store_source();
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        let dir = ExportDir::create();
+
+        // Act: a single-concept source read and a parquet export each append one
+        // access-log row.
+        Spi::run_with_args(
+            "SELECT pgokf.get_concept_source($1, 'alpha')",
+            &[bundle_id.into()],
+        )
+        .expect("get_concept_source executes");
+        Spi::run_with_args(
+            "SELECT pgokf.export_parquet($1, $2)",
+            &[bundle_id.into(), dir.path().into()],
+        )
+        .expect("export_parquet executes");
+
+        // Assert: both operations are recorded in the access log.
+        let source_reads = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf_private.access_log
+             WHERE bundle_id = $1 AND op = 'get_concept_source' AND concept_id = 'alpha'",
+            &[bundle_id.into()],
+        )
+        .expect("access_log query executes")
+        .expect("count is not NULL");
+        assert_eq!(source_reads, 1, "get_concept_source appends one access row");
+        let exports = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf_private.access_log
+             WHERE bundle_id = $1 AND op = 'export_parquet'",
+            &[bundle_id.into()],
+        )
+        .expect("access_log query executes")
+        .expect("count is not NULL");
+        assert_eq!(exports, 1, "export_parquet appends one access row");
+
+        // Assert: an admin (this superuser session) reads the log; a plain reader
+        // is denied the admin-tier list_access_log with 42501.
+        let admin_rows = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.list_access_log($1)",
+            &[bundle_id.into()],
+        )
+        .expect("list_access_log executes")
+        .expect("count is not NULL");
+        assert_eq!(admin_rows, 2, "an admin sees both access-log rows");
+
+        Spi::run("CREATE ROLE pgokf_access_reader").expect("reader role is creatable");
+        Spi::run("GRANT pgokf_reader TO pgokf_access_reader").expect("reader role is grantable");
+        Spi::run(
+            "CREATE FUNCTION pg_temp.access_denied_sqlstate() RETURNS text
+             LANGUAGE plpgsql
+             SET role TO pgokf_access_reader
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.list_access_log();
+                 RETURN 'not-denied';
+             EXCEPTION WHEN insufficient_privilege THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("access authz probe is creatable");
+        let sqlstate = Spi::get_one::<String>("SELECT pg_temp.access_denied_sqlstate()")
+            .expect("access authz probe executes")
+            .expect("the probe reports a SQLSTATE");
+        assert_eq!(
+            sqlstate, "42501",
+            "a reader is denied the admin-only list_access_log with 42501",
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // 0.1.8 F4: cross-bundle content deduplication.
+    // ---------------------------------------------------------------------
+
+    #[pg_test]
+    fn duplicate_concepts_finds_identical_content_across_bundles() {
+        // Arrange: bundle A holds alpha.md on disk; bundle B is a content bundle
+        // carrying a byte-identical copy of alpha, so both concepts share one
+        // BLAKE3 file_hash.
+        let bundle = FixtureBundle::create();
+        let bundle_a = register_fixture(&bundle);
+        let (bundle_b, added, ..) = register_content(
+            "dup-copy",
+            vec!["alpha.md".to_owned()],
+            vec![ALPHA_CONCEPT.as_bytes().to_vec()],
+        );
+        assert_eq!(added, 1, "the copy bundle registers one concept");
+
+        // Act/Assert: the group touching bundle A has two occurrences spanning the
+        // two distinct bundles.
+        let occurrences = Spi::get_one_with_args::<i64>(
+            "SELECT occurrences FROM pgokf.duplicate_concepts($1) LIMIT 1",
+            &[bundle_a.into()],
+        )
+        .expect("duplicate_concepts executes")
+        .expect("a duplicate group touching bundle A exists");
+        assert_eq!(occurrences, 2, "the shared file_hash appears twice");
+        let spans_both = Spi::get_one_with_args::<bool>(
+            "SELECT bundle_ids @> ARRAY[$1, $2]::bigint[]
+             FROM pgokf.duplicate_concepts($1) LIMIT 1",
+            &[bundle_a.into(), bundle_b.into()],
+        )
+        .expect("duplicate_concepts executes")
+        .expect("the group is present");
+        assert!(
+            spans_both,
+            "the duplicate group spans both the on-disk and the content bundle",
+        );
     }
 }

@@ -38,7 +38,7 @@
 
 use std::path::Path;
 
-use pgrx::datum::TimestampWithTimeZone;
+use pgrx::datum::{Interval, TimestampWithTimeZone};
 use pgrx::heap_tuple::PgHeapTuple;
 use pgrx::spi::SpiHeapTupleData;
 use pgrx::{AllocatedByRust, Spi};
@@ -193,10 +193,18 @@ fn delete_bundle(bundle_id: i64) -> Result<Option<BundleInfo>, CatalogError> {
     })
 }
 
-/// Load every bundle, ordered by identity for a stable listing.
+/// Load every active (non-retired) bundle, ordered by identity for a stable
+/// listing.
+///
+/// Retired bundles are excluded from the default listing (mirroring their
+/// exclusion from search and traversal); they remain reachable by id through
+/// `bundle_info(bundle_id)` and surface, with their `retired_at` instant, in
+/// `catalog_stats`. Disabled-but-not-retired bundles are still listed, unchanged.
 fn list_bundles_impl() -> Result<Vec<BundleInfo>, CatalogError> {
     security::authorize_current_user(security::Operation::Search, Path::new(""))?;
-    let query = format!("SELECT {BUNDLE_INFO_COLUMNS} FROM pgokf.bundles ORDER BY id");
+    let query = format!(
+        "SELECT {BUNDLE_INFO_COLUMNS} FROM pgokf.bundles WHERE retired_at IS NULL ORDER BY id"
+    );
     Spi::connect(|client| {
         let table = client
             .select(query.as_str(), None, &[])
@@ -286,15 +294,166 @@ fn set_bundle_enabled_impl(bundle_id: i64, enabled: bool) -> Result<BundleInfo, 
     .ok_or_else(|| unknown_bundle_error(bundle_id))
 }
 
+/// Authorize, lock on the stored canonical path, and set the bundle's
+/// `retired_at`, returning the updated projection.
+///
+/// Retirement is the reversible undo window for the hard unregister cascade: it
+/// sets `retired_at = now()` (which, combined with the `enabled AND retired_at IS
+/// NULL` active predicate, hides the bundle from search, graph traversal, and the
+/// default `list_bundles`) without deleting any catalog rows or touching the
+/// independent `enabled` flag, so [`unretire_bundle_impl`] fully restores it.
+///
+/// Retirement is idempotent: re-retiring an already-retired bundle preserves the
+/// original `retired_at` instant (`COALESCE(retired_at, now())`), so the
+/// `purge_retired` age window always measures from when the bundle was first
+/// retired. Serializes on the bundle advisory lock. An unknown `bundle_id` raises
+/// SQLSTATE `22023`.
+fn retire_bundle_impl(bundle_id: i64) -> Result<BundleInfo, CatalogError> {
+    security::authorize_current_user(security::Operation::Ingest, Path::new(""))?;
+    // Write-side tenant confinement: a scoped session may only retire its own
+    // tenant's bundle; a cross-tenant or absent id looks identically unknown.
+    security::enforce_bundle_tenant(bundle_id)?;
+    let stored_path =
+        select_bundle_path(bundle_id)?.ok_or_else(|| unknown_bundle_error(bundle_id))?;
+
+    acquire_bundle_lock(&stored_path)?;
+    let statement = format!(
+        "UPDATE pgokf.bundles
+         SET retired_at = COALESCE(retired_at, pg_catalog.now())
+         WHERE id = $1 RETURNING {BUNDLE_INFO_COLUMNS}"
+    );
+    Spi::connect_mut(|client| {
+        let mut table = client
+            .update(statement.as_str(), None, &[bundle_id.into()])
+            .map_err(|error| spi_error("failed to retire bundle", &error))?;
+        table.next().map(|row| read_bundle_info(&row)).transpose()
+    })?
+    .ok_or_else(|| unknown_bundle_error(bundle_id))
+}
+
+/// Authorize, lock on the stored canonical path, and clear the bundle's
+/// `retired_at`, returning the updated projection.
+///
+/// Reverses [`retire_bundle_impl`]: clearing `retired_at` makes the bundle active
+/// again (subject to its `enabled` flag) with every catalog row intact.
+/// Serializes on the bundle advisory lock. An unknown `bundle_id` raises SQLSTATE
+/// `22023`.
+fn unretire_bundle_impl(bundle_id: i64) -> Result<BundleInfo, CatalogError> {
+    security::authorize_current_user(security::Operation::Ingest, Path::new(""))?;
+    security::enforce_bundle_tenant(bundle_id)?;
+    let stored_path =
+        select_bundle_path(bundle_id)?.ok_or_else(|| unknown_bundle_error(bundle_id))?;
+
+    acquire_bundle_lock(&stored_path)?;
+    let statement = format!(
+        "UPDATE pgokf.bundles SET retired_at = NULL WHERE id = $1 RETURNING {BUNDLE_INFO_COLUMNS}"
+    );
+    Spi::connect_mut(|client| {
+        let mut table = client
+            .update(statement.as_str(), None, &[bundle_id.into()])
+            .map_err(|error| spi_error("failed to unretire bundle", &error))?;
+        table.next().map(|row| read_bundle_info(&row)).transpose()
+    })?
+    .ok_or_else(|| unknown_bundle_error(bundle_id))
+}
+
+/// Read the (id, path) of every bundle retired longer than `older_than`, scoped
+/// to the session's tenant.
+///
+/// The tenant predicate mirrors the row-level-security policy inline (this runs
+/// on the `SECURITY DEFINER` purge path, which bypasses RLS): an unset/empty
+/// `pgokf.tenant` sees every retired bundle (the backward-compatible
+/// operator/superuser default), while a scoped session sees only its own.
+fn select_purgeable_bundles(older_than: Interval) -> Result<Vec<(i64, String)>, CatalogError> {
+    Spi::connect(|client| {
+        let table = client
+            .select(
+                "SELECT id, path
+                 FROM pgokf.bundles
+                 WHERE retired_at IS NOT NULL
+                   AND retired_at < pg_catalog.now() - $1
+                   AND (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+                     OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+                     OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true))
+                 ORDER BY id",
+                None,
+                &[older_than.into()],
+            )
+            .map_err(|error| spi_error("failed to select purgeable bundles", &error))?;
+        let mut rows = Vec::with_capacity(table.len());
+        for row in table {
+            let reader = RowReader::new(&row, "failed to read purgeable bundle", "bundle");
+            let id = reader.required::<i64>(1, "id")?;
+            let path = reader.required::<String>(2, "path")?;
+            rows.push((id, path));
+        }
+        Ok(rows)
+    })
+}
+
+/// Hard-delete a single bundle by id under the caller-held advisory lock,
+/// returning whether a row was removed.
+fn delete_bundle_row(bundle_id: i64) -> Result<bool, CatalogError> {
+    Spi::connect_mut(|client| {
+        let mut table = client
+            .update(
+                "DELETE FROM pgokf.bundles WHERE id = $1 RETURNING id",
+                None,
+                &[bundle_id.into()],
+            )
+            .map_err(|error| spi_error("failed to purge retired bundle", &error))?;
+        Ok(table.next().is_some())
+    })
+}
+
+/// Authorize and hard-delete every bundle retired longer than `older_than`,
+/// returning the count purged.
+///
+/// Each purged bundle is serialized on its own advisory lock and deleted exactly
+/// like `unregister_bundle` — the `pgokf.concepts` cascade removes concepts,
+/// metadata, and every feature projection — and an `unregister` audit row is
+/// written per purged bundle (its counts and hash `NULL`, like a real
+/// unregister). Only bundles whose `retired_at` predates `now() - older_than` are
+/// eligible, so an in-window retired bundle stays recoverable; `unregister_bundle`
+/// remains a separate immediate hard delete.
+fn purge_retired_impl(older_than: Interval) -> Result<i64, CatalogError> {
+    security::authorize_current_user(security::Operation::Register, Path::new(""))?;
+    let retention_days = crate::catalog::config::sync_log_retention_days()?;
+    let candidates = select_purgeable_bundles(older_than)?;
+
+    let mut purged: i64 = 0;
+    for (bundle_id, stored_path) in candidates {
+        // Serialize with a concurrent register/refresh/unregister of the same
+        // bundle before mutating, exactly as unregister does.
+        acquire_bundle_lock(&stored_path)?;
+        if delete_bundle_row(bundle_id)? {
+            // Same FK-free unregister audit row a manual unregister writes; the
+            // returned sync id is unused (a purge has no per-concept manifest).
+            let _ = crate::catalog::audit::record(
+                bundle_id,
+                &stored_path,
+                "unregister",
+                None,
+                None,
+                retention_days,
+            )?;
+            purged += 1;
+        }
+    }
+    Ok(purged)
+}
+
 /// SQL-facing administration entry points, installed into the `pgokf` schema.
 #[pgrx::pg_schema]
 mod pgokf {
+    use pgrx::datum::Interval;
     use pgrx::iter::SetOfIterator;
-    use pgrx::{extension_sql, pg_extern};
+    use pgrx::{default, extension_sql, pg_extern};
 
     use super::{
-        bundle_info_impl, bundle_info_tuple, list_bundles_impl, set_bundle_enabled_impl,
-        unknown_bundle_error, unregister_bundle_impl,
+        bundle_info_impl, bundle_info_tuple, list_bundles_impl, purge_retired_impl,
+        retire_bundle_impl, set_bundle_enabled_impl, unknown_bundle_error, unregister_bundle_impl,
+        unretire_bundle_impl,
     };
 
     extension_sql!(
@@ -372,12 +531,73 @@ COMMENT ON TYPE pgokf.bundle_info IS
         bundle_info_tuple(info).unwrap_or_else(|error| error.raise())
     }
 
+    /// Retire (soft-delete) a registered bundle, returning the updated info.
+    ///
+    /// Requires membership in `pgokf_writer` (an admin qualifies by
+    /// inheritance). Sets `retired_at = now()`, which excludes the bundle from
+    /// `concept_search`, `concept_neighbors`, and the default `list_bundles`
+    /// without deleting any rows — a reversible undo window for the hard
+    /// unregister cascade. Idempotent: re-retiring keeps the original
+    /// `retired_at`. Does not alter the independent `enabled` flag. Serializes on
+    /// the bundle advisory lock. Raises SQLSTATE `22023` when `bundle_id` is
+    /// unknown.
+    #[pg_extern(requires = ["bundle_info_type"])]
+    fn retire_bundle(bundle_id: i64) -> pgrx::composite_type!('static, "pgokf.bundle_info") {
+        let info = retire_bundle_impl(bundle_id).unwrap_or_else(|error| error.raise());
+        bundle_info_tuple(info).unwrap_or_else(|error| error.raise())
+    }
+
+    /// Un-retire a bundle, clearing `retired_at`, and return the updated info.
+    ///
+    /// Requires membership in `pgokf_writer` (an admin qualifies by
+    /// inheritance). Fully reverses `retire_bundle`: the bundle becomes active
+    /// again (subject to its `enabled` flag) with every catalog row intact.
+    /// Serializes on the bundle advisory lock. Raises SQLSTATE `22023` when
+    /// `bundle_id` is unknown.
+    #[pg_extern(requires = ["bundle_info_type"])]
+    fn unretire_bundle(bundle_id: i64) -> pgrx::composite_type!('static, "pgokf.bundle_info") {
+        let info = unretire_bundle_impl(bundle_id).unwrap_or_else(|error| error.raise());
+        bundle_info_tuple(info).unwrap_or_else(|error| error.raise())
+    }
+
+    /// Hard-delete every bundle retired longer than `older_than`, returning the
+    /// count purged.
+    ///
+    /// Requires membership in `pgokf_admin`. Each eligible bundle (its
+    /// `retired_at` older than `now() - older_than`) is deleted like
+    /// `unregister_bundle` — concepts, metadata, and every feature projection
+    /// cascade — and an `unregister` audit row is written per purged bundle. A
+    /// retired bundle still inside the window is left recoverable via
+    /// `unretire_bundle`.
+    #[pg_extern(requires = ["bundle_info_type"])]
+    fn purge_retired(older_than: default!(Interval, "'7 days'")) -> i64 {
+        purge_retired_impl(older_than).unwrap_or_else(|error| error.raise())
+    }
+
     extension_sql!(
         r"
 ALTER FUNCTION pgokf.unregister_bundle(bigint)
     SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
 ALTER FUNCTION pgokf.set_bundle_enabled(bigint, boolean)
     SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
+ALTER FUNCTION pgokf.retire_bundle(bigint)
+    SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
+ALTER FUNCTION pgokf.unretire_bundle(bigint)
+    SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
+ALTER FUNCTION pgokf.purge_retired(interval)
+    SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
+REVOKE ALL ON FUNCTION pgokf.retire_bundle(bigint) FROM PUBLIC;
+REVOKE ALL ON FUNCTION pgokf.unretire_bundle(bigint) FROM PUBLIC;
+REVOKE ALL ON FUNCTION pgokf.purge_retired(interval) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pgokf.retire_bundle(bigint) TO pgokf_writer;
+GRANT EXECUTE ON FUNCTION pgokf.unretire_bundle(bigint) TO pgokf_writer;
+GRANT EXECUTE ON FUNCTION pgokf.purge_retired(interval) TO pgokf_admin;
+COMMENT ON FUNCTION pgokf.retire_bundle(bigint) IS
+    'Retire (soft-delete) a bundle: set retired_at = now(), returning the updated pgokf.bundle_info. Writer-tier (pgokf_writer; admin inherits it). Excludes the bundle from concept_search, concept_neighbors, and the default list_bundles without deleting rows (reversible via unretire_bundle); idempotent (keeps the original retired_at); does not change enabled. Raises 22023 if the bundle_id is unknown.';
+COMMENT ON FUNCTION pgokf.unretire_bundle(bigint) IS
+    'Un-retire a bundle: clear retired_at, returning the updated pgokf.bundle_info. Writer-tier (pgokf_writer; admin inherits it); fully reverses retire_bundle. Raises 22023 if the bundle_id is unknown.';
+COMMENT ON FUNCTION pgokf.purge_retired(interval) IS
+    'Hard-delete every bundle whose retired_at is older than now() - older_than (default 7 days); returns the count purged. Admin-only (pgokf_admin). Each purge cascades concept/metadata/feature rows and writes an unregister audit row; a bundle retired within the window stays recoverable via unretire_bundle. unregister_bundle remains a separate immediate hard delete.';
 REVOKE ALL ON FUNCTION pgokf.set_bundle_enabled(bigint, boolean) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pgokf.set_bundle_enabled(bigint, boolean) TO pgokf_writer;
 COMMENT ON FUNCTION pgokf.set_bundle_enabled(bigint, boolean) IS
@@ -391,7 +611,7 @@ GRANT EXECUTE ON FUNCTION pgokf.bundle_info(bigint) TO pgokf_reader;
 COMMENT ON FUNCTION pgokf.unregister_bundle(bigint) IS
     'Unregister a bundle and return the removed bundle_info. Writer-tier (pgokf_writer; admin inherits it); concept/metadata/feature rows cascade. Raises 22023 if the bundle_id is unknown.';
 COMMENT ON FUNCTION pgokf.list_bundles() IS
-    'List every registered bundle as pgokf.bundle_info, ordered by id. Reader-level.';
+    'List every active (non-retired) registered bundle as pgokf.bundle_info, ordered by id. Reader-level. Retired bundles are excluded (reachable by id via bundle_info, and visible with their retired_at in catalog_stats); disabled-but-not-retired bundles are still listed.';
 COMMENT ON FUNCTION pgokf.bundle_info(bigint) IS
     'Return one registered bundle as pgokf.bundle_info. Reader-level; raises 22023 if the bundle_id is unknown.';
 ",
@@ -400,7 +620,10 @@ COMMENT ON FUNCTION pgokf.bundle_info(bigint) IS
             unregister_bundle,
             list_bundles,
             bundle_info,
-            set_bundle_enabled
+            set_bundle_enabled,
+            retire_bundle,
+            unretire_bundle,
+            purge_retired
         ]
     );
 }

@@ -978,6 +978,10 @@ fn export_parquet_impl(bundle_id: i64, dest_dir: &str) -> Result<ExportSummary, 
         sizes.push(table_bytes);
     }
 
+    // Exfiltration audit: record who exported which bundle and where.
+    let dest = dir.to_string_lossy();
+    crate::catalog::access::record("export_parquet", bundle_id, None, Some(dest.as_ref()))?;
+
     Ok(ExportSummary {
         bundle_id,
         dest_dir: dir.to_string_lossy().into_owned(),

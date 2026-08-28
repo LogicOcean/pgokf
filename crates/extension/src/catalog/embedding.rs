@@ -250,7 +250,7 @@ fn run_semantic_query(
                 NULL::pg_catalog.text
          FROM pgokf.concept_embedding e
          JOIN pgokf.concepts c ON c.bundle_id = e.bundle_id AND c.id = e.concept_id
-         JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled
+         JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled AND b.retired_at IS NULL
          WHERE ($2 IS NULL OR c.bundle_id = $2)
          ORDER BY e.embedding::vector({dim}) <=> $1::vector({dim})
          LIMIT $3"
@@ -404,7 +404,7 @@ fn fuse_rrf(
                 NULL::pg_catalog.text
          FROM fused f
          JOIN pgokf.concepts c ON c.bundle_id = f.bundle_id AND c.id = f.concept_id
-         JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled
+         JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled AND b.retired_at IS NULL
          ORDER BY f.score DESC, c.id
          LIMIT $5"
     );

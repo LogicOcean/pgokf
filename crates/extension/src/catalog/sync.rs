@@ -569,6 +569,72 @@ fn adjust_report_for_skips(
     }
 }
 
+/// Read the concept ids of the rows about to be removed, before the delete.
+///
+/// The change manifest ([`crate::catalog::audit::record_changes`]) names removed
+/// concepts by their path-derived id, but [`delete_removed_concepts`] drops those
+/// rows, so their ids must be captured first. Empty `removed_paths` short-circuits
+/// with no query.
+fn load_removed_concept_ids(
+    bundle_id: i64,
+    removed_paths: &[String],
+) -> Result<Vec<String>, CatalogError> {
+    if removed_paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    Spi::connect(|client| {
+        let table = client
+            .select(
+                "SELECT id FROM pgokf.concepts WHERE bundle_id = $1 AND path = ANY($2)",
+                None,
+                &[bundle_id.into(), removed_paths.to_vec().into()],
+            )
+            .map_err(|error| spi_error("failed to load removed concept ids", &error))?;
+        let mut ids = Vec::with_capacity(table.len());
+        for row in table {
+            ids.push(spi_read::required_column::<String>(
+                &row,
+                1,
+                "failed to read removed concept id",
+                "removed concept id is NULL",
+            )?);
+        }
+        Ok(ids)
+    })
+}
+
+/// Build the parallel `(concept_id, change_kind)` slices for the per-concept
+/// change manifest of one sync.
+///
+/// Every staged concept was (re-)written, so it is classified `updated` when its
+/// path was already stored before this sync and `added` otherwise; every id in
+/// `removed_ids` is `removed`. The classification keys on the concept's own
+/// normalized path against the pre-sync stored projection, so it matches the
+/// paths the incremental diff itself compared.
+fn build_change_manifest(
+    stored: &BTreeMap<String, String>,
+    staged: &[StagedConcept],
+    removed_ids: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let capacity = staged.len() + removed_ids.len();
+    let mut concept_ids = Vec::with_capacity(capacity);
+    let mut change_kinds = Vec::with_capacity(capacity);
+    for entry in staged {
+        let kind = if stored.contains_key(&entry.concept.path) {
+            "updated"
+        } else {
+            "added"
+        };
+        concept_ids.push(entry.concept.id.clone());
+        change_kinds.push(kind.to_owned());
+    }
+    for id in removed_ids {
+        concept_ids.push(id.clone());
+        change_kinds.push("removed".to_owned());
+    }
+    (concept_ids, change_kinds)
+}
+
 fn delete_removed_concepts(bundle_id: i64, removed_paths: &[String]) -> Result<(), CatalogError> {
     if removed_paths.is_empty() {
         return Ok(());
@@ -888,6 +954,10 @@ pub(crate) fn run_bundle_sync<S: ByteSource>(
     adjust_report_for_skips(&mut delta, &stored, &outcome.skipped);
     let staged = outcome.staged;
 
+    // Capture the removed concepts' ids for the change manifest before the
+    // delete drops the rows they are read from.
+    let removed_ids = load_removed_concept_ids(bundle_id, &delta.removed_paths)?;
+
     delete_removed_concepts(bundle_id, &delta.removed_paths)?;
     upsert_concepts(bundle_id, &staged, &defaults.text_search_config)?;
     replace_concept_metadata(bundle_id, &staged)?;
@@ -908,7 +978,7 @@ pub(crate) fn run_bundle_sync<S: ByteSource>(
     // Audit trail: append exactly one row for this operation and prune history
     // to the retention policy — the mechanism that activates
     // sync_log_retention_days. Commits atomically with the sync.
-    crate::catalog::audit::record(
+    let sync_id = crate::catalog::audit::record(
         bundle_id,
         bundle_path,
         op.as_str(),
@@ -916,6 +986,11 @@ pub(crate) fn run_bundle_sync<S: ByteSource>(
         Some(&sync_hash),
         defaults.sync_log_retention_days,
     )?;
+
+    // Per-concept change manifest: hang the concrete added/updated/removed
+    // concepts off the audit row so an operator can see what this sync changed.
+    let (change_ids, change_kinds) = build_change_manifest(&stored, &staged, &removed_ids);
+    crate::catalog::audit::record_changes(sync_id, bundle_id, &change_ids, &change_kinds)?;
 
     // Opt-in change notification (LISTEN/NOTIFY). Zero overhead when the
     // notify_channel key is empty (no channel resolved).

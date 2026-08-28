@@ -245,6 +245,13 @@ This is new in 0.1.5: the key was defined but dead in earlier releases. Read the
 log through the reader-level `pgokf.list_sync_log(bundle_id, max_rows)` function
 (see [sql-api.md](sql-api.md) and [operations.md](operations.md)).
 
+As of 0.1.8 this one key governs **all three** audit trails, so operators tune a
+single retention window: the sync log; the per-concept **change manifest**
+(`pgokf_private.sync_log_change`, which cascades from `sync_log` and so is pruned
+with it); and the exfiltration **access log** (`pgokf_private.access_log`, pruned
+on the same policy after each `export_parquet` / `export_sources` /
+`get_concept_source` append).
+
 ```sql
 SELECT pgokf.set_config('sync_log_retention_days', '14'::jsonb);  -- keep 14 days
 SELECT pgokf.set_config('sync_log_retention_days', '0'::jsonb);   -- keep forever

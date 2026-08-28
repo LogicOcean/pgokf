@@ -73,6 +73,7 @@ struct CatalogStat {
     last_synced_at: Option<TimestampWithTimeZone>,
     sync_age: Option<Interval>,
     is_stale: bool,
+    retired_at: Option<TimestampWithTimeZone>,
 }
 
 const CATALOG_STATS_QUERY: &str = "
@@ -88,7 +89,8 @@ const CATALOG_STATS_QUERY: &str = "
            b.last_synced_at,
            (pg_catalog.now() - b.last_synced_at),
            COALESCE(
-               b.last_synced_at < pg_catalog.now() - $1::pg_catalog.interval, false)
+               b.last_synced_at < pg_catalog.now() - $1::pg_catalog.interval, false),
+           b.retired_at
     FROM pgokf.bundles b
     ORDER BY b.id";
 
@@ -106,6 +108,7 @@ fn read_catalog_stat(row: &pgrx::spi::SpiHeapTupleData<'_>) -> Result<CatalogSta
         last_synced_at: reader.optional::<TimestampWithTimeZone>(9)?,
         sync_age: reader.optional::<Interval>(10)?,
         is_stale: reader.required(11, "is_stale")?,
+        retired_at: reader.optional::<TimestampWithTimeZone>(12)?,
     })
 }
 
@@ -140,6 +143,9 @@ fn catalog_stat_tuple(
         .map_err(set)?;
     tuple.set_by_name("sync_age", stat.sync_age).map_err(set)?;
     tuple.set_by_name("is_stale", stat.is_stale).map_err(set)?;
+    tuple
+        .set_by_name("retired_at", stat.retired_at)
+        .map_err(set)?;
     Ok(tuple)
 }
 
@@ -311,7 +317,8 @@ CREATE TYPE pgokf.catalog_stat AS (
     resolved_link_count bigint,
     last_synced_at      timestamptz,
     sync_age            interval,
-    is_stale            boolean
+    is_stale            boolean,
+    retired_at          timestamptz
 );
 
 CREATE TYPE pgokf.stale_concept AS (
@@ -323,7 +330,7 @@ CREATE TYPE pgokf.stale_concept AS (
 );
 
 COMMENT ON TYPE pgokf.catalog_stat IS
-    'Per-bundle operational statistics from pgokf.catalog_stats: identity and state, indexed-concept / link / resolved-link counts, sync recency (last_synced_at, sync_age), and a 24-hour staleness flag.';
+    'Per-bundle operational statistics from pgokf.catalog_stats: identity and state, indexed-concept / link / resolved-link counts, sync recency (last_synced_at, sync_age), a 24-hour staleness flag, and retired_at (the soft-delete/retirement instant, NULL when active) so retired bundles — hidden from list_bundles — remain visible here.';
 COMMENT ON TYPE pgokf.stale_concept IS
     'One concept whose OKF stale_after instant has passed (as of the chosen time), from pgokf.stale_concepts: its bundle, id, path, type, and the stale_after instant.';
 ",

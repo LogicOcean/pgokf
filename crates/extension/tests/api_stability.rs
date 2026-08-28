@@ -37,7 +37,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The 26 stable public functions, as `(name, argument-type list)`. The pair
+/// The 32 stable public functions, as `(name, argument-type list)`. The pair
 /// renders to the exact `COMMENT ON FUNCTION pgokf.<name>(<args>)` prefix that
 /// the hardening blocks emit.
 const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
@@ -46,8 +46,12 @@ const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
     ("refresh_bundle", "bigint"),
     ("unregister_bundle", "bigint"),
     ("set_bundle_enabled", "bigint, boolean"),
+    ("retire_bundle", "bigint"),
+    ("unretire_bundle", "bigint"),
+    ("purge_retired", "interval"),
     ("list_bundles", ""),
     ("bundle_info", "bigint"),
+    ("duplicate_concepts", "bigint, integer"),
     (
         "concept_search",
         "text, bigint, integer, text, text[], text, text",
@@ -62,6 +66,8 @@ const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
     ("reset_config", "text"),
     ("get_config", ""),
     ("list_sync_log", "bigint, integer"),
+    ("list_sync_changes", "bigint, integer"),
+    ("list_access_log", "bigint, integer"),
     ("catalog_stats", ""),
     ("health", ""),
     ("stale_concepts", "bigint, timestamptz"),
@@ -72,7 +78,7 @@ const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
     ("version", ""),
 ];
 
-/// The 8 stable public composite types.
+/// The 11 stable public composite types.
 const PUBLIC_TYPES: &[&str] = &[
     "bundle_sync_result",
     "concept_search_result",
@@ -82,12 +88,15 @@ const PUBLIC_TYPES: &[&str] = &[
     "sync_log_entry",
     "catalog_stat",
     "stale_concept",
+    "sync_change",
+    "access_log_entry",
+    "duplicate_group",
 ];
 
-/// The 11 catalog tables, as fully-qualified `schema.table` identifiers. Nine
-/// are public (`pgokf`); the singleton policy row and the sync-history log live
-/// in the administrator-only `pgokf_private` schema and are documented all the
-/// same.
+/// The 13 catalog tables, as fully-qualified `schema.table` identifiers. Nine
+/// are public (`pgokf`); the singleton policy row and the three admin-only
+/// history/audit logs live in the `pgokf_private` schema and are documented all
+/// the same.
 const CATALOG_TABLES: &[&str] = &[
     "pgokf.bundles",
     "pgokf.concepts",
@@ -100,6 +109,8 @@ const CATALOG_TABLES: &[&str] = &[
     "pgokf.concept_embedding",
     "pgokf_private.config",
     "pgokf_private.sync_log",
+    "pgokf_private.sync_log_change",
+    "pgokf_private.access_log",
 ];
 
 /// The three public API roles created by `sql/bootstrap.sql`

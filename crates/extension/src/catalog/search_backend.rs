@@ -216,7 +216,7 @@ const NATIVE_QUERY: &str = "
                pg_catalog.concat_ws(' ', c.title, c.description, c.body_text),
                q.query)
     FROM pgokf.concepts c
-    JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled
+    JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled AND b.retired_at IS NULL
     LEFT JOIN pgokf.concept_provenance cp
            ON cp.bundle_id = c.bundle_id AND cp.concept_id = c.id,
          pg_catalog.websearch_to_tsquery($4::pg_catalog.regconfig, $1) AS q(query)
@@ -276,7 +276,7 @@ const BM25_QUERY: &str = "
                pg_catalog.concat_ws(' ', c.title, c.description, c.body_text),
                pg_catalog.websearch_to_tsquery($4::pg_catalog.regconfig, $1))
     FROM pgokf.concepts c
-    JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled
+    JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled AND b.retired_at IS NULL
     LEFT JOIN pgokf.concept_provenance cp
            ON cp.bundle_id = c.bundle_id AND cp.concept_id = c.id
     WHERE c.id @@@ paradedb.boolean(should => ARRAY[

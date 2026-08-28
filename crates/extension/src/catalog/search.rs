@@ -194,9 +194,9 @@ mod pgokf {
     /// filters.
     ///
     /// Requires membership in `pgokf_reader` (or `pgokf_admin`). Searches
-    /// only enabled bundles; pass `bundle_id` to scope the search to one
-    /// bundle. `limit_count` must lie in `1..=500` (SQLSTATE `22023`
-    /// otherwise).
+    /// only active bundles (enabled and not retired); pass `bundle_id` to scope
+    /// the search to one bundle. `limit_count` must lie in `1..=500` (SQLSTATE
+    /// `22023` otherwise).
     ///
     /// The four trailing filters are each a no-op when `NULL` (the default), so
     /// the historical three-argument call is unchanged: `concept_type` matches
@@ -238,7 +238,7 @@ mod pgokf {
 REVOKE ALL ON FUNCTION pgokf.concept_search(text, bigint, integer, text, text[], text, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pgokf.concept_search(text, bigint, integer, text, text[], text, text) TO pgokf_reader;
 COMMENT ON FUNCTION pgokf.concept_search(text, bigint, integer, text, text[], text, text) IS
-    'Rank catalog concepts. Reader-level; searches enabled bundles only. Optional trailing filters (each a no-op when NULL): concept_type (exact type), tags (ALL-of containment), status and trust_tier (from concept_provenance). Uses the search_backend configuration: native full-text search (websearch_to_tsquery + ts_rank_cd) by default, or ParadeDB pg_search BM25 when set to bm25 (falling back to native if pg_search or its index is absent).';
+    'Rank catalog concepts. Reader-level; searches active bundles only (enabled AND not retired). Optional trailing filters (each a no-op when NULL): concept_type (exact type), tags (ALL-of containment), status and trust_tier (from concept_provenance). Uses the search_backend configuration: native full-text search (websearch_to_tsquery + ts_rank_cd) by default, or ParadeDB pg_search BM25 when set to bm25 (falling back to native if pg_search or its index is absent).';
 ",
         name = "search_function_hardening",
         requires = [concept_search]

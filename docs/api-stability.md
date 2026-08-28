@@ -21,7 +21,7 @@ the database. Complete comment coverage is a release gate (see
 
 ## The stable surface
 
-### Functions (26)
+### Functions (32)
 
 | Function | Role required | Purpose |
 | -------- | ------------- | ------- |
@@ -30,8 +30,12 @@ the database. Complete comment coverage is a release gate (see
 | `pgokf.refresh_bundle(bigint)` | `pgokf_writer` | Incrementally re-sync a filesystem-sourced bundle (content bundles are re-synced via `register_bundle_content`) |
 | `pgokf.unregister_bundle(bigint)` | `pgokf_writer` | Remove a bundle (rows cascade) |
 | `pgokf.set_bundle_enabled(bigint, boolean)` | `pgokf_writer` | Enable/disable a bundle (hides it from search and graph without deleting rows; reversible) |
+| `pgokf.retire_bundle(bigint)` | `pgokf_writer` | Soft-retire a bundle (hides it, reversibly) into a purge window |
+| `pgokf.unretire_bundle(bigint)` | `pgokf_writer` | Reverse a retirement (clears `retired_at`) |
+| `pgokf.purge_retired(interval)` | `pgokf_admin` | Hard-delete bundles retired longer than the given window |
 | `pgokf.list_bundles()` | `pgokf_reader` | List registered bundles |
 | `pgokf.bundle_info(bigint)` | `pgokf_reader` | Info for one registered bundle |
+| `pgokf.duplicate_concepts(bigint, integer)` | `pgokf_reader` | Concepts sharing a BLAKE3 `file_hash` across bundles (dedup) |
 | `pgokf.concept_search(text, bigint, integer, text, text[], text, text)` | `pgokf_reader` | Ranked full-text search with optional `concept_type`/`tags`/`status`/`trust_tier` filters (trailing args default `NULL`; the historical 3-arg call still resolves) |
 | `pgokf.find_similar(text, bigint, integer)` | `pgokf_reader` | Content more-like-this for a seed concept (distinct from the link graph) |
 | `pgokf.concept_search_semantic(real[], bigint, integer)` | `pgokf_reader` | Vector nearest-neighbor search by a caller-supplied query embedding (requires pgvector) |
@@ -43,6 +47,8 @@ the database. Complete comment coverage is a release gate (see
 | `pgokf.reset_config(text)` | `pgokf_admin` | Reset one/all configuration keys |
 | `pgokf.get_config()` | `pgokf_reader` | Effective configuration as jsonb |
 | `pgokf.list_sync_log(bigint, integer)` | `pgokf_reader` | Sync/audit history rows (from the admin-only `pgokf_private.sync_log`) |
+| `pgokf.list_sync_changes(bigint, integer)` | `pgokf_reader` | Per-concept change manifest (added/updated/removed) for one sync |
+| `pgokf.list_access_log(bigint, integer)` | `pgokf_admin` | Exfiltration/access audit rows (exports + `get_concept_source`) |
 | `pgokf.catalog_stats()` | `pgokf_reader` | Per-bundle counts, sync recency, and staleness for operators |
 | `pgokf.health()` | `pgokf_reader` | Liveness/readiness document as jsonb (counts, backend, `in_recovery`) |
 | `pgokf.stale_concepts(bigint, timestamptz)` | `pgokf_reader` | Concepts past their OKF `stale_after` |
@@ -58,18 +64,19 @@ arguments (`name`/`options` on `register_bundle`, `bundle_id`/`limit` on search
 and neighbors) are contractual too: an existing call that omits them keeps
 working.
 
-### Composite types (8)
+### Composite types (11)
 
 `pgokf.bundle_sync_result`, `pgokf.concept_search_result`,
 `pgokf.concept_neighbor`, `pgokf.bundle_info`, `pgokf.export_result`,
-`pgokf.sync_log_entry`, `pgokf.catalog_stat`, `pgokf.stale_concept`.
+`pgokf.sync_log_entry`, `pgokf.catalog_stat`, `pgokf.stale_concept`,
+`pgokf.sync_change`, `pgokf.access_log_entry`, `pgokf.duplicate_group`.
 
 The set of columns, their names, and their types are stable. New columns are
 **not** added to an existing composite type in a compatible release, because
 `SELECT *` and positional row expansion would break; a new field ships as a new
 type or a new function instead.
 
-### Tables (9 public + 2 documented-internal)
+### Tables (9 public + 4 documented-internal)
 
 Public, `SELECT`-able by `pgokf_reader`: `pgokf.bundles`, `pgokf.concepts`,
 `pgokf.concept_metadata`, `pgokf.links`, `pgokf.concept_provenance`,
@@ -85,9 +92,10 @@ existing column names and types; the columns listed in
 compatible release; code that pins to named columns (never `SELECT *` into a
 fixed row type) is forward-compatible.
 
-`pgokf_private.config` and `pgokf_private.sync_log` are listed here only because
-they are catalog tables the documentation gate covers (the eight public tables
-plus these two private ones). They are **internal state, not API** — read the
+`pgokf_private.config`, `pgokf_private.sync_log`, `pgokf_private.sync_log_change`,
+and `pgokf_private.access_log` are listed here only because they are catalog
+tables the documentation gate covers (the nine public tables plus these four
+private ones). They are **internal state, not API** — read the
 sync history through `pgokf.list_sync_log` and configuration through
 `pgokf.get_config`; see [The private surface](#the-private-surface-not-api).
 

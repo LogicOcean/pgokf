@@ -73,6 +73,93 @@ For push-based monitoring, set the `notify_channel` policy and a `LISTEN`
 client is woken on every sync with a `{bundle_id, op, added, updated, removed,
 total}` payload.
 
+### Change manifest — what a sync actually changed
+
+Beyond the aggregate counts, every sync records the concrete concepts it added,
+updated, or removed. Read the manifest of any `sync_log` entry through the
+reader-level `pgokf.list_sync_changes(sync_id, max_rows)`:
+
+```sql
+-- what did the most recent refresh of bundle 1 change?
+SELECT concept_id, change_kind
+  FROM pgokf.list_sync_changes((SELECT id FROM pgokf.list_sync_log(1, 1)));
+```
+
+The manifest lives in `pgokf_private.sync_log_change`, a child of `sync_log`
+that cascades on delete — so it shares the `sync_log_retention_days` window with
+no separate knob. Use it to answer "when did concept X change, and in which
+sync?" or to drive a downstream re-index of exactly the touched concepts.
+
+### Access / exfiltration audit
+
+The three operations that move concept *content* out of the database each append
+one row to `pgokf_private.access_log`: `export_parquet`, `export_sources`, and
+`get_concept_source`. Read it through the **admin-only**
+`pgokf.list_access_log(bundle_id, max_rows)` — an exfiltration audit is sensitive,
+so it is not reader-visible:
+
+```sql
+-- who exported or read source content recently?
+SELECT at, actor, op, bundle_id, concept_id, detail
+  FROM pgokf.list_access_log(NULL, 100);
+```
+
+Rows carry the `session_user`, the timestamp, the bundle (and concept, for a
+single-concept read), and the destination directory for the exports. The log
+shares the `sync_log_retention_days` retention window. Alert on unexpected
+`export_*` volume or `get_concept_source` reads outside your service accounts.
+
+### Retirement (soft-delete) window
+
+`pgokf.retire_bundle(id)` hides a bundle from search, traversal, and the default
+`list_bundles` **without deleting any rows** — a reversible undo window for the
+hard `unregister_bundle` cascade. A bundle is *active* only when
+`enabled AND retired_at IS NULL`.
+
+```sql
+SELECT pgokf.retire_bundle(1);      -- take it offline, keep everything
+SELECT pgokf.unretire_bundle(1);    -- change your mind, fully restored
+```
+
+Retired bundles disappear from `list_bundles` but remain reachable by id via
+`bundle_info` and visible, with their `retired_at`, in `catalog_stats`:
+
+```sql
+SELECT bundle_id, name, retired_at FROM pgokf.catalog_stats()
+ WHERE retired_at IS NOT NULL;
+```
+
+When the grace period has passed, reclaim the storage with the admin-only
+`pgokf.purge_retired(older_than)` — it hard-deletes (cascading, with an
+`unregister` audit row) every bundle retired longer than the interval:
+
+```sql
+SELECT pgokf.purge_retired('7 days');   -- delete bundles retired over a week ago
+```
+
+Retirement is idempotent (re-retiring keeps the first instant, so the purge
+window measures from when retirement began) and never touches the independent
+`enabled` flag. `unregister_bundle` remains available as an immediate hard delete
+for callers who want no grace window.
+
+### Finding duplicated content across bundles
+
+`pgokf.duplicate_concepts(bundle_id, min_group)` groups byte-identical concepts by
+their stored BLAKE3 `file_hash`, so you can find the same runbook or reference
+copied into several bundles:
+
+```sql
+-- every group of >= 2 identical concepts, largest first
+SELECT left(file_hash, 12) AS hash, occurrences, bundle_ids, concept_ids
+  FROM pgokf.duplicate_concepts();
+
+-- only groups that touch bundle 1 (still listing occurrences in every bundle)
+SELECT occurrences, bundle_ids FROM pgokf.duplicate_concepts(1);
+```
+
+It is reader-level and RLS-filtered to the session's tenant. Use it before a
+consolidation to see where a canonical concept has been duplicated.
+
 ### Stale concepts
 
 `pgokf.stale_concepts(bundle_id, as_of)` surfaces concepts whose OKF

@@ -31,7 +31,9 @@
 //!
 //! - [`get_concept_source`](pgokf::get_concept_source) returns the exact stored
 //!   bytes to the client (reader-level; no filesystem write, so no path-security
-//!   surface).
+//!   surface). It is `SECURITY DEFINER` and tenant-scoped so each successful read
+//!   appends one `get_concept_source` row to the exfiltration access log
+//!   ([`crate::catalog::access`]).
 //! - [`export_sources`](pgokf::export_sources) reconstructs the bundle on disk
 //!   (admin-only), reusing the same destination-directory validation and
 //!   `O_NOFOLLOW` file creation as [`crate::catalog::export`] and verifying every
@@ -188,10 +190,21 @@ pub fn project(bundle_id: i64, staged: &[StagedConcept]) -> Result<(), CatalogEr
     Ok(())
 }
 
-/// Whether `(bundle_id, concept_id)` names a concept currently in the catalog.
+/// Whether `(bundle_id, concept_id)` names a concept currently in the catalog,
+/// visible to the session's tenant.
+///
+/// `get_concept_source` is `SECURITY DEFINER` (so it may append to the
+/// administrator-only access log), which bypasses row-level security; the tenant
+/// predicate is therefore inlined here so a scoped session cannot probe another
+/// tenant's concepts through the "no source stored" vs "no such concept"
+/// distinction.
 fn concept_exists(bundle_id: i64, concept_id: &str) -> Result<bool, CatalogError> {
     Spi::get_one_with_args::<bool>(
-        "SELECT EXISTS (SELECT 1 FROM pgokf.concepts WHERE bundle_id = $1 AND id = $2)",
+        "SELECT EXISTS (SELECT 1 FROM pgokf.concepts
+         WHERE bundle_id = $1 AND id = $2
+           AND (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+             OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+             OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true)))",
         &[bundle_id.into(), concept_id.into()],
     )
     .map_err(|error| spi_error("failed to look up concept", &error))
@@ -200,16 +213,26 @@ fn concept_exists(bundle_id: i64, concept_id: &str) -> Result<bool, CatalogError
 
 /// Read the stored source bytes for one concept, distinguishing an absent
 /// concept from a concept whose source was never stored.
+///
+/// `get_concept_source` runs `SECURITY DEFINER` — it must append to the
+/// administrator-only `pgokf_private.access_log` — so it bypasses row-level
+/// security and applies the same opt-in tenant filter explicitly to the source
+/// read and the concept-existence probe. Every successful read appends one
+/// `get_concept_source` exfiltration-audit row.
 fn get_concept_source_impl(bundle_id: i64, concept_id: &str) -> Result<Vec<u8>, CatalogError> {
     security::authorize_current_user(security::Operation::Search, Path::new(""))?;
 
     // A single-row read that tolerates zero rows: `Spi::get_one` raises on an
     // empty result rather than returning `None`, so the presence check goes
     // through `is_empty` (the same pattern the bundle lookups use). `None` here
-    // means no `concept_source` row exists for the pair.
+    // means no `concept_source` row exists for the pair (in this tenant).
     let stored: Option<Vec<u8>> = Spi::connect(|client| {
         let table = client.select(
-            "SELECT raw_content FROM pgokf.concept_source WHERE bundle_id = $1 AND concept_id = $2",
+            "SELECT raw_content FROM pgokf.concept_source
+             WHERE bundle_id = $1 AND concept_id = $2
+               AND (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+                 OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+                 OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true))",
             Some(1),
             &[bundle_id.into(), concept_id.into()],
         )?;
@@ -222,7 +245,16 @@ fn get_concept_source_impl(bundle_id: i64, concept_id: &str) -> Result<Vec<u8>, 
     .map_err(|error| spi_error("failed to read concept source", &error))?;
 
     match stored {
-        Some(bytes) => Ok(bytes),
+        Some(bytes) => {
+            // Exfiltration audit: record the single-concept source read.
+            crate::catalog::access::record(
+                "get_concept_source",
+                bundle_id,
+                Some(concept_id),
+                None,
+            )?;
+            Ok(bytes)
+        }
         None if concept_exists(bundle_id, concept_id)? => Err(CatalogError::invalid_parameter(
             format!(
                 "no source is stored for concept {concept_id} in bundle {bundle_id}; \
@@ -457,6 +489,10 @@ fn export_sources_impl(
         }
     }
 
+    // Exfiltration audit: record who reconstructed which bundle and where.
+    let dest = dir.to_string_lossy();
+    crate::catalog::access::record("export_sources", bundle_id, None, Some(dest.as_ref()))?;
+
     Ok(SourceExportSummary {
         bundle_id,
         dest_dir: dir.to_string_lossy().into_owned(),
@@ -548,7 +584,7 @@ mod pgokf {
     extension_sql!(
         r"
 ALTER FUNCTION pgokf.get_concept_source(bigint, text)
-    SET search_path = pg_catalog, pg_temp;
+    SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
 ALTER FUNCTION pgokf.export_sources(bigint, text)
     SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
 REVOKE ALL ON FUNCTION pgokf.get_concept_source(bigint, text) FROM PUBLIC;
@@ -556,7 +592,7 @@ REVOKE ALL ON FUNCTION pgokf.export_sources(bigint, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pgokf.get_concept_source(bigint, text) TO pgokf_reader;
 GRANT EXECUTE ON FUNCTION pgokf.export_sources(bigint, text) TO pgokf_admin;
 COMMENT ON FUNCTION pgokf.get_concept_source(bigint, text) IS
-    'Return the verbatim stored source bytes of one concept as bytea. Reader-level (same disclosure as body_text); raises 22023 when the concept exists but no source was stored, or when no such concept exists.';
+    'Return the verbatim stored source bytes of one concept as bytea. Reader-level (same disclosure as body_text), SECURITY DEFINER and tenant-scoped so it can append one get_concept_source row to the exfiltration access log on each successful read. Raises 22023 when the concept exists but no source was stored, or when no such concept exists.';
 COMMENT ON FUNCTION pgokf.export_sources(bigint, text) IS
     'Reconstruct a bundle''s stored source files under dest_dir, recreating the bundle-relative tree and verifying each file against its BLAKE3 file_hash; returns pgokf.export_result (concepts_rows = files written, bytes_written = total bytes). Admin-only; dest_dir must be an existing, writable, canonical directory contained within pgokf.allowed_roots when configured. Raises 22023 (bad bundle/dir), 42501 (dir not writable), or XX000 (a stored source fails its hash check, verified before any write).';
 ",

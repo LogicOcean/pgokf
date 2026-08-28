@@ -12,6 +12,62 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 Nothing yet.
 
+## [0.1.8] - 2026-08-28
+
+**Lifecycle and audit batch**: a per-sync change manifest, a reversible bundle
+retirement window, an exfiltration/access audit, and cross-bundle content
+deduplication. Everything is additive and backward compatible, so
+`ALTER EXTENSION pgokf UPDATE TO '0.1.8'` migrates an existing install in a single
+transaction and yields a catalog identical to a fresh 0.1.8. Six new public
+functions are added; no existing signature, type, or default changes.
+
+### Added
+
+- **Per-concept change manifest** — every `register` / `refresh` / `content`
+  sync now records which concepts it added, updated, or removed, not just the
+  aggregate counts. Stored in the new administrator-only
+  `pgokf_private.sync_log_change` (a child of `pgokf_private.sync_log`, cascading
+  on delete so it shares the `sync_log_retention_days` window) and read through
+  the reader-level **`pgokf.list_sync_changes(sync_id, max_rows DEFAULT 1000)`**
+  (`SETOF pgokf.sync_change`), tenant-scoped like `list_sync_log`.
+- **Bundle retirement / soft-delete window** — a new `bundles.retired_at`
+  timestamp and three functions: **`pgokf.retire_bundle(bundle_id)`** and
+  **`pgokf.unretire_bundle(bundle_id)`** (writer-tier), and
+  **`pgokf.purge_retired(older_than interval DEFAULT '7 days')`** (admin-tier).
+  A bundle is *active* only when `enabled AND retired_at IS NULL`; a retired
+  bundle is excluded from `concept_search`, `concept_neighbors`, semantic/hybrid
+  search, and the default `list_bundles` without deleting any rows, so retirement
+  is a reversible undo window for the hard `unregister_bundle` cascade.
+  `purge_retired` hard-deletes bundles retired longer than the interval (writing
+  one `unregister` audit row each). Retirement is idempotent (re-retiring keeps
+  the original instant) and does not touch `enabled`.
+- **Exfiltration / access audit** — the three content-exporting operations
+  (`export_parquet`, `export_sources`, `get_concept_source`) now each append one
+  row to the new administrator-only `pgokf_private.access_log` (who read/exported
+  what, and when), read through the admin-tier
+  **`pgokf.list_access_log(bundle_id DEFAULT NULL, max_rows DEFAULT 100)`**
+  (`SETOF pgokf.access_log_entry`). The log shares the `sync_log_retention_days`
+  retention window.
+- **Cross-bundle content deduplication** —
+  **`pgokf.duplicate_concepts(bundle_id DEFAULT NULL, min_group int DEFAULT 2)`**
+  (`SETOF pgokf.duplicate_group`, reader-level) groups byte-identical concepts by
+  their stored BLAKE3 `file_hash`, so an operator can find the same runbook or
+  reference copied across bundles.
+- **`retired_at`** on the `pgokf.catalog_stat` composite (returned by
+  `catalog_stats`), so retired bundles — hidden from `list_bundles` — stay
+  visible with their retirement instant.
+
+### Changed
+
+- **`pgokf.get_concept_source`** is now `SECURITY DEFINER` and tenant-scoped (so
+  it can append its access-audit row); its reader-tier grant and signature are
+  unchanged.
+- **`pgokf.list_bundles`** now excludes retired bundles by default (retired
+  bundles remain reachable by id via `bundle_info` and visible in
+  `catalog_stats`); disabled-but-not-retired bundles are still listed.
+- The `sync_log_retention_days` policy now also governs `pgokf_private.access_log`
+  and, transitively, the change manifest (via the `sync_log_change` cascade).
+
 ## [0.1.7] - 2026-08-28
 
 **Opt-in multi-tenant isolation**, built from a per-session GUC and PostgreSQL
