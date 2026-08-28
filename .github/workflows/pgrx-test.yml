@@ -72,6 +72,20 @@ jobs:
           cargo install --locked cargo-pgrx --version 0.19.2
           cargo pgrx init --pg${{ matrix.pg }}=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
 
+      # `cargo pgrx test` builds the extension and installs it into the system
+      # PostgreSQL's package-library and extension directories (it uses the
+      # system pg_config from the init step above). On the GitHub runner those
+      # directories are root-owned, so `cargo pgrx test` fails copying the .so
+      # with `Permission denied (os error 13)` unless the runner owns them.
+      # Hand both to the runner user before testing.
+      - name: Grant the runner write access to the PostgreSQL install dirs
+        if: steps.pgdg.outputs.available == 'true'
+        run: |
+          PGCONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+          sudo chown -R "$(id -u):$(id -g)" \
+            "$("$PGCONFIG" --pkglibdir)" \
+            "$("$PGCONFIG" --sharedir)/extension"
+
       # --no-default-features pins each leg to exactly one pgNN feature, so the
       # crate's default PostgreSQL feature is irrelevant here.
       - name: Clippy
