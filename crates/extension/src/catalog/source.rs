@@ -57,6 +57,7 @@ use pgrx::{AllocatedByRust, Spi, extension_sql};
 
 use crate::catalog::batch::{self, BATCH_SIZE};
 use crate::catalog::export;
+use crate::catalog::spi_read;
 use crate::catalog::types::StagedConcept;
 use crate::errors::CatalogError;
 use crate::security;
@@ -284,29 +285,31 @@ fn read_source_batch(bundle_id: i64, after: Option<&str>) -> Result<Vec<SourceRo
 
         let mut rows = Vec::new();
         for row in table {
-            let concept_id = row
-                .get::<String>(1)
-                .map_err(|error| spi_error("failed to read concept id", &error))?
-                .ok_or_else(|| CatalogError::internal("concept id is NULL", Path::new("")))?;
-            let path = row
-                .get::<String>(2)
-                .map_err(|error| spi_error("failed to read concept path", &error))?
-                .ok_or_else(|| CatalogError::internal("concept path is NULL", Path::new("")))?;
-            let content = row
-                .get::<Vec<u8>>(3)
-                .map_err(|error| spi_error("failed to read stored source", &error))?
-                .ok_or_else(|| CatalogError::internal("stored source is NULL", Path::new("")))?;
-            let file_hash = row
-                .get::<String>(4)
-                .map_err(|error| spi_error("failed to read concept file hash", &error))?
-                .ok_or_else(|| {
-                    CatalogError::internal("concept file hash is NULL", Path::new(""))
-                })?;
             rows.push(SourceRow {
-                concept_id,
-                path,
-                content,
-                file_hash,
+                concept_id: spi_read::required_column(
+                    &row,
+                    1,
+                    "failed to read concept id",
+                    "concept id is NULL",
+                )?,
+                path: spi_read::required_column(
+                    &row,
+                    2,
+                    "failed to read concept path",
+                    "concept path is NULL",
+                )?,
+                content: spi_read::required_column::<Vec<u8>>(
+                    &row,
+                    3,
+                    "failed to read stored source",
+                    "stored source is NULL",
+                )?,
+                file_hash: spi_read::required_column(
+                    &row,
+                    4,
+                    "failed to read concept file hash",
+                    "concept file hash is NULL",
+                )?,
             });
         }
         Ok(rows)

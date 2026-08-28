@@ -46,6 +46,7 @@ use pgrx::datum::TimestampWithTimeZone;
 use pgrx::heap_tuple::PgHeapTuple;
 use pgrx::{AllocatedByRust, Spi, extension_sql};
 
+use crate::catalog::spi_read::RowReader;
 use crate::catalog::types::count_to_i32;
 use crate::errors::CatalogError;
 use crate::security;
@@ -204,37 +205,23 @@ fn composite_error(error: impl std::fmt::Display) -> CatalogError {
 
 /// Read one log row projected via [`SYNC_LOG_ENTRY_COLUMNS`].
 fn read_entry(row: &pgrx::spi::SpiHeapTupleData<'_>) -> Result<SyncLogEntry, CatalogError> {
-    let read = |error| spi_error("failed to read sync_log_entry column", &error);
-    let missing = |column: &str| {
-        CatalogError::internal(
-            format!("sync_log_entry column {column} is unexpectedly NULL"),
-            Path::new(""),
-        )
-    };
+    let reader = RowReader::new(
+        row,
+        "failed to read sync_log_entry column",
+        "sync_log_entry",
+    );
     Ok(SyncLogEntry {
-        id: row
-            .get::<i64>(1)
-            .map_err(&read)?
-            .ok_or_else(|| missing("id"))?,
-        bundle_id: row.get::<i64>(2).map_err(&read)?,
-        bundle_path: row.get::<String>(3).map_err(&read)?,
-        op: row
-            .get::<String>(4)
-            .map_err(&read)?
-            .ok_or_else(|| missing("op"))?,
-        actor: row
-            .get::<String>(5)
-            .map_err(&read)?
-            .ok_or_else(|| missing("actor"))?,
-        synced_at: row
-            .get::<TimestampWithTimeZone>(6)
-            .map_err(&read)?
-            .ok_or_else(|| missing("synced_at"))?,
-        added: row.get::<i32>(7).map_err(&read)?,
-        updated: row.get::<i32>(8).map_err(&read)?,
-        removed: row.get::<i32>(9).map_err(&read)?,
-        unchanged: row.get::<i32>(10).map_err(&read)?,
-        total: row.get::<i32>(11).map_err(&read)?,
+        id: reader.required(1, "id")?,
+        bundle_id: reader.optional(2)?,
+        bundle_path: reader.optional(3)?,
+        op: reader.required(4, "op")?,
+        actor: reader.required(5, "actor")?,
+        synced_at: reader.required::<TimestampWithTimeZone>(6, "synced_at")?,
+        added: reader.optional(7)?,
+        updated: reader.optional(8)?,
+        removed: reader.optional(9)?,
+        unchanged: reader.optional(10)?,
+        total: reader.optional(11)?,
     })
 }
 

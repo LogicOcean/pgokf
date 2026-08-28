@@ -271,6 +271,22 @@ fn split_time_zone(remainder: &str) -> (&str, &str) {
     }
 }
 
+/// Split the digits following a zone sign into `(hours, minutes)` substrings.
+///
+/// Accepts the `HH:MM`, `HHMM`, and bare `HH` (implicit `:00`) shapes; any other
+/// length is malformed and yields `None`.
+fn split_zone_body(body: &str) -> Option<(&str, &str)> {
+    if let Some((hours, minutes)) = body.split_once(':') {
+        Some((hours, minutes))
+    } else if body.len() == 4 {
+        Some((&body[..2], &body[2..]))
+    } else if body.len() == 2 {
+        Some((body, "0"))
+    } else {
+        None
+    }
+}
+
 /// Parse an ISO 8601 zone designator into an offset in seconds east of UTC.
 ///
 /// Accepts `Z`/`z`, `±HH`, `±HHMM`, and `±HH:MM`. An empty designator (a naive
@@ -284,16 +300,7 @@ fn parse_zone_offset_secs(zone: &str) -> Option<i64> {
                 b'-' => -1,
                 _ => return None,
             };
-            let body = &zone[1..];
-            let (hours, minutes) = if let Some((hours, minutes)) = body.split_once(':') {
-                (hours, minutes)
-            } else if body.len() == 4 {
-                (&body[..2], &body[2..])
-            } else if body.len() == 2 {
-                (body, "0")
-            } else {
-                return None;
-            };
+            let (hours, minutes) = split_zone_body(&zone[1..])?;
             let hours: i64 = hours.parse().ok()?;
             let minutes: i64 = minutes.parse().ok()?;
             if !(0..=23).contains(&hours) || !(0..=59).contains(&minutes) {
@@ -313,6 +320,22 @@ struct ClockTime {
     offset_secs: i64,
 }
 
+/// Parse the seconds field of a clock time into `(whole_seconds, fraction)`.
+///
+/// A bare `SS` has a zero fraction; `SS.fff` keeps the fractional seconds. A
+/// trailing dot or a non-digit fraction is malformed and yields `None`.
+fn parse_seconds_field(field: &str) -> Option<(i64, f64)> {
+    match field.split_once('.') {
+        Some((whole, frac)) => {
+            if frac.is_empty() || !frac.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            Some((whole.parse().ok()?, format!("0.{frac}").parse().ok()?))
+        }
+        None => Some((field.parse().ok()?, 0.0)),
+    }
+}
+
 /// Parse the `HH:MM[:SS[.fff]][zone]` portion following the date.
 fn parse_clock_time(time_and_zone: &str) -> Option<ClockTime> {
     let (time, zone) = split_time_zone(time_and_zone);
@@ -320,18 +343,7 @@ fn parse_clock_time(time_and_zone: &str) -> Option<ClockTime> {
     let hour: i64 = fields.next()?.parse().ok()?;
     let minute: i64 = fields.next()?.parse().ok()?;
     let (second, fraction) = match fields.next() {
-        Some(seconds) => {
-            let (whole, frac) = match seconds.split_once('.') {
-                Some((whole, frac)) => {
-                    if frac.is_empty() || !frac.bytes().all(|byte| byte.is_ascii_digit()) {
-                        return None;
-                    }
-                    (whole, format!("0.{frac}").parse().ok()?)
-                }
-                None => (seconds, 0.0),
-            };
-            (whole.parse().ok()?, frac)
-        }
+        Some(seconds) => parse_seconds_field(seconds)?,
         None => (0, 0.0),
     };
     if fields.next().is_some() {
@@ -367,6 +379,23 @@ fn parse_clock_time(time_and_zone: &str) -> Option<ClockTime> {
 )]
 fn parse_iso8601_epoch(value: &str) -> Option<f64> {
     let text = value.trim();
+    let (year, month, day) = parse_civil_date(text)?;
+    let clock = parse_time_section(&text[10..])?;
+
+    let seconds = days_from_civil(year, month, day) * 86_400
+        + clock.hour * 3600
+        + clock.minute * 60
+        + clock.second
+        - clock.offset_secs;
+    Some(seconds as f64 + clock.fraction)
+}
+
+/// Parse and calendar-validate the leading zero-padded `YYYY-MM-DD` date.
+///
+/// Requires at least ten characters with `-` separators at the fixed positions,
+/// and range-checks the month and day (with leap years), so a shape-valid but
+/// impossible date such as `2026-02-30` yields `None`.
+fn parse_civil_date(text: &str) -> Option<(i64, u32, u32)> {
     if text.len() < 10 {
         return None;
     }
@@ -380,30 +409,29 @@ fn parse_iso8601_epoch(value: &str) -> Option<f64> {
     if !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month)? {
         return None;
     }
+    Some((year, month, day))
+}
 
-    let clock = match &text[10..] {
-        "" => ClockTime {
+/// Parse the optional time section following the date: an empty remainder is
+/// midnight UTC, otherwise a `T`/`t`/space separator must precede the clock
+/// time.
+fn parse_time_section(rest: &str) -> Option<ClockTime> {
+    match rest {
+        "" => Some(ClockTime {
             hour: 0,
             minute: 0,
             second: 0,
             fraction: 0.0,
             offset_secs: 0,
-        },
+        }),
         rest => {
             let separator = rest.as_bytes()[0];
             if separator != b'T' && separator != b't' && separator != b' ' {
                 return None;
             }
-            parse_clock_time(&rest[1..])?
+            parse_clock_time(&rest[1..])
         }
-    };
-
-    let seconds = days_from_civil(year, month, day) * 86_400
-        + clock.hour * 3600
-        + clock.minute * 60
-        + clock.second
-        - clock.offset_secs;
-    Some(seconds as f64 + clock.fraction)
+    }
 }
 
 /// One verification event extracted from the `verified[]` list.

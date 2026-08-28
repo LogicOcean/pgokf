@@ -56,6 +56,7 @@ pub mod schema;
 pub mod search;
 pub mod search_backend;
 pub mod source;
+pub(crate) mod spi_read;
 pub mod stats;
 pub mod sync;
 pub mod types;

@@ -59,6 +59,11 @@ config columns; the rest lives in the shared library and activates on load).
 
 - `sync_log_retention_days` moves from **defined-but-dead** to **active** (see
   above). `notify_channel` and `okf_version_policy` are new, active keys.
+- **Internal:** a behavior-preserving complexity refactor of the parser,
+  config-coercion, and SPI-row-reading hot paths — a shared `spi_read` tuple
+  helper (DRY), per-key config coercion/defaults, and decomposed ISO-8601
+  parsers — dropping the worst function's cyclomatic complexity from 39 to 18
+  with no change to any behavior, signature, SQL surface, or test.
 
 ## [0.1.4] - 2026-08-28
 

@@ -96,40 +96,15 @@ pub fn discover(config: &SyncConfig) -> Result<Snapshot, SyncError> {
             source,
         })?;
         let absolute = entry.path();
-        let relative = absolute
-            .strip_prefix(&config.root)
-            .map_err(|_| SyncError::OutsideRoot {
-                path: absolute.to_path_buf(),
-                root: config.root.clone(),
-            })?;
-        let path = normalized_relative_path(relative);
+        let path = bundle_relative_path(absolute, &config.root)?;
 
         if entry.path_is_symlink() {
-            // Containment is a contract on candidate documents only. A link that is
-            // not selectable as an OKF document — the wrong extension, unmatched by
-            // the include globs, or excluded — is ignored without being resolved, so
-            // a stray link elsewhere in the tree can never abort discovery.
-            if is_candidate(&path, config, &includes, &excludes) {
-                match ensure_symlink_containment(absolute, &config.root) {
-                    Ok(()) => {}
-                    Err(SyncError::Metadata { source, .. })
-                        if source.kind() == std::io::ErrorKind::NotFound =>
-                    {
-                        // The link dangles: its target resolves to nothing, so there
-                        // is no in-bundle content to index and nothing to escape.
-                    }
-                    Err(other) => return Err(other),
-                }
-            }
+            check_candidate_symlink(absolute, &path, config, &includes, &excludes)?;
             // A resolvable in-root link contributes nothing new: its target is
             // discovered at the target's own canonical path.
             continue;
         }
-        if !entry.file_type().is_file() {
-            continue;
-        }
-
-        if !is_candidate(&path, config, &includes, &excludes) {
+        if !entry.file_type().is_file() || !is_candidate(&path, config, &includes, &excludes) {
             continue;
         }
 
@@ -141,31 +116,81 @@ pub fn discover(config: &SyncConfig) -> Result<Snapshot, SyncError> {
                 limit,
             });
         }
-        let metadata = fs::metadata(absolute).map_err(|source| SyncError::Metadata {
-            path: absolute.to_path_buf(),
-            source,
-        })?;
-        if let Some(limit) = config.max_file_bytes
-            && metadata.len() > limit
-        {
-            return Err(SyncError::FileTooLarge {
-                path: absolute.to_path_buf(),
-                size_bytes: metadata.len(),
-                limit_bytes: limit,
-            });
-        }
-
-        let file = FileMetadata {
-            path: path.clone(),
-            hash: hash_file(absolute)?,
-            size_bytes: metadata.len(),
-            modified_at: metadata.modified().ok(),
-        };
+        let file = read_candidate_file(absolute, &path, config)?;
         tracing::debug!(path = %path.display(), hash = %file.hash, "discovered OKF document");
         files.insert(path, file);
     }
 
     Ok(Snapshot::new(files))
+}
+
+/// Map an absolute walked path to its normalized bundle-relative snapshot key.
+fn bundle_relative_path(absolute: &Path, root: &Path) -> Result<PathBuf, SyncError> {
+    let relative = absolute
+        .strip_prefix(root)
+        .map_err(|_| SyncError::OutsideRoot {
+            path: absolute.to_path_buf(),
+            root: root.to_path_buf(),
+        })?;
+    Ok(normalized_relative_path(relative))
+}
+
+/// Enforce root containment for a symlink, but only when it is a candidate
+/// document.
+///
+/// Containment is a contract on candidate documents only: a link that is not
+/// selectable as an OKF document — the wrong extension, unmatched by the include
+/// globs, or excluded — is ignored without being resolved, so a stray link
+/// elsewhere in the tree can never abort discovery. A candidate link that
+/// dangles (its target resolves to nothing) has no in-bundle content to index
+/// and nothing to escape, so it too is accepted.
+fn check_candidate_symlink(
+    absolute: &Path,
+    path: &Path,
+    config: &SyncConfig,
+    includes: &GlobSet,
+    excludes: &GlobSet,
+) -> Result<(), SyncError> {
+    if !is_candidate(path, config, includes, excludes) {
+        return Ok(());
+    }
+    match ensure_symlink_containment(absolute, &config.root) {
+        Ok(()) => Ok(()),
+        Err(SyncError::Metadata { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            Ok(())
+        }
+        Err(other) => Err(other),
+    }
+}
+
+/// Read a candidate file's metadata (enforcing [`SyncConfig::max_file_bytes`]
+/// before reading its contents) and BLAKE3 hash into a [`FileMetadata`].
+fn read_candidate_file(
+    absolute: &Path,
+    path: &Path,
+    config: &SyncConfig,
+) -> Result<FileMetadata, SyncError> {
+    let metadata = fs::metadata(absolute).map_err(|source| SyncError::Metadata {
+        path: absolute.to_path_buf(),
+        source,
+    })?;
+    if let Some(limit) = config.max_file_bytes
+        && metadata.len() > limit
+    {
+        return Err(SyncError::FileTooLarge {
+            path: absolute.to_path_buf(),
+            size_bytes: metadata.len(),
+            limit_bytes: limit,
+        });
+    }
+    Ok(FileMetadata {
+        path: path.to_path_buf(),
+        hash: hash_file(absolute)?,
+        size_bytes: metadata.len(),
+        modified_at: metadata.modified().ok(),
+    })
 }
 
 fn build_glob_set(patterns: &[String], kind: &'static str) -> Result<GlobSet, SyncError> {

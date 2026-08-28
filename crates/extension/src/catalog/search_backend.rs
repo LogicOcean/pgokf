@@ -41,6 +41,7 @@ use std::path::Path;
 use pgrx::Spi;
 use pgrx::spi::SpiTupleTable;
 
+use crate::catalog::spi_read::RowReader;
 use crate::catalog::types::SearchHit;
 use crate::errors::CatalogError;
 
@@ -131,33 +132,15 @@ fn spi_error(context: &'static str) -> impl Fn(pgrx::spi::Error) -> CatalogError
 fn read_hits(table: SpiTupleTable) -> Result<Vec<SearchHit>, CatalogError> {
     let mut hits = Vec::with_capacity(table.len());
     for row in table {
-        let read = spi_error("failed to read search result row");
-        let missing = |column: &str| {
-            CatalogError::internal(
-                format!("search result column {column} is unexpectedly NULL"),
-                Path::new(""),
-            )
-        };
+        let reader = RowReader::new(&row, "failed to read search result row", "search result");
         hits.push(SearchHit {
-            bundle_id: row
-                .get::<i64>(1)
-                .map_err(&read)?
-                .ok_or_else(|| missing("bundle_id"))?,
-            concept_id: row
-                .get::<String>(2)
-                .map_err(&read)?
-                .ok_or_else(|| missing("concept_id"))?,
-            path: row
-                .get::<String>(3)
-                .map_err(&read)?
-                .ok_or_else(|| missing("path"))?,
-            title: row.get::<String>(4).map_err(&read)?,
-            concept_type: row.get::<String>(5).map_err(&read)?,
-            rank: row
-                .get::<f32>(6)
-                .map_err(&read)?
-                .ok_or_else(|| missing("rank"))?,
-            headline: row.get::<String>(7).map_err(&read)?,
+            bundle_id: reader.required(1, "bundle_id")?,
+            concept_id: reader.required(2, "concept_id")?,
+            path: reader.required(3, "path")?,
+            title: reader.optional(4)?,
+            concept_type: reader.optional(5)?,
+            rank: reader.required(6, "rank")?,
+            headline: reader.optional(7)?,
         });
     }
     Ok(hits)

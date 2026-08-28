@@ -44,6 +44,7 @@ use std::path::{Path, PathBuf};
 
 use pgrx::Spi;
 
+use crate::catalog::spi_read;
 use crate::errors::CatalogError;
 use crate::security;
 
@@ -273,72 +274,117 @@ fn validate_okf_version_policy(policy: &str) -> Result<(), CatalogError> {
     }
 }
 
+/// Read a `jsonb` value as an array of strings, or the shared shape error for
+/// `key`. Consumes the wrapper (moving out its inner value) and never names
+/// `serde_json`: shape inspection goes through the inherent accessors.
+fn json_string_array(value: pgrx::JsonB, key: ConfigKey) -> Result<Vec<String>, CatalogError> {
+    let json = value.0;
+    let array = json
+        .as_array()
+        .ok_or_else(|| type_error(key, "an array of strings"))?;
+    let mut out = Vec::with_capacity(array.len());
+    for element in array {
+        let text = element
+            .as_str()
+            .ok_or_else(|| type_error(key, "an array of strings"))?;
+        out.push(text.to_owned());
+    }
+    Ok(out)
+}
+
+/// Coerce an array-of-strings key: parse, apply the key's own `validate`, then
+/// wrap with the key's `ConfigValue` constructor.
+fn coerce_string_array(
+    value: pgrx::JsonB,
+    key: ConfigKey,
+    validate: fn(&[String]) -> Result<(), CatalogError>,
+    make: fn(Vec<String>) -> ConfigValue,
+) -> Result<ConfigValue, CatalogError> {
+    let items = json_string_array(value, key)?;
+    validate(&items)?;
+    Ok(make(items))
+}
+
+/// Coerce a boolean key.
+fn coerce_bool(
+    value: pgrx::JsonB,
+    key: ConfigKey,
+    make: fn(bool) -> ConfigValue,
+) -> Result<ConfigValue, CatalogError> {
+    let json = value.0;
+    let flag = json.as_bool().ok_or_else(|| type_error(key, "a boolean"))?;
+    Ok(make(flag))
+}
+
+/// Coerce a string key: read, apply the key's own `validate`, then wrap.
+fn coerce_string(
+    value: pgrx::JsonB,
+    key: ConfigKey,
+    validate: fn(&str) -> Result<(), CatalogError>,
+    make: fn(String) -> ConfigValue,
+) -> Result<ConfigValue, CatalogError> {
+    let json = value.0;
+    let text = json.as_str().ok_or_else(|| type_error(key, "a string"))?;
+    validate(text)?;
+    Ok(make(text.to_owned()))
+}
+
+/// Coerce the `sync_log_retention_days` integer key.
+fn coerce_retention_days(value: pgrx::JsonB, key: ConfigKey) -> Result<ConfigValue, CatalogError> {
+    let json = value.0;
+    let raw = json.as_i64().ok_or_else(|| type_error(key, "an integer"))?;
+    Ok(ConfigValue::SyncLogRetentionDays(validate_retention_days(
+        raw,
+    )?))
+}
+
 /// Coerce and validate a `jsonb` value for `key` into a typed [`ConfigValue`].
 ///
-/// Consumes the wrapper so no argument is passed by value only to be borrowed,
-/// and never names `serde_json` directly — shape inspection goes through the
-/// inherent accessors on the wrapped value.
+/// A thin per-shape dispatch: each key owns its coercion by naming its own
+/// validator and `ConfigValue` constructor, so every key's exact validation and
+/// error text lives with the key rather than in one branchy match. Consumes the
+/// wrapper so no argument is passed by value only to be borrowed.
 fn coerce(key: ConfigKey, value: pgrx::JsonB) -> Result<ConfigValue, CatalogError> {
-    let json = value.0;
-    let string_array = |array_key: ConfigKey| -> Result<Vec<String>, CatalogError> {
-        let array = json
-            .as_array()
-            .ok_or_else(|| type_error(array_key, "an array of strings"))?;
-        let mut out = Vec::with_capacity(array.len());
-        for element in array {
-            let text = element
-                .as_str()
-                .ok_or_else(|| type_error(array_key, "an array of strings"))?;
-            out.push(text.to_owned());
-        }
-        Ok(out)
-    };
-
     match key {
-        ConfigKey::AllowedRoots => {
-            let roots = string_array(key)?;
-            validate_allowed_roots(&roots)?;
-            Ok(ConfigValue::AllowedRoots(roots))
-        }
-        ConfigKey::DefaultExclude => {
-            let patterns = string_array(key)?;
-            validate_exclude_patterns(&patterns)?;
-            Ok(ConfigValue::DefaultExclude(patterns))
-        }
-        ConfigKey::DefaultStrict => {
-            let flag = json.as_bool().ok_or_else(|| type_error(key, "a boolean"))?;
-            Ok(ConfigValue::DefaultStrict(flag))
-        }
-        ConfigKey::StoreSource => {
-            let flag = json.as_bool().ok_or_else(|| type_error(key, "a boolean"))?;
-            Ok(ConfigValue::StoreSource(flag))
-        }
-        ConfigKey::SyncLogRetentionDays => {
-            let raw = json.as_i64().ok_or_else(|| type_error(key, "an integer"))?;
-            Ok(ConfigValue::SyncLogRetentionDays(validate_retention_days(
-                raw,
-            )?))
-        }
-        ConfigKey::DefaultTextSearchConfig => {
-            let name = json.as_str().ok_or_else(|| type_error(key, "a string"))?;
-            validate_text_search_config_name(name)?;
-            Ok(ConfigValue::DefaultTextSearchConfig(name.to_owned()))
-        }
-        ConfigKey::SearchBackend => {
-            let name = json.as_str().ok_or_else(|| type_error(key, "a string"))?;
-            validate_search_backend(name)?;
-            Ok(ConfigValue::SearchBackend(name.to_owned()))
-        }
-        ConfigKey::NotifyChannel => {
-            let channel = json.as_str().ok_or_else(|| type_error(key, "a string"))?;
-            validate_notify_channel(channel)?;
-            Ok(ConfigValue::NotifyChannel(channel.to_owned()))
-        }
-        ConfigKey::OkfVersionPolicy => {
-            let policy = json.as_str().ok_or_else(|| type_error(key, "a string"))?;
-            validate_okf_version_policy(policy)?;
-            Ok(ConfigValue::OkfVersionPolicy(policy.to_owned()))
-        }
+        ConfigKey::AllowedRoots => coerce_string_array(
+            value,
+            key,
+            validate_allowed_roots,
+            ConfigValue::AllowedRoots,
+        ),
+        ConfigKey::DefaultExclude => coerce_string_array(
+            value,
+            key,
+            validate_exclude_patterns,
+            ConfigValue::DefaultExclude,
+        ),
+        ConfigKey::DefaultStrict => coerce_bool(value, key, ConfigValue::DefaultStrict),
+        ConfigKey::StoreSource => coerce_bool(value, key, ConfigValue::StoreSource),
+        ConfigKey::SyncLogRetentionDays => coerce_retention_days(value, key),
+        ConfigKey::DefaultTextSearchConfig => coerce_string(
+            value,
+            key,
+            validate_text_search_config_name,
+            ConfigValue::DefaultTextSearchConfig,
+        ),
+        ConfigKey::SearchBackend => coerce_string(
+            value,
+            key,
+            validate_search_backend,
+            ConfigValue::SearchBackend,
+        ),
+        ConfigKey::NotifyChannel => coerce_string(
+            value,
+            key,
+            validate_notify_channel,
+            ConfigValue::NotifyChannel,
+        ),
+        ConfigKey::OkfVersionPolicy => coerce_string(
+            value,
+            key,
+            validate_okf_version_policy,
+            ConfigValue::OkfVersionPolicy,
+        ),
     }
 }
 
@@ -636,48 +682,43 @@ pub fn sync_defaults() -> Result<SyncDefaults, CatalogError> {
                 Path::new(""),
             ));
         };
-        let strict = row
-            .get::<bool>(1)
-            .map_err(|error| spi_error("failed to read default_strict", &error))?
-            .ok_or_else(|| CatalogError::internal("default_strict is NULL", Path::new("")))?;
-        let exclude = row
-            .get::<Vec<String>>(2)
-            .map_err(|error| spi_error("failed to read default_exclude", &error))?
-            .unwrap_or_default();
-        let text_search_config = row
-            .get::<String>(3)
-            .map_err(|error| spi_error("failed to read default_text_search_config", &error))?
-            .ok_or_else(|| {
-                CatalogError::internal("default_text_search_config is NULL", Path::new(""))
-            })?;
-        let store_source = row
-            .get::<bool>(4)
-            .map_err(|error| spi_error("failed to read store_source", &error))?
-            .ok_or_else(|| CatalogError::internal("store_source is NULL", Path::new("")))?;
-        let sync_log_retention_days = row
-            .get::<i32>(5)
-            .map_err(|error| spi_error("failed to read sync_log_retention_days", &error))?
-            .ok_or_else(|| {
-                CatalogError::internal("sync_log_retention_days is NULL", Path::new(""))
-            })?;
-        // An empty channel string is the disabled default; normalize it to None
-        // so callers branch on presence rather than emptiness.
-        let notify_channel = row
-            .get::<String>(6)
-            .map_err(|error| spi_error("failed to read notify_channel", &error))?
-            .filter(|channel| !channel.is_empty());
-        let okf_version_policy = row
-            .get::<String>(7)
-            .map_err(|error| spi_error("failed to read okf_version_policy", &error))?
-            .ok_or_else(|| CatalogError::internal("okf_version_policy is NULL", Path::new("")))?;
         Ok(SyncDefaults {
-            strict,
-            exclude,
-            text_search_config,
-            store_source,
-            sync_log_retention_days,
-            notify_channel,
-            okf_version_policy,
+            strict: spi_read::required_column(
+                &row,
+                1,
+                "failed to read default_strict",
+                "default_strict is NULL",
+            )?,
+            exclude: spi_read::column::<Vec<String>>(&row, 2, "failed to read default_exclude")?
+                .unwrap_or_default(),
+            text_search_config: spi_read::required_column(
+                &row,
+                3,
+                "failed to read default_text_search_config",
+                "default_text_search_config is NULL",
+            )?,
+            store_source: spi_read::required_column(
+                &row,
+                4,
+                "failed to read store_source",
+                "store_source is NULL",
+            )?,
+            sync_log_retention_days: spi_read::required_column(
+                &row,
+                5,
+                "failed to read sync_log_retention_days",
+                "sync_log_retention_days is NULL",
+            )?,
+            // An empty channel string is the disabled default; normalize it to
+            // None so callers branch on presence rather than emptiness.
+            notify_channel: spi_read::column::<String>(&row, 6, "failed to read notify_channel")?
+                .filter(|channel| !channel.is_empty()),
+            okf_version_policy: spi_read::required_column(
+                &row,
+                7,
+                "failed to read okf_version_policy",
+                "okf_version_policy is NULL",
+            )?,
         })
     })
 }

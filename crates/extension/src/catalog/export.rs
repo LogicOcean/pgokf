@@ -90,6 +90,7 @@ use pgrx::spi::SpiHeapTupleData;
 use pgrx::{AllocatedByRust, Spi};
 
 use crate::catalog::config;
+use crate::catalog::spi_read;
 use crate::errors::CatalogError;
 use crate::security;
 
@@ -618,28 +619,24 @@ fn read_key_bounds(
     spec: &TableSpec,
     row: &SpiHeapTupleData<'_>,
 ) -> Result<Vec<KeyBound>, CatalogError> {
-    let read = |error| spi_error("failed to read keyset column", &error);
-    let missing = |name: &str| {
-        CatalogError::internal(
-            format!("keyset column {name} is unexpectedly NULL"),
-            Path::new(""),
-        )
-    };
     let mut bounds = Vec::with_capacity(spec.key_indices.len());
     for &index in spec.key_indices {
         let column = &spec.columns[index];
         let ordinal = index + 1;
+        let null_message = format!("keyset column {} is unexpectedly NULL", column.name);
         let bound = match column.pg_type {
-            PgType::Text => KeyBound::Text(
-                row.get::<String>(ordinal)
-                    .map_err(read)?
-                    .ok_or_else(|| missing(column.name))?,
-            ),
-            PgType::Integer => KeyBound::Int(
-                row.get::<i32>(ordinal)
-                    .map_err(read)?
-                    .ok_or_else(|| missing(column.name))?,
-            ),
+            PgType::Text => KeyBound::Text(spi_read::required_column(
+                row,
+                ordinal,
+                "failed to read keyset column",
+                &null_message,
+            )?),
+            PgType::Integer => KeyBound::Int(spi_read::required_column(
+                row,
+                ordinal,
+                "failed to read keyset column",
+                &null_message,
+            )?),
             other => {
                 return Err(CatalogError::internal(
                     format!(
@@ -756,6 +753,51 @@ pub(crate) fn create_export_file(path: &Path) -> Result<File, CatalogError> {
         })
 }
 
+/// Open a ZSTD-compressed Parquet writer over an already-created output file.
+fn open_parquet_writer(file: File, schema: &SchemaRef) -> Result<ArrowWriter<File>, CatalogError> {
+    let properties = WriterProperties::builder()
+        .set_compression(Compression::ZSTD(ZstdLevel::default()))
+        .build();
+    ArrowWriter::try_new(file, Arc::clone(schema), Some(properties))
+        .map_err(|error| parquet_error("failed to initialize Parquet writer", &error))
+}
+
+/// Finish one batch's columns into an Arrow [`RecordBatch`] and write it as a
+/// single Parquet row group, flushed before returning.
+fn write_row_group(
+    writer: &mut ArrowWriter<File>,
+    schema: &SchemaRef,
+    columns: Vec<ColumnData>,
+    table: &str,
+) -> Result<(), CatalogError> {
+    let arrays: Vec<ArrayRef> = columns.into_iter().map(ColumnData::finish).collect();
+    let record = RecordBatch::try_new(Arc::clone(schema), arrays).map_err(|error| {
+        CatalogError::internal(
+            format!("failed to assemble Arrow record batch for {table}: {error}"),
+            Path::new(""),
+        )
+    })?;
+    writer
+        .write(&record)
+        .map_err(|error| parquet_error("failed to write Parquet row group", &error))?;
+    writer
+        .flush()
+        .map_err(|error| parquet_error("failed to flush Parquet row group", &error))?;
+    Ok(())
+}
+
+/// Size in bytes of a finalized export file.
+fn export_file_len(path: &Path) -> Result<u64, CatalogError> {
+    std::fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .map_err(|error| {
+            CatalogError::internal(
+                format!("failed to stat export file {}: {error}", path.display()),
+                Path::new(""),
+            )
+        })
+}
+
 /// Stream one table to a Parquet file, returning `(rows_written, bytes)`.
 ///
 /// Rows are read in keyset batches and written incrementally; each batch is
@@ -768,12 +810,7 @@ fn export_table(
 ) -> Result<(usize, u64), CatalogError> {
     let schema = build_schema(spec);
     let path = dir.join(spec.file_name);
-    let file = create_export_file(&path)?;
-    let properties = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(ZstdLevel::default()))
-        .build();
-    let mut writer = ArrowWriter::try_new(file, Arc::clone(&schema), Some(properties))
-        .map_err(|error| parquet_error("failed to initialize Parquet writer", &error))?;
+    let mut writer = open_parquet_writer(create_export_file(&path)?, &schema)?;
 
     let mut cursor: Option<Vec<KeyBound>> = None;
     let mut total: usize = 0;
@@ -782,25 +819,10 @@ fn export_table(
         if batch.rows == 0 {
             break;
         }
-        let arrays: Vec<ArrayRef> = batch.columns.into_iter().map(ColumnData::finish).collect();
-        let record = RecordBatch::try_new(Arc::clone(&schema), arrays).map_err(|error| {
-            CatalogError::internal(
-                format!(
-                    "failed to assemble Arrow record batch for {}: {error}",
-                    spec.table
-                ),
-                Path::new(""),
-            )
-        })?;
-        writer
-            .write(&record)
-            .map_err(|error| parquet_error("failed to write Parquet row group", &error))?;
-        writer
-            .flush()
-            .map_err(|error| parquet_error("failed to flush Parquet row group", &error))?;
-        total += batch.rows;
-
         let is_last = batch.rows < EXPORT_BATCH_ROWS_USIZE;
+        let rows = batch.rows;
+        write_row_group(&mut writer, &schema, batch.columns, spec.table)?;
+        total += rows;
         cursor = batch.last_key;
         if is_last {
             break;
@@ -810,14 +832,7 @@ fn export_table(
     writer
         .close()
         .map_err(|error| parquet_error("failed to finalize Parquet file", &error))?;
-    let bytes = std::fs::metadata(&path)
-        .map(|metadata| metadata.len())
-        .map_err(|error| {
-            CatalogError::internal(
-                format!("failed to stat export file {}: {error}", path.display()),
-                Path::new(""),
-            )
-        })?;
+    let bytes = export_file_len(&path)?;
     Ok((total, bytes))
 }
 

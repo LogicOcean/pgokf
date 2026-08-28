@@ -33,6 +33,7 @@ use std::path::Path;
 use pgrx::heap_tuple::PgHeapTuple;
 use pgrx::{AllocatedByRust, Spi, extension_sql};
 
+use crate::catalog::spi_read::{self, RowReader};
 use crate::errors::CatalogError;
 use crate::guc;
 use crate::security;
@@ -151,10 +152,12 @@ fn resolve_bundle_scope(
             .map_err(|error| spi_error("failed to resolve concept bundle", &error))?;
         let mut ids = Vec::with_capacity(table.len());
         for row in table {
-            let id = row
-                .get::<i64>(1)
-                .map_err(|error| spi_error("failed to read concept bundle id", &error))?
-                .ok_or_else(|| CatalogError::internal("bundle id is NULL", Path::new("")))?;
+            let id = spi_read::required_column::<i64>(
+                &row,
+                1,
+                "failed to read concept bundle id",
+                "bundle id is NULL",
+            )?;
             ids.push(id);
         }
         Ok::<_, CatalogError>(ids)
@@ -218,31 +221,13 @@ fn read_neighbor_rows(
             .map_err(|error| spi_error("neighbor traversal query failed", &error))?;
         let mut hits = Vec::with_capacity(table.len());
         for row in table {
-            let read = |error: pgrx::spi::Error| spi_error("failed to read neighbor row", &error);
-            let missing = |column: &str| {
-                CatalogError::internal(
-                    format!("neighbor result column {column} is unexpectedly NULL"),
-                    Path::new(""),
-                )
-            };
+            let reader = RowReader::new(&row, "failed to read neighbor row", "neighbor result");
             hits.push(NeighborHit {
-                source_id: row
-                    .get::<String>(1)
-                    .map_err(read)?
-                    .ok_or_else(|| missing("source_id"))?,
-                neighbor_id: row
-                    .get::<String>(2)
-                    .map_err(read)?
-                    .ok_or_else(|| missing("neighbor_id"))?,
-                hops: row
-                    .get::<i32>(3)
-                    .map_err(read)?
-                    .ok_or_else(|| missing("hops"))?,
-                path: row
-                    .get::<Vec<String>>(4)
-                    .map_err(read)?
-                    .ok_or_else(|| missing("path"))?,
-                title: row.get::<String>(5).map_err(read)?,
+                source_id: reader.required(1, "source_id")?,
+                neighbor_id: reader.required(2, "neighbor_id")?,
+                hops: reader.required(3, "hops")?,
+                path: reader.required::<Vec<String>>(4, "path")?,
+                title: reader.optional(5)?,
             });
         }
         Ok(hits)

@@ -43,6 +43,7 @@ use pgrx::heap_tuple::PgHeapTuple;
 use pgrx::spi::SpiHeapTupleData;
 use pgrx::{AllocatedByRust, Spi};
 
+use crate::catalog::spi_read::RowReader;
 use crate::catalog::sync::advisory_lock_key;
 use crate::errors::CatalogError;
 use crate::security;
@@ -99,33 +100,15 @@ fn unknown_bundle_error(bundle_id: i64) -> CatalogError {
 /// `file_count`, `last_synced_at`, `enabled`. The `NOT NULL` columns are
 /// treated as internal invariants and surface as `XX000` if ever violated.
 fn read_bundle_info(row: &SpiHeapTupleData<'_>) -> Result<BundleInfo, CatalogError> {
-    let read = |error| spi_error("failed to read bundle_info column", &error);
-    let missing = |column: &str| {
-        CatalogError::internal(
-            format!("bundle_info column {column} is unexpectedly NULL"),
-            Path::new(""),
-        )
-    };
+    let reader = RowReader::new(row, "failed to read bundle_info column", "bundle_info");
     Ok(BundleInfo {
-        id: row
-            .get::<i64>(1)
-            .map_err(&read)?
-            .ok_or_else(|| missing("id"))?,
-        path: row
-            .get::<String>(2)
-            .map_err(&read)?
-            .ok_or_else(|| missing("path"))?,
-        name: row.get::<String>(3).map_err(&read)?,
-        okf_version: row.get::<String>(4).map_err(&read)?,
-        file_count: row
-            .get::<i32>(5)
-            .map_err(&read)?
-            .ok_or_else(|| missing("file_count"))?,
-        last_synced_at: row.get::<TimestampWithTimeZone>(6).map_err(&read)?,
-        enabled: row
-            .get::<bool>(7)
-            .map_err(&read)?
-            .ok_or_else(|| missing("enabled"))?,
+        id: reader.required(1, "id")?,
+        path: reader.required(2, "path")?,
+        name: reader.optional(3)?,
+        okf_version: reader.optional(4)?,
+        file_count: reader.required(5, "file_count")?,
+        last_synced_at: reader.optional::<TimestampWithTimeZone>(6)?,
+        enabled: reader.required(7, "enabled")?,
     })
 }
 

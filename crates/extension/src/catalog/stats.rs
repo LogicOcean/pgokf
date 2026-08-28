@@ -30,6 +30,7 @@ use pgrx::datum::{Interval, TimestampWithTimeZone};
 use pgrx::heap_tuple::PgHeapTuple;
 use pgrx::{AllocatedByRust, Spi};
 
+use crate::catalog::spi_read::RowReader;
 use crate::errors::CatalogError;
 use crate::security;
 
@@ -92,49 +93,19 @@ const CATALOG_STATS_QUERY: &str = "
     ORDER BY b.id";
 
 fn read_catalog_stat(row: &pgrx::spi::SpiHeapTupleData<'_>) -> Result<CatalogStat, CatalogError> {
-    let read = |error| spi_error("failed to read catalog_stat column", &error);
-    let missing = |column: &str| {
-        CatalogError::internal(
-            format!("catalog_stat column {column} is unexpectedly NULL"),
-            Path::new(""),
-        )
-    };
+    let reader = RowReader::new(row, "failed to read catalog_stat column", "catalog_stat");
     Ok(CatalogStat {
-        bundle_id: row
-            .get::<i64>(1)
-            .map_err(&read)?
-            .ok_or_else(|| missing("bundle_id"))?,
-        name: row.get::<String>(2).map_err(&read)?,
-        enabled: row
-            .get::<bool>(3)
-            .map_err(&read)?
-            .ok_or_else(|| missing("enabled"))?,
-        source_type: row
-            .get::<String>(4)
-            .map_err(&read)?
-            .ok_or_else(|| missing("source_type"))?,
-        file_count: row
-            .get::<i32>(5)
-            .map_err(&read)?
-            .ok_or_else(|| missing("file_count"))?,
-        indexed_concepts: row
-            .get::<i64>(6)
-            .map_err(&read)?
-            .ok_or_else(|| missing("indexed_concepts"))?,
-        link_count: row
-            .get::<i64>(7)
-            .map_err(&read)?
-            .ok_or_else(|| missing("link_count"))?,
-        resolved_link_count: row
-            .get::<i64>(8)
-            .map_err(&read)?
-            .ok_or_else(|| missing("resolved_link_count"))?,
-        last_synced_at: row.get::<TimestampWithTimeZone>(9).map_err(&read)?,
-        sync_age: row.get::<Interval>(10).map_err(&read)?,
-        is_stale: row
-            .get::<bool>(11)
-            .map_err(&read)?
-            .ok_or_else(|| missing("is_stale"))?,
+        bundle_id: reader.required(1, "bundle_id")?,
+        name: reader.optional(2)?,
+        enabled: reader.required(3, "enabled")?,
+        source_type: reader.required(4, "source_type")?,
+        file_count: reader.required(5, "file_count")?,
+        indexed_concepts: reader.required(6, "indexed_concepts")?,
+        link_count: reader.required(7, "link_count")?,
+        resolved_link_count: reader.required(8, "resolved_link_count")?,
+        last_synced_at: reader.optional::<TimestampWithTimeZone>(9)?,
+        sync_age: reader.optional::<Interval>(10)?,
+        is_stale: reader.required(11, "is_stale")?,
     })
 }
 
@@ -252,31 +223,13 @@ const STALE_CONCEPTS_QUERY: &str = "
     ORDER BY p.stale_after, p.bundle_id, p.concept_id";
 
 fn read_stale_concept(row: &pgrx::spi::SpiHeapTupleData<'_>) -> Result<StaleConcept, CatalogError> {
-    let read = |error| spi_error("failed to read stale_concept column", &error);
-    let missing = |column: &str| {
-        CatalogError::internal(
-            format!("stale_concept column {column} is unexpectedly NULL"),
-            Path::new(""),
-        )
-    };
+    let reader = RowReader::new(row, "failed to read stale_concept column", "stale_concept");
     Ok(StaleConcept {
-        bundle_id: row
-            .get::<i64>(1)
-            .map_err(&read)?
-            .ok_or_else(|| missing("bundle_id"))?,
-        concept_id: row
-            .get::<String>(2)
-            .map_err(&read)?
-            .ok_or_else(|| missing("concept_id"))?,
-        path: row
-            .get::<String>(3)
-            .map_err(&read)?
-            .ok_or_else(|| missing("path"))?,
-        concept_type: row.get::<String>(4).map_err(&read)?,
-        stale_after: row
-            .get::<TimestampWithTimeZone>(5)
-            .map_err(&read)?
-            .ok_or_else(|| missing("stale_after"))?,
+        bundle_id: reader.required(1, "bundle_id")?,
+        concept_id: reader.required(2, "concept_id")?,
+        path: reader.required(3, "path")?,
+        concept_type: reader.optional(4)?,
+        stale_after: reader.required::<TimestampWithTimeZone>(5, "stale_after")?,
     })
 }
 

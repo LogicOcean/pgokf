@@ -62,6 +62,7 @@ use okf_sync::{FileMetadata, SyncConfig, SyncReport, discover, hash_bytes};
 use pgrx::Spi;
 
 use crate::catalog::batch::{self, BATCH_SIZE};
+use crate::catalog::spi_read;
 use crate::catalog::types::{StagedConcept, count_to_i32};
 use crate::errors::CatalogError;
 use crate::guc;
@@ -280,18 +281,18 @@ fn load_stored_hashes(bundle_id: i64) -> Result<BTreeMap<String, String>, Catalo
             .map_err(|error| spi_error("failed to load stored concept hashes", &error))?;
         let mut stored = BTreeMap::new();
         for row in table {
-            let path = row
-                .get::<String>(1)
-                .map_err(|error| spi_error("failed to read stored concept path", &error))?
-                .ok_or_else(|| {
-                    CatalogError::internal("stored concept path is NULL", Path::new(""))
-                })?;
-            let file_hash = row
-                .get::<String>(2)
-                .map_err(|error| spi_error("failed to read stored concept hash", &error))?
-                .ok_or_else(|| {
-                    CatalogError::internal("stored concept hash is NULL", Path::new(""))
-                })?;
+            let path: String = spi_read::required_column(
+                &row,
+                1,
+                "failed to read stored concept path",
+                "stored concept path is NULL",
+            )?;
+            let file_hash: String = spi_read::required_column(
+                &row,
+                2,
+                "failed to read stored concept hash",
+                "stored concept hash is NULL",
+            )?;
             stored.insert(path, file_hash);
         }
         Ok(stored)
@@ -836,6 +837,25 @@ fn emit_change_notification(
     .map_err(|error| spi_error("failed to emit change notification", &error))
 }
 
+/// Run the ordered projection seam over the staged concepts.
+///
+/// Feature modules observe the finalized concept set here, in a fixed order:
+/// the link-graph projection, then the bundle-wide link re-resolution (so the
+/// inbound edges of *unchanged* concepts reflect targets added or removed during
+/// this sync — only staged sources are re-projected, so their peers must be
+/// re-evaluated against the post-upsert/delete concept set), then the provenance
+/// projection, then the opt-in source-byte storage. The source-byte pass writes
+/// nothing under the default `store_source`-off policy (every staged concept
+/// carries `raw_content = None`); its order relative to links/provenance is
+/// irrelevant since it only depends on the concept rows existing.
+fn run_projection_seam(bundle_id: i64, staged: &[StagedConcept]) -> Result<(), CatalogError> {
+    crate::catalog::links::project(bundle_id, staged)?;
+    crate::catalog::links::reresolve_bundle(bundle_id)?;
+    crate::catalog::provenance::project(bundle_id, staged)?;
+    crate::catalog::source::project(bundle_id, staged)?;
+    Ok(())
+}
+
 /// The shared sync engine used by `register_bundle`, `refresh_bundle`, and
 /// `register_bundle_content`; see the module docs for the full step list.
 ///
@@ -870,21 +890,9 @@ pub(crate) fn run_bundle_sync<S: ByteSource>(
     replace_concept_metadata(bundle_id, &staged)?;
 
     // Ordered projection seam: feature modules observe the staged concepts
-    // here. Removals need no per-source seam because feature tables cascade
-    // from pgokf.concepts, but the link graph still needs a bundle-wide
-    // re-resolution: only staged (added/updated) sources are re-projected, so
-    // the inbound edges of *unchanged* concepts must be re-evaluated against
-    // the finalized concept set (post upsert + delete) to flip stale
-    // resolutions as targets appear or disappear.
-    crate::catalog::links::project(bundle_id, &staged)?;
-    crate::catalog::links::reresolve_bundle(bundle_id)?;
-    crate::catalog::provenance::project(bundle_id, &staged)?;
-    // Opt-in source-byte storage. Only concepts staged with source bytes (the
-    // `store_source` tier) upsert a `pgokf.concept_source` row; under the
-    // default policy every staged concept carries `raw_content = None`, so this
-    // writes nothing. Order relative to links/provenance is irrelevant: it only
-    // depends on the concept rows existing, which the upsert above guarantees.
-    crate::catalog::source::project(bundle_id, &staged)?;
+    // here (link graph and its bundle-wide re-resolution, provenance, then
+    // opt-in source-byte storage).
+    run_projection_seam(bundle_id, &staged)?;
 
     // Apply the OKF-version conformance policy before finalizing the bundle
     // row: under `reject` an unsupported declared version aborts the sync here,
@@ -961,14 +969,18 @@ fn lookup_bundle_path_and_type(bundle_id: i64) -> Result<Option<(String, String)
         let Some(row) = table.into_iter().next() else {
             return Ok(None);
         };
-        let path = row
-            .get::<String>(1)
-            .map_err(|error| spi_error("failed to read bundle path", &error))?
-            .ok_or_else(|| CatalogError::internal("bundle path is NULL", Path::new("")))?;
-        let source_type = row
-            .get::<String>(2)
-            .map_err(|error| spi_error("failed to read bundle source_type", &error))?
-            .ok_or_else(|| CatalogError::internal("bundle source_type is NULL", Path::new("")))?;
+        let path: String = spi_read::required_column(
+            &row,
+            1,
+            "failed to read bundle path",
+            "bundle path is NULL",
+        )?;
+        let source_type: String = spi_read::required_column(
+            &row,
+            2,
+            "failed to read bundle source_type",
+            "bundle source_type is NULL",
+        )?;
         Ok(Some((path, source_type)))
     })
 }

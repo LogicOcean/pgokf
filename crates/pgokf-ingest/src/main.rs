@@ -174,43 +174,13 @@ async fn collect_bundle<S: ObjectStore>(
     prefix: Option<&str>,
     concurrency: usize,
 ) -> Result<Vec<BundleObject>> {
-    let list_prefix = prefix.map(ObjectPath::from);
-    let mut listing = store.list(list_prefix.as_ref());
-
-    let mut locations = Vec::new();
-    while let Some(meta) = listing.next().await {
-        let meta = meta.context("listing object store")?;
-        let location = meta.location.to_string();
-        // Mirror OKF bundle discovery: only Markdown files are concepts (the
-        // reserved index.md / log.md are handled server-side). Skipping other
-        // objects keeps a stray non-Markdown file from aborting a strict sync.
-        if location.to_ascii_lowercase().ends_with(".md") {
-            locations.push(meta.location);
-        }
-    }
-
+    let locations = list_markdown_locations(store, prefix).await?;
     let strip = prefix.map(|value| format!("{value}/"));
-    let downloads = futures::stream::iter(locations.into_iter().map(|location| {
-        let strip = strip.clone();
-        async move {
-            let bytes = store
-                .get(&location)
-                .await
-                .with_context(|| format!("downloading {location}"))?
-                .bytes()
-                .await
-                .with_context(|| format!("reading {location}"))?;
-            let full = location.to_string();
-            let relative = match &strip {
-                Some(prefix) => full.strip_prefix(prefix).unwrap_or(&full).to_owned(),
-                None => full,
-            };
-            Ok::<_, anyhow::Error>(BundleObject {
-                path: relative,
-                bytes: bytes.to_vec(),
-            })
-        }
-    }))
+    let downloads = futures::stream::iter(
+        locations
+            .into_iter()
+            .map(|location| download_object(store, location, strip.clone())),
+    )
     .buffer_unordered(concurrency.max(1));
 
     let mut objects: Vec<BundleObject> = downloads.try_collect().await?;
@@ -218,6 +188,58 @@ async fn collect_bundle<S: ObjectStore>(
     // server diffs by content, so order does not affect correctness.
     objects.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(objects)
+}
+
+/// List every Markdown object under `prefix`, in object-store listing order.
+///
+/// Only `.md` objects are concepts (the reserved `index.md` / `log.md` are
+/// handled server-side); skipping other objects keeps a stray non-Markdown file
+/// from aborting a strict sync.
+async fn list_markdown_locations<S: ObjectStore>(
+    store: &S,
+    prefix: Option<&str>,
+) -> Result<Vec<ObjectPath>> {
+    let list_prefix = prefix.map(ObjectPath::from);
+    let mut listing = store.list(list_prefix.as_ref());
+
+    let mut locations = Vec::new();
+    while let Some(meta) = listing.next().await {
+        let meta = meta.context("listing object store")?;
+        if meta
+            .location
+            .to_string()
+            .to_ascii_lowercase()
+            .ends_with(".md")
+        {
+            locations.push(meta.location);
+        }
+    }
+    Ok(locations)
+}
+
+/// Download one object and derive its bundle-relative path by stripping the
+/// listing prefix.
+async fn download_object<S: ObjectStore>(
+    store: &S,
+    location: ObjectPath,
+    strip: Option<String>,
+) -> Result<BundleObject> {
+    let bytes = store
+        .get(&location)
+        .await
+        .with_context(|| format!("downloading {location}"))?
+        .bytes()
+        .await
+        .with_context(|| format!("reading {location}"))?;
+    let full = location.to_string();
+    let relative = match &strip {
+        Some(prefix) => full.strip_prefix(prefix).unwrap_or(&full).to_owned(),
+        None => full,
+    };
+    Ok(BundleObject {
+        path: relative,
+        bytes: bytes.to_vec(),
+    })
 }
 
 /// Connect to PostgreSQL and call `pgokf.register_bundle_content`, printing the
