@@ -301,9 +301,13 @@ jobs:
             -tAc "SELECT extversion FROM pg_extension WHERE extname='pgokf';" \
             | grep -qx "$VER" \
             || { echo "::error::pgokf extversion is not ${VER}"; docker logs "$cid"; docker rm -f "$cid"; exit 1; }
-          # Register the mounted bundle and materialize its concepts.
+          # Register the mounted bundle and materialize its concepts. Call the
+          # function in the FROM clause, not as (register_bundle(...)).*: the
+          # composite-star form re-evaluates the volatile function once per
+          # output column, so the second evaluation fails with "already
+          # registered". FROM evaluates it exactly once.
           docker exec "$cid" psql -U postgres -v ON_ERROR_STOP=1 \
-            -c "SELECT (pgokf.register_bundle('/bundles/sample')).*;"
+            -c "SELECT * FROM pgokf.register_bundle('/bundles/sample');"
           # Assert at least one concept row landed in the catalog.
           n=$(docker exec "$cid" psql -U postgres -tAc "SELECT count(*) FROM pgokf.concepts;")
           echo "concept rows materialized: ${n}"
