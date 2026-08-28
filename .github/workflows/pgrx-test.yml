@@ -58,10 +58,22 @@ jobs:
             echo "::error::postgresql-${{ matrix.pg }} is required but missing from PGDG."
             exit 1
           fi
-          sudo apt-get install -y \
+          # A required leg must install cleanly; an advisory leg may be only
+          # partially published (apt metadata present but the dev packages not
+          # yet installable, as with PostgreSQL 19 pre-GA) — skip it gracefully
+          # rather than showing a spurious red, matching the guard above.
+          if ! sudo apt-get install -y \
             postgresql-${{ matrix.pg }} \
             postgresql-server-dev-${{ matrix.pg }} \
-            libclang-dev
+            libclang-dev; then
+            if [[ "${{ matrix.experimental }}" == "true" ]]; then
+              echo "::notice::postgresql-${{ matrix.pg }} is not fully installable yet; skipping this advisory leg."
+              echo "available=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::failed to install postgresql-${{ matrix.pg }} (required leg)."
+            exit 1
+          fi
           echo "available=true" >> "$GITHUB_OUTPUT"
 
       # Keep this version synchronized with the workspace `pgrx` dependency in
