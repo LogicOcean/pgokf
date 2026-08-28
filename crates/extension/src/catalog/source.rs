@@ -80,12 +80,25 @@ CREATE TABLE pgokf.concept_source (
     concept_id  text    NOT NULL,
     raw_content bytea   NOT NULL,
     byte_size   integer NOT NULL,
+    tenant_id   text    NOT NULL DEFAULT 'default',
     CONSTRAINT concept_source_pkey PRIMARY KEY (bundle_id, concept_id),
     CONSTRAINT concept_source_concept_fk
         FOREIGN KEY (bundle_id, concept_id)
         REFERENCES pgokf.concepts (bundle_id, id)
         ON DELETE CASCADE
 );
+
+-- Multi-tenant isolation (see pgokf.bundles): opt-in-by-usage RLS on the
+-- denormalized tenant_id. Not forced, so the SECURITY DEFINER sync path bypasses
+-- it to persist a single-tenant bundle's source bytes.
+ALTER TABLE pgokf.concept_source ENABLE ROW LEVEL SECURITY;
+CREATE POLICY concept_source_tenant_isolation ON pgokf.concept_source
+    USING (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+        OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true))
+    WITH CHECK (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+        OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true));
 
 -- Prefer lz4 compression for the source bytes when this PostgreSQL build ships
 -- it; fall back to the default pglz otherwise. Wrapped in an exception-guarded
@@ -107,6 +120,8 @@ COMMENT ON COLUMN pgokf.concept_source.raw_content IS
     'The exact, unmodified bytes of the concept source file, as read at sync time; hashes to pgokf.concepts.file_hash (BLAKE3).';
 COMMENT ON COLUMN pgokf.concept_source.byte_size IS
     'Length in bytes of raw_content, recorded so a reader can size a retrieval without detoasting the content.';
+COMMENT ON COLUMN pgokf.concept_source.tenant_id IS
+    'Multi-tenant owner, denormalized from the concept''s bundle for a local row-level-security predicate; always equals the bundle''s tenant_id.';
 
 GRANT SELECT ON pgokf.concept_source TO pgokf_reader;
 ",
@@ -142,9 +157,13 @@ fn composite_error(error: impl std::fmt::Display) -> CatalogError {
 /// Returns a [`CatalogError`] on any SPI failure, aborting the surrounding sync
 /// transaction so a partial projection is never committed.
 pub fn project(bundle_id: i64, staged: &[StagedConcept]) -> Result<(), CatalogError> {
+    // tenant_id is derived from the bundle (single-tenant) and left untouched on
+    // conflict, so re-syncing a concept never rewrites its tenant.
     const UPSERT: &str = "
-        INSERT INTO pgokf.concept_source (bundle_id, concept_id, raw_content, byte_size)
-        SELECT $1, d.concept_id, d.raw_content, d.byte_size
+        INSERT INTO pgokf.concept_source (bundle_id, tenant_id, concept_id, raw_content, byte_size)
+        SELECT $1,
+               (SELECT b.tenant_id FROM pgokf.bundles b WHERE b.id = $1),
+               d.concept_id, d.raw_content, d.byte_size
         FROM unnest($2::text[], $3::bytea[], $4::integer[])
              AS d(concept_id, raw_content, byte_size)
         ON CONFLICT (bundle_id, concept_id) DO UPDATE SET
@@ -410,6 +429,10 @@ fn export_sources_impl(
     dest_dir: &str,
 ) -> Result<SourceExportSummary, CatalogError> {
     security::authorize_current_user(security::Operation::Register, Path::new(""))?;
+    // Write-side tenant confinement: a scoped session may only reconstruct its
+    // own tenant's bundle. Checked before the directory is validated (a filesystem
+    // side effect) so a cross-tenant or absent id looks identically unknown.
+    security::enforce_bundle_tenant(bundle_id)?;
     ensure_bundle_exists(bundle_id)?;
     let dir = export::validate_dest_dir(dest_dir)?;
 

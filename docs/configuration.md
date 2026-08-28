@@ -32,6 +32,7 @@ threshold uses **`SUSET`**, so a superuser can adjust it at runtime.
 | `pgokf.max_frontmatter_bytes` | integer | `262144` (256 KiB) | `1 .. 2147483647` | `SIGHUP` | Maximum bytes parsed as YAML frontmatter in one document. |
 | `pgokf.max_graph_hops` | integer | `5` | `1 .. 1000` | `SIGHUP` | Hard ceiling for graph traversal depth; `concept_neighbors(max_hops)` is capped to this. |
 | `pgokf.log_level` | string | `warning` | — | `SUSET` | Logging threshold used by `pgokf`. |
+| `pgokf.tenant` | string | `''` (empty = see all) | — | `USERSET` | Active tenant for multi-tenant row-level isolation. A policy selector, not a ceiling: any session may set it. |
 
 ### Reading and setting GUCs
 
@@ -62,6 +63,23 @@ SET pgokf.max_graph_hops = 50;
 `max_graph_hops` interacts with `concept_neighbors`: a `max_hops` argument above
 the ceiling is silently capped to it, and `max_hops < 1` is rejected with
 `22023`.
+
+### Tenant selector — `pgokf.tenant`
+
+Unlike the ceilings above, `pgokf.tenant` is a `USERSET` policy selector, not a
+safety limit. It chooses the tenant a session reads and writes under for
+multi-tenant row-level isolation. Its empty default preserves the
+pre-multi-tenancy see-all behavior, so an install that never sets it is
+unaffected. Set it per session, per role, or per connection:
+
+```sql
+SET pgokf.tenant = 'acme';                    -- this session
+ALTER ROLE acme_app SET pgokf.tenant = 'acme'; -- every connection as this role
+RESET pgokf.tenant;                            -- back to see-all
+```
+
+See [multi-tenancy.md](multi-tenancy.md) for the full model, including the
+strict-isolation contract (pin the tenant, connect as a non-superuser reader).
 
 ---
 

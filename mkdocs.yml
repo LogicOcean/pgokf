@@ -51,6 +51,7 @@ nav:
   - SQL API: sql-api.md
   - Configuration: configuration.md
   - Security: security.md
+  - Multi-tenancy: multi-tenancy.md
   - Troubleshooting: troubleshooting.md
   - API Stability: api-stability.md
   - Benchmarks: benchmarks.md

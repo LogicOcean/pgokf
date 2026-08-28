@@ -80,6 +80,7 @@ CREATE TABLE pgokf.concept_provenance (
     usage_window_to   timestamptz,
     trust_tier        text,
     details           jsonb  NOT NULL DEFAULT '{}'::jsonb,
+    tenant_id         text   NOT NULL DEFAULT 'default',
     CONSTRAINT concept_provenance_pkey PRIMARY KEY (bundle_id, concept_id),
     CONSTRAINT concept_provenance_concept_fk
         FOREIGN KEY (bundle_id, concept_id)
@@ -93,6 +94,7 @@ CREATE TABLE pgokf.concept_verification (
     ordinal     integer NOT NULL,
     verified_by text    NOT NULL,
     verified_at timestamptz,
+    tenant_id   text    NOT NULL DEFAULT 'default',
     CONSTRAINT concept_verification_pkey PRIMARY KEY (bundle_id, concept_id, ordinal),
     CONSTRAINT concept_verification_concept_fk
         FOREIGN KEY (bundle_id, concept_id)
@@ -112,6 +114,7 @@ CREATE TABLE pgokf.concept_provenance_source (
     last_modified     timestamptz,
     usage_window_from timestamptz,
     usage_window_to   timestamptz,
+    tenant_id         text    NOT NULL DEFAULT 'default',
     CONSTRAINT concept_provenance_source_pkey PRIMARY KEY (bundle_id, concept_id, ordinal),
     CONSTRAINT concept_provenance_source_concept_fk
         FOREIGN KEY (bundle_id, concept_id)
@@ -121,6 +124,36 @@ CREATE TABLE pgokf.concept_provenance_source (
 
 CREATE INDEX concept_provenance_trust_tier_idx
     ON pgokf.concept_provenance (trust_tier);
+
+-- Multi-tenant isolation (see pgokf.bundles): opt-in-by-usage RLS on the
+-- denormalized tenant_id of each provenance table. Not forced, so the SECURITY
+-- DEFINER sync path bypasses it to project a single-tenant bundle's rows.
+ALTER TABLE pgokf.concept_provenance ENABLE ROW LEVEL SECURITY;
+CREATE POLICY concept_provenance_tenant_isolation ON pgokf.concept_provenance
+    USING (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+        OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true))
+    WITH CHECK (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+        OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true));
+
+ALTER TABLE pgokf.concept_verification ENABLE ROW LEVEL SECURITY;
+CREATE POLICY concept_verification_tenant_isolation ON pgokf.concept_verification
+    USING (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+        OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true))
+    WITH CHECK (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+        OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true));
+
+ALTER TABLE pgokf.concept_provenance_source ENABLE ROW LEVEL SECURITY;
+CREATE POLICY concept_provenance_source_tenant_isolation ON pgokf.concept_provenance_source
+    USING (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+        OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true))
+    WITH CHECK (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+        OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true));
 
 COMMENT ON TABLE pgokf.concept_provenance IS
     'Scalar OKF v0.2 generation/trust/lifecycle projection: one row per concept that carries any provenance, trust, or lifecycle frontmatter (sparse). The verified[] event list and the sources[] materials live in pgokf.concept_verification and pgokf.concept_provenance_source; the full lossless key subset is in details.';
@@ -140,6 +173,8 @@ COMMENT ON COLUMN pgokf.concept_provenance.trust_tier IS
     'Derived OKF trust tier: human-reviewed when any verified[] actor is a human:, else machine-confirmed with >=1 verified event, else unverified.';
 COMMENT ON COLUMN pgokf.concept_provenance.details IS
     'Lossless jsonb copy of the recognized OKF provenance/trust/lifecycle key subset (generated, verified, sources, usage_window, stale_after, status, and the generated_by alias).';
+COMMENT ON COLUMN pgokf.concept_provenance.tenant_id IS
+    'Multi-tenant owner, denormalized from the concept''s bundle for a local row-level-security predicate; always equals the bundle''s tenant_id.';
 
 COMMENT ON TABLE pgokf.concept_verification IS
     'One row per OKF v0.2 verified[] event for a concept: the ordered list of verification events (a single mapping is stored as one 0-ordinal row). Cascades from pgokf.concepts.';
@@ -149,6 +184,8 @@ COMMENT ON COLUMN pgokf.concept_verification.verified_by IS
     'OKF verified[].by: the actor that performed the verification (agent/human:/process:). Events with no actor are skipped, never stored as NULL.';
 COMMENT ON COLUMN pgokf.concept_verification.verified_at IS
     'OKF verified[].at, parsed from ISO 8601. NULL when the at value is absent or unparseable.';
+COMMENT ON COLUMN pgokf.concept_verification.tenant_id IS
+    'Multi-tenant owner, denormalized from the concept''s bundle for a local row-level-security predicate; always equals the bundle''s tenant_id.';
 
 COMMENT ON TABLE pgokf.concept_provenance_source IS
     'One row per OKF v0.2 sources[] provenance material for a concept — the inputs the content was derived from. Distinct from pgokf.concept_source, which holds the concept''s own raw source bytes. Cascades from pgokf.concepts.';
@@ -170,6 +207,8 @@ COMMENT ON COLUMN pgokf.concept_provenance_source.usage_window_from IS
     'OKF sources[].usage_window.from: start of this source''s own usage window, overriding the top-level window. NULL when absent or unparseable.';
 COMMENT ON COLUMN pgokf.concept_provenance_source.usage_window_to IS
     'OKF sources[].usage_window.to: end of this source''s own usage window. NULL when absent or unparseable.';
+COMMENT ON COLUMN pgokf.concept_provenance_source.tenant_id IS
+    'Multi-tenant owner, denormalized from the concept''s bundle for a local row-level-security predicate; always equals the bundle''s tenant_id.';
 
 GRANT SELECT ON pgokf.concept_provenance TO pgokf_reader;
 GRANT SELECT ON pgokf.concept_verification TO pgokf_reader;
@@ -763,10 +802,12 @@ fn delete_staged_provenance(bundle_id: i64, staged: &[StagedConcept]) -> Result<
 fn insert_scalar_rows(bundle_id: i64, rows: &ProvenanceRows) -> Result<(), CatalogError> {
     const INSERT: &str = "
         INSERT INTO pgokf.concept_provenance
-            (bundle_id, concept_id, generated_by, generated_at, status,
+            (bundle_id, tenant_id, concept_id, generated_by, generated_at, status,
              stale_after, usage_window_from, usage_window_to, trust_tier, details)
         SELECT
-            $1, d.concept_id, d.generated_by,
+            $1,
+            (SELECT b.tenant_id FROM pgokf.bundles b WHERE b.id = $1),
+            d.concept_id, d.generated_by,
             pg_catalog.to_timestamp(d.generated_at), d.status,
             pg_catalog.to_timestamp(d.stale_after),
             pg_catalog.to_timestamp(d.usage_window_from),
@@ -806,9 +847,11 @@ fn insert_scalar_rows(bundle_id: i64, rows: &ProvenanceRows) -> Result<(), Catal
 fn insert_verification_rows(bundle_id: i64, rows: &ProvenanceRows) -> Result<(), CatalogError> {
     const INSERT: &str = "
         INSERT INTO pgokf.concept_verification
-            (bundle_id, concept_id, ordinal, verified_by, verified_at)
+            (bundle_id, tenant_id, concept_id, ordinal, verified_by, verified_at)
         SELECT
-            $1, d.concept_id, d.ordinal, d.verified_by,
+            $1,
+            (SELECT b.tenant_id FROM pgokf.bundles b WHERE b.id = $1),
+            d.concept_id, d.ordinal, d.verified_by,
             pg_catalog.to_timestamp(d.verified_at)
         FROM unnest($2::text[], $3::integer[], $4::text[], $5::float8[])
              AS d(concept_id, ordinal, verified_by, verified_at)";
@@ -836,10 +879,12 @@ fn insert_verification_rows(bundle_id: i64, rows: &ProvenanceRows) -> Result<(),
 fn insert_source_rows(bundle_id: i64, rows: &ProvenanceRows) -> Result<(), CatalogError> {
     const INSERT: &str = "
         INSERT INTO pgokf.concept_provenance_source
-            (bundle_id, concept_id, ordinal, source_id, resource, title, author,
+            (bundle_id, tenant_id, concept_id, ordinal, source_id, resource, title, author,
              usage_count, last_modified, usage_window_from, usage_window_to)
         SELECT
-            $1, d.concept_id, d.ordinal, d.source_id, d.resource, d.title,
+            $1,
+            (SELECT b.tenant_id FROM pgokf.bundles b WHERE b.id = $1),
+            d.concept_id, d.ordinal, d.source_id, d.resource, d.title,
             d.author, d.usage_count,
             pg_catalog.to_timestamp(d.last_modified),
             pg_catalog.to_timestamp(d.usage_window_from),

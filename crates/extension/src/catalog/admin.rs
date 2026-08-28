@@ -225,6 +225,9 @@ fn bundle_info_impl(bundle_id: i64) -> Result<Option<BundleInfo>, CatalogError> 
 /// returning the removed projection.
 fn unregister_bundle_impl(bundle_id: i64) -> Result<BundleInfo, CatalogError> {
     security::authorize_current_user(security::Operation::Ingest, Path::new(""))?;
+    // Write-side tenant confinement: a scoped session may only unregister its own
+    // tenant's bundle; a cross-tenant or absent id looks identically unknown.
+    security::enforce_bundle_tenant(bundle_id)?;
     let stored_path =
         select_bundle_path(bundle_id)?.ok_or_else(|| unknown_bundle_error(bundle_id))?;
 
@@ -260,6 +263,9 @@ fn unregister_bundle_impl(bundle_id: i64) -> Result<BundleInfo, CatalogError> {
 /// unknown `bundle_id` raises SQLSTATE `22023`.
 fn set_bundle_enabled_impl(bundle_id: i64, enabled: bool) -> Result<BundleInfo, CatalogError> {
     security::authorize_current_user(security::Operation::Ingest, Path::new(""))?;
+    // Write-side tenant confinement: a scoped session may only toggle its own
+    // tenant's bundle; a cross-tenant or absent id looks identically unknown.
+    security::enforce_bundle_tenant(bundle_id)?;
     let stored_path =
         select_bundle_path(bundle_id)?.ok_or_else(|| unknown_bundle_error(bundle_id))?;
 

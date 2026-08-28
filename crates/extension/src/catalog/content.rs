@@ -167,9 +167,13 @@ fn content_path_key(name: &str) -> String {
 /// Look up an existing content bundle by its synthetic key, returning its id.
 fn lookup_content_bundle(path_key: &str) -> Result<Option<i64>, CatalogError> {
     Spi::connect(|client| {
+        // Scope to the current tenant: the registration key is UNIQUE
+        // (tenant_id, path), so two tenants may each own a content:<name> bundle
+        // and this create-or-resync must find only the caller tenant's own.
         let table = client
             .select(
-                "SELECT id FROM pgokf.bundles WHERE path = $1",
+                "SELECT id FROM pgokf.bundles
+                 WHERE tenant_id = pgokf_private.effective_tenant() AND path = $1",
                 Some(1),
                 &[path_key.into()],
             )
@@ -190,9 +194,10 @@ fn insert_content_bundle(
     name: &str,
     options: Option<pgrx::JsonB>,
 ) -> Result<i64, CatalogError> {
+    // Stamped with the session's effective tenant; child rows inherit it.
     Spi::get_one_with_args::<i64>(
-        "INSERT INTO pgokf.bundles (path, name, options, source_type)
-         VALUES ($1, $2, COALESCE($3, '{}'::jsonb), 'content')
+        "INSERT INTO pgokf.bundles (tenant_id, path, name, options, source_type)
+         VALUES (pgokf_private.effective_tenant(), $1, $2, COALESCE($3, '{}'::jsonb), 'content')
          RETURNING id",
         &[path_key.into(), name.into(), options.into()],
     )

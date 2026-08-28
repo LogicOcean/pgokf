@@ -106,7 +106,16 @@ jobs:
 
       # `cargo pgrx test` resolves the extension crate from the working
       # directory and appends the `pg_test` feature itself.
+      #
+      # RUST_TEST_THREADS=1: pgrx wraps each `#[pg_test]` in one long-lived
+      # transaction, so tests that both touch the singleton `pgokf_private.config`
+      # row (e.g. set_config) can deadlock against each other under the default
+      # parallel harness. Running the in-DB suite single-threaded is
+      # deterministic; it does not reflect any production concurrency issue
+      # (real set_config runs in its own short transaction).
       - name: Test
         if: steps.pgdg.outputs.available == 'true'
         working-directory: crates/extension
+        env:
+          RUST_TEST_THREADS: "1"
         run: cargo pgrx test pg${{ matrix.pg }} --no-default-features --features pg${{ matrix.pg }}

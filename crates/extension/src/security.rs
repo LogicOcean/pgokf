@@ -293,6 +293,121 @@ pub fn authorize_current_user(
     authorize(operation, &PostgresRoleMembership, bundle_relative_path)
 }
 
+/// The SQLSTATE `22023` error every bundle-addressed entry point already raises
+/// for an unregistered `bundle_id`
+/// (`pgokf.refresh_bundle` / `unregister_bundle` / `set_bundle_enabled` /
+/// `export_parquet` / `export_sources`).
+///
+/// The tenant guard reuses this identical message and shape so that a bundle
+/// owned by *another* tenant is indistinguishable from one that does not exist:
+/// a scoped session cannot use a guessed id to confirm whether some other
+/// tenant holds a bundle.
+fn unknown_bundle_error(bundle_id: i64) -> CatalogError {
+    CatalogError::invalid_parameter(
+        format!("bundle {bundle_id} is not registered"),
+        Path::new(""),
+    )
+}
+
+/// Decide whether a session may act on a bundle, given the session's *raw*
+/// `pgokf.tenant` setting and the target bundle's stored `tenant_id`.
+///
+/// This is the write-side mirror of the read-side row-level-security predicate
+/// (`current_setting('pgokf.tenant', true) IS NULL OR = '' OR tenant_id =
+/// current_setting(...)`), factored out as a pure function so the decision is
+/// unit-testable without a running `PostgreSQL` server:
+///
+/// - a session with **no** tenant set (`None`) or an **empty** tenant (`""`) is
+///   cross-tenant *by design* — the backward-compatible see-all default that
+///   also lets a trusted operator/superuser operate on any bundle, exactly as
+///   the read policy's "unset = all" — so it is always permitted;
+/// - a session **with** a tenant is confined to it: the bundle must exist
+///   (`bundle_tenant` is `Some`) and its tenant must equal the session's.
+///
+/// A missing bundle (`bundle_tenant == None`) is therefore rejected identically
+/// to a cross-tenant one, which is what makes the two indistinguishable.
+fn tenant_permits(session_tenant: Option<&str>, bundle_tenant: Option<&str>) -> bool {
+    match session_tenant {
+        None | Some("") => true,
+        Some(active) => bundle_tenant == Some(active),
+    }
+}
+
+/// Read the raw session tenant and the target bundle's owner in a single
+/// read-only SPI round-trip.
+///
+/// The session tenant is read with `current_setting('pgokf.tenant', true)` (the
+/// missing-ok form), which is `NULL` when unset and `''` when explicitly
+/// cleared — deliberately *not* `pgokf_private.effective_tenant()`, which
+/// collapses both to the literal `'default'` and would wrongly confine an unset
+/// operator session to the default tenant. The bundle owner is a correlated
+/// scalar subquery, so the statement always yields exactly one row and a
+/// non-existent `bundle_id` reads back as a `NULL` owner rather than no row.
+///
+/// The read is intentionally an owner-rights read (the caller is a
+/// `SECURITY DEFINER` body): it must see the bundle regardless of the row-level
+/// policy, because the whole point of the guard is to confine the very callers
+/// that bypass RLS.
+fn read_bundle_tenant_context(
+    bundle_id: i64,
+) -> Result<(Option<String>, Option<String>), CatalogError> {
+    pgrx::Spi::connect(|client| {
+        let table = client.select(
+            "SELECT pg_catalog.current_setting('pgokf.tenant', true),
+                    (SELECT b.tenant_id FROM pgokf.bundles b WHERE b.id = $1)",
+            Some(1),
+            &[bundle_id.into()],
+        )?;
+        let row = table.first();
+        let session_tenant = row.get::<String>(1)?;
+        let bundle_tenant = row.get::<String>(2)?;
+        Ok((session_tenant, bundle_tenant))
+    })
+    .map_err(|error: pgrx::spi::Error| {
+        CatalogError::internal(
+            format!("failed to resolve bundle tenant for write confinement: {error}"),
+            Path::new(""),
+        )
+    })
+}
+
+/// Confine a bundle-addressed mutation or export to the session's active tenant.
+///
+/// This closes the write-side counterpart of the read-side row-level-security
+/// isolation. The `SECURITY DEFINER` functions that take an explicit
+/// `bundle_id` run as the table owner and so **bypass RLS**; without this guard
+/// a `pgokf_writer` / `pgokf_admin` session that has `SET pgokf.tenant = 'acme'`
+/// could still act on another tenant's bundle simply by passing its id. Calling
+/// this right after the `bundle_id` is known — and before any lock, filesystem,
+/// or catalog side effect — makes write confinement equal to read confinement.
+///
+/// The rule mirrors [`tenant_permits`] exactly: when `pgokf.tenant` is unset or
+/// empty the caller is cross-tenant by design (backward compatible; the trusted
+/// operator/superuser path), so nothing is restricted; when a tenant is set, a
+/// bundle owned by any other tenant — or one that does not exist — is rejected
+/// with the same [`unknown_bundle_error`] (`22023`) the entry points already
+/// raise for a bad id, so a cross-tenant id cannot be used to probe another
+/// tenant's catalog.
+///
+/// Because this is an explicit check rather than RLS, it confines every caller,
+/// including a superuser or the extension owner running inside the
+/// `SECURITY DEFINER` bodies — precisely the callers RLS does not.
+///
+/// # Errors
+///
+/// Returns an [`crate::errors::ErrorKind::InvalidParameter`] error (SQLSTATE
+/// `22023`) when a tenant is set and the target bundle is owned by a different
+/// tenant or is unregistered, or an [`crate::errors::ErrorKind::Internal`] error
+/// if the read-only tenant lookup itself fails.
+pub fn enforce_bundle_tenant(bundle_id: i64) -> Result<(), CatalogError> {
+    let (session_tenant, bundle_tenant) = read_bundle_tenant_context(bundle_id)?;
+    if tenant_permits(session_tenant.as_deref(), bundle_tenant.as_deref()) {
+        Ok(())
+    } else {
+        Err(unknown_bundle_error(bundle_id))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -544,5 +659,53 @@ mod tests {
         // Assert
         assert_eq!(error.kind(), ErrorKind::InsufficientPrivilege);
         assert_eq!(error.sqlstate(), "42501");
+    }
+
+    #[test]
+    fn tenant_permits_allows_an_unset_session_on_any_bundle() {
+        // Arrange: no pgokf.tenant set (the backward-compatible see-all default).
+        // Act & Assert: permitted for a matching, a foreign, and a missing bundle.
+        assert!(tenant_permits(None, Some("acme")));
+        assert!(tenant_permits(None, Some("globex")));
+        assert!(tenant_permits(None, None));
+    }
+
+    #[test]
+    fn tenant_permits_treats_an_empty_tenant_as_unset() {
+        // Arrange: pgokf.tenant explicitly cleared to '' behaves as unset.
+        // Act & Assert
+        assert!(tenant_permits(Some(""), Some("globex")));
+        assert!(tenant_permits(Some(""), None));
+    }
+
+    #[test]
+    fn tenant_permits_confines_a_scoped_session_to_its_own_tenant() {
+        // Arrange: a session scoped to acme.
+        // Act & Assert: only acme's own bundle is permitted.
+        assert!(tenant_permits(Some("acme"), Some("acme")));
+        assert!(!tenant_permits(Some("acme"), Some("globex")));
+    }
+
+    #[test]
+    fn tenant_permits_rejects_a_missing_bundle_for_a_scoped_session() {
+        // Arrange: a scoped session naming a bundle that does not exist — must be
+        // rejected identically to a cross-tenant one so the two are
+        // indistinguishable.
+        // Act & Assert
+        assert!(!tenant_permits(Some("acme"), None));
+    }
+
+    #[test]
+    fn unknown_bundle_error_is_the_shared_22023_shape() {
+        // Arrange & Act
+        let error = unknown_bundle_error(7);
+
+        // Assert: the same SQLSTATE, kind, and message shape the bundle-addressed
+        // entry points already raise for a bad id (so a cross-tenant bundle looks
+        // unknown, not "forbidden").
+        assert_eq!(error.kind(), ErrorKind::InvalidParameter);
+        assert_eq!(error.sqlstate(), "22023");
+        assert!(error.message().contains('7'));
+        assert!(error.message().contains("not registered"));
     }
 }

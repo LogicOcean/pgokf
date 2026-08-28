@@ -77,6 +77,7 @@ CREATE TABLE pgokf.concept_embedding (
     dim        integer     NOT NULL,
     model      text,
     updated_at timestamptz NOT NULL DEFAULT now(),
+    tenant_id  text        NOT NULL DEFAULT 'default',
     CONSTRAINT concept_embedding_pkey PRIMARY KEY (bundle_id, concept_id),
     CONSTRAINT concept_embedding_concept_fk
         FOREIGN KEY (bundle_id, concept_id)
@@ -84,6 +85,18 @@ CREATE TABLE pgokf.concept_embedding (
         ON DELETE CASCADE,
     CONSTRAINT concept_embedding_dim_chk CHECK (dim = cardinality(embedding))
 );
+
+-- Multi-tenant isolation (see pgokf.bundles): opt-in-by-usage RLS on the
+-- denormalized tenant_id. Not forced, so the SECURITY DEFINER set_concept_embedding
+-- path bypasses it to upsert a single-tenant bundle's vectors.
+ALTER TABLE pgokf.concept_embedding ENABLE ROW LEVEL SECURITY;
+CREATE POLICY concept_embedding_tenant_isolation ON pgokf.concept_embedding
+    USING (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+        OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true))
+    WITH CHECK (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+        OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true));
 
 COMMENT ON TABLE pgokf.concept_embedding IS
     'Opt-in per-concept embedding vectors, streamed in by a companion embedder via pgokf.set_concept_embedding (the extension never computes embeddings or performs network I/O). The vector is stored as the builtin real[] — NOT a pgvector ''vector'' column — so CREATE EXTENSION pgokf succeeds without pgvector installed; it is cast to vector(dim) at query time and in the HNSW index only when pgvector is present. Rows cascade from pgokf.concepts, so removing a concept or unregistering a bundle drops its embedding automatically.';
@@ -95,6 +108,8 @@ COMMENT ON COLUMN pgokf.concept_embedding.model IS
     'Optional identifier of the embedding model/producer that computed the vector, for provenance; NULL when not supplied.';
 COMMENT ON COLUMN pgokf.concept_embedding.updated_at IS
     'When this embedding row was last written by pgokf.set_concept_embedding.';
+COMMENT ON COLUMN pgokf.concept_embedding.tenant_id IS
+    'Multi-tenant owner, denormalized from the concept''s bundle for a local row-level-security predicate; always equals the bundle''s tenant_id.';
 
 GRANT SELECT ON pgokf.concept_embedding TO pgokf_reader;
 ",
@@ -273,6 +288,11 @@ fn set_concept_embedding_impl(
     embedding: Vec<f32>,
 ) -> Result<(), CatalogError> {
     security::authorize_current_user(security::Operation::Ingest, Path::new(""))?;
+    // Write-side tenant confinement: a scoped session may only embed into its own
+    // tenant's bundle. Checked first (before the dimension/concept validation) so
+    // a cross-tenant bundle_id is rejected as an unknown bundle without revealing
+    // anything about that bundle's concepts.
+    security::enforce_bundle_tenant(bundle_id)?;
 
     let dim = config::embedding_dim()?;
     validate_embedding_length(embedding.len(), dim)?;
@@ -284,9 +304,14 @@ fn set_concept_embedding_impl(
         ));
     }
 
+    // tenant_id is derived from the bundle (single-tenant) and left untouched on
+    // conflict, so re-embedding a concept never rewrites its tenant.
     Spi::run_with_args(
-        "INSERT INTO pgokf.concept_embedding (bundle_id, concept_id, embedding, dim, updated_at)
-         VALUES ($1, $2, $3, $4, pg_catalog.now())
+        "INSERT INTO pgokf.concept_embedding
+             (bundle_id, tenant_id, concept_id, embedding, dim, updated_at)
+         VALUES ($1,
+                 (SELECT b.tenant_id FROM pgokf.bundles b WHERE b.id = $1),
+                 $2, $3, $4, pg_catalog.now())
          ON CONFLICT (bundle_id, concept_id) DO UPDATE SET
              embedding = excluded.embedding,
              dim = excluded.dim,

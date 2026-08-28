@@ -12,6 +12,54 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 Nothing yet.
 
+## [0.1.7] - 2026-08-28
+
+**Opt-in multi-tenant isolation**, built from a per-session GUC and PostgreSQL
+row-level security. Everything is strictly backward compatible: an existing
+install, and any session that never sets a tenant, sees all rows and behaves
+exactly as under 0.1.6, so `ALTER EXTENSION pgokf UPDATE TO '0.1.7'` migrates an
+existing install in a single transaction and yields a catalog identical to a
+fresh 0.1.7 (every existing row backfills to the `default` tenant). No public API
+surface changes — no new functions, types, or arguments.
+
+### Added
+
+- **Denormalized `tenant_id`** (`text NOT NULL DEFAULT 'default'`) on every
+  projection table — `bundles`, `concepts`, `concept_metadata`, `links`,
+  `concept_provenance`, `concept_verification`, `concept_provenance_source`,
+  `concept_source`, `concept_embedding` — and on `pgokf_private.sync_log`.
+  Indexed where it helps (a dedicated index on `concepts`; on `bundles` the new
+  `UNIQUE (tenant_id, path)` index already leads with it).
+- **`pgokf.tenant` GUC** (`USERSET`, empty default) — the per-session tenant
+  selector. Set it per session (`SET pgokf.tenant = 'acme'`), per login role
+  (`ALTER ROLE r SET pgokf.tenant = ...`), or as a connection option; empty (the
+  default) means the session declares no tenant and sees every row.
+- **Row-level security on every projection table** with an opt-in-by-usage
+  policy: a session that has not set `pgokf.tenant` matches all rows (backward
+  compatible), a session that has set it matches only that tenant. RLS is enabled
+  but *not forced*, so the `SECURITY DEFINER` write/admin functions bypass it to
+  stamp and read within one single-tenant bundle.
+- **`docs/multi-tenancy.md`** documenting the model, the per-tenant bundle keys,
+  the `SECURITY DEFINER`-bypass reasoning, and the strict-isolation contract.
+
+### Changed
+
+- **Per-tenant bundle registration key.** `pgokf.bundles` is now keyed
+  `UNIQUE (tenant_id, path)` instead of `UNIQUE (path)`, so two tenants may
+  register the same filesystem or `content:<name>` path as independent bundles.
+  The duplicate-registration `23505` check is scoped to the current tenant. (The
+  upgrade replaces the old single-column key with this strict superset; no data
+  is touched.)
+- **Writes stamp the tenant.** `register_bundle` / `register_bundle_content`
+  stamp the bundle row from `effective_tenant()`; every projected child row and
+  the `set_concept_embedding` row inherit the bundle's tenant; the `sync_log`
+  row records the operating tenant. `refresh_bundle`, `unregister_bundle`, and
+  `set_bundle_enabled` operate on an existing bundle and never change its tenant.
+- **`list_sync_log` and `health` are tenant-scoped.** Both are `SECURITY DEFINER`
+  (they bypass RLS), so they apply the same opt-in tenant filter explicitly:
+  `list_sync_log` filters its rows and `health`'s `bundle_count` / `concept_count`
+  are scoped, each a no-op for an unset session.
+
 ## [0.1.6] - 2026-08-28
 
 An additive **search-enhancement** batch: structured filters on ranked search, a
@@ -390,7 +438,9 @@ queries, native full-text search, and link-graph traversal.
 - The `pgokf_private` schema and its `config` table are readable and writable
   only by the extension owner and `pgokf_admin`; readers cannot see policy.
 
-[Unreleased]: https://github.com/LogicOcean/pgokf/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/LogicOcean/pgokf/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/LogicOcean/pgokf/compare/v0.1.6...v0.1.7
+[0.1.6]: https://github.com/LogicOcean/pgokf/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/LogicOcean/pgokf/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/LogicOcean/pgokf/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/LogicOcean/pgokf/compare/v0.1.2...v0.1.3

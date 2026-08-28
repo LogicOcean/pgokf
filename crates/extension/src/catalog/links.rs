@@ -56,6 +56,7 @@ CREATE TABLE pgokf.links (
     resolved    boolean NOT NULL DEFAULT false,
     is_external boolean NOT NULL DEFAULT false,
     ordinal     integer NOT NULL,
+    tenant_id   text    NOT NULL DEFAULT 'default',
     CONSTRAINT links_pkey PRIMARY KEY (bundle_id, source_id, ordinal),
     CONSTRAINT links_source_fk
         FOREIGN KEY (bundle_id, source_id)
@@ -64,6 +65,18 @@ CREATE TABLE pgokf.links (
 );
 
 CREATE INDEX links_target_idx ON pgokf.links (bundle_id, target_id);
+
+-- Multi-tenant isolation (see pgokf.bundles): opt-in-by-usage RLS on the
+-- denormalized tenant_id. Not forced, so the SECURITY DEFINER sync path bypasses
+-- it to project a single-tenant bundle's edges.
+ALTER TABLE pgokf.links ENABLE ROW LEVEL SECURITY;
+CREATE POLICY links_tenant_isolation ON pgokf.links
+    USING (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+        OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true))
+    WITH CHECK (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+        OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true));
 
 COMMENT ON TABLE pgokf.links IS
     'Directed Markdown links extracted per concept during sync: one row per outgoing link, in source order.';
@@ -83,6 +96,8 @@ COMMENT ON COLUMN pgokf.links.is_external IS
     'True when the destination is a scheme-qualified or protocol-relative URL; external links never become graph edges.';
 COMMENT ON COLUMN pgokf.links.ordinal IS
     'Zero-based position of the link within its source document, in document order.';
+COMMENT ON COLUMN pgokf.links.tenant_id IS
+    'Multi-tenant owner, denormalized from the edge''s bundle for a local row-level-security predicate; always equals the bundle''s tenant_id.';
 
 GRANT SELECT ON pgokf.links TO pgokf_reader;
 ",
@@ -145,10 +160,12 @@ fn delete_staged_outgoing(bundle_id: i64, staged: &[StagedConcept]) -> Result<()
 fn insert_staged_links(bundle_id: i64, staged: &[StagedConcept]) -> Result<(), CatalogError> {
     const INSERT: &str = "
         INSERT INTO pgokf.links
-            (bundle_id, source_id, target_id, link_text, target_path,
+            (bundle_id, tenant_id, source_id, target_id, link_text, target_path,
              link_kind, resolved, is_external, ordinal)
         SELECT
-            $1, d.source_id, d.target_id, d.link_text, d.target_path,
+            $1,
+            (SELECT b.tenant_id FROM pgokf.bundles b WHERE b.id = $1),
+            d.source_id, d.target_id, d.link_text, d.target_path,
             d.link_kind,
             (d.target_id IS NOT NULL AND NOT d.is_external AND EXISTS (
                  SELECT 1 FROM pgokf.concepts c

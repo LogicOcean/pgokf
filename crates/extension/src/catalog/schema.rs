@@ -36,7 +36,10 @@ CREATE TABLE pgokf.bundles (
     options        jsonb NOT NULL DEFAULT '{}'::jsonb,
     enabled        boolean NOT NULL DEFAULT true,
     source_type    text NOT NULL DEFAULT 'filesystem',
-    CONSTRAINT bundles_path_key UNIQUE (path),
+    -- tenant_id is appended last so a fresh install matches, column-for-column, an
+    -- existing install upgraded via ADD COLUMN (see sql/pgokf--0.1.6--0.1.7.sql).
+    tenant_id      text NOT NULL DEFAULT 'default',
+    CONSTRAINT bundles_tenant_path_key UNIQUE (tenant_id, path),
     CONSTRAINT bundles_source_type_chk CHECK (source_type IN ('filesystem', 'content'))
 );
 
@@ -54,6 +57,7 @@ CREATE TABLE pgokf.concepts (
     modified_at timestamptz,
     body_tsv    tsvector,
     indexed_at  timestamptz NOT NULL DEFAULT now(),
+    tenant_id   text NOT NULL DEFAULT 'default',
     CONSTRAINT concepts_pkey PRIMARY KEY (bundle_id, id),
     CONSTRAINT concepts_bundle_path_key UNIQUE (bundle_id, path)
 );
@@ -63,6 +67,7 @@ CREATE TABLE pgokf.concept_metadata (
     concept_id text NOT NULL,
     key        text NOT NULL,
     value      jsonb NOT NULL,
+    tenant_id  text NOT NULL DEFAULT 'default',
     CONSTRAINT concept_metadata_key_uq UNIQUE (bundle_id, concept_id, key),
     CONSTRAINT concept_metadata_concept_fk
         FOREIGN KEY (bundle_id, concept_id)
@@ -76,6 +81,46 @@ CREATE INDEX concept_metadata_value_gin
     ON pgokf.concept_metadata USING gin (value jsonb_path_ops);
 CREATE INDEX concepts_type_idx ON pgokf.concepts (type);
 CREATE INDEX concepts_path_idx ON pgokf.concepts (path);
+-- Index the RLS discriminator on concepts (the highest-cardinality projection
+-- table). On pgokf.bundles the UNIQUE (tenant_id, path) index already leads with
+-- tenant_id, so the tenant predicate there is index-served without a second one.
+CREATE INDEX concepts_tenant_id_idx ON pgokf.concepts (tenant_id);
+
+-- Multi-tenant isolation. Every projection table carries a denormalized
+-- tenant_id and enables row-level security with the identical opt-in-by-usage
+-- predicate: a session that has NOT set pgokf.tenant (NULL or empty — every
+-- pre-multi-tenancy install) sees ALL rows unchanged, while a session that HAS
+-- set it sees only that tenant's rows. RLS is NOT forced, so the SECURITY DEFINER
+-- write/admin functions (which run as the table owner) bypass it and may stamp
+-- and read across tenants — correct because each operates strictly within one
+-- single-tenant bundle. The matching WITH CHECK constrains any future
+-- invoker-side write to the active tenant.
+ALTER TABLE pgokf.bundles ENABLE ROW LEVEL SECURITY;
+CREATE POLICY bundles_tenant_isolation ON pgokf.bundles
+    USING (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+        OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true))
+    WITH CHECK (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+        OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true));
+
+ALTER TABLE pgokf.concepts ENABLE ROW LEVEL SECURITY;
+CREATE POLICY concepts_tenant_isolation ON pgokf.concepts
+    USING (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+        OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true))
+    WITH CHECK (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+        OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true));
+
+ALTER TABLE pgokf.concept_metadata ENABLE ROW LEVEL SECURITY;
+CREATE POLICY concept_metadata_tenant_isolation ON pgokf.concept_metadata
+    USING (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+        OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true))
+    WITH CHECK (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+        OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true));
 
 CREATE TYPE pgokf.bundle_sync_result AS (
     bundle_id bigint,
@@ -117,11 +162,46 @@ COMMENT ON COLUMN pgokf.bundles.sync_hash IS
     'Aggregate BLAKE3 digest over the sorted (path, file_hash) pairs of the last successful sync.';
 COMMENT ON COLUMN pgokf.bundles.source_type IS
     'How the bundle bytes reach the catalog: ''filesystem'' (registered from a canonical on-disk root via pgokf.register_bundle and refreshed from disk via pgokf.refresh_bundle) or ''content'' (streamed in memory via pgokf.register_bundle_content — a mountless object-store companion or any client — where path is the synthetic key ''content:''||name and refresh_bundle is rejected).';
+COMMENT ON COLUMN pgokf.bundles.tenant_id IS
+    'Multi-tenant owner of this bundle, stamped at registration from pgokf.tenant (effective_tenant(); ''default'' for a session that set no tenant). A bundle is single-tenant and its tenant never changes on refresh/unregister/enable; combined with path it forms the per-tenant registration key UNIQUE (tenant_id, path), so two tenants may register the same filesystem or content:<name> path. The row-level-security policy shows it only to a matching or unset pgokf.tenant.';
+COMMENT ON COLUMN pgokf.concepts.tenant_id IS
+    'Multi-tenant owner, denormalized from the concept''s bundle so the row-level-security predicate is local and index-friendly; always equals pgokf.bundles.tenant_id for the concept''s bundle.';
+COMMENT ON COLUMN pgokf.concept_metadata.tenant_id IS
+    'Multi-tenant owner, denormalized from the concept''s bundle for a local row-level-security predicate; always equals the bundle''s tenant_id.';
 
 GRANT SELECT ON pgokf.bundles, pgokf.concepts, pgokf.concept_metadata TO pgokf_reader;
 ",
     name = "catalog_tables",
     requires = ["bootstrap"]
+);
+
+// The multi-tenant write helper. `effective_tenant()` resolves the tenant a
+// write is stamped with from the per-session `pgokf.tenant` GUC — an unset or
+// empty value maps to the literal 'default', matching the column default and the
+// pre-multi-tenancy behavior. It lives in the administrator-only `pgokf_private`
+// schema so it never widens the public `pgokf` API surface, and is called only
+// from the SECURITY DEFINER write functions (which run as, and are owned by, the
+// extension owner, so no additional grant is required). The row-level-security
+// policies deliberately inline `current_setting('pgokf.tenant', true)` rather
+// than call this helper, so a reader needs no access to `pgokf_private`.
+extension_sql!(
+    r"
+CREATE FUNCTION pgokf_private.effective_tenant() RETURNS text
+    LANGUAGE sql
+    STABLE
+    AS $$
+        SELECT coalesce(
+            nullif(pg_catalog.current_setting('pgokf.tenant', true), ''),
+            'default')
+    $$;
+
+REVOKE ALL ON FUNCTION pgokf_private.effective_tenant() FROM PUBLIC;
+
+COMMENT ON FUNCTION pgokf_private.effective_tenant() IS
+    'Resolve the tenant that a catalog write is stamped with from the per-session pgokf.tenant GUC: an unset or empty value yields the literal ''default'' (matching the tenant_id column default and the pre-multi-tenancy behavior), any other value is the active tenant. Internal helper for the SECURITY DEFINER write paths; the row-level-security policies inline current_setting instead so readers need no access to pgokf_private.';
+",
+    name = "tenant_context",
+    requires = ["catalog_tables"]
 );
 
 // The `pgokf.version()` function is declared in `crate::lib`'s `pgokf`

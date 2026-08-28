@@ -41,6 +41,12 @@ static MAX_GRAPH_HOPS: GucSetting<i32> = GucSetting::<i32>::new(DEFAULT_MAX_GRAP
 static LOG_LEVEL: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(Some(c"warning"));
 
+/// The per-session multi-tenant context. An empty string (the default) means the
+/// session declares no tenant and therefore sees every row — exactly the
+/// pre-multi-tenancy behavior — while a non-empty value scopes the session to
+/// that tenant through the row-level-security policies on the projection tables.
+static TENANT: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(Some(c""));
+
 /// Register every `pgokf.*` configuration variable with `PostgreSQL`.
 ///
 /// Must be called exactly once per shared-library load, from `_PG_init`.
@@ -95,6 +101,22 @@ pub fn register_gucs() {
         c"Logging threshold used by pgokf; defaults to warning.",
         &LOG_LEVEL,
         GucContext::Suset,
+        GucFlags::default(),
+    );
+    // The multi-tenant session context. `PGC_USERSET`, so any session may set it
+    // (`SET pgokf.tenant = 'acme'`), and it can be pinned per role or connection
+    // with `ALTER ROLE r SET pgokf.tenant = ...` or a connection default. It is a
+    // policy selector, not a safety ceiling, so `Userset` is correct here. An
+    // empty default preserves the pre-multi-tenancy see-all behavior for any
+    // session that never sets it.
+    GucRegistry::define_string_guc(
+        c"pgokf.tenant",
+        c"Active pgokf tenant for row-level isolation.",
+        c"Per-session tenant selector: empty (the default) sees every row \
+          (backward compatible), a non-empty value scopes reads and stamps writes \
+          to that tenant via the projection tables' row-level-security policies.",
+        &TENANT,
+        GucContext::Userset,
         GucFlags::default(),
     );
 }

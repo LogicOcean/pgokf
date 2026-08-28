@@ -615,10 +615,11 @@ fn upsert_concepts(
     let upsert = format!(
         "
         INSERT INTO pgokf.concepts
-            (bundle_id, id, path, type, title, description, tags, resource,
+            (bundle_id, tenant_id, id, path, type, title, description, tags, resource,
              body_text, file_hash, modified_at, body_tsv)
         SELECT
-            $1, t.id, t.path, t.type, t.title, t.description, t.tags, t.resource,
+            $1, (SELECT b.tenant_id FROM pgokf.bundles b WHERE b.id = $1),
+            t.id, t.path, t.type, t.title, t.description, t.tags, t.resource,
             t.body_text, t.file_hash, pg_catalog.to_timestamp(t.modified_at),
             pg_catalog.setweight(
                 pg_catalog.to_tsvector($14::pg_catalog.regconfig,
@@ -701,8 +702,10 @@ fn upsert_concepts(
 /// to the row-by-row binding.
 fn replace_concept_metadata(bundle_id: i64, staged: &[StagedConcept]) -> Result<(), CatalogError> {
     const INSERT: &str = "
-        INSERT INTO pgokf.concept_metadata (bundle_id, concept_id, key, value)
-        SELECT $1, d.concept_id, d.key, d.value::jsonb
+        INSERT INTO pgokf.concept_metadata (bundle_id, tenant_id, concept_id, key, value)
+        SELECT $1,
+               (SELECT b.tenant_id FROM pgokf.bundles b WHERE b.id = $1),
+               d.concept_id, d.key, d.value::jsonb
         FROM unnest($2::text[], $3::text[], $4::text[])
              AS d(concept_id, key, value)";
 
@@ -925,9 +928,13 @@ pub(crate) fn run_bundle_sync<S: ByteSource>(
 
 fn lookup_bundle_id_by_path(canonical_path: &str) -> Result<Option<i64>, CatalogError> {
     Spi::connect(|client| {
+        // Scope the duplicate check to the current tenant: the registration key
+        // is UNIQUE (tenant_id, path), so a different tenant may register the same
+        // path and must not be seen as a duplicate here.
         let table = client
             .select(
-                "SELECT id FROM pgokf.bundles WHERE path = $1",
+                "SELECT id FROM pgokf.bundles
+                 WHERE tenant_id = pgokf_private.effective_tenant() AND path = $1",
                 Some(1),
                 &[canonical_path.into()],
             )
@@ -947,9 +954,11 @@ fn insert_bundle_row(
     name: Option<String>,
     options: Option<pgrx::JsonB>,
 ) -> Result<i64, CatalogError> {
+    // The bundle row is stamped with the session's effective tenant; every child
+    // row then inherits this bundle's tenant_id (single-tenant bundle).
     Spi::get_one_with_args::<i64>(
-        "INSERT INTO pgokf.bundles (path, name, options)
-         VALUES ($1, $2, COALESCE($3, '{}'::jsonb))
+        "INSERT INTO pgokf.bundles (tenant_id, path, name, options)
+         VALUES (pgokf_private.effective_tenant(), $1, $2, COALESCE($3, '{}'::jsonb))
          RETURNING id",
         &[canonical_path.into(), name.into(), options.into()],
     )
@@ -1017,6 +1026,10 @@ fn register_bundle_impl(
 
 fn refresh_bundle_impl(bundle_id: i64) -> Result<(String, SyncReport), CatalogError> {
     security::authorize_current_user(security::Operation::Ingest, Path::new(""))?;
+    // Write-side tenant confinement: when pgokf.tenant is set, a bundle owned by
+    // another tenant (or absent) is rejected as an unknown bundle before any
+    // lookup, lock, or filesystem access — mirroring the read-side RLS policy.
+    security::enforce_bundle_tenant(bundle_id)?;
     let (stored_path, source_type) = lookup_bundle_path_and_type(bundle_id)?.ok_or_else(|| {
         CatalogError::invalid_parameter(
             format!("bundle {bundle_id} is not registered"),

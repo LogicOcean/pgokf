@@ -963,6 +963,10 @@ struct ExportSummary {
 /// one bundle.
 fn export_parquet_impl(bundle_id: i64, dest_dir: &str) -> Result<ExportSummary, CatalogError> {
     security::authorize_current_user(security::Operation::Register, Path::new(""))?;
+    // Write-side tenant confinement: a scoped session may only export its own
+    // tenant's bundle. Checked before the directory is validated (a filesystem
+    // side effect) so a cross-tenant or absent id looks identically unknown.
+    security::enforce_bundle_tenant(bundle_id)?;
     ensure_bundle_exists(bundle_id)?;
     let dir = validate_dest_dir(dest_dir)?;
 

@@ -74,6 +74,7 @@ CREATE TABLE pgokf_private.sync_log (
     unchanged   integer,
     total       integer,
     sync_hash   text,
+    tenant_id   text NOT NULL DEFAULT 'default',
     CONSTRAINT sync_log_op_chk CHECK (op IN ('register', 'refresh', 'content', 'unregister'))
 );
 
@@ -88,6 +89,8 @@ COMMENT ON COLUMN pgokf_private.sync_log.id IS
     'Surrogate primary key (GENERATED ALWAYS AS IDENTITY); monotonic append order of the audit trail.';
 COMMENT ON COLUMN pgokf_private.sync_log.bundle_id IS
     'Identity of the affected bundle. Retained for unregister rows even though the pgokf.bundles row is gone, so there is intentionally no foreign key.';
+COMMENT ON COLUMN pgokf_private.sync_log.tenant_id IS
+    'Multi-tenant owner of the operation, stamped from pgokf.tenant (effective_tenant(); ''default'' when unset). The table stays administrator-only (no row-level security); the reader-facing pgokf.list_sync_log applies the same opt-in tenant filter so a tenant session sees only its own audit rows.';
 COMMENT ON COLUMN pgokf_private.sync_log.bundle_path IS
     'Canonical path (filesystem root or the content:<name> synthetic key) of the affected bundle, captured at operation time.';
 COMMENT ON COLUMN pgokf_private.sync_log.op IS
@@ -154,8 +157,9 @@ pub(crate) fn record(
 
     Spi::run_with_args(
         "INSERT INTO pgokf_private.sync_log
-             (bundle_id, bundle_path, op, added, updated, removed, unchanged, total, sync_hash)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+             (bundle_id, tenant_id, bundle_path, op,
+              added, updated, removed, unchanged, total, sync_hash)
+         VALUES ($1, pgokf_private.effective_tenant(), $2, $3, $4, $5, $6, $7, $8, $9)",
         &[
             bundle_id.into(),
             bundle_path.into(),
@@ -282,10 +286,17 @@ fn list_sync_log_impl(
 ) -> Result<Vec<SyncLogEntry>, CatalogError> {
     security::authorize_current_user(security::Operation::Search, Path::new(""))?;
     let limit = validate_max_rows(max_rows)?;
+    // list_sync_log is SECURITY DEFINER and so bypasses row-level security; it
+    // therefore applies the same opt-in tenant filter explicitly, so a session
+    // that set pgokf.tenant sees only its own audit rows while an unset session
+    // sees every row (backward compatible).
     let query = format!(
         "SELECT {SYNC_LOG_ENTRY_COLUMNS}
          FROM pgokf_private.sync_log
          WHERE ($1::bigint IS NULL OR bundle_id = $1)
+           AND (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+             OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+             OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true))
          ORDER BY synced_at DESC, id DESC
          LIMIT $2"
     );

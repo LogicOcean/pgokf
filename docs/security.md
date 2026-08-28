@@ -263,6 +263,23 @@ are parsed into a typed `ConfigKey`/`ConfigValue` and validated per key before
 any statement runs, so an unknown key or wrong-shaped value is rejected with
 `22023` rather than reaching SQL.
 
+## Multi-tenant row-level security
+
+Every projection table carries a denormalized `tenant_id` and an **opt-in**
+row-level-security policy keyed on the per-session `pgokf.tenant` GUC: a session
+that sets no tenant sees all rows (unchanged behavior), while a session that sets
+one sees only that tenant's rows. RLS is *enabled but not forced*, so the
+`SECURITY DEFINER` write/admin functions (running as the table owner) bypass it —
+correct because each operates strictly within one single-tenant bundle — while
+the invoker-rights readers are filtered automatically. The two `SECURITY DEFINER`
+readers (`list_sync_log`, `health`) apply the same tenant predicate explicitly.
+
+Because RLS is bypassed by superusers and the table owner, a tenant application
+must connect as an ordinary (non-superuser) login role that is a member of
+`pgokf_reader`, and should pin `pgokf.tenant` to the role or connection so it is
+never accidentally left unset. See [multi-tenancy.md](multi-tenancy.md) for the
+full model and the strict-isolation contract.
+
 ## The private schema
 
 `pgokf_private` holds internal catalog state (currently the `config` policy row)

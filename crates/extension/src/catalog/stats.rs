@@ -162,15 +162,25 @@ fn catalog_stats_impl() -> Result<Vec<CatalogStat>, CatalogError> {
 // ---------------------------------------------------------------------------
 
 /// Build the health document. `SECURITY DEFINER` at the SQL layer, so it may
-/// read `pgokf_private.config`.
+/// read `pgokf_private.config`. Because `SECURITY DEFINER` bypasses row-level
+/// security, the bundle and concept counts apply the same opt-in tenant filter
+/// explicitly: a session that set `pgokf.tenant` sees only its own counts, while
+/// an unset session counts every row (backward compatible). The role and config
+/// checks are cluster-global, not tenant data, so they are never scoped.
 const HEALTH_QUERY: &str = "
     WITH h AS (
         SELECT
             (SELECT pg_catalog.count(*) = 3 FROM pg_catalog.pg_roles
              WHERE rolname IN ('pgokf_reader', 'pgokf_writer', 'pgokf_admin')) AS roles_ok,
             (SELECT pg_catalog.count(*) = 1 FROM pgokf_private.config) AS config_ok,
-            (SELECT pg_catalog.count(*) FROM pgokf.bundles) AS bundle_count,
-            (SELECT pg_catalog.count(*) FROM pgokf.concepts) AS concept_count,
+            (SELECT pg_catalog.count(*) FROM pgokf.bundles
+             WHERE pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+                OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+                OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true)) AS bundle_count,
+            (SELECT pg_catalog.count(*) FROM pgokf.concepts
+             WHERE pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+                OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+                OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true)) AS concept_count,
             (SELECT search_backend FROM pgokf_private.config WHERE singleton) AS search_backend,
             (EXISTS (SELECT 1 FROM pg_catalog.pg_extension WHERE extname = 'pg_search')
              AND EXISTS (

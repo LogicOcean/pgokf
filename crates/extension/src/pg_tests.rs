@@ -1187,7 +1187,7 @@ The gamma concept is introduced during the refresh cycle.\n";
         // an existing install can be stepped up to this release.
         let upgrade_script = manifest_dir
             .join("sql")
-            .join(format!("pgokf--0.1.5--{crate_version}.sql"));
+            .join(format!("pgokf--0.1.6--{crate_version}.sql"));
         let metadata =
             fs::metadata(&upgrade_script).expect("the current upgrade script ships on disk");
         assert!(
@@ -2298,5 +2298,520 @@ An added concept for the resync diff.\n";
             sqlstate, "42501",
             "a reader role must be denied set_concept_embedding with 42501",
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // 0.1.7: opt-in multi-tenant isolation (session GUC + RLS).
+    //
+    // RLS is bypassed by superusers and the table owner, so the isolation
+    // assertions run a reader query as a non-superuser role granted pgokf_reader
+    // (via a function-local `SET role`), the same pattern the authz probes use;
+    // the session-level pgokf.tenant GUC is inherited into that probe. The
+    // write-stamping and definer-reader (list_sync_log / health) assertions can
+    // run in the superuser session because they observe stamped tenant_id column
+    // values directly, or exercise the explicit tenant filter those SECURITY
+    // DEFINER readers apply (which does not depend on RLS).
+    // ---------------------------------------------------------------------
+
+    #[pg_test]
+    fn a_write_stamps_the_effective_tenant_on_the_bundle_and_every_child_row() {
+        // Arrange: register the two-concept fixture under an explicit tenant.
+        // alpha carries provenance frontmatter and a resolved link to beta, so
+        // the register projects concept, link, and provenance child rows.
+        let bundle = FixtureBundle::create();
+        Spi::run("SET pgokf.tenant = 'acme'").expect("pgokf.tenant is settable");
+        let bundle_id = register_fixture(&bundle);
+
+        // Assert: the bundle row is stamped with the session's effective tenant.
+        let bundle_tenant = Spi::get_one_with_args::<String>(
+            "SELECT tenant_id FROM pgokf.bundles WHERE id = $1",
+            &[bundle_id.into()],
+        )
+        .expect("bundle tenant query executes")
+        .expect("bundle tenant is not NULL");
+        assert_eq!(bundle_tenant, "acme", "the bundle row is stamped acme");
+
+        // Assert: every child row inherits the bundle's tenant — no child row in
+        // any projection table carries a tenant other than acme.
+        for table in [
+            "pgokf.concepts",
+            "pgokf.concept_metadata",
+            "pgokf.links",
+            "pgokf.concept_provenance",
+            "pgokf.concept_verification",
+            "pgokf.concept_provenance_source",
+        ] {
+            let mismatched = Spi::get_one_with_args::<i64>(
+                &format!(
+                    "SELECT count(*) FROM {table} WHERE bundle_id = $1 AND tenant_id <> 'acme'"
+                ),
+                &[bundle_id.into()],
+            )
+            .expect("mismatch query executes")
+            .expect("count is not NULL");
+            assert_eq!(mismatched, 0, "no {table} row escapes the acme tenant");
+        }
+
+        // Assert: the guaranteed child rows are present and stamped acme (both
+        // concepts, alpha's resolved link to beta, alpha's provenance row).
+        let acme_concepts = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concepts WHERE bundle_id = $1 AND tenant_id = 'acme'",
+            &[bundle_id.into()],
+        )
+        .expect("concept tenant query executes")
+        .expect("count is not NULL");
+        assert_eq!(acme_concepts, 2, "both concepts are stamped acme");
+        let acme_links = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.links WHERE bundle_id = $1 AND tenant_id = 'acme'",
+            &[bundle_id.into()],
+        )
+        .expect("link tenant query executes")
+        .expect("count is not NULL");
+        assert!(acme_links >= 1, "alpha's link is stamped acme");
+        let acme_prov = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concept_provenance
+             WHERE bundle_id = $1 AND tenant_id = 'acme'",
+            &[bundle_id.into()],
+        )
+        .expect("provenance tenant query executes")
+        .expect("count is not NULL");
+        assert!(acme_prov >= 1, "alpha's provenance row is stamped acme");
+
+        // Assert: the audit row for the register is stamped acme too.
+        let log_tenant = Spi::get_one_with_args::<String>(
+            "SELECT tenant_id FROM pgokf_private.sync_log
+             WHERE bundle_id = $1 AND op = 'register'",
+            &[bundle_id.into()],
+        )
+        .expect("sync_log tenant query executes")
+        .expect("the register audit row exists");
+        assert_eq!(log_tenant, "acme", "the sync_log row is stamped acme");
+    }
+
+    #[pg_test]
+    fn a_no_tenant_write_stamps_the_default_tenant_backward_compatible() {
+        // Arrange: the default session (no pgokf.tenant set) — every pre-0.1.7
+        // install and session behaves this way.
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+
+        // Assert: writes stamp the literal 'default', identical to the value an
+        // upgraded install backfills onto its existing rows.
+        let bundle_tenant = Spi::get_one_with_args::<String>(
+            "SELECT tenant_id FROM pgokf.bundles WHERE id = $1",
+            &[bundle_id.into()],
+        )
+        .expect("bundle tenant query executes")
+        .expect("bundle tenant is not NULL");
+        assert_eq!(bundle_tenant, "default", "a no-tenant write stamps default");
+        let default_concepts = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concepts WHERE bundle_id = $1 AND tenant_id = 'default'",
+            &[bundle_id.into()],
+        )
+        .expect("concept tenant query executes")
+        .expect("count is not NULL");
+        assert_eq!(default_concepts, 2, "child rows stamp default too");
+    }
+
+    #[pg_test]
+    fn same_path_registers_under_two_tenants_independently() {
+        // Arrange: one on-disk bundle path, registered first as acme.
+        let bundle = FixtureBundle::create();
+        Spi::run("SET pgokf.tenant = 'acme'").expect("pgokf.tenant is settable");
+        let acme_id = register_fixture(&bundle);
+
+        // Act: register the SAME filesystem path as a second tenant. The
+        // per-tenant key UNIQUE (tenant_id, path) and the tenant-scoped duplicate
+        // check must let this succeed as a brand-new bundle (both concepts added).
+        Spi::run("SET pgokf.tenant = 'globex'").expect("pgokf.tenant is settable");
+        let globex_id = register_fixture(&bundle);
+
+        // Assert: two distinct bundles, one per tenant, sharing the same path.
+        assert_ne!(
+            acme_id, globex_id,
+            "the same path under a different tenant is a distinct bundle"
+        );
+        let acme_tenant = Spi::get_one_with_args::<String>(
+            "SELECT tenant_id FROM pgokf.bundles WHERE id = $1",
+            &[acme_id.into()],
+        )
+        .expect("acme tenant query executes")
+        .expect("not NULL");
+        let globex_tenant = Spi::get_one_with_args::<String>(
+            "SELECT tenant_id FROM pgokf.bundles WHERE id = $1",
+            &[globex_id.into()],
+        )
+        .expect("globex tenant query executes")
+        .expect("not NULL");
+        assert_eq!(acme_tenant, "acme");
+        assert_eq!(globex_tenant, "globex");
+        let same_path = Spi::get_one_with_args::<bool>(
+            "SELECT (SELECT path FROM pgokf.bundles WHERE id = $1)
+                  = (SELECT path FROM pgokf.bundles WHERE id = $2)",
+            &[acme_id.into(), globex_id.into()],
+        )
+        .expect("path comparison executes")
+        .expect("not NULL");
+        assert!(
+            same_path,
+            "both tenants registered the identical filesystem path"
+        );
+    }
+
+    #[pg_test]
+    fn same_content_name_registers_under_two_tenants_independently() {
+        // Arrange / Act: the same content:<name> key under two tenants must also
+        // create two distinct bundles (the content lookup is tenant-scoped).
+        Spi::run("SET pgokf.tenant = 'acme'").expect("pgokf.tenant is settable");
+        let (acme_id, acme_added, ..) = register_content(
+            "handbook",
+            vec!["alpha.md".to_owned()],
+            vec![CONTENT_ALPHA.as_bytes().to_vec()],
+        );
+        Spi::run("SET pgokf.tenant = 'globex'").expect("pgokf.tenant is settable");
+        let (globex_id, globex_added, ..) = register_content(
+            "handbook",
+            vec!["alpha.md".to_owned()],
+            vec![CONTENT_ALPHA.as_bytes().to_vec()],
+        );
+
+        // Assert: each is a fresh, independent content bundle (both add the concept
+        // rather than one resyncing the other), keyed content:handbook per tenant.
+        assert_ne!(acme_id, globex_id, "content:handbook is per-tenant");
+        assert_eq!(acme_added, 1, "acme's content bundle adds its concept");
+        assert_eq!(
+            globex_added, 1,
+            "globex's content bundle adds its own concept"
+        );
+    }
+
+    /// Read the five reader-visible counts a non-superuser `pgokf_iso_reader`
+    /// sees for the current session's `pgokf.tenant`: bundles and concepts (direct
+    /// RLS-filtered table reads), and list_bundles / concept_search('peregrine') /
+    /// list_sync_log (the reader functions). Returns
+    /// `(bundles, concepts, listed, searched, logs)`.
+    fn iso_reader_counts() -> (i64, i64, i64, i64, i64) {
+        Spi::connect(|client| {
+            let row = client
+                .select(
+                    "SELECT bundles, concepts, listed, searched, logs
+                     FROM pg_temp.iso_reader_counts()",
+                    Some(1),
+                    &[],
+                )
+                .expect("iso_reader_counts executes")
+                .first();
+            let read = |ord| {
+                row.get::<i64>(ord)
+                    .expect("count column is readable")
+                    .expect("count is not NULL")
+            };
+            (read(1), read(2), read(3), read(4), read(5))
+        })
+    }
+
+    #[pg_test]
+    fn readers_are_scoped_to_the_active_tenant_and_an_unset_session_sees_all() {
+        // Arrange: two identical two-concept bundles, one per tenant. Each fixture
+        // has an alpha carrying the distinctive 'peregrine' term and a register
+        // audit row.
+        let acme_bundle = FixtureBundle::create();
+        let globex_bundle = FixtureBundle::create();
+        Spi::run("SET pgokf.tenant = 'acme'").expect("pgokf.tenant is settable");
+        let _acme_id = register_fixture(&acme_bundle);
+        Spi::run("SET pgokf.tenant = 'globex'").expect("pgokf.tenant is settable");
+        let _globex_id = register_fixture(&globex_bundle);
+
+        // A non-superuser reader (so RLS is actually enforced) granted pgokf_reader,
+        // and a probe that reports what that reader sees for the session's tenant.
+        Spi::run("CREATE ROLE pgokf_iso_reader").expect("reader role is creatable");
+        Spi::run("GRANT pgokf_reader TO pgokf_iso_reader").expect("reader role is grantable");
+        Spi::run(
+            "CREATE FUNCTION pg_temp.iso_reader_counts(
+                 OUT bundles bigint, OUT concepts bigint, OUT listed bigint,
+                 OUT searched bigint, OUT logs bigint)
+             LANGUAGE plpgsql
+             SET role TO pgokf_iso_reader
+             AS $probe$
+             BEGIN
+                 bundles  := (SELECT count(*) FROM pgokf.bundles);
+                 concepts := (SELECT count(*) FROM pgokf.concepts);
+                 listed   := (SELECT count(*) FROM pgokf.list_bundles());
+                 searched := (SELECT count(*) FROM pgokf.concept_search('peregrine'));
+                 logs     := (SELECT count(*) FROM pgokf.list_sync_log());
+             END
+             $probe$;",
+        )
+        .expect("iso reader probe is creatable");
+
+        // Act / Assert: as acme, the reader sees exactly acme's one bundle, its two
+        // concepts, its one listed bundle, its single peregrine hit, and its one
+        // audit row — never globex's.
+        Spi::run("SET pgokf.tenant = 'acme'").expect("pgokf.tenant is settable");
+        assert_eq!(
+            iso_reader_counts(),
+            (1, 2, 1, 1, 1),
+            "an acme reader sees only acme's rows across every reader surface",
+        );
+
+        // As globex, symmetrically only globex's rows.
+        Spi::run("SET pgokf.tenant = 'globex'").expect("pgokf.tenant is settable");
+        assert_eq!(
+            iso_reader_counts(),
+            (1, 2, 1, 1, 1),
+            "a globex reader sees only globex's rows",
+        );
+
+        // Unset (the backward-compatible default): the reader sees BOTH tenants —
+        // RLS with no pgokf.tenant is a no-op, so behavior is unchanged.
+        Spi::run("SET pgokf.tenant = ''").expect("pgokf.tenant is resettable");
+        assert_eq!(
+            iso_reader_counts(),
+            (2, 4, 2, 2, 2),
+            "a reader with no tenant set sees every tenant's rows (backward compatible)",
+        );
+    }
+
+    #[pg_test]
+    fn concept_neighbors_is_tenant_scoped_for_a_reader() {
+        // Arrange: acme and globex each register the fixture, whose alpha links to
+        // beta. A reader scoped to a tenant must traverse only that tenant's graph.
+        let acme_bundle = FixtureBundle::create();
+        let globex_bundle = FixtureBundle::create();
+        Spi::run("SET pgokf.tenant = 'acme'").expect("pgokf.tenant is settable");
+        let _acme_id = register_fixture(&acme_bundle);
+        Spi::run("SET pgokf.tenant = 'globex'").expect("pgokf.tenant is settable");
+        let _globex_id = register_fixture(&globex_bundle);
+
+        Spi::run("CREATE ROLE pgokf_nbr_reader").expect("reader role is creatable");
+        Spi::run("GRANT pgokf_reader TO pgokf_nbr_reader").expect("reader role is grantable");
+        // The probe omits bundle_id, so concept_neighbors resolves the seed's
+        // bundle across the concepts the reader can SEE. Under a tenant the reader
+        // sees exactly one 'alpha', so resolution is unambiguous and scoped.
+        Spi::run(
+            "CREATE FUNCTION pg_temp.nbr_reader_count() RETURNS bigint
+             LANGUAGE plpgsql
+             SET role TO pgokf_nbr_reader
+             AS $probe$
+             BEGIN
+                 RETURN (SELECT count(*) FROM pgokf.concept_neighbors('alpha'));
+             END
+             $probe$;",
+        )
+        .expect("neighbor reader probe is creatable");
+
+        // Act / Assert: scoped to acme, alpha reaches exactly one neighbor (beta)
+        // in acme's graph — globex's identical graph is invisible and does not make
+        // the seed ambiguous.
+        Spi::run("SET pgokf.tenant = 'acme'").expect("pgokf.tenant is settable");
+        let acme_neighbors = Spi::get_one::<i64>("SELECT pg_temp.nbr_reader_count()")
+            .expect("neighbor probe executes")
+            .expect("count is not NULL");
+        assert_eq!(
+            acme_neighbors, 1,
+            "an acme reader traverses only acme's graph"
+        );
+    }
+
+    #[pg_test]
+    fn definer_readers_list_sync_log_and_health_are_tenant_scoped() {
+        // Arrange: acme and globex each register a bundle, so each tenant has one
+        // audit row and one bundle. list_sync_log and health are SECURITY DEFINER
+        // (they bypass RLS) yet apply the same opt-in tenant filter explicitly, so
+        // they can be exercised directly in this (superuser) session by toggling
+        // pgokf.tenant.
+        let acme_bundle = FixtureBundle::create();
+        let globex_bundle = FixtureBundle::create();
+        Spi::run("SET pgokf.tenant = 'acme'").expect("pgokf.tenant is settable");
+        let _acme_id = register_fixture(&acme_bundle);
+        Spi::run("SET pgokf.tenant = 'globex'").expect("pgokf.tenant is settable");
+        let _globex_id = register_fixture(&globex_bundle);
+
+        // As acme: list_sync_log shows only acme's register row, and health's
+        // bundle_count counts only acme's bundle.
+        Spi::run("SET pgokf.tenant = 'acme'").expect("pgokf.tenant is settable");
+        let acme_logs = Spi::get_one::<i64>("SELECT count(*) FROM pgokf.list_sync_log()")
+            .expect("list_sync_log executes")
+            .expect("count is not NULL");
+        assert_eq!(acme_logs, 1, "list_sync_log is scoped to the acme tenant");
+        let acme_health = Spi::get_one::<i64>("SELECT (pgokf.health() ->> 'bundle_count')::bigint")
+            .expect("health executes")
+            .expect("bundle_count is not NULL");
+        assert_eq!(
+            acme_health, 1,
+            "health bundle_count is scoped to the acme tenant"
+        );
+
+        // Unset: both readers report every tenant's rows (backward compatible).
+        Spi::run("SET pgokf.tenant = ''").expect("pgokf.tenant is resettable");
+        let all_logs = Spi::get_one::<i64>("SELECT count(*) FROM pgokf.list_sync_log()")
+            .expect("list_sync_log executes")
+            .expect("count is not NULL");
+        assert_eq!(
+            all_logs, 2,
+            "an unset session sees every tenant's audit rows"
+        );
+        let all_health = Spi::get_one::<i64>("SELECT (pgokf.health() ->> 'bundle_count')::bigint")
+            .expect("health executes")
+            .expect("bundle_count is not NULL");
+        assert_eq!(
+            all_health, 2,
+            "an unset session's health counts every bundle"
+        );
+    }
+
+    #[pg_test]
+    fn bundle_addressed_mutators_and_exports_are_confined_to_the_active_tenant() {
+        // Arrange: one on-disk fixture registered under two tenants, so acme owns
+        // bundle A and globex owns bundle B (distinct ids, the same path). A
+        // writable export directory backs the same-tenant export probes. The embed
+        // probe sizes its vector from the configured embedding_dim (read, never
+        // written) so this test adds no contention on the config singleton row.
+        let bundle = FixtureBundle::create();
+        Spi::run("SET pgokf.tenant = 'acme'").expect("pgokf.tenant is settable");
+        let acme_id = register_fixture(&bundle);
+        Spi::run("SET pgokf.tenant = 'globex'").expect("pgokf.tenant is settable");
+        let globex_id = register_fixture(&bundle);
+        assert_ne!(acme_id, globex_id, "each tenant owns a distinct bundle");
+
+        let export_root = std::env::temp_dir().join(format!(
+            "pgokf-mt-export-{}-{}",
+            std::process::id(),
+            unique_nonce()
+        ));
+        fs::create_dir_all(&export_root).expect("export dir is creatable");
+        let dir = export_root
+            .to_str()
+            .expect("export dir is valid UTF-8")
+            .to_owned();
+
+        // A probe that dispatches one bundle-addressed mutator/export in the
+        // caller's session — inheriting its pgokf.tenant — and reports 'ok' or the
+        // raised SQLSTATE. It runs as this (superuser) test session, so a rejection
+        // proves the guard is EXPLICIT logic, not RLS (which a superuser bypasses).
+        Spi::run(
+            "CREATE FUNCTION pg_temp.mt_write_probe(op text, bid bigint, dir text)
+                 RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             BEGIN
+                 CASE op
+                     WHEN 'refresh' THEN
+                         PERFORM pgokf.refresh_bundle(bid);
+                     WHEN 'unregister' THEN
+                         PERFORM pgokf.unregister_bundle(bid);
+                     WHEN 'enable' THEN
+                         PERFORM pgokf.set_bundle_enabled(bid, true);
+                     WHEN 'embed' THEN
+                         -- Size the vector to the configured embedding_dim (read,
+                         -- not written) so the same-tenant embed succeeds without
+                         -- this test mutating the config singleton.
+                         PERFORM pgokf.set_concept_embedding(
+                             bid, 'alpha',
+                             (SELECT array_agg(
+                                         CASE WHEN g = 1 THEN 1.0 ELSE 0.0 END)::real[]
+                              FROM generate_series(
+                                       1,
+                                       (pgokf.get_config() ->> 'embedding_dim')::int) AS g));
+                     WHEN 'export_parquet' THEN
+                         PERFORM pgokf.export_parquet(bid, dir);
+                     WHEN 'export_sources' THEN
+                         PERFORM pgokf.export_sources(bid, dir);
+                 END CASE;
+                 RETURN 'ok';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("write-confinement probe is creatable");
+
+        let probe = |op: &str, bid: i64| -> String {
+            Spi::get_one_with_args::<String>(
+                "SELECT pg_temp.mt_write_probe($1, $2, $3)",
+                &[op.into(), bid.into(), dir.clone().into()],
+            )
+            .expect("write-confinement probe executes")
+            .expect("the probe reports an outcome")
+        };
+
+        // Act / Assert: as acme, every bundle-addressed op against GLOBEX's bundle
+        // is rejected as an unknown bundle (22023) — indistinguishable from a
+        // nonexistent id — before any lock or filesystem side effect.
+        Spi::run("SET pgokf.tenant = 'acme'").expect("pgokf.tenant is settable");
+        for op in [
+            "refresh",
+            "unregister",
+            "enable",
+            "embed",
+            "export_parquet",
+            "export_sources",
+        ] {
+            assert_eq!(
+                probe(op, globex_id),
+                "22023",
+                "as acme, {op} against globex's bundle must look like an unknown bundle",
+            );
+        }
+
+        // The rejected cross-tenant unregister had no effect: globex's bundle is
+        // untouched (this session is superuser, so the read bypasses RLS and can
+        // confirm B directly).
+        let globex_still_there = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.bundles WHERE id = $1",
+            &[globex_id.into()],
+        )
+        .expect("bundle existence query executes")
+        .expect("count is not NULL");
+        assert_eq!(
+            globex_still_there, 1,
+            "a rejected cross-tenant mutation leaves the foreign bundle intact",
+        );
+
+        // Act / Assert: the SAME ops on acme's OWN bundle all succeed. The
+        // destructive unregister is issued last so the earlier probes still have a
+        // bundle to act on.
+        for op in [
+            "refresh",
+            "enable",
+            "embed",
+            "export_parquet",
+            "export_sources",
+        ] {
+            assert_eq!(
+                probe(op, acme_id),
+                "ok",
+                "as acme, {op} on acme's own bundle must succeed",
+            );
+        }
+        assert_eq!(
+            probe("unregister", acme_id),
+            "ok",
+            "as acme, unregistering acme's own bundle must succeed",
+        );
+
+        // Act / Assert: an UNSET session is cross-tenant by design (backward
+        // compatible) — it operates on globex's bundle exactly as before the guard.
+        Spi::run("SET pgokf.tenant = ''").expect("pgokf.tenant is resettable");
+        for op in [
+            "refresh",
+            "enable",
+            "embed",
+            "export_parquet",
+            "export_sources",
+        ] {
+            assert_eq!(
+                probe(op, globex_id),
+                "ok",
+                "an unset session operates on any tenant's bundle: {op}",
+            );
+        }
+        assert_eq!(
+            probe("unregister", globex_id),
+            "ok",
+            "an unset session can unregister any tenant's bundle (backward compatible)",
+        );
+
+        let _ = fs::remove_dir_all(&export_root);
     }
 }
