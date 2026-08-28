@@ -315,7 +315,7 @@ WHERE p.trust_tier = 'human-reviewed';
 
 See the [authoring guide](okf-authoring.md#derived-trust-tier) for how the tier
 is derived. More filter/join recipes live in
-[`examples/queries/search.sql`](https://github.com/LogicOcean/okf-pg-catalog/blob/main/examples/queries/search.sql).
+[`examples/queries/search.sql`](https://github.com/LogicOcean/pgokf/blob/main/examples/queries/search.sql).
 
 ---
 
@@ -385,7 +385,7 @@ Properties worth knowing:
 
 To inspect the raw edges (including unresolved and external ones), query
 `pgokf.links` directly — see
-[`examples/queries/graph.sql`](https://github.com/LogicOcean/okf-pg-catalog/blob/main/examples/queries/graph.sql).
+[`examples/queries/graph.sql`](https://github.com/LogicOcean/pgokf/blob/main/examples/queries/graph.sql).
 
 ---
 
@@ -451,5 +451,5 @@ Until then: keep broad queries fast with the
   ceilings (`pgokf.max_graph_hops`, and more).
 - [Benchmarks](benchmarks.md) — measured FTS / filter / graph performance.
 - [BM25 research](bm25-research.md) — the future top-k adapter.
-- Example queries: [`examples/queries/search.sql`](https://github.com/LogicOcean/okf-pg-catalog/blob/main/examples/queries/search.sql),
-  [`examples/queries/graph.sql`](https://github.com/LogicOcean/okf-pg-catalog/blob/main/examples/queries/graph.sql).
+- Example queries: [`examples/queries/search.sql`](https://github.com/LogicOcean/pgokf/blob/main/examples/queries/search.sql),
+  [`examples/queries/graph.sql`](https://github.com/LogicOcean/pgokf/blob/main/examples/queries/graph.sql).

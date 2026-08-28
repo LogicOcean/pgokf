@@ -12,7 +12,7 @@ width. If your numbers differ, it is because your bundle differs — the shapes
 will match.
 
 - New to the OKF document format? See [okf-authoring.md](okf-authoring.md) and
-  the ready-to-copy [`templates/`](https://github.com/LogicOcean/okf-pg-catalog/blob/main/templates/README.md).
+  the ready-to-copy [`templates/`](https://github.com/LogicOcean/pgokf/blob/main/templates/README.md).
 - Choosing where the catalog and the source files should live? See
   [deployment-topologies.md](deployment-topologies.md).
 - Running it in production? See [operations.md](operations.md).
@@ -26,7 +26,7 @@ will match.
   (see [packaging.md](packaging.md) for how the artifacts get there).
 - A superuser connection for the one-time install and role setup.
 - A directory of OKF Markdown files to register — this walkthrough uses the
-  bundle shipped at [`examples/sample-bundle`](https://github.com/LogicOcean/okf-pg-catalog/blob/main/examples/sample-bundle), which
+  bundle shipped at [`examples/sample-bundle`](https://github.com/LogicOcean/pgokf/blob/main/examples/sample-bundle), which
   contains four concepts (a service, a runbook, a reference appendix, and a
   dashboard) that cross-link each other so the graph and search steps have
   something to show.
@@ -376,7 +376,7 @@ backup/DR and analytics pipelines.
 
 | You want to… | Read |
 | ------------ | ---- |
-| Write your own OKF concepts | [okf-authoring.md](okf-authoring.md), [`templates/`](https://github.com/LogicOcean/okf-pg-catalog/blob/main/templates/README.md) |
+| Write your own OKF concepts | [okf-authoring.md](okf-authoring.md), [`templates/`](https://github.com/LogicOcean/pgokf/blob/main/templates/README.md) |
 | Decide where catalog and files live | [deployment-topologies.md](deployment-topologies.md) |
 | Run it day-to-day | [operations.md](operations.md) |
 | Get better search results | [search-guide.md](search-guide.md) |

@@ -10,14 +10,14 @@
 # `CREATE EXTENSION pgokf;` works on a `brew services`-managed cluster.
 class Pgokf < Formula
   desc "Materialized PostgreSQL catalog for Open Knowledge Format bundles"
-  homepage "https://github.com/LogicOcean/okf-pg-catalog"
-  url "https://github.com/LogicOcean/okf-pg-catalog/archive/refs/tags/v0.1.3.tar.gz"
+  homepage "https://github.com/LogicOcean/pgokf"
+  url "https://github.com/LogicOcean/pgokf/archive/refs/tags/v0.1.3.tar.gz"
   # PLACEHOLDER: replace with the real tarball digest at release time, once the
   # v0.1.3 tag exists:
-  #   curl -fsSL https://github.com/LogicOcean/okf-pg-catalog/archive/refs/tags/v0.1.3.tar.gz | shasum -a 256
+  #   curl -fsSL https://github.com/LogicOcean/pgokf/archive/refs/tags/v0.1.3.tar.gz | shasum -a 256
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"
   license "MIT"
-  head "https://github.com/LogicOcean/okf-pg-catalog.git", branch: "main"
+  head "https://github.com/LogicOcean/pgokf.git", branch: "main"
 
   # Track Homebrew's current default PostgreSQL. The formula is written to
   # follow whatever major `postgresql@17` resolves to; bump this pair together.
@@ -74,7 +74,7 @@ class Pgokf < Formula
 
       Registering an OKF bundle requires a server-readable absolute bundle path
       and membership in pgokf_admin. See:
-        https://github.com/LogicOcean/okf-pg-catalog#quickstart
+        https://github.com/LogicOcean/pgokf#quickstart
     EOS
   end
 

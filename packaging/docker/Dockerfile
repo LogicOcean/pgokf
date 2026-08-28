@@ -77,7 +77,7 @@ FROM postgres:${PG_MAJOR}
 ARG PG_MAJOR
 LABEL org.opencontainers.image.title="pgokf" \
       org.opencontainers.image.description="PostgreSQL ${PG_MAJOR} with the pgokf Open Knowledge Format catalog extension" \
-      org.opencontainers.image.source="https://github.com/LogicOcean/okf-pg-catalog" \
+      org.opencontainers.image.source="https://github.com/LogicOcean/pgokf" \
       org.opencontainers.image.licenses="MIT"
 
 # Copy the staged pgrx tree verbatim: .so into the pkglibdir and

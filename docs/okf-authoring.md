@@ -18,7 +18,7 @@ function signatures, table columns, SQLSTATEs — see the
 > spec, this page says so explicitly.
 
 Every example below is drawn from the copy-and-fill starters in the
-repository's [`templates/`](https://github.com/LogicOcean/okf-pg-catalog/blob/main/templates/) directory — start there.
+repository's [`templates/`](https://github.com/LogicOcean/pgokf/blob/main/templates/) directory — start there.
 
 ---
 
@@ -393,7 +393,7 @@ Operational runbook for the [payments API service](service.md). Escalate by
 [emailing the on-call lead](mailto:oncall@example.test).
 ```
 
-- **Internal links** (`[label](service.md)`, `[label](https://github.com/LogicOcean/okf-pg-catalog/blob/main/runbooks/failover.md)`)
+- **Internal links** (`[label](service.md)`, `[label](https://github.com/LogicOcean/pgokf/blob/main/runbooks/failover.md)`)
   resolve to another concept. The target path is normalized relative to the
   **source file's directory**, and `.md` is appended when the destination has
   no extension. The resolved concept ID is `target_path` without `.md`.
@@ -431,7 +431,7 @@ see [the graph section of the search guide](search-guide.md#the-link-graph).
   plain Markdown viewer *and* resolve as graph edges.
 - The target's concept ID is its path minus `.md`, so a link to
   `runbooks/failover.md` resolves to the concept `runbooks/failover`.
-- The [templates](https://github.com/LogicOcean/okf-pg-catalog/blob/main/templates/) cross-link each other by filename, so a
+- The [templates](https://github.com/LogicOcean/pgokf/blob/main/templates/) cross-link each other by filename, so a
   bundle assembled from them exercises the link graph out of the box.
 
 ---
@@ -579,7 +579,7 @@ the first `register_bundle`. See the
 
 ## See also
 
-- [Templates](https://github.com/LogicOcean/okf-pg-catalog/blob/main/templates/) — copy-and-fill starters for every field on this
+- [Templates](https://github.com/LogicOcean/pgokf/blob/main/templates/) — copy-and-fill starters for every field on this
   page.
 - [Search guide](search-guide.md) — querying the catalog you just authored.
 - [SQL API reference](sql-api.md) — every function, table column, and SQLSTATE.

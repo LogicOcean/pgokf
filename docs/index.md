@@ -74,7 +74,7 @@ The bundle path is read by the **PostgreSQL server process**, so it must be an
 absolute path the server can reach. Registration requires membership in
 `pgokf_admin`; a fresh login role sees nothing in the `pgokf` schema (SQLSTATE
 `42501`) until you GRANT it a role. A ready-to-use sample bundle ships in
-[`examples/sample-bundle/`](https://github.com/LogicOcean/okf-pg-catalog/blob/main/examples/sample-bundle).
+[`examples/sample-bundle/`](https://github.com/LogicOcean/pgokf/blob/main/examples/sample-bundle).
 
 ```sql
 CREATE EXTENSION pgokf;                                                         -- schema, tables, roles, functions

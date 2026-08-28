@@ -4,7 +4,7 @@ The concrete, ordered steps to cut a `pgokf` release. Nothing here is
 automatic: a release is a deliberate human decision. Work top to bottom; every
 gate must pass before the next. The stability rules these gates enforce live in
 [api-stability.md](api-stability.md), and every change must already be recorded
-in [CHANGELOG.md](https://github.com/LogicOcean/okf-pg-catalog/blob/main/CHANGELOG.md).
+in [CHANGELOG.md](https://github.com/LogicOcean/pgokf/blob/main/CHANGELOG.md).
 
 Throughout, `PGVER` is a PostgreSQL major (15–19) and `PG_CONFIG` is the path to
 its `pg_config` (e.g. `/usr/lib/postgresql/18/bin/pg_config`).
@@ -121,7 +121,7 @@ alongside it, so the update path is available without any manual step. The
 shipped chain is `0.1.0 → 0.1.1 → 0.1.2 → 0.1.3`.
 
 > **0.1.3 is a breaking pre-release re-model.** The `pgokf.concept_provenance`
-> shape changed to conform to OKF v0.2 (see [CHANGELOG.md](https://github.com/LogicOcean/okf-pg-catalog/blob/main/CHANGELOG.md)).
+> shape changed to conform to OKF v0.2 (see [CHANGELOG.md](https://github.com/LogicOcean/pgokf/blob/main/CHANGELOG.md)).
 > Because the extension is still pre-release with no tagged release and no
 > external installs, `0.1.2 → 0.1.3` is **not** a no-data-loss in-place upgrade:
 > re-`CREATE EXTENSION` and re-register bundles (the on-disk bundle is the

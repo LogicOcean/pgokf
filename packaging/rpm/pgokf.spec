@@ -34,7 +34,7 @@ Release:        1%{?dist}
 Summary:        Materialized PostgreSQL catalog for Open Knowledge Format bundles
 
 License:        MIT
-URL:            https://github.com/LogicOcean/okf-pg-catalog
+URL:            https://github.com/LogicOcean/pgokf
 Source0:        %{sname}-%{version}.tar.gz
 
 BuildRequires:  postgresql%{pgmajorversion}-devel

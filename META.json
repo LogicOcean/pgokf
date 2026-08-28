@@ -23,13 +23,13 @@
       }
    },
    "resources": {
-      "homepage": "https://github.com/LogicOcean/okf-pg-catalog",
+      "homepage": "https://github.com/LogicOcean/pgokf",
       "bugtracker": {
-         "web": "https://github.com/LogicOcean/okf-pg-catalog/issues"
+         "web": "https://github.com/LogicOcean/pgokf/issues"
       },
       "repository": {
-         "url": "https://github.com/LogicOcean/okf-pg-catalog.git",
-         "web": "https://github.com/LogicOcean/okf-pg-catalog",
+         "url": "https://github.com/LogicOcean/pgokf.git",
+         "web": "https://github.com/LogicOcean/pgokf",
          "type": "git"
       }
    },

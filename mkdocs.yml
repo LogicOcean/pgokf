@@ -1,7 +1,7 @@
 site_name: "pgokf — OKF PostgreSQL Catalog"
 site_description: "Documentation for pgokf, a PostgreSQL extension implementing the Open Knowledge Format (OKF) metadata catalog."
-repo_url: https://github.com/LogicOcean/okf-pg-catalog
-repo_name: LogicOcean/okf-pg-catalog
+repo_url: https://github.com/LogicOcean/pgokf
+repo_name: LogicOcean/pgokf
 
 docs_dir: docs
 use_directory_urls: true
@@ -62,4 +62,4 @@ nav:
   # The changelog lives at the repo root (CHANGELOG.md). MkDocs cannot pull in
   # files above docs_dir, so the docs CI workflow copies it to docs/changelog.md
   # before `mkdocs build`. See .github/workflows/docs.yml.
-  - Changelog: https://github.com/LogicOcean/okf-pg-catalog/blob/main/CHANGELOG.md
+  - Changelog: https://github.com/LogicOcean/pgokf/blob/main/CHANGELOG.md

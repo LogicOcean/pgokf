@@ -3,7 +3,7 @@
 This document defines the **public API contract** for the `pgokf` extension:
 what callers may depend on, how it is versioned, how it changes, and what is
 explicitly *not* part of the contract. It is the reference that
-[CHANGELOG.md](https://github.com/LogicOcean/okf-pg-catalog/blob/main/CHANGELOG.md) classifies changes against and that the
+[CHANGELOG.md](https://github.com/LogicOcean/pgokf/blob/main/CHANGELOG.md) classifies changes against and that the
 [release checklist](release-checklist.md) enforces.
 
 ## What "public API" means here

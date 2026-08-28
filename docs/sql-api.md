@@ -247,7 +247,7 @@ ORDER BY hops, neighbor_id;
 ```
 
 The `pgokf.links` table (below) supports direct edge and backlink queries; see
-[`examples/queries/graph.sql`](https://github.com/LogicOcean/okf-pg-catalog/blob/main/examples/queries/graph.sql).
+[`examples/queries/graph.sql`](https://github.com/LogicOcean/pgokf/blob/main/examples/queries/graph.sql).
 
 ---
 

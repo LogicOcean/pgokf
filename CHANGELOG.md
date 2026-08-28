@@ -225,8 +225,8 @@ queries, native full-text search, and link-graph traversal.
 - The `pgokf_private` schema and its `config` table are readable and writable
   only by the extension owner and `pgokf_admin`; readers cannot see policy.
 
-[Unreleased]: https://github.com/LogicOcean/okf-pg-catalog/compare/v0.1.3...HEAD
-[0.1.3]: https://github.com/LogicOcean/okf-pg-catalog/compare/v0.1.2...v0.1.3
-[0.1.2]: https://github.com/LogicOcean/okf-pg-catalog/compare/v0.1.1...v0.1.2
-[0.1.1]: https://github.com/LogicOcean/okf-pg-catalog/compare/v0.1.0...v0.1.1
-[0.1.0]: https://github.com/LogicOcean/okf-pg-catalog/releases/tag/v0.1.0
+[Unreleased]: https://github.com/LogicOcean/pgokf/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/LogicOcean/pgokf/compare/v0.1.2...v0.1.3
+[0.1.2]: https://github.com/LogicOcean/pgokf/compare/v0.1.1...v0.1.2
+[0.1.1]: https://github.com/LogicOcean/pgokf/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/LogicOcean/pgokf/releases/tag/v0.1.0
