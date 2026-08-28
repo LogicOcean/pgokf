@@ -11,9 +11,10 @@
 class Pgokf < Formula
   desc "Materialized PostgreSQL catalog for Open Knowledge Format bundles"
   homepage "https://github.com/LogicOcean/okf-pg-catalog"
-  url "https://github.com/LogicOcean/okf-pg-catalog/archive/refs/tags/v0.1.0.tar.gz"
-  # Replace with the real tarball digest at release time:
-  #   curl -fsSL <url> | shasum -a 256
+  url "https://github.com/LogicOcean/okf-pg-catalog/archive/refs/tags/v0.1.3.tar.gz"
+  # PLACEHOLDER: replace with the real tarball digest at release time, once the
+  # v0.1.3 tag exists:
+  #   curl -fsSL https://github.com/LogicOcean/okf-pg-catalog/archive/refs/tags/v0.1.3.tar.gz | shasum -a 256
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"
   license "MIT"
   head "https://github.com/LogicOcean/okf-pg-catalog.git", branch: "main"
@@ -85,7 +86,7 @@ class Pgokf < Formula
     control = share/"postgresql@#{pg_major}/extension/pgokf.control"
     control = share/"postgresql/extension/pgokf.control" unless control.exist?
     assert_predicate control, :exist?, "pgokf.control not installed"
-    assert_match "default_version = '0.1.0'", control.read
+    assert_match "default_version = '0.1.3'", control.read
 
     # End-to-end: initialize a throwaway cluster and CREATE EXTENSION.
     pg_bin = pg.opt_bin
@@ -99,7 +100,7 @@ class Pgokf < Formula
         "#{pg_bin}/psql -h 127.0.0.1 -p #{port} -U postgres -d postgres " \
         "-tAc 'CREATE EXTENSION pgokf; SELECT extversion FROM pg_extension WHERE extname=''pgokf'';'",
       )
-      assert_match "0.1.0", output
+      assert_match "0.1.3", output
     ensure
       system pg_bin/"pg_ctl", "-D", datadir, "-w", "stop"
     end

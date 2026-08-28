@@ -1,0 +1,72 @@
+name: Docs
+
+# Build and publish the MkDocs Material site to GitHub Pages.
+#
+# The build runs with `--strict`, so a missing nav page or a broken internal
+# link fails CI rather than silently shipping a broken site.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/**
+      - mkdocs.yml
+      - .github/workflows/docs.yml
+  # Allow manual runs from the Actions tab.
+  workflow_dispatch:
+
+# Least-privilege token: Pages deployment needs pages:write + id-token:write.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Serialize deployments; never cancel an in-flight publish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build (mkdocs --strict)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install MkDocs Material
+        run: pip install mkdocs-material
+
+      - name: Stage repo-root changelog into docs/
+        # MkDocs cannot include files above docs_dir, so surface CHANGELOG.md as
+        # docs/changelog.md (referenced by the nav) just before the build. The
+        # changelog lives at the repo root, so its root-relative "docs/…" links
+        # must be rebased to be docs_dir-relative once the file is relocated
+        # into docs/ — otherwise `--strict` rejects them as broken links.
+        run: |
+          sed -E 's#\]\((\./)?docs/#](#g' CHANGELOG.md > docs/changelog.md
+
+      - name: Build site (strict)
+        run: mkdocs build --strict
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

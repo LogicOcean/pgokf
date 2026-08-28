@@ -12,7 +12,7 @@
 #   %{pginstdir}/lib/pgokf.so
 #   %{pginstdir}/share/extension/pgokf.control
 #   %{pginstdir}/share/extension/pgokf--%{version}.sql
-#   %{pginstdir}/share/extension/pgokf--%{version}--0.1.1.sql
+#   %{pginstdir}/share/extension/pgokf--<from>--<to>.sql   (upgrade scripts)
 #
 # Like every other format, the build delegates the filesystem image entirely
 # to `cargo pgrx package`, whose output tree mirrors the target root; %install
@@ -29,7 +29,7 @@
 %global __strip       /bin/true
 
 Name:           %{sname}_%{pgmajorversion}
-Version:        0.1.0
+Version:        0.1.3
 Release:        1%{?dist}
 Summary:        Materialized PostgreSQL catalog for Open Knowledge Format bundles
 
@@ -87,8 +87,15 @@ cp -a target/release/%{sname}-pg%{pgmajorversion}/. %{buildroot}/
 %{pginstdir}/lib/%{sname}.so
 %{pginstdir}/share/extension/%{sname}.control
 %{pginstdir}/share/extension/%{sname}--%{version}.sql
-%{pginstdir}/share/extension/%{sname}--%{version}--0.1.1.sql
+# All upgrade scripts shipped in crates/extension/sql/ (pgokf--<from>--<to>.sql)
+# are copied verbatim by `cargo pgrx package`; glob them so the file list does
+# not have to be edited every time a new migration is added.
+%{pginstdir}/share/extension/%{sname}--*--*.sql
 
 %changelog
+* Wed Aug 27 2026 David Saroka <david.saroka@gmail.com> - 0.1.3-1
+- Release 0.1.3: version coherence across all packaging formats.
+- Ship extension upgrade scripts (0.1.0->0.1.1->0.1.2->0.1.3) via glob.
+
 * Wed Aug 27 2026 David Saroka <david.saroka@gmail.com> - 0.1.0-1
 - Initial RPM packaging of pgokf for PostgreSQL 15-19.

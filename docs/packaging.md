@@ -56,7 +56,7 @@ packaging/deb/build-deb.sh 18          # or 15 / 16 / 17 / 19
 ```
 
 `build-deb.sh` runs the build primitive, stages the tree into a package root,
-renders `DEBIAN/control` from [`packaging/deb/control.template`](../packaging/deb/control.template),
+renders `DEBIAN/control` from [`packaging/deb/control.template`](https://github.com/LogicOcean/okf-pg-catalog/blob/main/packaging/deb/control.template),
 and calls `dpkg-deb --root-owner-group --build`. Output defaults to
 `target/packaging/deb/postgresql-N-pgokf_<version>-1_<arch>.deb`.
 
@@ -84,7 +84,7 @@ host.
 
 ## RHEL / Fedora (`.rpm`)
 
-[`packaging/rpm/pgokf.spec`](../packaging/rpm/pgokf.spec) follows the PGDG
+[`packaging/rpm/pgokf.spec`](https://github.com/LogicOcean/okf-pg-catalog/blob/main/packaging/rpm/pgokf.spec) follows the PGDG
 convention: package `pgokf_NN`, installed under `/usr/pgsql-NN`, depending on
 `postgresql NN-server`. The major is chosen at build time:
 
@@ -103,7 +103,7 @@ build primitive; `%install` copies the staged tree into `%{buildroot}`.
 
 ## PGXN (`META.json`)
 
-[`META.json`](../META.json) is a PGXN meta-spec v1.0.0 distribution manifest
+[`META.json`](https://github.com/LogicOcean/okf-pg-catalog/blob/main/META.json) is a PGXN meta-spec v1.0.0 distribution manifest
 (`name` `pgokf`, `version` `0.1.0`, `provides.pgokf`, `prereqs` PostgreSQL
 ≥ 15, `resources`, MIT license). `provides.pgokf.file` points at the generated
 `crates/extension/sql/pgokf--0.1.0.sql`, which the release process emits into
@@ -123,7 +123,7 @@ jq -e 'has("name") and has("version") and has("abstract")
 
 ## Docker image (ghcr.io)
 
-[`packaging/docker/Dockerfile`](../packaging/docker/Dockerfile) is a stock
+[`packaging/docker/Dockerfile`](https://github.com/LogicOcean/okf-pg-catalog/blob/main/packaging/docker/Dockerfile) is a stock
 `postgres:N` image with the extension pre-installed, so `CREATE EXTENSION
 pgokf;` works out of the box (auto-created on first init). Build from the
 **repository root**:
@@ -135,13 +135,13 @@ docker build -f packaging/docker/Dockerfile \
 ```
 
 Add a `.dockerignore` excluding `target/` and `.git/` to keep the build
-context small. Details and a compose snippet: [packaging/docker/README.md](../packaging/docker/README.md).
+context small. Details and a compose snippet: [packaging/docker/README.md](https://github.com/LogicOcean/okf-pg-catalog/blob/main/packaging/docker/README.md).
 
 ---
 
 ## Homebrew tap
 
-[`packaging/homebrew/pgokf.rb`](../packaging/homebrew/pgokf.rb) builds from
+[`packaging/homebrew/pgokf.rb`](https://github.com/LogicOcean/okf-pg-catalog/blob/main/packaging/homebrew/pgokf.rb) builds from
 source against Homebrew's `postgresql@N` and installs into that keg. For a tap
 `LogicOcean/homebrew-pgokf`:
 
@@ -161,13 +161,13 @@ dependency at each release.
 
 1. **Gate.** Complete [release-checklist.md](release-checklist.md) (static,
    supply-chain, schema, and per-major live smoke gates). Confirm
-   [CHANGELOG.md](../CHANGELOG.md) records the release.
+   [CHANGELOG.md](https://github.com/LogicOcean/okf-pg-catalog/blob/main/CHANGELOG.md) records the release.
 2. **Version bump.** Ensure the version agrees across
    `Cargo.toml` (`[workspace.package]`), `crates/extension/pgokf.control`
    (`default_version`), `META.json` (`version` and `provides.pgokf.version`),
    and `packaging/rpm/pgokf.spec` (`Version`).
 3. **Tag.** `git tag v0.1.0 && git push origin v0.1.0`. CI
-   ([`.github/workflows/packages.yml`](../.github/workflows/packages.yml))
+   ([`.github/workflows/packages.yml`](https://github.com/LogicOcean/okf-pg-catalog/blob/main/.github/workflows/packages.yml))
    builds the `.deb`s, validates `META.json`, and builds the Docker images per
    major, uploading them as workflow artifacts.
 4. **PGXN.** Emit the generated SQL into the tree

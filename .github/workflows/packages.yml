@@ -237,18 +237,34 @@ jobs:
             PG_MAJOR=${{ matrix.pg }}
             RUST_VERSION=${{ env.RUST_TOOLCHAIN }}
             CARGO_PGRX_VERSION=${{ env.CARGO_PGRX_VERSION }}
-          tags: ghcr.io/logicocean/pgokf:0.1.0-pg${{ matrix.pg }}
+          tags: ghcr.io/logicocean/pgokf:0.1.3-pg${{ matrix.pg }}
           push: false
           load: true
 
-      - name: Smoke test image (CREATE EXTENSION)
+      - name: Smoke test image (register sample bundle + assert a concept row)
         run: |
+          # Mount the repo's sample OKF bundle where the server process can read
+          # it, so the smoke exercises the real pipeline end to end -- not just
+          # that CREATE EXTENSION succeeds. The bootstrap superuser passes the
+          # pgokf_admin check (pg_has_role), so register_bundle is authorized.
           cid=$(docker run -d -e POSTGRES_PASSWORD=postgres \
-            ghcr.io/logicocean/pgokf:0.1.0-pg${{ matrix.pg }})
+            -v "$PWD/examples/sample-bundle:/bundles/sample:ro" \
+            ghcr.io/logicocean/pgokf:0.1.3-pg${{ matrix.pg }})
           for i in $(seq 1 30); do
             if docker exec "$cid" pg_isready -U postgres >/dev/null 2>&1; then break; fi
             sleep 2
           done
+          # The extension is present at exactly the released version.
           docker exec "$cid" psql -U postgres -v ON_ERROR_STOP=1 \
-            -c "SELECT extname, extversion FROM pg_extension WHERE extname='pgokf';"
+            -tAc "SELECT extversion FROM pg_extension WHERE extname='pgokf';" \
+            | grep -qx '0.1.3' \
+            || { echo "::error::pgokf extversion is not 0.1.3"; docker logs "$cid"; docker rm -f "$cid"; exit 1; }
+          # Register the mounted bundle and materialize its concepts.
+          docker exec "$cid" psql -U postgres -v ON_ERROR_STOP=1 \
+            -c "SELECT (pgokf.register_bundle('/bundles/sample')).*;"
+          # Assert at least one concept row landed in the catalog.
+          n=$(docker exec "$cid" psql -U postgres -tAc "SELECT count(*) FROM pgokf.concepts;")
+          echo "concept rows materialized: ${n}"
           docker rm -f "$cid"
+          test "${n}" -gt 0 \
+            || { echo "::error::no concept rows materialized from the sample bundle"; exit 1; }

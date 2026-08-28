@@ -1,0 +1,65 @@
+site_name: "pgokf — OKF PostgreSQL Catalog"
+site_description: "Documentation for pgokf, a PostgreSQL extension implementing the Open Knowledge Format (OKF) metadata catalog."
+repo_url: https://github.com/LogicOcean/okf-pg-catalog
+repo_name: LogicOcean/okf-pg-catalog
+
+docs_dir: docs
+use_directory_urls: true
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - content.code.copy
+  palette:
+    # Light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    # Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - pymdownx.superfences
+  - pymdownx.highlight
+  - pymdownx.tabbed:
+      alternate_style: true
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - OKF Authoring: okf-authoring.md
+  - Search Guide: search-guide.md
+  - Architecture: architecture.md
+  - Deployment: deployment-topologies.md
+  - Operations: operations.md
+  - SQL API: sql-api.md
+  - Configuration: configuration.md
+  - Security: security.md
+  - Troubleshooting: troubleshooting.md
+  - API Stability: api-stability.md
+  - Benchmarks: benchmarks.md
+  - BM25 Research: bm25-research.md
+  - Packaging: packaging.md
+  - Release Checklist: release-checklist.md
+  - FAQ: faq.md
+  - Glossary: glossary.md
+  # The changelog lives at the repo root (CHANGELOG.md). MkDocs cannot pull in
+  # files above docs_dir, so the docs CI workflow copies it to docs/changelog.md
+  # before `mkdocs build`. See .github/workflows/docs.yml.
+  - Changelog: https://github.com/LogicOcean/okf-pg-catalog/blob/main/CHANGELOG.md

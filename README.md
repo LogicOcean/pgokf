@@ -7,6 +7,9 @@ the portable source of truth; PostgreSQL becomes a projection optimized for
 metadata queries, native full-text search, and link-graph traversal.
 
 - **Extension name and SQL schema:** `pgokf`
+- **OKF conformance:** OKF v0.2 (provenance / trust / lifecycle families:
+  `sources`, `generated.{by,at}`, `verified[]`, `status`, `stale_after`,
+  `usage_window`; only `type` is required per concept)
 - **Supported PostgreSQL:** 15, 16, 17, 18, 19
 - **Built with:** Rust (edition 2024) and [pgrx](https://github.com/pgcentralfoundation/pgrx) 0.19
 - **Search backend:** native PostgreSQL FTS only — no third-party extension is required
@@ -36,30 +39,48 @@ ingested concepts.
 
 | Document | What it covers |
 | -------- | -------------- |
+| [docs/getting-started.md](docs/getting-started.md) | Install, create the extension, grant a role, register the sample bundle, run your first queries |
 | [docs/sql-api.md](docs/sql-api.md) | Complete reference for every `pgokf.*` function, table, type, and GUC |
 | [docs/architecture.md](docs/architecture.md) | System design: parser, sync engine, projection seams, search |
-| [docs/security.md](docs/security.md) | Roles, `SECURITY DEFINER` model, path containment, least privilege |
+| [docs/deployment-topologies.md](docs/deployment-topologies.md) | Storage tiers (`store_source` off = data lake / bucket mount; on = self-contained in PG), bucket-mount and Parquet-export patterns |
+| [docs/operations.md](docs/operations.md) | Day-2 operations: refresh cadence, backups, monitoring, capacity, upgrades |
+| [docs/okf-authoring.md](docs/okf-authoring.md) | Authoring OKF v0.2 bundles: frontmatter families, actor convention, reserved `index.md` / `log.md` |
+| [docs/search-guide.md](docs/search-guide.md) | Full-text search behavior, ranking, `websearch_to_tsquery`, metadata filters, tuning |
 | [docs/configuration.md](docs/configuration.md) | GUCs and the durable `pgokf_private.config` policy keys |
+| [docs/security.md](docs/security.md) | Roles, `SECURITY DEFINER` model, path containment, least privilege |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Common errors mapped to SQLSTATEs, with causes and fixes |
+| [docs/faq.md](docs/faq.md) | Frequently asked questions about tiers, search, OKF conformance, and operations |
+| [docs/glossary.md](docs/glossary.md) | Definitions for OKF and pgokf terms (bundle, concept, provenance, trust tier, projection) |
+| [docs/api-stability.md](docs/api-stability.md) | The public API contract, SemVer policy, and deprecation process |
+| [docs/benchmarks.md](docs/benchmarks.md) | Reproducible YAML vs PostgreSQL vs Parquet performance measurements |
 | [docs/bm25-research.md](docs/bm25-research.md) | Research notes on an optional future BM25 adapter |
+| [docs/packaging.md](docs/packaging.md) | Building `.deb` / `.rpm` / PGXN / Docker / Homebrew artifacts |
+| [docs/release-checklist.md](docs/release-checklist.md) | The ordered gates for cutting a release |
 
 Runnable SQL lives in [`examples/queries/`](examples/queries)
-(`quickstart.sql`, `search.sql`, `graph.sql`).
+(`quickstart.sql`, `search.sql`, `graph.sql`). Reusable OKF v0.2 concept and
+bundle-root templates live in [`templates/`](templates), and the
+authoring / catalog skills live in [`skills/`](skills)
+(`okf-authoring`, `pgokf-catalog`).
 
 ## What gets created
 
 `CREATE EXTENSION pgokf;` installs, under the non-relocatable `pgokf` schema:
 
-- **Tables** — `pgokf.bundles`, `pgokf.concepts`, `pgokf.concept_metadata`,
-  `pgokf.links`, `pgokf.concept_provenance`, and the administrator-only
-  `pgokf_private.config`.
-- **Functions** — bundle lifecycle (`register_bundle`, `refresh_bundle`,
+- **Tables (8 in `pgokf`)** — `pgokf.bundles`, `pgokf.concepts`,
+  `pgokf.concept_metadata`, `pgokf.links`, `pgokf.concept_provenance`,
+  `pgokf.concept_verification` (the OKF `verified[]` event list),
+  `pgokf.concept_provenance_source` (the OKF `sources[]` materials), and
+  `pgokf.concept_source` (opt-in verbatim source bytes when `store_source` is
+  on) — plus the administrator-only `pgokf_private.config`.
+- **Functions (14)** — bundle lifecycle (`register_bundle`, `refresh_bundle`,
   `unregister_bundle`, `list_bundles`, `bundle_info`), search
   (`concept_search`), graph (`concept_neighbors`), configuration
-  (`set_config`, `reset_config`, `get_config`), Parquet snapshot export
-  (`export_parquet`, admin-only — the one function that writes files), and
-  `version`.
-- **Types** — `bundle_sync_result`, `bundle_info`, `concept_search_result`,
+  (`set_config`, `reset_config`, `get_config`), source retrieval
+  (`get_concept_source`, reader-level — returns stored bytes, no filesystem
+  write), file-writing exports (`export_parquet` and `export_sources`, both
+  admin-only), and `version`.
+- **Types (5)** — `bundle_sync_result`, `bundle_info`, `concept_search_result`,
   `concept_neighbor`, and `export_result`.
 - **Roles** — `pgokf_reader` (read/search) and `pgokf_admin` (register/refresh/
   configure; inherits `pgokf_reader`). Both are cluster-wide `NOLOGIN` roles you

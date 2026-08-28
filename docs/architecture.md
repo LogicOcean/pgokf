@@ -213,7 +213,7 @@ cycle-safe recursive CTE over `pgokf.links`. It follows only resolved,
 non-external edges, is bundle-scoped, depth-limited (`max_hops >= 1`, capped at
 `pgokf.max_graph_hops`), and authorization-filtered at reader level. It returns
 each reachable concept once with its shortest hop count and path.
-[`examples/queries/graph.sql`](../examples/queries/graph.sql) shows both direct
+[`examples/queries/graph.sql`](https://github.com/LogicOcean/okf-pg-catalog/blob/main/examples/queries/graph.sql) shows both direct
 edge queries and the built-in traversal alongside an equivalent hand-written CTE.
 
 ### Parquet export
@@ -259,7 +259,7 @@ edited):
 `concept_source` cascades from `pgokf.concepts` (`ON DELETE CASCADE`), so removed
 concepts and unregistered bundles drop their stored source with no extra seam.
 Like `default_text_search_config`, `store_source` is read at sync time and is not
-retroactive — see [configuration.md](configuration.md#storage-tiers--store_source)
+retroactive — see [configuration.md](configuration.md)
 and [security.md](security.md#source-retrieval-and-reconstruction).
 
 ### Configuration and safety limits

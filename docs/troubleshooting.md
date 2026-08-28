@@ -32,10 +32,11 @@ ERROR:  42501: permission denied for function concept_search
 ```
 
 **Cause.** The current login user is not a member of the role that owns the
-operation: `pgokf_admin` for the mutators (`register_bundle`, `refresh_bundle`,
-`unregister_bundle`, `set_config`, `reset_config`), or `pgokf_reader` for the
+operation: `pgokf_admin` for the mutators and file-writing exports
+(`register_bundle`, `refresh_bundle`, `unregister_bundle`, `set_config`,
+`reset_config`, `export_parquet`, `export_sources`), or `pgokf_reader` for the
 read paths (`concept_search`, `concept_neighbors`, `list_bundles`,
-`bundle_info`, `get_config`).
+`bundle_info`, `get_config`, `get_concept_source`).
 
 **Fix.** Grant the appropriate role to the user:
 
@@ -55,6 +56,19 @@ SELECT pg_has_role('analytics_ro', 'pgokf_reader', 'MEMBER');
 **Cause.** The user has no `USAGE` on the schema (they were not granted either
 role). **Fix.** Grant `pgokf_reader` or `pgokf_admin` as above — both carry
 schema `USAGE`.
+
+### Export destination directory is not writable
+
+```text
+ERROR:  42501: destination directory is not writable: /srv/exports/readonly
+```
+
+**Cause.** `export_parquet` and `export_sources` probe the destination with an
+`O_NOFOLLOW` write before exporting; if the PostgreSQL server's OS user cannot
+write there, the directory exists but the write is refused with `42501` (a
+privilege condition), not `22023`. **Fix.** Choose a directory the server's OS
+account owns or has write permission on, and (if `allowed_roots` is configured)
+one contained within an allowed root.
 
 ---
 
@@ -172,6 +186,63 @@ ERROR:  22023: text search configuration does not exist: no_such_config
 outside the key's domain. **Fix.** See [configuration.md](configuration.md) for
 each key's expected `jsonb` shape and constraints.
 
+### `get_concept_source`: no source stored vs. no such concept
+
+```text
+ERROR:  22023: no source is stored for concept runbooks/failover in bundle 1; the bundle was synced with store_source disabled
+ERROR:  22023: no such concept runbooks/typo in bundle 1
+```
+
+**Cause.** `get_concept_source(bundle_id, concept_id)` raises `22023` in two
+**distinct** situations, and the message tells them apart:
+
+- **The concept exists but no source bytes were stored.** Verbatim source
+  storage is opt-in: `store_source` was `false` when the bundle was synced, so
+  only metadata and search were projected — there is nothing to return. This is
+  the deployment tier where originals live in a data lake / mounted bucket.
+- **No such concept.** The `(bundle_id, concept_id)` pair does not exist at all
+  (wrong id, wrong bundle, or the concept was removed on a later refresh).
+
+**Fix.** For the first case, enable source storage and re-register (the setting
+is **not retroactive** — see below), or read the original from wherever the data
+lake keeps it. For the second, look up the real id and bundle:
+
+```sql
+SELECT bundle_id, id FROM pgokf.concepts WHERE id = 'runbooks/failover';
+```
+
+### `store_source` is not retroactive
+
+Enabling `store_source` after a bundle is already synced does **not** backfill
+the stored bytes — like `default_text_search_config`, it is read at sync time.
+A concept synced while `store_source` was `false` has no `pgokf.concept_source`
+row, so `get_concept_source` / `export_sources` cannot return it.
+
+```sql
+SELECT pgokf.set_config('store_source', 'true'::jsonb);  -- set BEFORE first register
+SELECT * FROM pgokf.refresh_bundle(1);                   -- or re-sync to populate sources
+```
+
+**Fix.** Set `store_source` before the first `register_bundle`, or run
+`refresh_bundle` / re-register afterward so the source bytes are projected.
+
+### `export_sources`: bad bundle or destination directory
+
+```text
+ERROR:  22023: bundle 999 is not registered
+ERROR:  22023: resolved path /tmp/.../outside is outside allowed_roots
+ERROR:  22023: dest_dir is not a directory: /srv/exports/out.tar
+```
+
+**Cause.** `export_sources(bundle_id, dest_dir)` reuses `export_parquet`'s
+destination validation: `dest_dir` must be an existing directory, canonical and
+traversal-free, and — when `pgokf.allowed_roots` is configured — contained
+within an allowed root. Files are created with `O_NOFOLLOW`, so a **symlink**
+planted at a target path is refused with `22023` rather than followed. **Fix.**
+Pass an existing, writable directory the server's OS user can reach, under an
+allowed root if `allowed_roots` is set; remove any symlink at a colliding
+target name.
+
 ---
 
 ## `23505` — bundle already registered
@@ -224,6 +295,21 @@ they diverge (`cargo pgrx install …` for the target major version). If it
 persists, capture the full `VERBOSITY verbose` output and the bundle-relative
 path from the message.
 
+### `export_sources`: stored source fails its hash check
+
+```text
+ERROR:  XX000: stored source for runbooks/failover.md does not match its recorded file hash (expected <blake3>, computed <blake3>)
+```
+
+**Cause.** `export_sources` verifies every stored source against the concept's
+recorded BLAKE3 `file_hash` **before** any file is created, so a mismatch aborts
+the whole export and nothing is written. This is a corruption / integrity
+condition (the stored bytes drifted from their recorded digest), not caller
+input — hence `XX000`, not `22023`. **Fix.** Re-`refresh_bundle` the affected
+bundle to re-project the source bytes from the on-disk originals, then re-run
+the export. If it recurs, the on-disk bundle or the storage underneath the
+catalog is corrupt.
+
 ---
 
 ## Nothing returned from `concept_search`
@@ -242,3 +328,23 @@ Not an error — a few benign causes:
   (`pgokf.concepts.tags`, `type`) remain available regardless of language.
 - **Nothing was ingested.** Confirm `file_count > 0` via `pgokf.bundle_info`.
   Reserved files (`index.md`, `log.md`) do not become concepts.
+
+---
+
+## Exported Parquet timestamps look like large integers
+
+Not an error. `export_parquet` writes the OKF v0.2 provenance timestamp
+`generated_at` as **epoch microseconds** cast to `bigint`, which the Parquet
+writer stores as a `Timestamp(µs, UTC)` logical type. A reader that ignores the
+logical type sees a large integer (microseconds since 1970-01-01 UTC). In
+DuckDB the column reads back as a native `TIMESTAMP`:
+
+```sql
+SELECT concept_id, generated_at
+FROM read_parquet('/srv/exports/concept_provenance.parquet');
+-- generated_at is a TIMESTAMP; to force from raw µs: make_timestamp(generated_at)
+```
+
+This epoch cast is what makes the export interoperable — an OKF v0.2 ISO 8601
+instant round-trips through the catalog's `timestamptz` column into a portable
+Parquet timestamp.

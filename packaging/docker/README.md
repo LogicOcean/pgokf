@@ -12,11 +12,11 @@ One image per PostgreSQL major (15-19), selected at build time via the
 
 | Tag                  | PostgreSQL |
 | -------------------- | ---------- |
-| `0.1.0-pg15`         | 15         |
-| `0.1.0-pg16`         | 16         |
-| `0.1.0-pg17`         | 17         |
-| `0.1.0-pg18`, `latest` | 18       |
-| `0.1.0-pg19`         | 19 (once PGDG ships packages) |
+| `0.1.3-pg15`         | 15         |
+| `0.1.3-pg16`         | 16         |
+| `0.1.3-pg17`         | 17         |
+| `0.1.3-pg18`, `latest` | 18       |
+| `0.1.3-pg19`         | 19 (once PGDG ships packages) |
 
 ## Build
 
@@ -26,7 +26,7 @@ whole source tree:
 ```bash
 docker build -f packaging/docker/Dockerfile \
   --build-arg PG_MAJOR=18 \
-  -t ghcr.io/logicocean/pgokf:0.1.0-pg18 .
+  -t ghcr.io/logicocean/pgokf:0.1.3-pg18 .
 ```
 
 Pinned build arguments (override only deliberately):
@@ -47,7 +47,7 @@ final image — no Rust toolchain, no source.
 
 ```bash
 docker run --rm -e POSTGRES_PASSWORD=postgres \
-  ghcr.io/logicocean/pgokf:0.1.0-pg18
+  ghcr.io/logicocean/pgokf:0.1.3-pg18
 ```
 
 The extension is created automatically in the default `postgres` database on
@@ -67,7 +67,7 @@ see the project [README](../../README.md).
 ```yaml
 services:
   db:
-    image: ghcr.io/logicocean/pgokf:0.1.0-pg18
+    image: ghcr.io/logicocean/pgokf:0.1.3-pg18
     environment:
       POSTGRES_PASSWORD: postgres
     ports:

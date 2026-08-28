@@ -50,6 +50,27 @@ compatibility shim.
   Distinct from the raw-bytes `pgokf.concept_source`. Cascades from
   `pgokf.concepts`; reader-`SELECT`able.
 
+### Fixed
+
+- **`export_parquet` epoch cast for OKF v0.2 provenance timestamps.** The
+  re-modeled `pgokf.concept_provenance.generated_at` is a `timestamptz`;
+  `export_parquet` now converts it to epoch microseconds
+  (`(EXTRACT(EPOCH FROM generated_at) * 1000000)::bigint`) so the Parquet writer
+  emits a portable `Timestamp(µs, UTC)` column. Verified round-trippable in
+  DuckDB via an in-database test.
+
+### Security
+
+- **Closed an `export_sources` write-escape via a symlinked parent directory.**
+  `export_sources` recreates a bundle's directory tree under `dest_dir`; a
+  symlink planted at an intermediate path component could previously redirect a
+  write outside the validated destination. Writes now use the same `O_NOFOLLOW`
+  open as `export_parquet` on the final component and re-validate every stored
+  concept path as a plain bundle-relative path, so a planted symlink is refused
+  (`22023`) instead of followed. Each reconstructed file is additionally
+  verified against its recorded BLAKE3 `file_hash` before creation
+  (`XX000` on mismatch, nothing written).
+
 ### Upgrade
 
 - No supported in-place upgrade from `0.1.2`: this pre-release drops and
@@ -99,6 +120,43 @@ is byte-for-byte identical to 0.1.1.
   with no data loss: it adds the `store_source` column (default `false`), the
   `concept_source` table, and the two new functions, and touches no existing
   object.
+
+## [0.1.1] - 2026-08-27
+
+Hardening, performance, and packaging. No public-API change: the stable surface
+(functions, types, tables, roles, GUCs) is byte-for-byte identical to 0.1.0, so
+`ALTER EXTENSION pgokf UPDATE TO '0.1.1'` is a proven no-data-loss step.
+
+### Fixed
+
+- **A large concept body could abort an otherwise-valid sync.** The body
+  `tsvector` is now fully bounded so no document within the configured size
+  limits can raise PostgreSQL's `tsvector` size error mid-sync; the whole
+  transaction no longer rolls back on a single large-but-in-limit file.
+- **Resolved the findings from a full-repository adversarial audit** across the
+  parser, sync engine, and catalog surface — input-validation edges, error
+  mapping, and path-handling corners hardened without changing behavior for
+  well-formed input.
+
+### Performance
+
+- **Batched SPI inserts in the sync engine** — concepts, metadata, links, and
+  provenance are projected in batched statements instead of row-at-a-time,
+  cutting per-file round trips on large bundles.
+- **Guarded the link re-resolution `UPDATE`** so an incremental
+  `refresh_bundle` only re-resolves links whose target set actually changed,
+  avoiding needless writes on unchanged concepts.
+
+### Added
+
+- **Distribution packaging** — `.deb` / `.rpm` build recipes, a PGXN
+  `META.json`, a Docker image, and a Homebrew formula, wired into a `packages`
+  CI job so per-major artifacts build reproducibly.
+- **Proven extension upgrade path.** The example `sql/pgokf--0.1.0--0.1.1.sql`
+  upgrade script exercises `ALTER EXTENSION pgokf UPDATE TO '0.1.1'` end to end
+  as a deliberate no-op, demonstrating the forward-compatible,
+  never-`DROP`/`TRUNCATE`/`DELETE` migration contract that
+  `tests/api_stability.rs` enforces on every shipped script.
 
 ## [0.1.0] - 2026-08-27
 
@@ -167,5 +225,8 @@ queries, native full-text search, and link-graph traversal.
 - The `pgokf_private` schema and its `config` table are readable and writable
   only by the extension owner and `pgokf_admin`; readers cannot see policy.
 
-[Unreleased]: https://github.com/LogicOcean/okf-pg-catalog/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/LogicOcean/okf-pg-catalog/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/LogicOcean/okf-pg-catalog/compare/v0.1.2...v0.1.3
+[0.1.2]: https://github.com/LogicOcean/okf-pg-catalog/compare/v0.1.1...v0.1.2
+[0.1.1]: https://github.com/LogicOcean/okf-pg-catalog/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/LogicOcean/okf-pg-catalog/releases/tag/v0.1.0

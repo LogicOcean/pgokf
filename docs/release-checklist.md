@@ -4,7 +4,7 @@ The concrete, ordered steps to cut a `pgokf` release. Nothing here is
 automatic: a release is a deliberate human decision. Work top to bottom; every
 gate must pass before the next. The stability rules these gates enforce live in
 [api-stability.md](api-stability.md), and every change must already be recorded
-in [CHANGELOG.md](../CHANGELOG.md).
+in [CHANGELOG.md](https://github.com/LogicOcean/okf-pg-catalog/blob/main/CHANGELOG.md).
 
 Throughout, `PGVER` is a PostgreSQL major (15–19) and `PG_CONFIG` is the path to
 its `pg_config` (e.g. `/usr/lib/postgresql/18/bin/pg_config`).
@@ -88,7 +88,9 @@ FROM pg_roles r WHERE r.rolname LIKE 'pgokf_%' ORDER BY 1;
 ```
 
 Each of the first three queries must return **no rows**. As a positive check,
-this confirms full coverage (expect `12/12`, `5/5`, `6/6`):
+this confirms full coverage (expect `14/14`, `5/5`, `9/9` — 14 functions, 5
+composite types, and 9 catalog tables = the 8 public `pgokf` tables plus
+`pgokf_private.config`):
 
 ```sql
 SELECT 'functions',  count(*) FILTER (WHERE obj_description(p.oid,'pg_proc')  IS NOT NULL)||'/'||count(*)
@@ -115,7 +117,18 @@ SELECT pgokf.version();                                                      -- 
 The extension ships forward-compatible upgrade scripts named
 `sql/pgokf--<from>--<to>.sql`. `cargo pgrx install` writes the full install
 script as `pgokf--<crate-version>.sql` and copies every upgrade script
-alongside it, so the update path is available without any manual step.
+alongside it, so the update path is available without any manual step. The
+shipped chain is `0.1.0 → 0.1.1 → 0.1.2 → 0.1.3`.
+
+> **0.1.3 is a breaking pre-release re-model.** The `pgokf.concept_provenance`
+> shape changed to conform to OKF v0.2 (see [CHANGELOG.md](https://github.com/LogicOcean/okf-pg-catalog/blob/main/CHANGELOG.md)).
+> Because the extension is still pre-release with no tagged release and no
+> external installs, `0.1.2 → 0.1.3` is **not** a no-data-loss in-place upgrade:
+> re-`CREATE EXTENSION` and re-register bundles (the on-disk bundle is the
+> source of truth, so the projection rebuilds fully from a sync). The
+> no-data-loss upgrade guarantee below applies to the additive `0.1.0 → 0.1.1`
+> and `0.1.1 → 0.1.2` links, and becomes a binding cross-version guarantee once
+> `1.0.0` is cut.
 
 Verify an upgrade preserves a populated catalog byte-for-byte:
 

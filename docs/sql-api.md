@@ -247,7 +247,7 @@ ORDER BY hops, neighbor_id;
 ```
 
 The `pgokf.links` table (below) supports direct edge and backlink queries; see
-[`examples/queries/graph.sql`](../examples/queries/graph.sql).
+[`examples/queries/graph.sql`](https://github.com/LogicOcean/okf-pg-catalog/blob/main/examples/queries/graph.sql).
 
 ---
 
@@ -347,7 +347,7 @@ SELECT * FROM pgokf.export_parquet(1, '/srv/okf-exports/sample');
 
 These functions are only useful when the bundle was synced with the
 `store_source` policy enabled, so `pgokf.concept_source` holds the verbatim
-source bytes. See [configuration.md](configuration.md#storage-tiers--store_source)
+source bytes. See [configuration.md](configuration.md)
 for the two-tier model. With `store_source` off (the default) no source is
 stored, and `get_concept_source` raises `22023`.
 

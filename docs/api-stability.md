@@ -3,7 +3,7 @@
 This document defines the **public API contract** for the `pgokf` extension:
 what callers may depend on, how it is versioned, how it changes, and what is
 explicitly *not* part of the contract. It is the reference that
-[CHANGELOG.md](../CHANGELOG.md) classifies changes against and that the
+[CHANGELOG.md](https://github.com/LogicOcean/okf-pg-catalog/blob/main/CHANGELOG.md) classifies changes against and that the
 [release checklist](release-checklist.md) enforces.
 
 ## What "public API" means here
@@ -21,7 +21,7 @@ the database. Complete comment coverage is a release gate (see
 
 ## The stable surface
 
-### Functions (12)
+### Functions (14)
 
 | Function | Role required | Purpose |
 | -------- | ------------- | ------- |
@@ -35,7 +35,9 @@ the database. Complete comment coverage is a release gate (see
 | `pgokf.set_config(text, jsonb)` | `pgokf_admin` | Set a durable configuration key |
 | `pgokf.reset_config(text)` | `pgokf_admin` | Reset one/all configuration keys |
 | `pgokf.get_config()` | `pgokf_reader` | Effective configuration as jsonb |
-| `pgokf.export_parquet(bigint, text)` | `pgokf_admin` | Export a bundle projection to Parquet |
+| `pgokf.get_concept_source(bigint, text)` | `pgokf_reader` | Return one concept's stored source bytes as `bytea` (no filesystem write) |
+| `pgokf.export_parquet(bigint, text)` | `pgokf_admin` | Export a bundle projection to Parquet files |
+| `pgokf.export_sources(bigint, text)` | `pgokf_admin` | Reconstruct a bundle's stored source files on disk, hash-verified |
 | `pgokf.version()` | `pgokf_reader` | Loaded shared-library version |
 
 The function **name, schema, argument types, argument order, and result shape**
@@ -70,8 +72,9 @@ existing column names and types; the columns listed in
 compatible release; code that pins to named columns (never `SELECT *` into a
 fixed row type) is forward-compatible.
 
-`pgokf_private.config` is listed here only because it is one of the six catalog
-tables the documentation gate covers. It is **internal state, not API** — see
+`pgokf_private.config` is listed here only because it is one of the catalog
+tables the documentation gate covers (the eight public tables plus this private
+one). It is **internal state, not API** — see
 [The private surface](#the-private-surface-not-api).
 
 ### Roles (2)
@@ -132,7 +135,7 @@ Nothing on the stable surface is removed abruptly. The process is:
 
 Extension upgrade scripts (`pgokf--<from>--<to>.sql`) carry any data migration
 a deprecation requires and must remain forward-compatible — see the
-[upgrade mechanism](release-checklist.md#upgrade-path) — so
+[upgrade mechanism](release-checklist.md) — so
 `ALTER EXTENSION pgokf UPDATE` never loses catalog data.
 
 ## The private surface (NOT API)

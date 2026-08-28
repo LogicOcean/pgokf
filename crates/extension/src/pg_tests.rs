@@ -22,8 +22,17 @@
 mod tests {
     use pgrx::prelude::*;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// A monotonic-ish, process/clock-unique nonce for temp fixture names, so
+    /// concurrently running test backends never collide on a path.
+    fn unique_nonce() -> u128 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock is after the Unix epoch")
+            .as_nanos()
+    }
 
     /// `alpha` concept: carries a distinctive search term, provenance
     /// frontmatter (so it projects a `concept_provenance` row), and a resolved
@@ -62,14 +71,20 @@ The beta concept is the companion definition referenced by alpha.\n";
     }
 
     impl FixtureBundle {
-        /// Materialize the two-concept fixture bundle on disk.
+        /// Materialize the two-concept fixture bundle under the system temp dir.
         fn create() -> Self {
-            let nonce = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("system clock is after the Unix epoch")
-                .as_nanos();
-            let root =
-                std::env::temp_dir().join(format!("pgokf-pg-test-{}-{nonce}", std::process::id()));
+            Self::create_in(&std::env::temp_dir())
+        }
+
+        /// Materialize the two-concept fixture bundle in a subdirectory of
+        /// `parent`, so a test can place a bundle inside (or outside) a
+        /// configured `allowed_roots` boundary.
+        fn create_in(parent: &Path) -> Self {
+            let root = parent.join(format!(
+                "pgokf-pg-test-{}-{}",
+                std::process::id(),
+                unique_nonce()
+            ));
             fs::create_dir_all(&root).expect("fixture bundle root is creatable");
             fs::write(root.join("alpha.md"), ALPHA_CONCEPT).expect("alpha fixture is writable");
             fs::write(root.join("beta.md"), BETA_CONCEPT).expect("beta fixture is writable");
@@ -838,6 +853,347 @@ The beta concept is the companion definition referenced by alpha.\n";
         assert_eq!(
             undocumented_tables, None,
             "every pgokf table must carry a COMMENT; undocumented: {undocumented_tables:?}",
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Incremental refresh: the diff + re-projection + guarded re-resolution.
+    // ---------------------------------------------------------------------
+
+    /// A third concept that is written once and never touched, so a refresh
+    /// classifies it as `unchanged` (its content hash is stable). It links to
+    /// `/gamma.md`, which does not exist at register time, so its edge starts
+    /// unresolved; adding `gamma.md` on refresh must flip that edge to resolved
+    /// *even though keep itself is unchanged* — the guarded re-resolution pass.
+    const KEEP_CONCEPT: &str = "---\n\
+type: Reference\n\
+title: Keep Concept\n\
+tags: [widgets]\n\
+---\n\
+\n\
+# Keep\n\
+\n\
+The keep concept mentions the distinctive marmoset anchor term.\n\
+It links to [the gamma concept](/gamma.md) that appears only on refresh.\n";
+
+    /// The edited body for `alpha.md` on refresh: same frontmatter shape, a new
+    /// distinctive body term (`quokka`) that did not exist at register time, and
+    /// no link to the now-deleted `beta.md`.
+    const ALPHA_EDITED: &str = "---\n\
+type: Reference\n\
+title: Alpha Widget Concept\n\
+tags: [widgets, indexing]\n\
+generated_by: pipeline/test\n\
+status: stable\n\
+---\n\
+\n\
+# Alpha\n\
+\n\
+The alpha concept now documents the quokka indexing strategy for widgets.\n";
+
+    /// A brand-new concept added on refresh, classified as `added`.
+    const GAMMA_CONCEPT: &str = "---\n\
+type: Reference\n\
+title: Gamma Concept\n\
+tags: [widgets]\n\
+---\n\
+\n\
+# Gamma\n\
+\n\
+The gamma concept is introduced during the refresh cycle.\n";
+
+    #[pg_test]
+    fn refresh_bundle_reflects_added_updated_and_removed_files() {
+        // Arrange: register a three-file bundle (alpha, beta, keep). The default
+        // FixtureBundle writes alpha+beta; add keep.md so at least one file
+        // survives the refresh unchanged and exercises the `unchanged` bucket.
+        let bundle = FixtureBundle::create();
+        fs::write(bundle.root.join("keep.md"), KEEP_CONCEPT).expect("keep fixture is writable");
+        let bundle_id = Spi::get_one_with_args::<i64>(
+            "SELECT bundle_id FROM pgokf.register_bundle($1) AS r",
+            &[bundle.path().into()],
+        )
+        .expect("register_bundle executes")
+        .expect("bundle_id is not NULL");
+        // Sanity: search finds the original alpha term but not the future one.
+        let pre_alpha = Spi::get_one::<String>(
+            "SELECT concept_id FROM pgokf.concept_search('peregrine') LIMIT 1",
+        )
+        .expect("pre-refresh search executes")
+        .expect("the original alpha term matches before refresh");
+        assert_eq!(pre_alpha, "alpha", "alpha's original body term is indexed");
+        // Sanity: keep's edge to the not-yet-existing gamma starts unresolved.
+        let pre_keep_edge = Spi::get_one_with_args::<bool>(
+            "SELECT resolved FROM pgokf.links
+             WHERE bundle_id = $1 AND source_id = 'keep' AND target_id = 'gamma'",
+            &[bundle_id.into()],
+        )
+        .expect("pre-refresh keep-edge query executes")
+        .expect("keep's edge to gamma exists");
+        assert!(
+            !pre_keep_edge,
+            "keep's edge to the absent gamma is unresolved"
+        );
+
+        // Act: mutate the on-disk bundle — edit one file (alpha), add one file
+        // (gamma), delete one file (beta) — then re-synchronize. keep.md is left
+        // byte-identical so it must classify as unchanged.
+        fs::write(bundle.root.join("alpha.md"), ALPHA_EDITED).expect("alpha edit is writable");
+        fs::write(bundle.root.join("gamma.md"), GAMMA_CONCEPT).expect("gamma add is writable");
+        fs::remove_file(bundle.root.join("beta.md")).expect("beta delete succeeds");
+
+        let counts = Spi::connect(|client| {
+            let row = client
+                .select(
+                    "SELECT added, updated, removed, unchanged
+                     FROM pgokf.refresh_bundle($1) AS r",
+                    Some(1),
+                    &[bundle_id.into()],
+                )
+                .expect("refresh_bundle executes")
+                .first();
+            (
+                row.get::<i32>(1)
+                    .expect("added readable")
+                    .expect("added not NULL"),
+                row.get::<i32>(2)
+                    .expect("updated readable")
+                    .expect("updated not NULL"),
+                row.get::<i32>(3)
+                    .expect("removed readable")
+                    .expect("removed not NULL"),
+                row.get::<i32>(4)
+                    .expect("unchanged readable")
+                    .expect("unchanged not NULL"),
+            )
+        });
+
+        // Assert: the incremental diff counted each mutation exactly once.
+        assert_eq!(counts.0, 1, "gamma is the single added file");
+        assert_eq!(counts.1, 1, "alpha is the single updated file");
+        assert_eq!(counts.2, 1, "beta is the single removed file");
+        assert_eq!(counts.3, 1, "keep is the single unchanged file");
+
+        // Assert: the re-projection re-indexed the edited body — the new term is
+        // searchable and the stale term is gone.
+        let post_alpha =
+            Spi::get_one::<String>("SELECT concept_id FROM pgokf.concept_search('quokka') LIMIT 1")
+                .expect("post-refresh search executes")
+                .expect("the edited alpha term matches after refresh");
+        assert_eq!(
+            post_alpha, "alpha",
+            "the refreshed alpha body is re-indexed"
+        );
+        let stale_hits =
+            Spi::get_one::<i64>("SELECT count(*) FROM pgokf.concept_search('peregrine')")
+                .expect("stale-term search executes")
+                .expect("count is not NULL");
+        assert_eq!(stale_hits, 0, "the removed alpha term no longer matches");
+
+        // Assert: the added concept row exists and the removed one is gone.
+        let gamma_rows = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concepts WHERE bundle_id = $1 AND id = 'gamma'",
+            &[bundle_id.into()],
+        )
+        .expect("gamma row query executes")
+        .expect("count is not NULL");
+        assert_eq!(gamma_rows, 1, "the added gamma concept row is projected");
+        let beta_rows = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concepts WHERE bundle_id = $1 AND id = 'beta'",
+            &[bundle_id.into()],
+        )
+        .expect("beta row query executes")
+        .expect("count is not NULL");
+        assert_eq!(beta_rows, 0, "the removed beta concept row is deleted");
+
+        // Assert: the guarded re-resolution ran — keep was classified unchanged
+        // (so project() never re-touched its row), yet its edge to the
+        // newly-added gamma flipped from unresolved to resolved by the bundle-
+        // wide re-resolution pass over the finalized concept set.
+        let post_keep_edge = Spi::get_one_with_args::<bool>(
+            "SELECT resolved FROM pgokf.links
+             WHERE bundle_id = $1 AND source_id = 'keep' AND target_id = 'gamma'",
+            &[bundle_id.into()],
+        )
+        .expect("post-refresh keep-edge query executes")
+        .expect("keep's edge to gamma still exists");
+        assert!(
+            post_keep_edge,
+            "an unchanged concept's edge to a newly-added target must re-resolve",
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // allowed_roots sandbox boundary (end-to-end, not just unit-tested).
+    // ---------------------------------------------------------------------
+
+    #[pg_test]
+    fn register_bundle_outside_allowed_roots_is_rejected_and_inside_succeeds() {
+        // Arrange: an allowed-root directory, a bundle placed *inside* it, and a
+        // second bundle placed *outside* it (a sibling under the temp dir).
+        let allowed_root = ExportDir::create();
+        let inside = FixtureBundle::create_in(&allowed_root.root);
+        let outside = FixtureBundle::create();
+        Spi::run_with_args(
+            "SELECT pgokf.set_config('allowed_roots', jsonb_build_array($1))",
+            &[allowed_root.path().into()],
+        )
+        .expect("allowed_roots is configurable");
+
+        // A plpgsql probe registers a path and reports the denial SQLSTATE, so a
+        // rejected register aborts only its own subtransaction.
+        Spi::run(
+            "CREATE FUNCTION pg_temp.register_sqlstate(p text) RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.register_bundle(p);
+                 RETURN 'ok';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("register probe is creatable");
+
+        // Act / Assert: a path outside allowed_roots is rejected with the
+        // invalid-parameter class (22023) the sandbox raises.
+        let outside_sqlstate = Spi::get_one_with_args::<String>(
+            "SELECT pg_temp.register_sqlstate($1)",
+            &[outside.path().into()],
+        )
+        .expect("outside probe executes")
+        .expect("probe reports a SQLSTATE");
+        assert_eq!(
+            outside_sqlstate, "22023",
+            "a bundle path outside allowed_roots must be rejected with 22023",
+        );
+
+        // Act / Assert: a path inside allowed_roots synchronizes normally.
+        let inside_added = Spi::get_one_with_args::<i32>(
+            "SELECT added FROM pgokf.register_bundle($1) AS r",
+            &[inside.path().into()],
+        )
+        .expect("inside register executes")
+        .expect("added is not NULL");
+        assert_eq!(
+            inside_added, 2,
+            "a contained bundle registers its two concepts"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Resource ceilings: a real sync aborting on a configured limit.
+    // ---------------------------------------------------------------------
+
+    #[pg_test]
+    fn register_bundle_exceeding_max_file_bytes_is_rejected() {
+        // Arrange: the resource-ceiling GUCs (pgokf.max_file_bytes,
+        // pgokf.max_bundle_files) are PGC_SIGHUP — they cannot be changed with
+        // SET inside a session, so this exercises the *shipped default* ceiling
+        // (4 MiB per file) by registering a bundle with one oversized file. A
+        // bundle whose file exceeds the ceiling must abort discovery.
+        let over_ceiling_bytes = (crate::guc::DEFAULT_MAX_FILE_BYTES as usize) + 1;
+        let bundle = FixtureBundle::create();
+        let mut oversized = String::with_capacity(over_ceiling_bytes + 64);
+        oversized.push_str("---\ntype: Reference\ntitle: Oversized\n---\n\n");
+        oversized.push_str(&"x".repeat(over_ceiling_bytes));
+        fs::write(bundle.root.join("huge.md"), &oversized).expect("oversized fixture is writable");
+
+        Spi::run(
+            "CREATE FUNCTION pg_temp.register_ceiling_sqlstate(p text) RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.register_bundle(p);
+                 RETURN 'ok';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("ceiling probe is creatable");
+
+        // Act
+        let sqlstate = Spi::get_one_with_args::<String>(
+            "SELECT pg_temp.register_ceiling_sqlstate($1)",
+            &[bundle.path().into()],
+        )
+        .expect("ceiling probe executes")
+        .expect("probe reports a SQLSTATE");
+
+        // Assert: the scan aborts with the invalid-parameter class (22023) the
+        // sync engine maps a discovery failure to.
+        assert_eq!(
+            sqlstate, "22023",
+            "a bundle file over max_file_bytes must abort the sync with 22023",
+        );
+
+        // Assert: the aborted register left no bundle row behind (the probe's
+        // subtransaction rolled the speculative insert back).
+        let leaked = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.bundles WHERE path LIKE $1",
+            &[format!("%{}%", bundle.root.file_name().unwrap().to_str().unwrap()).into()],
+        )
+        .expect("leak query executes")
+        .expect("count is not NULL");
+        assert_eq!(leaked, 0, "an aborted register persists no bundle row");
+    }
+
+    // ---------------------------------------------------------------------
+    // Upgrade smoke: default_version and the shipped upgrade script.
+    // ---------------------------------------------------------------------
+
+    #[pg_test]
+    fn control_default_version_matches_crate_and_upgrade_script_is_present() {
+        // A real ALTER EXTENSION UPDATE cannot be exercised in-process: the
+        // pgrx test harness installs the latest schema directly rather than
+        // stepping through prior versions. Instead assert the two release-hygiene
+        // invariants that make an upgrade installable: the control file's
+        // default_version equals the crate version, and the matching
+        // prior->current upgrade script ships and is non-empty.
+        let crate_version = env!("CARGO_PKG_VERSION");
+
+        // Arrange: read the shipped control file next to the crate manifest.
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let control = fs::read_to_string(manifest_dir.join("pgokf.control"))
+            .expect("control file is readable");
+
+        // Assert: default_version tracks the crate version exactly.
+        let declared = control
+            .lines()
+            .find_map(|line| {
+                let (key, value) = line.split_once('=')?;
+                (key.trim() == "default_version")
+                    .then(|| value.trim().trim_matches('\'').to_owned())
+            })
+            .expect("control file declares default_version");
+        assert_eq!(
+            declared, crate_version,
+            "control default_version must match the crate version",
+        );
+
+        // Assert: the runtime version() function agrees with the control file,
+        // tying the installed extension to the declared release version.
+        let runtime_version = Spi::get_one::<String>("SELECT pgokf.version()")
+            .expect("version query executes")
+            .expect("version is not NULL");
+        assert_eq!(
+            runtime_version, declared,
+            "the installed extension reports the declared default_version",
+        );
+
+        // Assert: the prior->current upgrade script exists and is non-empty, so
+        // an existing install can be stepped up to this release.
+        let upgrade_script = manifest_dir
+            .join("sql")
+            .join(format!("pgokf--0.1.2--{crate_version}.sql"));
+        let metadata =
+            fs::metadata(&upgrade_script).expect("the current upgrade script ships on disk");
+        assert!(
+            metadata.len() > 0,
+            "the upgrade script {} must be non-empty",
+            upgrade_script.display(),
         );
     }
 }
