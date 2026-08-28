@@ -310,7 +310,7 @@ size hardware and set expectations; do not extrapolate other numbers from them.
 | ----------- | -------- |
 | Selective / point / tag / type recall | Sub-millisecond to roughly ~10 ms, holding up to ~10M concepts (index-backed). |
 | Broad "rank everything" FTS | Scales **linearly** with corpus size: ≈322 ms @ 1M → ≈2.4 s @ 10M → ≈29 s @ 50M. |
-| Broad query with a benchmarked BM25 adapter | Top-k stays flat at ≈10–15 ms even on broad queries (30–194× faster on the broad case). |
+| Broad query on the optional `bm25` backend | Block-Max WAND top-k pruning keeps broad queries roughly flat instead of scaling linearly; requires ParadeDB `pg_search` installed by the operator. |
 
 Reading these:
 
@@ -323,11 +323,16 @@ Reading these:
   phrase" query is the expensive case, reaching seconds at tens of millions of
   concepts. Two levers: **pre-filter** so fewer rows are ranked, and keep the
   `body_tsv` GIN index resident in RAM (below).
-- **BM25 is a benchmarked *future* adapter, not a shipped function.** The flat
-  top-k numbers above come from evaluating an external BM25 backend
-  (ParadeDB `pg_search`); it is not part of `pgokf` today. See
-  [bm25-research.md](bm25-research.md). Do not document or call a BM25 function —
-  none exists in this release.
+- **BM25 is a shipped *optional* backend, not a standalone function.** Setting
+  the durable `search_backend` key to `bm25` routes the same
+  `pgokf.concept_search` through a ParadeDB `pg_search` index at runtime; it
+  keeps broad top-k queries roughly flat where native ranking grows linearly.
+  It requires the operator to install `pg_search` separately — `pgokf` takes no
+  hard dependency on it — and search **falls back to native FTS with a warning**
+  when `pg_search` or its index is absent. There is no `bm25()` function; it is a
+  backend mode selected by configuration. See
+  [Enabling the BM25 backend](search-guide.md#enabling-the-bm25-backend) and the
+  [`search_backend` key](configuration.md#search-backend-search_backend).
 
 For horizontal read scaling, add streaming replicas and route searches to them —
 see [deployment-topologies.md](deployment-topologies.md#scaling-reads-with-replicas).

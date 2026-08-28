@@ -126,9 +126,14 @@ ORDER BY s.rank DESC, s.concept_id ASC;
 Note the result key is `concept_id` (not `id`) and there is **no** `tags`
 column — join `pgokf.concepts` to get tags/description.
 
-> Large-scale broad-corpus ranking (BM25) is a **documented future option** in
-> `docs/bm25-research.md`, NOT a shipped function. There is no `bm25()` or
-> `search_backend` function — `concept_search` is the only search entry point.
+> Large-scale broad-corpus ranking (BM25) is an **optional, config-selected
+> backend**, not a standalone function. Set the durable `search_backend` key to
+> `bm25` (via `pgokf.set_config`) to route `concept_search` through a ParadeDB
+> `pg_search` index — the operator must install `pg_search` separately, and it
+> falls back to native FTS with a warning when absent. There is no `bm25()`
+> function; `search_backend` is a config key, and `concept_search` remains the
+> only search entry point. See `docs/search-guide.md` (Enabling the BM25
+> backend) and `docs/configuration.md` (`search_backend`).
 
 ## 4. Walk the link graph
 

@@ -195,9 +195,14 @@ snippet, and searches only enabled bundles. Results add the concept ID as a
 deterministic tiebreaker, so equal-rank hits order stably. Ranks are comparable
 only within one query; callers order by them rather than persisting them.
 
-An optional future adapter could use ParadeDB `pg_search`/BM25 while returning
-the same logical result shape; ParadeDB must never be a transitive requirement of
-`CREATE EXTENSION pgokf`. See [BM25 research](bm25-research.md).
+An optional backend selected by the durable `search_backend` key routes the same
+`pgokf.concept_search` through a ParadeDB `pg_search`/BM25 index at runtime,
+returning the identical logical result shape. It is opt-in and requires the
+operator to install `pg_search` separately — `CREATE EXTENSION pgokf` takes no
+hard dependency on ParadeDB, and search falls back to native FTS with a warning
+when `pg_search` is absent. See
+[Enabling the BM25 backend](search-guide.md#enabling-the-bm25-backend) and the
+[`search_backend` key](configuration.md#search-backend-search_backend).
 
 ### Link graph (OKF v0.2)
 

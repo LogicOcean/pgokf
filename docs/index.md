@@ -25,8 +25,10 @@ needs no external file store.
 - **Extension name and SQL schema:** `pgokf`
 - **Supported PostgreSQL:** 15, 16, 17, 18, 19
 - **Built with:** Rust (edition 2024) and [pgrx](https://github.com/pgcentralfoundation/pgrx) 0.19
-- **Search backend:** native PostgreSQL FTS only (a BM25 adapter is
-  [researched but not shipped](bm25-research.md))
+- **Search backend:** native PostgreSQL FTS by default; an optional
+  `search_backend=bm25` mode routes search through ParadeDB `pg_search` when the
+  operator installs it (see the
+  [search guide](search-guide.md#enabling-the-bm25-backend))
 
 ---
 
@@ -118,7 +120,6 @@ your first real bundle — start with [Getting started](getting-started.md).
 | ---- | -------------- |
 | [Architecture](architecture.md) | Parser, sync engine, projection seams, and the search path. |
 | [Benchmarks](benchmarks.md) | Measured recall and full-text scaling to tens of millions of concepts. |
-| [BM25 research](bm25-research.md) | Notes on an optional *future* BM25 top-k adapter — not shipped. |
 | [Packaging](packaging.md) | Building and distributing the extension across PostgreSQL 15–19. |
 | [API stability](api-stability.md) | What the SQL surface guarantees and how it will evolve. |
 

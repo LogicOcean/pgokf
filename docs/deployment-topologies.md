@@ -180,7 +180,7 @@ mount availability. The **mountless** variant of the enterprise tier removes the
 mount entirely.
 
 Instead of the backend reading files, a small standalone companion —
-[`pgokf-ingest`](../crates/pgokf-ingest) — reads the object store over the
+[`pgokf-ingest`](https://github.com/LogicOcean/pgokf/tree/main/crates/pgokf-ingest) — reads the object store over the
 network and streams the bytes into PostgreSQL through a new writer-tier
 function:
 

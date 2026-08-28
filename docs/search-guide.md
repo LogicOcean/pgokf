@@ -7,10 +7,10 @@ from thousands to tens of millions of concepts.
 
 To *author* the concepts being searched, see the
 [authoring guide](okf-authoring.md). For exact signatures, result columns, and
-SQLSTATEs, see the [SQL API reference](sql-api.md). For the ranking research and
-the optional BM25 backend, see [BM25 research](bm25-research.md) and
-[benchmarks](benchmarks.md); the enable steps are in
-[Enabling the BM25 backend](#enabling-the-bm25-backend) below.
+SQLSTATEs, see the [SQL API reference](sql-api.md). For measured native FTS
+performance see [benchmarks](benchmarks.md); for the optional BM25 backend and
+how to turn it on, see [Enabling the BM25 backend](#enabling-the-bm25-backend)
+below.
 
 All of the output below is **real**, captured from a live PostgreSQL 18 cluster
 with the extension's `templates/` assembled into one bundle.
@@ -436,11 +436,11 @@ relevance-ranked** queries — where a common term matches millions of rows and
 native ranking scales linearly (see
 [Selective vs. broad queries](#selective-vs-broad-queries)) — `pgokf` can
 instead run **BM25 top-k** over a ParadeDB `pg_search` index. Block-Max WAND
-pruning keeps broad queries roughly **flat** where native grows linearly: the
-project's research measured a **30–194× speedup on broad queries** (native stays
-the winner for selective ones). The analysis and version matrix are in
-[BM25 research](bm25-research.md); native's measured numbers are in
-[benchmarks](benchmarks.md).
+pruning keeps broad queries roughly **flat** where native grows linearly, while
+native stays the winner for selective ones. The `pg_search` version matrix and
+the `search_backend` key are covered in
+[configuration](configuration.md#search-backend-search_backend); native's
+measured numbers are in [benchmarks](benchmarks.md).
 
 The BM25 backend is **opt-in** and rides on an external extension, so it is off
 until you enable it deliberately.
@@ -545,6 +545,7 @@ Keep broad queries fast on native, when you are not on BM25, with the
 - [Configuration](configuration.md) — `default_text_search_config` and the GUC
   ceilings (`pgokf.max_graph_hops`, and more).
 - [Benchmarks](benchmarks.md) — measured FTS / filter / graph performance.
-- [BM25 research](bm25-research.md) — the `pg_search` top-k backend analysis.
+- [Configuration](configuration.md#search-backend-search_backend) — the
+  `search_backend` key and the `pg_search` version matrix for the BM25 backend.
 - Example queries: [`examples/queries/search.sql`](https://github.com/LogicOcean/pgokf/blob/main/examples/queries/search.sql),
   [`examples/queries/graph.sql`](https://github.com/LogicOcean/pgokf/blob/main/examples/queries/graph.sql).

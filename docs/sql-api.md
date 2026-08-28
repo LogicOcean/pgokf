@@ -111,7 +111,7 @@ Register or resynchronize a bundle from **in-memory content** rather than a
 filesystem path — the *mountless* ingestion path. `VOLATILE`, `SECURITY
 DEFINER`, **requires `pgokf_writer`**. The extension performs no network or
 filesystem I/O here: a companion process (see the [`pgokf-ingest`
-crate](deployment-topologies.md#mountless-object-store-ingestion)) reads an
+crate](deployment-topologies.md#enterprise-tier-mountless-the-ingestion-companion)) reads an
 object store and streams the collected `(path, bytes)` pairs into this function.
 
 | Parameter | Type | Default | Meaning |

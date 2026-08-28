@@ -54,7 +54,6 @@ nav:
   - Troubleshooting: troubleshooting.md
   - API Stability: api-stability.md
   - Benchmarks: benchmarks.md
-  - BM25 Research: bm25-research.md
   - Packaging: packaging.md
   - Release Checklist: release-checklist.md
   - FAQ: faq.md

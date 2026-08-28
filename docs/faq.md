@@ -193,9 +193,14 @@ weight A, tags/type/description weight B, body weight D. It returns a
 `ts_headline` snippet per hit. The `tsvector` is indexed with GIN
 (`concepts_body_tsv_gin`).
 
-BM25 is a **benchmarked future adapter**, not a shipped function. The research
-(a ParadeDB `pg_search` top-k adapter) lives in
-[BM25 research](bm25-research.md); there is no `pgokf` BM25 function today.
+BM25 is available as an **optional, config-selected backend**, not a separate
+function. Setting the durable `search_backend` key to `bm25` routes the *same*
+`pgokf.concept_search` through a ParadeDB `pg_search` index — the operator must
+install `pg_search` separately, and search falls back to native FTS with a
+warning when it is absent. There is no standalone `pgokf` `bm25()` function; it
+is a backend mode selected by configuration. See
+[Enabling the BM25 backend](search-guide.md#enabling-the-bm25-backend) and the
+[`search_backend` key](configuration.md#search-backend-search_backend).
 
 ### When does native FTS become a problem, and what does BM25 buy?
 
@@ -207,13 +212,16 @@ Measured on this project:
 - **Broad "rank everything" full-text queries** scale **linearly** with corpus
   size: about **322 ms at 1M**, **2.4 s at 10M**, and **29 s at 50M** concepts,
   because `ts_rank_cd` must score every match.
-- The benchmarked **BM25 top-k adapter kept broad queries roughly flat at
-  ~10-15 ms** (a 30-194x speedup) by pruning with WAND-style top-k instead of
-  scoring the whole match set.
 
-So native FTS is the right default for selective queries and moderate corpora;
-the future BM25 adapter targets broad top-k queries over very large corpora. See
-[Benchmarks](benchmarks.md) and [Search guide](search-guide.md).
+For broad top-k queries over very large corpora, the optional `bm25` backend
+(`search_backend=bm25`, backed by ParadeDB `pg_search`) prunes with Block-Max
+WAND top-k instead of scoring the whole match set, so broad queries stay roughly
+flat where native ranking grows linearly. It requires the operator to install
+`pg_search` and falls back to native FTS when it is absent. So native FTS is the
+right default for selective queries and moderate corpora; enable the `bm25`
+backend when you need broad top-k at scale. See
+[Enabling the BM25 backend](search-guide.md#enabling-the-bm25-backend),
+[Benchmarks](benchmarks.md), and the [Search guide](search-guide.md).
 
 ### How do I search within one bundle, or limit results?
 

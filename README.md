@@ -53,7 +53,6 @@ ingested concepts.
 | [docs/glossary.md](docs/glossary.md) | Definitions for OKF and pgokf terms (bundle, concept, provenance, trust tier, projection) |
 | [docs/api-stability.md](docs/api-stability.md) | The public API contract, SemVer policy, and deprecation process |
 | [docs/benchmarks.md](docs/benchmarks.md) | Reproducible YAML vs PostgreSQL vs Parquet performance measurements |
-| [docs/bm25-research.md](docs/bm25-research.md) | Research notes on an optional future BM25 adapter |
 | [docs/packaging.md](docs/packaging.md) | Building `.deb` / `.rpm` / PGXN / Docker / Homebrew artifacts |
 | [docs/release-checklist.md](docs/release-checklist.md) | The ordered gates for cutting a release |
 

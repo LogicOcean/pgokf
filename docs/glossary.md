@@ -286,15 +286,20 @@ respecting weights), and `ts_headline` produces the snippet returned as
 ### BM25
 
 Best Match 25, a ranking function used by inverted-index search engines. In
-pgokf, BM25 is a **benchmarked future adapter** (a ParadeDB `pg_search`
-integration), **not a shipped function**. See [BM25 research](bm25-research.md).
+pgokf, BM25 is an **optional, config-selected search backend** — setting the
+durable `search_backend` key to `bm25` routes `pgokf.concept_search` through a
+ParadeDB `pg_search` index when the operator has installed it. It is a backend
+mode, **not a standalone function** (there is no `bm25()` function), and it
+falls back to native FTS when `pg_search` is absent. See
+[Enabling the BM25 backend](search-guide.md#enabling-the-bm25-backend).
 
 ### WAND top-k
 
 Weak-AND, a dynamic-pruning algorithm for retrieving the top *k* documents
-without scoring the entire match set. It is the mechanism that keeps the
-benchmarked BM25 adapter roughly flat (~10-15 ms) on broad queries where native
-`ts_rank_cd` scales linearly. See [Benchmarks](benchmarks.md).
+without scoring the entire match set. It is the mechanism the optional `bm25`
+search backend uses (via ParadeDB `pg_search`) to keep broad queries roughly
+flat where native `ts_rank_cd` scales linearly. See
+[Enabling the BM25 backend](search-guide.md#enabling-the-bm25-backend).
 
 ---
 
