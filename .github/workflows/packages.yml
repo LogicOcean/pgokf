@@ -292,15 +292,23 @@ jobs:
           cid=$(docker run -d -e POSTGRES_PASSWORD=postgres \
             -v "$PWD/examples/sample-bundle:/bundles/sample:ro" \
             "ghcr.io/logicocean/pgokf:${VER}-pg${{ matrix.pg }}")
-          for i in $(seq 1 30); do
-            if docker exec "$cid" pg_isready -U postgres >/dev/null 2>&1; then break; fi
+          # Wait until the extension is actually created at the expected version,
+          # not merely until the socket accepts connections. The postgres image
+          # runs /docker-entrypoint-initdb.d (CREATE EXTENSION) during init, and a
+          # slow container can leave a window where pg_isready is up but the init
+          # script has not finished — polling only pg_isready then querying once
+          # races and flakes. Poll the real condition with an explicit timeout so
+          # a slow leg fails loudly instead of reading an empty version.
+          ready=""
+          for i in $(seq 1 60); do
+            got=$(docker exec "$cid" psql -U postgres -tAc \
+              "SELECT extversion FROM pg_extension WHERE extname='pgokf'" 2>/dev/null \
+              | tr -d '[:space:]' || true)
+            if [ "$got" = "$VER" ]; then ready=1; break; fi
             sleep 2
           done
-          # The extension is present at exactly the released version.
-          docker exec "$cid" psql -U postgres -v ON_ERROR_STOP=1 \
-            -tAc "SELECT extversion FROM pg_extension WHERE extname='pgokf';" \
-            | grep -qx "$VER" \
-            || { echo "::error::pgokf extversion is not ${VER}"; docker logs "$cid"; docker rm -f "$cid"; exit 1; }
+          [ -n "$ready" ] \
+            || { echo "::error::pgokf extension not present at ${VER} after 120s"; docker logs "$cid"; docker rm -f "$cid"; exit 1; }
           # Register the mounted bundle and materialize its concepts. Call the
           # function in the FROM clause, not as (register_bundle(...)).*: the
           # composite-star form re-evaluates the volatile function once per
