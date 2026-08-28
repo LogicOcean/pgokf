@@ -21,28 +21,71 @@ signals.
 
 ### Catalog health
 
-`list_bundles()` is the operator's dashboard query. `last_synced_at` going stale
-is the first sign a scheduled refresh has stopped running.
+`pgokf.health()` is the one-call liveness/readiness probe (reader-level). It
+returns a `jsonb` document you can wire straight into a load balancer or
+uptime check; `in_recovery` (`pg_is_in_recovery()`) lets you route reads to a
+replica.
 
 ```sql
-SELECT id, name, okf_version, file_count, enabled, last_synced_at
-  FROM pgokf.list_bundles()
- ORDER BY last_synced_at NULLS FIRST;
+SELECT jsonb_pretty(pgokf.health());
+-- { "ok": true, "roles_ok": true, "config_ok": true, "bm25_ready": false,
+--   "in_recovery": false, "bundle_count": 1, "concept_count": 4,
+--   "search_backend": "native" }
 ```
 
-Cross-check the projected corpus against what each bundle claims:
+`pgokf.catalog_stats()` is the per-bundle dashboard query. It folds the counts
+you used to assemble by hand — indexed concepts, links, resolved links — plus
+sync recency and a 24-hour `is_stale` flag into one row per bundle. A stale
+bundle is the first sign a scheduled refresh has stopped running.
 
 ```sql
--- concepts actually indexed, per bundle
-SELECT bundle_id, count(*) AS concepts
-  FROM pgokf.concepts
- GROUP BY bundle_id
- ORDER BY bundle_id;
+SELECT bundle_id, name, enabled, indexed_concepts,
+       link_count, resolved_link_count, sync_age, is_stale
+  FROM pgokf.catalog_stats()
+ ORDER BY is_stale DESC, sync_age DESC NULLS FIRST;
+```
 
--- a mismatch between file_count and indexed concepts is worth investigating
-SELECT b.id, b.name, b.file_count,
-       (SELECT count(*) FROM pgokf.concepts c WHERE c.bundle_id = b.id) AS indexed
-  FROM pgokf.bundles b;
+`list_bundles()` remains available for the raw bundle rows.
+
+### Audit log
+
+Every successful `register` / `refresh` / `register_bundle_content` sync and
+every `unregister` appends one row to `pgokf_private.sync_log`, committed in the
+operation's own transaction — so a logged row always means the operation
+committed (a failed, rolled-back sync leaves none). Read it through the
+reader-level `pgokf.list_sync_log(bundle_id, max_rows)`:
+
+```sql
+-- recent activity across all bundles
+SELECT id, op, actor, added, updated, removed, total, synced_at
+  FROM pgokf.list_sync_log(NULL, 50);
+
+-- just one bundle's history
+SELECT op, total, synced_at FROM pgokf.list_sync_log(1);
+```
+
+History is bounded by the durable `sync_log_retention_days` policy (new in
+0.1.5, now **active**): after each append, rows older than
+`now() - sync_log_retention_days` are pruned in the same transaction. Set it to
+`0` to keep history indefinitely. See [configuration.md](configuration.md).
+
+For push-based monitoring, set the `notify_channel` policy and a `LISTEN`
+client is woken on every sync with a `{bundle_id, op, added, updated, removed,
+total}` payload.
+
+### Stale concepts
+
+`pgokf.stale_concepts(bundle_id, as_of)` surfaces concepts whose OKF
+`stale_after` instant has passed — the lifecycle signal for content that needs
+review or regeneration.
+
+```sql
+-- content already stale now
+SELECT bundle_id, concept_id, path, stale_after FROM pgokf.stale_concepts();
+
+-- content that will be stale by month end (early-warning report)
+SELECT concept_id, stale_after
+  FROM pgokf.stale_concepts(NULL, date_trunc('month', now()) + interval '1 month');
 ```
 
 ### Search-index residency
@@ -75,8 +118,11 @@ SELECT relname,
 
 ### What to alert on
 
-- `last_synced_at` older than your refresh interval + margin → refresh pipeline
-  broken.
+- `pgokf.health() ->> 'ok'` not `true`, or `catalog_stats().is_stale` set on a
+  bundle → refresh pipeline broken or roles/config drifted. `last_synced_at`
+  older than your refresh interval + margin is the same signal at the row level.
+- `pgokf.stale_concepts()` returning rows → content past its OKF `stale_after`
+  needs review or regeneration.
 - GIN index `hit_pct` trending down on a growing corpus → broad-search latency
   will climb; add RAM, pre-filter, or adopt the future BM25 adapter.
 - Sync errors in the PostgreSQL log (SQLSTATE `22023` invalid parameter, `23505`

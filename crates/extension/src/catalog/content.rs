@@ -223,7 +223,7 @@ fn register_bundle_content_impl(
         None => insert_content_bundle(&path_key, name, options)?,
     };
 
-    let report = sync::run_bundle_sync(bundle_id, &source)?;
+    let report = sync::run_bundle_sync(bundle_id, &source, sync::SyncOp::Content, &path_key)?;
     Ok((bundle_id, path_key, report))
 }
 

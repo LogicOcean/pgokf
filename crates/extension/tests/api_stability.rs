@@ -37,7 +37,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The 16 stable public functions, as `(name, argument-type list)`. The pair
+/// The 21 stable public functions, as `(name, argument-type list)`. The pair
 /// renders to the exact `COMMENT ON FUNCTION pgokf.<name>(<args>)` prefix that
 /// the hardening blocks emit.
 const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
@@ -45,6 +45,7 @@ const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
     ("register_bundle_content", "text, text[], bytea[], jsonb"),
     ("refresh_bundle", "bigint"),
     ("unregister_bundle", "bigint"),
+    ("set_bundle_enabled", "bigint, boolean"),
     ("list_bundles", ""),
     ("bundle_info", "bigint"),
     ("concept_search", "text, bigint, integer"),
@@ -52,6 +53,10 @@ const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
     ("set_config", "text, jsonb"),
     ("reset_config", "text"),
     ("get_config", ""),
+    ("list_sync_log", "bigint, integer"),
+    ("catalog_stats", ""),
+    ("health", ""),
+    ("stale_concepts", "bigint, timestamptz"),
     ("export_parquet", "bigint, text"),
     ("get_concept_source", "bigint, text"),
     ("export_sources", "bigint, text"),
@@ -59,18 +64,22 @@ const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
     ("version", ""),
 ];
 
-/// The 5 stable public composite types.
+/// The 8 stable public composite types.
 const PUBLIC_TYPES: &[&str] = &[
     "bundle_sync_result",
     "concept_search_result",
     "concept_neighbor",
     "bundle_info",
     "export_result",
+    "sync_log_entry",
+    "catalog_stat",
+    "stale_concept",
 ];
 
-/// The 9 catalog tables, as fully-qualified `schema.table` identifiers. Eight
-/// are public (`pgokf`); the singleton policy row lives in the
-/// administrator-only `pgokf_private` schema and is documented all the same.
+/// The 10 catalog tables, as fully-qualified `schema.table` identifiers. Eight
+/// are public (`pgokf`); the singleton policy row and the sync-history log live
+/// in the administrator-only `pgokf_private` schema and are documented all the
+/// same.
 const CATALOG_TABLES: &[&str] = &[
     "pgokf.bundles",
     "pgokf.concepts",
@@ -81,6 +90,7 @@ const CATALOG_TABLES: &[&str] = &[
     "pgokf.concept_provenance_source",
     "pgokf.concept_source",
     "pgokf_private.config",
+    "pgokf_private.sync_log",
 ];
 
 /// The three public API roles created by `sql/bootstrap.sql`

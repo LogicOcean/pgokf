@@ -23,11 +23,12 @@
 //! surface small while still letting each key carry its natural shape — a
 //! `jsonb` array of strings for `allowed_roots`/`default_exclude`, a boolean
 //! for `default_strict`/`store_source`, an integer for
-//! `sync_log_retention_days`, and a string for `default_text_search_config`
-//! and `search_backend`. Every value is validated and
-//! coerced per key ([`coerce`]); an unknown key or a value of the wrong shape
-//! or domain is rejected with SQLSTATE `22023`. `pgokf.get_config()` is a
-//! reader-level projection returning the effective policy as `jsonb`.
+//! `sync_log_retention_days`, and a string for `default_text_search_config`,
+//! `search_backend`, `notify_channel` (a `LISTEN`/`NOTIFY` channel, or empty to
+//! disable), and `okf_version_policy` (`warn`/`reject`). Every value is
+//! validated and coerced per key ([`coerce`]); an unknown key or a value of the
+//! wrong shape or domain is rejected with SQLSTATE `22023`. `pgokf.get_config()`
+//! is a reader-level projection returning the effective policy as `jsonb`.
 //!
 //! # Enforcement seam
 //!
@@ -63,6 +64,11 @@ enum ConfigKey {
     StoreSource,
     /// Ranked-search execution backend (`native` FTS or optional `bm25`).
     SearchBackend,
+    /// `LISTEN`/`NOTIFY` channel a successful sync announces on; empty disables.
+    NotifyChannel,
+    /// How sync treats a declared-but-unsupported bundle `okf_version`
+    /// (`warn` or `reject`).
+    OkfVersionPolicy,
 }
 
 impl ConfigKey {
@@ -76,6 +82,8 @@ impl ConfigKey {
             Self::DefaultExclude => "default_exclude",
             Self::StoreSource => "store_source",
             Self::SearchBackend => "search_backend",
+            Self::NotifyChannel => "notify_channel",
+            Self::OkfVersionPolicy => "okf_version_policy",
         }
     }
 
@@ -90,6 +98,8 @@ impl ConfigKey {
             "default_exclude" => Ok(Self::DefaultExclude),
             "store_source" => Ok(Self::StoreSource),
             "search_backend" => Ok(Self::SearchBackend),
+            "notify_channel" => Ok(Self::NotifyChannel),
+            "okf_version_policy" => Ok(Self::OkfVersionPolicy),
             other => Err(CatalogError::invalid_parameter(
                 format!("unknown configuration key: {other}"),
                 Path::new(""),
@@ -108,7 +118,18 @@ enum ConfigValue {
     DefaultExclude(Vec<String>),
     StoreSource(bool),
     SearchBackend(String),
+    NotifyChannel(String),
+    OkfVersionPolicy(String),
 }
+
+/// The two accepted values of the `okf_version_policy` key.
+const OKF_VERSION_POLICY_WARN: &str = "warn";
+const OKF_VERSION_POLICY_REJECT: &str = "reject";
+
+/// Longest accepted `notify_channel` identifier. A `PostgreSQL` identifier is
+/// capped at 63 bytes (`NAMEDATALEN - 1`); a channel name is validated to the
+/// same bound so it names a legal, un-truncated `LISTEN`/`NOTIFY` channel.
+const MAX_NOTIFY_CHANNEL_LEN: usize = 63;
 
 fn spi_error(context: &str, error: &pgrx::spi::Error) -> CatalogError {
     CatalogError::internal(format!("{context}: {error}"), Path::new(""))
@@ -197,6 +218,61 @@ fn validate_search_backend(name: &str) -> Result<(), CatalogError> {
     }
 }
 
+/// Validate `notify_channel`: either empty (the disabled default) or a safe
+/// `LISTEN`/`NOTIFY` channel identifier.
+///
+/// A non-empty value must be a conservative SQL identifier — a leading letter
+/// or underscore followed by letters, digits, or underscores, no longer than
+/// [`MAX_NOTIFY_CHANNEL_LEN`] bytes. The value is always bound as a parameter to
+/// `pg_notify` (never interpolated), so this validation is defense in depth
+/// against a surprising channel name rather than the sole injection barrier.
+fn validate_notify_channel(channel: &str) -> Result<(), CatalogError> {
+    if channel.is_empty() {
+        return Ok(());
+    }
+    if channel.len() > MAX_NOTIFY_CHANNEL_LEN {
+        return Err(CatalogError::invalid_parameter(
+            format!(
+                "notify_channel must be at most {MAX_NOTIFY_CHANNEL_LEN} bytes, got {}",
+                channel.len()
+            ),
+            Path::new(""),
+        ));
+    }
+    let mut characters = channel.chars();
+    let valid_start = characters
+        .next()
+        .is_some_and(|first| first == '_' || first.is_ascii_alphabetic());
+    let valid_rest =
+        characters.all(|character| character == '_' || character.is_ascii_alphanumeric());
+    if valid_start && valid_rest {
+        Ok(())
+    } else {
+        Err(CatalogError::invalid_parameter(
+            format!(
+                "notify_channel must be a safe identifier \
+                 (letters, digits, underscore; leading letter or underscore), got {channel}"
+            ),
+            Path::new(""),
+        ))
+    }
+}
+
+/// Validate `okf_version_policy`: it must be `warn` or `reject`.
+fn validate_okf_version_policy(policy: &str) -> Result<(), CatalogError> {
+    if matches!(policy, OKF_VERSION_POLICY_WARN | OKF_VERSION_POLICY_REJECT) {
+        Ok(())
+    } else {
+        Err(CatalogError::invalid_parameter(
+            format!(
+                "okf_version_policy must be one of '{OKF_VERSION_POLICY_WARN}', \
+                 '{OKF_VERSION_POLICY_REJECT}', got {policy}"
+            ),
+            Path::new(""),
+        ))
+    }
+}
+
 /// Coerce and validate a `jsonb` value for `key` into a typed [`ConfigValue`].
 ///
 /// Consumes the wrapper so no argument is passed by value only to be borrowed,
@@ -252,6 +328,16 @@ fn coerce(key: ConfigKey, value: pgrx::JsonB) -> Result<ConfigValue, CatalogErro
             let name = json.as_str().ok_or_else(|| type_error(key, "a string"))?;
             validate_search_backend(name)?;
             Ok(ConfigValue::SearchBackend(name.to_owned()))
+        }
+        ConfigKey::NotifyChannel => {
+            let channel = json.as_str().ok_or_else(|| type_error(key, "a string"))?;
+            validate_notify_channel(channel)?;
+            Ok(ConfigValue::NotifyChannel(channel.to_owned()))
+        }
+        ConfigKey::OkfVersionPolicy => {
+            let policy = json.as_str().ok_or_else(|| type_error(key, "a string"))?;
+            validate_okf_version_policy(policy)?;
+            Ok(ConfigValue::OkfVersionPolicy(policy.to_owned()))
         }
     }
 }
@@ -332,6 +418,14 @@ fn persist(value: &ConfigValue) -> Result<(), CatalogError> {
             "UPDATE pgokf_private.config SET search_backend = $1 WHERE singleton",
             &[name.clone().into()],
         ),
+        ConfigValue::NotifyChannel(channel) => Spi::run_with_args(
+            "UPDATE pgokf_private.config SET notify_channel = $1 WHERE singleton",
+            &[channel.clone().into()],
+        ),
+        ConfigValue::OkfVersionPolicy(policy) => Spi::run_with_args(
+            "UPDATE pgokf_private.config SET okf_version_policy = $1 WHERE singleton",
+            &[policy.clone().into()],
+        ),
     }
     .map_err(|error| spi_error("failed to persist configuration", &error))
 }
@@ -360,6 +454,12 @@ fn reset_key(key: ConfigKey) -> Result<(), CatalogError> {
         ConfigKey::SearchBackend => {
             "UPDATE pgokf_private.config SET search_backend = DEFAULT WHERE singleton"
         }
+        ConfigKey::NotifyChannel => {
+            "UPDATE pgokf_private.config SET notify_channel = DEFAULT WHERE singleton"
+        }
+        ConfigKey::OkfVersionPolicy => {
+            "UPDATE pgokf_private.config SET okf_version_policy = DEFAULT WHERE singleton"
+        }
     };
     Spi::run(statement).map_err(|error| spi_error("failed to reset configuration key", &error))
 }
@@ -374,7 +474,9 @@ fn reset_all() -> Result<(), CatalogError> {
              sync_log_retention_days = DEFAULT, \
              default_exclude = DEFAULT, \
              store_source = DEFAULT, \
-             search_backend = DEFAULT \
+             search_backend = DEFAULT, \
+             notify_channel = DEFAULT, \
+             okf_version_policy = DEFAULT \
          WHERE singleton",
     )
     .map_err(|error| spi_error("failed to reset configuration", &error))
@@ -408,7 +510,9 @@ fn get_config_impl() -> Result<pgrx::JsonB, CatalogError> {
              'sync_log_retention_days', pg_catalog.to_jsonb(sync_log_retention_days),
              'default_exclude', pg_catalog.to_jsonb(default_exclude),
              'store_source', pg_catalog.to_jsonb(store_source),
-             'search_backend', pg_catalog.to_jsonb(search_backend))
+             'search_backend', pg_catalog.to_jsonb(search_backend),
+             'notify_channel', pg_catalog.to_jsonb(notify_channel),
+             'okf_version_policy', pg_catalog.to_jsonb(okf_version_policy))
          FROM pgokf_private.config
          WHERE singleton",
     )
@@ -455,6 +559,23 @@ pub fn enforce_allowed_roots(requested_path: &str) -> Result<(), CatalogError> {
     Ok(())
 }
 
+/// The durable `sync_log` retention window, in days.
+///
+/// Read from the singleton config row for the audit path that does not go
+/// through [`sync_defaults`] (bundle unregistration). `0` means keep history
+/// indefinitely. Intended for the `SECURITY DEFINER` admin path only (it reads
+/// the admin-only config table).
+///
+/// # Errors
+///
+/// Returns a [`CatalogError`] when the configuration row cannot be read or is
+/// missing.
+pub fn sync_log_retention_days() -> Result<i32, CatalogError> {
+    Spi::get_one::<i32>("SELECT sync_log_retention_days FROM pgokf_private.config WHERE singleton")
+        .map_err(|error| spi_error("failed to read sync_log_retention_days", &error))?
+        .ok_or_else(|| CatalogError::internal("sync_log_retention_days is missing", Path::new("")))
+}
+
 /// The durable, sync-time defaults consumed by the register/refresh engine.
 ///
 /// Read once per sync from the singleton `pgokf_private.config` row through the
@@ -475,6 +596,15 @@ pub struct SyncDefaults {
     /// `pgokf.concept_source` (small self-contained tier) or leaves the source
     /// in its external store (enterprise data-lake tier, the default).
     pub store_source: bool,
+    /// Retention window in days for `pgokf_private.sync_log`; `0` keeps history
+    /// indefinitely. Consumed by the audit prune at the tail of every sync.
+    pub sync_log_retention_days: i32,
+    /// `LISTEN`/`NOTIFY` channel a successful sync announces on, or `None` when
+    /// the durable `notify_channel` key is empty (the disabled default).
+    pub notify_channel: Option<String>,
+    /// How a declared-but-unsupported bundle `okf_version` is handled: `warn`
+    /// (log and index anyway) or `reject` (abort the sync).
+    pub okf_version_policy: String,
 }
 
 /// Read the durable sync-time defaults from the singleton config row.
@@ -492,7 +622,8 @@ pub fn sync_defaults() -> Result<SyncDefaults, CatalogError> {
     Spi::connect(|client| {
         let table = client
             .select(
-                "SELECT default_strict, default_exclude, default_text_search_config, store_source
+                "SELECT default_strict, default_exclude, default_text_search_config, store_source,
+                        sync_log_retention_days, notify_channel, okf_version_policy
                  FROM pgokf_private.config
                  WHERE singleton",
                 Some(1),
@@ -523,11 +654,30 @@ pub fn sync_defaults() -> Result<SyncDefaults, CatalogError> {
             .get::<bool>(4)
             .map_err(|error| spi_error("failed to read store_source", &error))?
             .ok_or_else(|| CatalogError::internal("store_source is NULL", Path::new("")))?;
+        let sync_log_retention_days = row
+            .get::<i32>(5)
+            .map_err(|error| spi_error("failed to read sync_log_retention_days", &error))?
+            .ok_or_else(|| {
+                CatalogError::internal("sync_log_retention_days is NULL", Path::new(""))
+            })?;
+        // An empty channel string is the disabled default; normalize it to None
+        // so callers branch on presence rather than emptiness.
+        let notify_channel = row
+            .get::<String>(6)
+            .map_err(|error| spi_error("failed to read notify_channel", &error))?
+            .filter(|channel| !channel.is_empty());
+        let okf_version_policy = row
+            .get::<String>(7)
+            .map_err(|error| spi_error("failed to read okf_version_policy", &error))?
+            .ok_or_else(|| CatalogError::internal("okf_version_policy is NULL", Path::new("")))?;
         Ok(SyncDefaults {
             strict,
             exclude,
             text_search_config,
             store_source,
+            sync_log_retention_days,
+            notify_channel,
+            okf_version_policy,
         })
     })
 }
@@ -545,9 +695,12 @@ CREATE TABLE pgokf_private.config (
     default_exclude            text[]  NOT NULL DEFAULT '{}',
     store_source               boolean NOT NULL DEFAULT false,
     search_backend             text    NOT NULL DEFAULT 'native',
+    notify_channel             text    NOT NULL DEFAULT '',
+    okf_version_policy         text    NOT NULL DEFAULT 'warn',
     CONSTRAINT config_singleton_chk CHECK (singleton),
     CONSTRAINT config_retention_nonneg_chk CHECK (sync_log_retention_days >= 0),
-    CONSTRAINT config_search_backend_chk CHECK (search_backend IN ('native', 'bm25'))
+    CONSTRAINT config_search_backend_chk CHECK (search_backend IN ('native', 'bm25')),
+    CONSTRAINT config_okf_version_policy_chk CHECK (okf_version_policy IN ('warn', 'reject'))
 );
 
 INSERT INTO pgokf_private.config DEFAULT VALUES;
@@ -563,13 +716,17 @@ COMMENT ON COLUMN pgokf_private.config.default_text_search_config IS
 COMMENT ON COLUMN pgokf_private.config.default_strict IS
     'Whether sync rejects malformed files (true) instead of skipping them.';
 COMMENT ON COLUMN pgokf_private.config.sync_log_retention_days IS
-    'Retention window in days for sync-log history; must be >= 0.';
+    'Retention window in days for pgokf_private.sync_log history: rows older than now() - this many days are pruned in the same transaction after each successful sync appends its audit row. 0 (or any value with no older rows) keeps history indefinitely; must be >= 0.';
 COMMENT ON COLUMN pgokf_private.config.default_exclude IS
     'Default bundle-relative glob patterns excluded from discovery.';
 COMMENT ON COLUMN pgokf_private.config.store_source IS
     'Whether sync stores each concept''s verbatim source bytes in pgokf.concept_source (true = small self-contained tier: the original files live in Postgres) or leaves the source in its external object-store/data-lake (false, the default = enterprise tier: Postgres holds only metadata and search). Not retroactive: a change takes effect for bundles synced or refreshed afterward; existing rows keep their stored source (or absence of one) until refresh_bundle re-indexes them.';
 COMMENT ON COLUMN pgokf_private.config.search_backend IS
     'Ranked-search execution backend for pgokf.concept_search: ''native'' (the default, zero-dependency PostgreSQL FTS available on every supported server) or ''bm25'' (Block-Max WAND top-k via the external ParadeDB pg_search extension). When set to ''bm25'' the search transparently falls back to native, with a warning, if pg_search is not installed or no bm25 index exists on pgokf.concepts (build one with pgokf.rebuild_search_index).';
+COMMENT ON COLUMN pgokf_private.config.notify_channel IS
+    'LISTEN/NOTIFY channel that a successful sync (register/refresh/register_bundle_content) announces on with a JSON payload {bundle_id, op, added, updated, removed, total}. Empty (the default) disables notification, with zero overhead. A non-empty value must be a safe channel identifier (letters, digits, underscore; leading letter or underscore; <= 63 bytes).';
+COMMENT ON COLUMN pgokf_private.config.okf_version_policy IS
+    'How sync treats a bundle-root index.md that declares an okf_version this build does not support (only 0.2 / 0.2.x is supported): ''warn'' (the default) logs a WARNING and indexes anyway, ''reject'' aborts the sync with 22023. An absent okf_version is always accepted and leaves pgokf.bundles.okf_version NULL.';
 ",
     name = "config_table",
     requires = ["catalog_tables"]
@@ -588,9 +745,11 @@ mod pgokf {
     /// of strings for `allowed_roots` / `default_exclude`, a boolean for
     /// `default_strict` / `store_source`, an integer for
     /// `sync_log_retention_days`, and a string for
-    /// `default_text_search_config` (any installed configuration) and
-    /// `search_backend` (`native` or `bm25`). Unknown keys and wrong-shaped or
-    /// out-of-domain values raise SQLSTATE `22023`.
+    /// `default_text_search_config` (any installed configuration),
+    /// `search_backend` (`native` or `bm25`), `notify_channel` (a safe
+    /// `LISTEN`/`NOTIFY` identifier, or empty to disable), and
+    /// `okf_version_policy` (`warn` or `reject`). Unknown keys and wrong-shaped
+    /// or out-of-domain values raise SQLSTATE `22023`.
     #[pg_extern(requires = ["config_table"])]
     fn set_config(key: &str, value: pgrx::JsonB) {
         set_config_impl(key, value).unwrap_or_else(|error| error.raise());
@@ -668,6 +827,8 @@ mod tests {
             ("default_exclude", ConfigKey::DefaultExclude),
             ("store_source", ConfigKey::StoreSource),
             ("search_backend", ConfigKey::SearchBackend),
+            ("notify_channel", ConfigKey::NotifyChannel),
+            ("okf_version_policy", ConfigKey::OkfVersionPolicy),
         ];
 
         for (name, key) in expected {
@@ -808,6 +969,57 @@ mod tests {
         // Assert
         assert_eq!(error.sqlstate(), "22023");
         assert!(error.message().contains("elasticsearch"));
+    }
+
+    #[test]
+    fn validate_notify_channel_accepts_empty_and_safe_identifiers() {
+        // Arrange / Act / Assert: empty disables; safe identifiers pass.
+        assert!(validate_notify_channel("").is_ok());
+        assert!(validate_notify_channel("pgokf_events").is_ok());
+        assert!(validate_notify_channel("_ch1").is_ok());
+    }
+
+    #[test]
+    fn validate_notify_channel_rejects_unsafe_names() {
+        // Arrange: names with a leading digit, punctuation, or whitespace.
+        for unsafe_name in ["1bad", "drop table", "ev;ent", "chan-nel"] {
+            // Act
+            let error = validate_notify_channel(unsafe_name)
+                .expect_err("unsafe channel names must be rejected");
+
+            // Assert
+            assert_eq!(error.sqlstate(), "22023");
+        }
+    }
+
+    #[test]
+    fn validate_notify_channel_rejects_overlong_names() {
+        // Arrange: 64 bytes, one over the identifier bound.
+        let name = "a".repeat(MAX_NOTIFY_CHANNEL_LEN + 1);
+
+        // Act
+        let error = validate_notify_channel(&name).expect_err("overlong channels must be rejected");
+
+        // Assert
+        assert_eq!(error.sqlstate(), "22023");
+    }
+
+    #[test]
+    fn validate_okf_version_policy_accepts_the_two_policies() {
+        // Arrange / Act / Assert
+        assert!(validate_okf_version_policy("warn").is_ok());
+        assert!(validate_okf_version_policy("reject").is_ok());
+    }
+
+    #[test]
+    fn validate_okf_version_policy_rejects_unknown_values() {
+        // Arrange / Act
+        let error =
+            validate_okf_version_policy("ignore").expect_err("unknown policies must be rejected");
+
+        // Assert
+        assert_eq!(error.sqlstate(), "22023");
+        assert!(error.message().contains("ignore"));
     }
 
     #[test]

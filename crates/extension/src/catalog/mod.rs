@@ -30,7 +30,13 @@
 //! - [`source`] — opt-in verbatim source-byte storage (`pgokf.concept_source`)
 //!   and retrieval, gated by the `store_source` configuration key.
 //! - [`config`] — the `pgokf.allowed_roots` style configuration surface.
-//! - [`admin`] — `bundle_info`, `unregister_bundle`, `list_bundles`.
+//! - [`admin`] — `bundle_info`, `unregister_bundle`, `list_bundles`,
+//!   `set_bundle_enabled`.
+//! - [`audit`] — the `pgokf_private.sync_log` audit trail and
+//!   `pgokf.list_sync_log`; the sync engine appends one row at its successful
+//!   tail and prunes to the `sync_log_retention_days` policy.
+//! - [`stats`] — reader-level observability: `catalog_stats`, `health`, and
+//!   `stale_concepts`.
 //! - [`content`] — `pgokf.register_bundle_content`, the mountless
 //!   content-ingestion path: it wraps caller-supplied bytes in the sync
 //!   engine's `ContentSource` and runs the identical shared pipeline, so a
@@ -38,6 +44,7 @@
 //!   extension performing any network or filesystem I/O.
 
 pub mod admin;
+pub mod audit;
 mod batch;
 pub mod config;
 pub mod content;
@@ -49,6 +56,7 @@ pub mod schema;
 pub mod search;
 pub mod search_backend;
 pub mod source;
+pub mod stats;
 pub mod sync;
 pub mod types;
 

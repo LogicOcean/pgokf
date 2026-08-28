@@ -21,7 +21,7 @@ the database. Complete comment coverage is a release gate (see
 
 ## The stable surface
 
-### Functions (16)
+### Functions (21)
 
 | Function | Role required | Purpose |
 | -------- | ------------- | ------- |
@@ -29,6 +29,7 @@ the database. Complete comment coverage is a release gate (see
 | `pgokf.register_bundle_content(text, text[], bytea[], jsonb)` | `pgokf_writer` | Register or resync a bundle from in-memory `(path, bytes)` content — the mountless object-store ingestion path (no filesystem, no network I/O in the extension) |
 | `pgokf.refresh_bundle(bigint)` | `pgokf_writer` | Incrementally re-sync a filesystem-sourced bundle (content bundles are re-synced via `register_bundle_content`) |
 | `pgokf.unregister_bundle(bigint)` | `pgokf_writer` | Remove a bundle (rows cascade) |
+| `pgokf.set_bundle_enabled(bigint, boolean)` | `pgokf_writer` | Enable/disable a bundle (hides it from search and graph without deleting rows; reversible) |
 | `pgokf.list_bundles()` | `pgokf_reader` | List registered bundles |
 | `pgokf.bundle_info(bigint)` | `pgokf_reader` | Info for one registered bundle |
 | `pgokf.concept_search(text, bigint, integer)` | `pgokf_reader` | Ranked full-text search |
@@ -36,6 +37,10 @@ the database. Complete comment coverage is a release gate (see
 | `pgokf.set_config(text, jsonb)` | `pgokf_admin` | Set a durable configuration key |
 | `pgokf.reset_config(text)` | `pgokf_admin` | Reset one/all configuration keys |
 | `pgokf.get_config()` | `pgokf_reader` | Effective configuration as jsonb |
+| `pgokf.list_sync_log(bigint, integer)` | `pgokf_reader` | Sync/audit history rows (from the admin-only `pgokf_private.sync_log`) |
+| `pgokf.catalog_stats()` | `pgokf_reader` | Per-bundle counts, sync recency, and staleness for operators |
+| `pgokf.health()` | `pgokf_reader` | Liveness/readiness document as jsonb (counts, backend, `in_recovery`) |
+| `pgokf.stale_concepts(bigint, timestamptz)` | `pgokf_reader` | Concepts past their OKF `stale_after` |
 | `pgokf.get_concept_source(bigint, text)` | `pgokf_reader` | Return one concept's stored source bytes as `bytea` (no filesystem write) |
 | `pgokf.export_parquet(bigint, text)` | `pgokf_admin` | Export a bundle projection to Parquet files |
 | `pgokf.export_sources(bigint, text)` | `pgokf_admin` | Reconstruct a bundle's stored source files on disk, hash-verified |
@@ -48,17 +53,18 @@ arguments (`name`/`options` on `register_bundle`, `bundle_id`/`limit` on search
 and neighbors) are contractual too: an existing call that omits them keeps
 working.
 
-### Composite types (5)
+### Composite types (8)
 
 `pgokf.bundle_sync_result`, `pgokf.concept_search_result`,
-`pgokf.concept_neighbor`, `pgokf.bundle_info`, `pgokf.export_result`.
+`pgokf.concept_neighbor`, `pgokf.bundle_info`, `pgokf.export_result`,
+`pgokf.sync_log_entry`, `pgokf.catalog_stat`, `pgokf.stale_concept`.
 
 The set of columns, their names, and their types are stable. New columns are
 **not** added to an existing composite type in a compatible release, because
 `SELECT *` and positional row expansion would break; a new field ships as a new
 type or a new function instead.
 
-### Tables (8 public + 1 documented-internal)
+### Tables (8 public + 2 documented-internal)
 
 Public, `SELECT`-able by `pgokf_reader`: `pgokf.bundles`, `pgokf.concepts`,
 `pgokf.concept_metadata`, `pgokf.links`, `pgokf.concept_provenance`,
@@ -74,10 +80,11 @@ existing column names and types; the columns listed in
 compatible release; code that pins to named columns (never `SELECT *` into a
 fixed row type) is forward-compatible.
 
-`pgokf_private.config` is listed here only because it is one of the catalog
-tables the documentation gate covers (the eight public tables plus this private
-one). It is **internal state, not API** — see
-[The private surface](#the-private-surface-not-api).
+`pgokf_private.config` and `pgokf_private.sync_log` are listed here only because
+they are catalog tables the documentation gate covers (the eight public tables
+plus these two private ones). They are **internal state, not API** — read the
+sync history through `pgokf.list_sync_log` and configuration through
+`pgokf.get_config`; see [The private surface](#the-private-surface-not-api).
 
 ### Roles (3)
 

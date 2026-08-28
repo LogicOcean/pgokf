@@ -83,14 +83,16 @@ admin-only).
 | `default_exclude` | array of strings | `[]` | each pattern non-empty and NUL-free |
 | `store_source` | boolean | `false` | must be a boolean |
 | `search_backend` | string | `"native"` | one of `"native"`, `"bm25"` |
+| `notify_channel` | string | `""` | empty (disabled) or a safe channel identifier (letters, digits, underscore; leading letter/underscore; ≤ 63 bytes) |
+| `okf_version_policy` | string | `"warn"` | one of `"warn"`, `"reject"` |
 
 ### Which keys the current engine consults
 
 Accuracy matters here. As of this release the engine **enforces
 `allowed_roots`**, **applies `default_text_search_config`** to both indexing and
-querying, and **honors `store_source`** at sync time; the remaining three keys
-are validated and durably stored but are **not yet consulted** by the
-ingest/search paths:
+querying, **honors `store_source`** and `search_backend`, and — new in 0.1.5 —
+**activates `sync_log_retention_days`**, `notify_channel`, and
+`okf_version_policy`:
 
 | Key | Status in the current engine |
 | --- | ---------------------------- |
@@ -98,12 +100,15 @@ ingest/search paths:
 | `default_text_search_config` | **Applied.** Used as the `regconfig` for `to_tsvector` when building each concept's `body_tsv` at index time, and for `websearch_to_tsquery`/`ts_headline` at query time, so query parsing matches the configuration that indexed the rows. See the caveat below. |
 | `store_source` | **Honored.** When `true`, sync stores each concept's verbatim source bytes in `pgokf.concept_source`; when `false` (default) it stores none. See the storage-tiers section below. |
 | `search_backend` | **Applied.** Selects the ranked-search backend `pgokf.concept_search` dispatches to: `native` PostgreSQL FTS (default) or `bm25` (ParadeDB `pg_search`). When `bm25` but `pg_search` or its index is absent, search falls back to native with a warning. See the search-backend section below. |
+| `sync_log_retention_days` | **Applied (new in 0.1.5).** After each successful sync appends its `pgokf_private.sync_log` audit row, history older than `now() - this many days` is pruned in the same transaction. `0` (or no older rows) keeps history indefinitely. See the audit-log section below. |
+| `notify_channel` | **Applied (new in 0.1.5).** When non-empty, a successful sync emits `pg_notify(<channel>, <json>)`; empty (default) disables it with zero overhead. See the change-notification section below. |
+| `okf_version_policy` | **Applied (new in 0.1.5).** Governs how sync treats a bundle that declares an unsupported OKF `okf_version`: `warn` (default) logs a `WARNING` and indexes anyway, `reject` aborts with `22023`. See the version-policy section below. |
 | `default_strict` | **Stored, not yet consulted.** Sync is always strict — the first malformed file aborts the sync. |
-| `sync_log_retention_days` | **Stored, not yet consulted.** No sync-log retention is wired up yet. |
 | `default_exclude` | **Stored, not yet consulted.** Discovery does not yet apply these exclusion globs. |
 
-The remaining three are reserved for planned functionality; setting them is safe
-and persists, but does not change behavior today.
+`default_strict` and `default_exclude` remain reserved for planned
+functionality; setting them is safe and persists, but does not change behavior
+today.
 
 ### Storage tiers — `store_source`
 
@@ -179,6 +184,62 @@ the tokenizer differences between the two backends.
 > `shared_preload_libraries` entry). If you cannot or do not want that
 > dependency, stay on `native`.
 
+### Audit-log retention — `sync_log_retention_days`
+
+Every successful `register` / `refresh` / `register_bundle_content` sync, and
+every `unregister_bundle`, appends one row to the administrator-only
+`pgokf_private.sync_log` audit trail, inside the operation's own transaction (so
+a logged row always means the operation committed). Immediately after appending,
+history older than `now() - sync_log_retention_days` is **pruned in the same
+transaction**. A value of `0` — or simply no rows older than the window — keeps
+history indefinitely.
+
+This is new in 0.1.5: the key was defined but dead in earlier releases. Read the
+log through the reader-level `pgokf.list_sync_log(bundle_id, max_rows)` function
+(see [sql-api.md](sql-api.md) and [operations.md](operations.md)).
+
+```sql
+SELECT pgokf.set_config('sync_log_retention_days', '14'::jsonb);  -- keep 14 days
+SELECT pgokf.set_config('sync_log_retention_days', '0'::jsonb);   -- keep forever
+```
+
+### Change notification — `notify_channel`
+
+When `notify_channel` is a non-empty channel identifier, a successful sync emits
+`pg_notify(<channel>, <json>)` with a payload of
+`{bundle_id, op, added, updated, removed, total}`. A `LISTEN <channel>` client
+(an external indexer, a cache invalidator, a dashboard) is then woken on commit.
+Empty (the default) disables it entirely, with zero overhead — no `pg_notify`
+call is made. The channel name is validated as a safe identifier and always
+bound as a parameter, never interpolated.
+
+```sql
+SELECT pgokf.set_config('notify_channel', '"pgokf_events"'::jsonb);  -- enable
+SELECT pgokf.set_config('notify_channel', '""'::jsonb);              -- disable
+-- Consumer side:
+LISTEN pgokf_events;
+```
+
+### OKF version policy — `okf_version_policy`
+
+A bundle-root `index.md` may declare an `okf_version`. This build models OKF
+v0.2, so it recognizes `0.2` (and its patch line `0.2.x`, lenient on a leading
+`v`). `okf_version_policy` governs a bundle that declares an *unsupported*
+version:
+
+- **`warn`** (the default) — log a `WARNING` and index the bundle anyway; the
+  declared version is still stored on `pgokf.bundles.okf_version`.
+- **`reject`** — abort the sync with `22023`, so a non-conforming bundle never
+  commits.
+
+An **absent** `okf_version` is always accepted and leaves
+`pgokf.bundles.okf_version` `NULL`, under either policy.
+
+```sql
+SELECT pgokf.set_config('okf_version_policy', '"reject"'::jsonb);  -- strict
+SELECT pgokf.set_config('okf_version_policy', '"warn"'::jsonb);    -- lenient (default)
+```
+
 ### Reading the effective policy
 
 `get_config()` returns the whole row as a `jsonb` object (reader-level):
@@ -187,10 +248,12 @@ the tokenizer differences between the two backends.
 SELECT jsonb_pretty(pgokf.get_config());
 -- {
 --     "allowed_roots": [],
+--     "notify_channel": "",
 --     "store_source": false,
 --     "search_backend": "native",
 --     "default_strict": true,
 --     "default_exclude": [],
+--     "okf_version_policy": "warn",
 --     "sync_log_retention_days": 30,
 --     "default_text_search_config": "pg_catalog.english"
 -- }
@@ -221,9 +284,18 @@ SELECT pgokf.set_config('store_source', 'true'::jsonb);
 -- Falls back to native, with a warning, if pg_search or its index is absent.
 SELECT pgokf.set_config('search_backend', '"bm25"'::jsonb);
 
+-- Audit-log retention (new in 0.1.5): keep 14 days of sync history; 0 = forever.
+SELECT pgokf.set_config('sync_log_retention_days', '14'::jsonb);
+
+-- Change notification (new in 0.1.5): announce each sync on a LISTEN channel.
+SELECT pgokf.set_config('notify_channel', '"pgokf_events"'::jsonb);
+
+-- OKF version policy (new in 0.1.5): reject bundles that declare an unsupported
+-- okf_version instead of warning.
+SELECT pgokf.set_config('okf_version_policy', '"reject"'::jsonb);
+
 -- Reserved keys (stored, not yet consulted by the engine):
 SELECT pgokf.set_config('default_strict', 'false'::jsonb);
-SELECT pgokf.set_config('sync_log_retention_days', '14'::jsonb);
 SELECT pgokf.set_config('default_exclude', '["*.tmp", "drafts/**"]'::jsonb);
 ```
 
@@ -240,6 +312,10 @@ SELECT pgokf.set_config('default_text_search_config', '"no_such_config"'::jsonb)
 -- ERROR:  22023: text search configuration does not exist: no_such_config
 SELECT pgokf.set_config('search_backend', '"solr"'::jsonb);
 -- ERROR:  22023: search_backend must be one of 'native', 'bm25', got solr
+SELECT pgokf.set_config('notify_channel', '"1 drop"'::jsonb);
+-- ERROR:  22023: notify_channel must be a safe identifier ...
+SELECT pgokf.set_config('okf_version_policy', '"ignore"'::jsonb);
+-- ERROR:  22023: okf_version_policy must be one of 'warn', 'reject', got ignore
 ```
 
 ### Resetting keys

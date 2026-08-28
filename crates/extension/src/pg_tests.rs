@@ -1187,7 +1187,7 @@ The gamma concept is introduced during the refresh cycle.\n";
         // an existing install can be stepped up to this release.
         let upgrade_script = manifest_dir
             .join("sql")
-            .join(format!("pgokf--0.1.3--{crate_version}.sql"));
+            .join(format!("pgokf--0.1.4--{crate_version}.sql"));
         let metadata =
             fs::metadata(&upgrade_script).expect("the current upgrade script ships on disk");
         assert!(
@@ -1519,6 +1519,419 @@ An added concept for the resync diff.\n";
             stored,
             CONTENT_ALPHA.as_bytes(),
             "store_source must persist the exact content bytes for a content bundle",
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // F1: sync/audit log (pgokf_private.sync_log + pgokf.list_sync_log).
+    // ---------------------------------------------------------------------
+
+    #[pg_test]
+    fn sync_log_records_every_op_and_prunes_by_retention() {
+        // Arrange: registering a filesystem bundle appends one 'register' row
+        // whose total equals the two synced concepts.
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        let register_rows = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf_private.sync_log WHERE bundle_id = $1 AND op = 'register'",
+            &[bundle_id.into()],
+        )
+        .expect("register audit query executes")
+        .expect("count is not NULL");
+        assert_eq!(register_rows, 1, "a register appends exactly one audit row");
+        let register_total = Spi::get_one_with_args::<i32>(
+            "SELECT total FROM pgokf_private.sync_log WHERE bundle_id = $1 AND op = 'register'",
+            &[bundle_id.into()],
+        )
+        .expect("register total query executes")
+        .expect("total is not NULL");
+        assert_eq!(register_total, 2, "the register row records both concepts");
+
+        // Act/Assert: a refresh appends a 'refresh' row.
+        Spi::run_with_args("SELECT pgokf.refresh_bundle($1)", &[bundle_id.into()])
+            .expect("refresh executes");
+        let refresh_rows = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf_private.sync_log WHERE bundle_id = $1 AND op = 'refresh'",
+            &[bundle_id.into()],
+        )
+        .expect("refresh audit query executes")
+        .expect("count is not NULL");
+        assert_eq!(refresh_rows, 1, "a refresh appends exactly one audit row");
+
+        // A content ingest appends a 'content' row for its own bundle.
+        let (content_id, ..) = register_content(
+            "audited",
+            vec!["alpha.md".to_owned()],
+            vec![CONTENT_ALPHA.as_bytes().to_vec()],
+        );
+        let content_rows = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf_private.sync_log WHERE bundle_id = $1 AND op = 'content'",
+            &[content_id.into()],
+        )
+        .expect("content audit query executes")
+        .expect("count is not NULL");
+        assert_eq!(content_rows, 1, "a content ingest appends one audit row");
+
+        // Unregistering appends an 'unregister' row that survives the delete
+        // (sync_log.bundle_id is intentionally FK-free).
+        Spi::run_with_args("SELECT pgokf.unregister_bundle($1)", &[bundle_id.into()])
+            .expect("unregister executes");
+        let unregister_rows = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf_private.sync_log
+             WHERE bundle_id = $1 AND op = 'unregister'",
+            &[bundle_id.into()],
+        )
+        .expect("unregister audit query executes")
+        .expect("count is not NULL");
+        assert_eq!(
+            unregister_rows, 1,
+            "an unregister appends one audit row that outlives the bundle",
+        );
+
+        // Prune: an artificially old row, a 1-day retention, and a fresh sync
+        // whose tail prune must delete history older than the window.
+        Spi::run(
+            "INSERT INTO pgokf_private.sync_log (bundle_id, bundle_path, op, synced_at)
+             VALUES (NULL, '/legacy', 'register', now() - interval '10 days')",
+        )
+        .expect("an old audit row is insertable");
+        Spi::run("SELECT pgokf.set_config('sync_log_retention_days', '1'::jsonb)")
+            .expect("retention is configurable");
+        let _ = register_content(
+            "audited",
+            vec!["alpha.md".to_owned()],
+            vec![CONTENT_ALPHA.as_bytes().to_vec()],
+        );
+        let stale_rows = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgokf_private.sync_log WHERE synced_at < now() - interval '1 day'",
+        )
+        .expect("stale audit query executes")
+        .expect("count is not NULL");
+        assert_eq!(
+            stale_rows, 0,
+            "the retention prune removed rows older than the window",
+        );
+    }
+
+    #[pg_test]
+    fn list_sync_log_returns_rows_to_a_reader() {
+        // Arrange: a registered bundle (so an audit row exists) plus a role
+        // granted only pgokf_reader.
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        Spi::run("CREATE ROLE pgokf_log_reader").expect("reader role is creatable");
+        Spi::run("GRANT pgokf_reader TO pgokf_log_reader").expect("reader role is grantable");
+        Spi::run(
+            "CREATE FUNCTION pg_temp.reader_log_count(bid bigint) RETURNS bigint
+             LANGUAGE plpgsql
+             SET role TO pgokf_log_reader
+             AS $probe$
+             BEGIN
+                 RETURN (SELECT count(*) FROM pgokf.list_sync_log(bid));
+             END
+             $probe$;",
+        )
+        .expect("reader log probe is creatable");
+
+        // Act: a plain reader reads the log through the SECURITY DEFINER function.
+        let count = Spi::get_one_with_args::<i64>(
+            "SELECT pg_temp.reader_log_count($1)",
+            &[bundle_id.into()],
+        )
+        .expect("reader log probe executes")
+        .expect("count is not NULL");
+
+        // Assert: the reader sees the bundle's audit row(s).
+        assert!(
+            count >= 1,
+            "a reader can read the audit log via pgokf.list_sync_log",
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // F2: bundle enable/disable lifecycle (pgokf.set_bundle_enabled).
+    // ---------------------------------------------------------------------
+
+    #[pg_test]
+    fn set_bundle_enabled_hides_from_search_and_traversal_and_is_reversible() {
+        // Arrange: a registered bundle is enabled by default, so search and
+        // traversal both surface it.
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        let pre_hits =
+            Spi::get_one::<i64>("SELECT count(*) FROM pgokf.concept_search('peregrine')")
+                .expect("pre-disable search executes")
+                .expect("count is not NULL");
+        assert_eq!(pre_hits, 1, "an enabled bundle is searchable");
+        let pre_neighbors = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concept_neighbors('alpha', 2, $1)",
+            &[bundle_id.into()],
+        )
+        .expect("pre-disable traversal executes")
+        .expect("count is not NULL");
+        assert_eq!(pre_neighbors, 1, "alpha reaches beta while enabled");
+
+        // Act: disable the bundle.
+        let disabled = Spi::get_one_with_args::<bool>(
+            "SELECT enabled FROM pgokf.set_bundle_enabled($1, false)",
+            &[bundle_id.into()],
+        )
+        .expect("set_bundle_enabled(false) executes")
+        .expect("enabled is not NULL");
+        assert!(
+            !disabled,
+            "set_bundle_enabled(false) reports the bundle disabled"
+        );
+
+        // Assert: disabled hides the bundle from BOTH search and traversal.
+        let hidden_hits =
+            Spi::get_one::<i64>("SELECT count(*) FROM pgokf.concept_search('peregrine')")
+                .expect("post-disable search executes")
+                .expect("count is not NULL");
+        assert_eq!(hidden_hits, 0, "a disabled bundle is hidden from search");
+        let hidden_neighbors = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concept_neighbors('alpha', 2, $1)",
+            &[bundle_id.into()],
+        )
+        .expect("post-disable traversal executes")
+        .expect("count is not NULL");
+        assert_eq!(
+            hidden_neighbors, 0,
+            "a disabled bundle's concepts are not traversed",
+        );
+
+        // Act/Assert: re-enabling restores both surfaces (fully reversible).
+        let enabled = Spi::get_one_with_args::<bool>(
+            "SELECT enabled FROM pgokf.set_bundle_enabled($1, true)",
+            &[bundle_id.into()],
+        )
+        .expect("set_bundle_enabled(true) executes")
+        .expect("enabled is not NULL");
+        assert!(
+            enabled,
+            "set_bundle_enabled(true) reports the bundle enabled"
+        );
+        let post_hits =
+            Spi::get_one::<i64>("SELECT count(*) FROM pgokf.concept_search('peregrine')")
+                .expect("post-enable search executes")
+                .expect("count is not NULL");
+        assert_eq!(post_hits, 1, "re-enabling restores search visibility");
+        let post_neighbors = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concept_neighbors('alpha', 2, $1)",
+            &[bundle_id.into()],
+        )
+        .expect("post-enable traversal executes")
+        .expect("count is not NULL");
+        assert_eq!(post_neighbors, 1, "re-enabling restores traversal");
+    }
+
+    #[pg_test]
+    fn set_bundle_enabled_denies_a_reader_role() {
+        // Arrange: a registered bundle and a role granted only pgokf_reader.
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        Spi::run("CREATE ROLE pgokf_enable_reader").expect("reader role is creatable");
+        Spi::run("GRANT pgokf_reader TO pgokf_enable_reader").expect("reader role is grantable");
+        Spi::run(
+            "CREATE FUNCTION pg_temp.enable_denied_sqlstate(bid bigint) RETURNS text
+             LANGUAGE plpgsql
+             SET role TO pgokf_enable_reader
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.set_bundle_enabled(bid, false);
+                 RETURN 'not-denied';
+             EXCEPTION WHEN insufficient_privilege THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("enable authz probe is creatable");
+
+        // Act
+        let sqlstate = Spi::get_one_with_args::<String>(
+            "SELECT pg_temp.enable_denied_sqlstate($1)",
+            &[bundle_id.into()],
+        )
+        .expect("enable authz probe executes")
+        .expect("the probe reports a SQLSTATE");
+
+        // Assert: a plain reader is denied the writer-tier toggle with 42501.
+        assert_eq!(
+            sqlstate, "42501",
+            "a reader role must be denied set_bundle_enabled with 42501",
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // F3: change notification (notify_channel).
+    // ---------------------------------------------------------------------
+
+    #[pg_test]
+    fn notify_channel_is_gated_and_validated() {
+        // Arrange: a valid channel enables notification. The test transaction is
+        // rolled back, so a LISTEN could not observe the delivered message here;
+        // instead assert the gated path runs cleanly (the sync fires pg_notify
+        // without error) and that an unsafe channel name is rejected.
+        Spi::run("SELECT pgokf.set_config('notify_channel', to_jsonb('pgokf_events'::text))")
+            .expect("a valid notify channel is accepted");
+        let bundle = FixtureBundle::create();
+
+        // Act: a sync with the channel set completes and fires the notification.
+        let added = Spi::get_one_with_args::<i32>(
+            "SELECT added FROM pgokf.register_bundle($1) AS r",
+            &[bundle.path().into()],
+        )
+        .expect("register with notify_channel set executes")
+        .expect("added is not NULL");
+        assert_eq!(
+            added, 2,
+            "a sync with notify_channel set completes normally"
+        );
+
+        // Assert: an unsafe channel name is rejected with 22023.
+        Spi::run(
+            "CREATE FUNCTION pg_temp.bad_channel_sqlstate() RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.set_config('notify_channel', to_jsonb('1 drop'::text));
+                 RETURN 'not-rejected';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("bad channel probe is creatable");
+        let bad = Spi::get_one::<String>("SELECT pg_temp.bad_channel_sqlstate()")
+            .expect("bad channel probe executes")
+            .expect("the probe reports a SQLSTATE");
+        assert_eq!(bad, "22023", "an unsafe notify_channel name is rejected");
+    }
+
+    // ---------------------------------------------------------------------
+    // F4/F5/F6: observability (catalog_stats / health / stale_concepts).
+    // ---------------------------------------------------------------------
+
+    #[pg_test]
+    fn observability_functions_return_expected_shapes() {
+        // Arrange: the rich OKF v0.2 fixture (five concepts, one carrying a
+        // stale_after) registered into the catalog.
+        let fixture = RichFixture::create();
+        let bundle_id = register_rich(&fixture);
+
+        // catalog_stats: the bundle row reports its indexed concepts, a fresh
+        // (not stale) sync, and its enabled flag.
+        Spi::connect(|client| {
+            let row = client
+                .select(
+                    "SELECT indexed_concepts, is_stale, enabled
+                     FROM pgokf.catalog_stats() WHERE bundle_id = $1",
+                    Some(1),
+                    &[bundle_id.into()],
+                )
+                .expect("catalog_stats executes")
+                .first();
+            assert_eq!(
+                row.get::<i64>(1).expect("indexed_concepts readable"),
+                Some(5),
+                "catalog_stats counts the five rich-metadata concepts",
+            );
+            assert_eq!(
+                row.get::<bool>(2).expect("is_stale readable"),
+                Some(false),
+                "a just-synced bundle is not stale",
+            );
+            assert_eq!(
+                row.get::<bool>(3).expect("enabled readable"),
+                Some(true),
+                "a fresh bundle is enabled",
+            );
+        });
+
+        // health: ok with sane roles/config, reporting the native backend.
+        let ok = Spi::get_one::<bool>("SELECT (pgokf.health() ->> 'ok')::boolean")
+            .expect("health executes")
+            .expect("ok is not NULL");
+        assert!(ok, "health reports ok when roles and config are sane");
+        let backend = Spi::get_one::<String>("SELECT pgokf.health() ->> 'search_backend'")
+            .expect("health backend read executes")
+            .expect("search_backend is present");
+        assert_eq!(backend, "native", "health reports the default backend");
+
+        // stale_concepts: with a far-future as_of, the one concept carrying a
+        // stale_after surfaces with its path and type.
+        Spi::connect(|client| {
+            let row = client
+                .select(
+                    "SELECT concept_id, path, concept_type
+                     FROM pgokf.stale_concepts($1, '2999-01-01T00:00:00Z'::timestamptz)",
+                    Some(1),
+                    &[bundle_id.into()],
+                )
+                .expect("stale_concepts executes")
+                .first();
+            assert_eq!(
+                row.get::<String>(1).expect("concept_id readable"),
+                Some("rich-concept".to_owned()),
+                "the concept carrying stale_after surfaces as stale",
+            );
+            assert!(
+                row.get::<String>(2).expect("path readable").is_some(),
+                "the stale concept carries its bundle-relative path",
+            );
+        });
+    }
+
+    // ---------------------------------------------------------------------
+    // F7: OKF version-conformance policy (okf_version_policy).
+    // ---------------------------------------------------------------------
+
+    #[pg_test]
+    fn okf_version_policy_rejects_only_under_reject() {
+        // Arrange: an in-memory bundle whose root index.md declares an
+        // unsupported okf_version.
+        let bogus_index = "---\nokf_version: \"9.9\"\n---\n\n# Bundle\n";
+        let paths = vec!["index.md".to_owned(), "alpha.md".to_owned()];
+        let contents = vec![
+            bogus_index.as_bytes().to_vec(),
+            CONTENT_ALPHA.as_bytes().to_vec(),
+        ];
+
+        // Act/Assert: under the default 'warn' policy the bundle still indexes
+        // (index.md is reserved, so exactly the one alpha concept is added).
+        let (_id, added, ..) = register_content("warned", paths, contents);
+        assert_eq!(
+            added, 1,
+            "the warn policy indexes despite an unsupported okf_version",
+        );
+
+        // Switch to 'reject' and a bogus okf_version aborts the sync with 22023.
+        Spi::run("SELECT pgokf.set_config('okf_version_policy', to_jsonb('reject'::text))")
+            .expect("okf_version_policy is configurable");
+        let bundle = FixtureBundle::create();
+        fs::write(bundle.root.join("index.md"), bogus_index).expect("bogus index.md is writable");
+        Spi::run(
+            "CREATE FUNCTION pg_temp.reject_register_sqlstate(p text) RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.register_bundle(p);
+                 RETURN 'not-rejected';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("reject register probe is creatable");
+        let sqlstate = Spi::get_one_with_args::<String>(
+            "SELECT pg_temp.reject_register_sqlstate($1)",
+            &[bundle.path().into()],
+        )
+        .expect("reject register probe executes")
+        .expect("the probe reports a SQLSTATE");
+        assert_eq!(
+            sqlstate, "22023",
+            "the reject policy aborts a bundle with an unsupported okf_version",
         );
     }
 }

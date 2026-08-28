@@ -1,0 +1,400 @@
+//! Sync/audit log: `pgokf_private.sync_log` and `pgokf.list_sync_log`.
+//!
+//! # What this records
+//!
+//! Every successful catalog-mutating operation appends exactly one row to the
+//! administrator-only `pgokf_private.sync_log`:
+//!
+//! - `register` / `refresh` / `content` rows are written at the successful tail
+//!   of [`crate::catalog::sync::run_bundle_sync`], carrying the per-bucket
+//!   change counts (`added`/`updated`/`removed`/`unchanged`/`total`) and the
+//!   aggregate `sync_hash` of the synced snapshot;
+//! - one `unregister` row is written by
+//!   [`crate::catalog::admin`] when a bundle is removed, capturing the bundle's
+//!   path (the counts and hash are `NULL` — an unregister has no diff).
+//!
+//! # v1 transactional semantics
+//!
+//! The audit row is inserted inside the very transaction that performs the
+//! operation, under the bundle advisory lock. It therefore commits atomically
+//! with the operation: **a logged row always means the operation committed**,
+//! and a sync that fails and rolls back leaves no row behind. There is
+//! deliberately no autonomous-transaction "attempted but failed" logging in
+//! this version — the log is a durable record of what happened, not of what was
+//! tried.
+//!
+//! # Retention
+//!
+//! After the row is appended, history older than the durable
+//! `sync_log_retention_days` policy is pruned in the same transaction (see
+//! [`record`]). A retention of `0` (or simply no rows older than the window)
+//! keeps history indefinitely. This is the mechanism that activates the
+//! `sync_log_retention_days` configuration key.
+//!
+//! # Reader surface
+//!
+//! [`list_sync_log`](pgokf::list_sync_log) is the reader-level projection over
+//! the log. Because the table lives in the administrator-only `pgokf_private`
+//! schema, the function is `SECURITY DEFINER` (with a pinned `search_path`) and
+//! its `EXECUTE` is granted to `pgokf_reader`, so operators can audit sync
+//! activity without direct access to the private schema.
+
+use std::path::Path;
+
+use okf_sync::SyncReport;
+use pgrx::datum::TimestampWithTimeZone;
+use pgrx::heap_tuple::PgHeapTuple;
+use pgrx::{AllocatedByRust, Spi, extension_sql};
+
+use crate::catalog::types::count_to_i32;
+use crate::errors::CatalogError;
+use crate::security;
+
+/// Qualified SQL name of the sync-log-entry composite type.
+const SYNC_LOG_ENTRY_TYPE: &str = "pgokf.sync_log_entry";
+
+/// Column projection shared by every `sync_log_entry` read, in the attribute
+/// order of [`SYNC_LOG_ENTRY_TYPE`] and of [`read_entry`].
+const SYNC_LOG_ENTRY_COLUMNS: &str =
+    "id, bundle_id, bundle_path, op, actor, synced_at, added, updated, removed, unchanged, total";
+
+extension_sql!(
+    r"
+CREATE TABLE pgokf_private.sync_log (
+    id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    bundle_id   bigint,
+    bundle_path text,
+    op          text NOT NULL,
+    actor       text NOT NULL DEFAULT session_user,
+    synced_at   timestamptz NOT NULL DEFAULT now(),
+    added       integer,
+    updated     integer,
+    removed     integer,
+    unchanged   integer,
+    total       integer,
+    sync_hash   text,
+    CONSTRAINT sync_log_op_chk CHECK (op IN ('register', 'refresh', 'content', 'unregister'))
+);
+
+CREATE INDEX sync_log_bundle_id_idx ON pgokf_private.sync_log (bundle_id);
+CREATE INDEX sync_log_synced_at_idx ON pgokf_private.sync_log (synced_at);
+
+REVOKE ALL ON pgokf_private.sync_log FROM PUBLIC;
+
+COMMENT ON TABLE pgokf_private.sync_log IS
+    'Append-only audit trail of catalog-mutating operations: one row per successful register/refresh/content sync or bundle unregister, written inside the operation''s own transaction under the bundle advisory lock (so a logged row always means the operation committed). History is pruned to the sync_log_retention_days policy after each append. Administrator-only; read through the reader-granted pgokf.list_sync_log function.';
+COMMENT ON COLUMN pgokf_private.sync_log.id IS
+    'Surrogate primary key (GENERATED ALWAYS AS IDENTITY); monotonic append order of the audit trail.';
+COMMENT ON COLUMN pgokf_private.sync_log.bundle_id IS
+    'Identity of the affected bundle. Retained for unregister rows even though the pgokf.bundles row is gone, so there is intentionally no foreign key.';
+COMMENT ON COLUMN pgokf_private.sync_log.bundle_path IS
+    'Canonical path (filesystem root or the content:<name> synthetic key) of the affected bundle, captured at operation time.';
+COMMENT ON COLUMN pgokf_private.sync_log.op IS
+    'The operation: register / refresh / content (register_bundle_content) / unregister.';
+COMMENT ON COLUMN pgokf_private.sync_log.actor IS
+    'The session_user that performed the operation, captured by column default.';
+COMMENT ON COLUMN pgokf_private.sync_log.synced_at IS
+    'When the operation committed (transaction now()); the column pruning compares against sync_log_retention_days.';
+COMMENT ON COLUMN pgokf_private.sync_log.added IS
+    'Count of concepts added by the sync; NULL for an unregister row.';
+COMMENT ON COLUMN pgokf_private.sync_log.updated IS
+    'Count of concepts updated by the sync; NULL for an unregister row.';
+COMMENT ON COLUMN pgokf_private.sync_log.removed IS
+    'Count of concepts removed by the sync; NULL for an unregister row.';
+COMMENT ON COLUMN pgokf_private.sync_log.unchanged IS
+    'Count of concepts left unchanged by the sync; NULL for an unregister row.';
+COMMENT ON COLUMN pgokf_private.sync_log.total IS
+    'Total files considered by the sync (added + updated + removed + unchanged); NULL for an unregister row.';
+COMMENT ON COLUMN pgokf_private.sync_log.sync_hash IS
+    'Aggregate BLAKE3 digest of the synced snapshot (matches pgokf.bundles.sync_hash); NULL for an unregister row.';
+",
+    name = "sync_log_table",
+    requires = ["catalog_tables", "config_table"]
+);
+
+fn spi_error(context: &str, error: &pgrx::spi::Error) -> CatalogError {
+    CatalogError::internal(format!("{context}: {error}"), Path::new(""))
+}
+
+/// Append one audit row and prune history older than the retention window.
+///
+/// The row is inserted with the caller-supplied identity, operation, per-bucket
+/// counts (`None` for an unregister), and snapshot hash; `actor` and
+/// `synced_at` take their column defaults (`session_user` and `now()`), so an
+/// audit row is always attributed to the invoking session at commit time. When
+/// `retention_days > 0`, rows whose `synced_at` predates `now() - retention_days`
+/// are deleted in the same transaction; `0` keeps history indefinitely.
+///
+/// Runs on the `SECURITY DEFINER` sync/admin path, which holds privileges on
+/// the administrator-only table; parameterized SPI only.
+///
+/// # Errors
+///
+/// Returns a [`CatalogError`] on any SPI failure, aborting the surrounding
+/// transaction so the audit row commits atomically with the operation.
+pub(crate) fn record(
+    bundle_id: i64,
+    bundle_path: &str,
+    op: &str,
+    report: Option<&SyncReport>,
+    sync_hash: Option<&str>,
+    retention_days: i32,
+) -> Result<(), CatalogError> {
+    let (added, updated, removed, unchanged, total) = match report {
+        Some(report) => (
+            Some(count_to_i32(report.added)),
+            Some(count_to_i32(report.updated)),
+            Some(count_to_i32(report.removed)),
+            Some(count_to_i32(report.unchanged)),
+            Some(count_to_i32(report.total())),
+        ),
+        None => (None, None, None, None, None),
+    };
+
+    Spi::run_with_args(
+        "INSERT INTO pgokf_private.sync_log
+             (bundle_id, bundle_path, op, added, updated, removed, unchanged, total, sync_hash)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        &[
+            bundle_id.into(),
+            bundle_path.into(),
+            op.into(),
+            added.into(),
+            updated.into(),
+            removed.into(),
+            unchanged.into(),
+            total.into(),
+            sync_hash.into(),
+        ],
+    )
+    .map_err(|error| spi_error("failed to append sync-log row", &error))?;
+
+    if retention_days > 0 {
+        Spi::run_with_args(
+            "DELETE FROM pgokf_private.sync_log
+             WHERE synced_at < pg_catalog.now() - pg_catalog.make_interval(days => $1)",
+            &[retention_days.into()],
+        )
+        .map_err(|error| spi_error("failed to prune sync-log history", &error))?;
+    }
+    Ok(())
+}
+
+/// One `pgokf_private.sync_log` row projected onto the `sync_log_entry` shape.
+struct SyncLogEntry {
+    id: i64,
+    bundle_id: Option<i64>,
+    bundle_path: Option<String>,
+    op: String,
+    actor: String,
+    synced_at: TimestampWithTimeZone,
+    added: Option<i32>,
+    updated: Option<i32>,
+    removed: Option<i32>,
+    unchanged: Option<i32>,
+    total: Option<i32>,
+}
+
+fn composite_error(error: impl std::fmt::Display) -> CatalogError {
+    CatalogError::internal(
+        format!("failed to build {SYNC_LOG_ENTRY_TYPE} composite: {error}"),
+        Path::new(""),
+    )
+}
+
+/// Read one log row projected via [`SYNC_LOG_ENTRY_COLUMNS`].
+fn read_entry(row: &pgrx::spi::SpiHeapTupleData<'_>) -> Result<SyncLogEntry, CatalogError> {
+    let read = |error| spi_error("failed to read sync_log_entry column", &error);
+    let missing = |column: &str| {
+        CatalogError::internal(
+            format!("sync_log_entry column {column} is unexpectedly NULL"),
+            Path::new(""),
+        )
+    };
+    Ok(SyncLogEntry {
+        id: row
+            .get::<i64>(1)
+            .map_err(&read)?
+            .ok_or_else(|| missing("id"))?,
+        bundle_id: row.get::<i64>(2).map_err(&read)?,
+        bundle_path: row.get::<String>(3).map_err(&read)?,
+        op: row
+            .get::<String>(4)
+            .map_err(&read)?
+            .ok_or_else(|| missing("op"))?,
+        actor: row
+            .get::<String>(5)
+            .map_err(&read)?
+            .ok_or_else(|| missing("actor"))?,
+        synced_at: row
+            .get::<TimestampWithTimeZone>(6)
+            .map_err(&read)?
+            .ok_or_else(|| missing("synced_at"))?,
+        added: row.get::<i32>(7).map_err(&read)?,
+        updated: row.get::<i32>(8).map_err(&read)?,
+        removed: row.get::<i32>(9).map_err(&read)?,
+        unchanged: row.get::<i32>(10).map_err(&read)?,
+        total: row.get::<i32>(11).map_err(&read)?,
+    })
+}
+
+/// Pack a [`SyncLogEntry`] into a `pgokf.sync_log_entry` heap tuple.
+fn entry_tuple(entry: SyncLogEntry) -> Result<PgHeapTuple<'static, AllocatedByRust>, CatalogError> {
+    let mut tuple =
+        PgHeapTuple::new_composite_type(SYNC_LOG_ENTRY_TYPE).map_err(composite_error)?;
+    tuple.set_by_name("id", entry.id).map_err(composite_error)?;
+    tuple
+        .set_by_name("bundle_id", entry.bundle_id)
+        .map_err(composite_error)?;
+    tuple
+        .set_by_name("bundle_path", entry.bundle_path)
+        .map_err(composite_error)?;
+    tuple.set_by_name("op", entry.op).map_err(composite_error)?;
+    tuple
+        .set_by_name("actor", entry.actor)
+        .map_err(composite_error)?;
+    tuple
+        .set_by_name("synced_at", entry.synced_at)
+        .map_err(composite_error)?;
+    tuple
+        .set_by_name("added", entry.added)
+        .map_err(composite_error)?;
+    tuple
+        .set_by_name("updated", entry.updated)
+        .map_err(composite_error)?;
+    tuple
+        .set_by_name("removed", entry.removed)
+        .map_err(composite_error)?;
+    tuple
+        .set_by_name("unchanged", entry.unchanged)
+        .map_err(composite_error)?;
+    tuple
+        .set_by_name("total", entry.total)
+        .map_err(composite_error)?;
+    Ok(tuple)
+}
+
+/// Validate `max_rows` and map it to the SQL `LIMIT` argument.
+///
+/// A negative bound is a caller error (SQLSTATE `22023`); `0` is accepted and
+/// returns no rows.
+fn validate_max_rows(max_rows: i32) -> Result<i64, CatalogError> {
+    if max_rows < 0 {
+        return Err(CatalogError::invalid_parameter(
+            format!("max_rows must be greater than or equal to 0, got {max_rows}"),
+            Path::new(""),
+        ));
+    }
+    Ok(i64::from(max_rows))
+}
+
+/// Read the most recent log rows, optionally scoped to one bundle.
+fn list_sync_log_impl(
+    bundle_id: Option<i64>,
+    max_rows: i32,
+) -> Result<Vec<SyncLogEntry>, CatalogError> {
+    security::authorize_current_user(security::Operation::Search, Path::new(""))?;
+    let limit = validate_max_rows(max_rows)?;
+    let query = format!(
+        "SELECT {SYNC_LOG_ENTRY_COLUMNS}
+         FROM pgokf_private.sync_log
+         WHERE ($1::bigint IS NULL OR bundle_id = $1)
+         ORDER BY synced_at DESC, id DESC
+         LIMIT $2"
+    );
+    Spi::connect(|client| {
+        let table = client
+            .select(query.as_str(), None, &[bundle_id.into(), limit.into()])
+            .map_err(|error| spi_error("failed to read sync log", &error))?;
+        let mut entries = Vec::with_capacity(table.len());
+        for row in table {
+            entries.push(read_entry(&row)?);
+        }
+        Ok(entries)
+    })
+}
+
+/// SQL-facing sync-log projection, installed into the `pgokf` schema.
+#[pgrx::pg_schema]
+mod pgokf {
+    use pgrx::iter::SetOfIterator;
+    use pgrx::{default, extension_sql, pg_extern};
+
+    use super::{entry_tuple, list_sync_log_impl};
+
+    extension_sql!(
+        r"
+CREATE TYPE pgokf.sync_log_entry AS (
+    id          bigint,
+    bundle_id   bigint,
+    bundle_path text,
+    op          text,
+    actor       text,
+    synced_at   timestamptz,
+    added       integer,
+    updated     integer,
+    removed     integer,
+    unchanged   integer,
+    total       integer
+);
+
+COMMENT ON TYPE pgokf.sync_log_entry IS
+    'One audit-trail entry from pgokf.list_sync_log: the operation (register/refresh/content/unregister), who ran it, when it committed, and its per-bucket change counts (NULL for an unregister).';
+",
+        name = "sync_log_entry_type",
+        requires = ["catalog_tables"]
+    );
+
+    /// List recent catalog sync/audit-log entries, most recent first.
+    ///
+    /// Requires membership in `pgokf_reader` (or `pgokf_admin`). Pass
+    /// `bundle_id` to scope the listing to one bundle, or leave it `NULL` for
+    /// every bundle. `max_rows` bounds the number of rows returned (must be
+    /// `>= 0`; SQLSTATE `22023` otherwise).
+    #[pg_extern(requires = ["sync_log_entry_type", "sync_log_table"])]
+    fn list_sync_log(
+        bundle_id: default!(Option<i64>, "NULL"),
+        max_rows: default!(i32, 100),
+    ) -> SetOfIterator<'static, pgrx::composite_type!('static, "pgokf.sync_log_entry")> {
+        let entries = list_sync_log_impl(bundle_id, max_rows).unwrap_or_else(|error| error.raise());
+        let rows: Vec<_> = entries
+            .into_iter()
+            .map(|entry| entry_tuple(entry).unwrap_or_else(|error| error.raise()))
+            .collect();
+        SetOfIterator::new(rows)
+    }
+
+    extension_sql!(
+        r"
+ALTER FUNCTION pgokf.list_sync_log(bigint, integer)
+    SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
+REVOKE ALL ON FUNCTION pgokf.list_sync_log(bigint, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pgokf.list_sync_log(bigint, integer) TO pgokf_reader;
+COMMENT ON FUNCTION pgokf.list_sync_log(bigint, integer) IS
+    'List recent pgokf_private.sync_log audit entries as pgokf.sync_log_entry, newest first, optionally scoped to one bundle and bounded by max_rows. Reader-level (SECURITY DEFINER over the admin-only log table); raises 22023 when max_rows < 0.';
+",
+        name = "sync_log_function_hardening",
+        requires = [list_sync_log]
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_max_rows_accepts_zero_and_positive() {
+        // Arrange / Act / Assert
+        assert_eq!(validate_max_rows(0).expect("zero is valid"), 0);
+        assert_eq!(validate_max_rows(100).expect("positive is valid"), 100);
+    }
+
+    #[test]
+    fn validate_max_rows_rejects_negative() {
+        // Arrange / Act
+        let error = validate_max_rows(-1).expect_err("negative max_rows must be rejected");
+
+        // Assert
+        assert_eq!(error.sqlstate(), "22023");
+    }
+}

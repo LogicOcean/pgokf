@@ -31,9 +31,11 @@ exercised against a live PostgreSQL 18 cluster.
 | Function | Returns | Volatility | Security | Required role |
 | -------- | ------- | ---------- | -------- | ------------- |
 | `version()` | `text` | IMMUTABLE | invoker | `pgokf_reader` |
-| `register_bundle(path, name, options)` | `bundle_sync_result` | VOLATILE | DEFINER | `pgokf_admin` |
-| `refresh_bundle(bundle_id)` | `bundle_sync_result` | VOLATILE | DEFINER | `pgokf_admin` |
-| `unregister_bundle(bundle_id)` | `bundle_info` | VOLATILE | DEFINER | `pgokf_admin` |
+| `register_bundle(path, name, options)` | `bundle_sync_result` | VOLATILE | DEFINER | `pgokf_writer` |
+| `register_bundle_content(name, paths, contents, options)` | `bundle_sync_result` | VOLATILE | DEFINER | `pgokf_writer` |
+| `refresh_bundle(bundle_id)` | `bundle_sync_result` | VOLATILE | DEFINER | `pgokf_writer` |
+| `unregister_bundle(bundle_id)` | `bundle_info` | VOLATILE | DEFINER | `pgokf_writer` |
+| `set_bundle_enabled(bundle_id, enabled)` | `bundle_info` | VOLATILE | DEFINER | `pgokf_writer` |
 | `list_bundles()` | `SETOF bundle_info` | STABLE | invoker | `pgokf_reader` |
 | `bundle_info(bundle_id)` | `bundle_info` | STABLE | invoker | `pgokf_reader` |
 | `concept_search(query, bundle_id, limit_count)` | `SETOF concept_search_result` | STABLE | invoker | `pgokf_reader` |
@@ -41,15 +43,25 @@ exercised against a live PostgreSQL 18 cluster.
 | `set_config(key, value)` | `void` | VOLATILE | DEFINER | `pgokf_admin` |
 | `reset_config(key)` | `void` | VOLATILE | DEFINER | `pgokf_admin` |
 | `get_config()` | `jsonb` | VOLATILE | DEFINER | `pgokf_reader` |
+| `list_sync_log(bundle_id, max_rows)` | `SETOF sync_log_entry` | VOLATILE | DEFINER | `pgokf_reader` |
+| `catalog_stats()` | `SETOF catalog_stat` | STABLE | invoker | `pgokf_reader` |
+| `health()` | `jsonb` | STABLE | DEFINER | `pgokf_reader` |
+| `stale_concepts(bundle_id, as_of)` | `SETOF stale_concept` | STABLE | invoker | `pgokf_reader` |
+| `rebuild_search_index()` | `boolean` | VOLATILE | DEFINER | `pgokf_admin` |
 | `export_parquet(bundle_id, dest_dir)` | `export_result` | VOLATILE | DEFINER | `pgokf_admin` |
 | `get_concept_source(bundle_id, concept_id)` | `bytea` | STABLE | invoker | `pgokf_reader` |
 | `export_sources(bundle_id, dest_dir)` | `export_result` | VOLATILE | DEFINER | `pgokf_admin` |
 
-`register_bundle`, `concept_search`, `concept_neighbors`, and `reset_config`
-accept `NULL`-defaulting arguments and are therefore **not** declared `STRICT`;
-every other function — including `list_bundles` and `bundle_info`, which take no
-`NULL`-defaulting argument — is `STRICT`. `concept_search` and
-`concept_neighbors` are also `PARALLEL SAFE`.
+`register_bundle`, `concept_search`, `concept_neighbors`, `reset_config`,
+`list_sync_log`, and `stale_concepts` accept `NULL`-defaulting arguments and are
+therefore **not** declared `STRICT`; every other function — including
+`list_bundles`, `bundle_info`, `catalog_stats`, and `health`, which take no
+`NULL`-defaulting argument — is `STRICT`. `concept_search`, `concept_neighbors`,
+`catalog_stats`, and `stale_concepts` are also `PARALLEL SAFE`.
+
+The `register_bundle` / `refresh_bundle` / `unregister_bundle` /
+`set_bundle_enabled` ingestion functions require `pgokf_writer` (an admin
+qualifies by inheritance).
 
 ---
 
@@ -178,6 +190,25 @@ An unknown `bundle_id` raises `22023`.
 
 ```sql
 SELECT id, path, file_count FROM pgokf.unregister_bundle(1);
+```
+
+An unregister is recorded in the audit log (`op = 'unregister'`); see
+[`pgokf.list_sync_log`](#pgokflist_sync_logbundle_id-bigint-default-null-max_rows-int-default-100--setof-pgokfsync_log_entry).
+
+### `pgokf.set_bundle_enabled(bundle_id bigint, enabled boolean) → pgokf.bundle_info`
+
+Enable or disable a registered bundle, returning the updated `bundle_info`.
+`VOLATILE STRICT`, `SECURITY DEFINER`, **requires `pgokf_writer`**.
+
+A disabled bundle's concepts are excluded from ranked search
+(`pgokf.concept_search`) and graph traversal (`pgokf.concept_neighbors`) without
+deleting any catalog rows, so the toggle is fully reversible — re-enabling
+restores the bundle exactly. Serializes on the bundle advisory lock. An unknown
+`bundle_id` raises `22023`.
+
+```sql
+SELECT id, enabled FROM pgokf.set_bundle_enabled(1, false);  -- hide bundle 1
+SELECT id, enabled FROM pgokf.set_bundle_enabled(1, true);   -- and restore it
 ```
 
 ### `pgokf.list_bundles() → SETOF pgokf.bundle_info`
@@ -341,11 +372,96 @@ STRICT`, `SECURITY DEFINER`, **requires `pgokf_reader`**.
 SELECT jsonb_pretty(pgokf.get_config());
 -- {
 --     "allowed_roots": [],
+--     "notify_channel": "",
 --     "default_strict": true,
 --     "default_exclude": [],
+--     "search_backend": "native",
+--     "okf_version_policy": "warn",
 --     "sync_log_retention_days": 30,
 --     "default_text_search_config": "pg_catalog.english"
 -- }
+```
+
+---
+
+## Monitoring and audit
+
+### `pgokf.list_sync_log(bundle_id bigint DEFAULT NULL, max_rows int DEFAULT 100) → SETOF pgokf.sync_log_entry`
+
+List recent catalog sync/audit-log entries, newest first. `VOLATILE`,
+`SECURITY DEFINER`, **requires `pgokf_reader`**.
+
+Every successful `register` / `refresh` / `content` sync and every `unregister`
+appends exactly one row to the administrator-only `pgokf_private.sync_log`,
+inside the operation's own transaction (so a logged row always means the
+operation committed). This function is the reader-facing projection over that
+log. Pass `bundle_id` to scope the listing to one bundle; `max_rows` bounds the
+number of rows (must be `>= 0`, else `22023`).
+
+```sql
+SELECT id, op, actor, added, updated, removed, total
+FROM pgokf.list_sync_log();
+--  id |    op    |  actor   | added | updated | removed | total
+-- ----+----------+----------+-------+---------+---------+-------
+--   2 | refresh  | app_sync |     0 |       0 |       0 |     4
+--   1 | register | app_sync |     4 |       0 |       0 |     4
+```
+
+History is pruned to the `sync_log_retention_days` policy after each append; see
+[configuration.md](configuration.md).
+
+### `pgokf.catalog_stats() → SETOF pgokf.catalog_stat`
+
+Per-bundle operational statistics for monitoring. `STABLE`, `PARALLEL SAFE`,
+invoker rights, **requires `pgokf_reader`**.
+
+One row per registered bundle with its indexed-concept, link, and resolved-link
+counts, sync recency (`last_synced_at`, `sync_age`), and an `is_stale` flag
+(true when the last sync is more than 24 hours old).
+
+```sql
+SELECT bundle_id, enabled, indexed_concepts, link_count, resolved_link_count,
+       sync_age, is_stale
+FROM pgokf.catalog_stats();
+```
+
+### `pgokf.health() → jsonb`
+
+A single `jsonb` health document for liveness/readiness probes. `STABLE`,
+`SECURITY DEFINER`, **requires `pgokf_reader`**.
+
+```sql
+SELECT jsonb_pretty(pgokf.health());
+-- {
+--     "ok": true,
+--     "roles_ok": true,
+--     "config_ok": true,
+--     "bm25_ready": false,
+--     "in_recovery": false,
+--     "bundle_count": 1,
+--     "concept_count": 4,
+--     "search_backend": "native"
+-- }
+```
+
+`ok` is `roles_ok AND config_ok`; `in_recovery` (`pg_is_in_recovery()`) supports
+replica/readiness routing; `bm25_ready` reports whether the ParadeDB `pg_search`
+extension and a `bm25` index on `pgokf.concepts` are both present.
+
+### `pgokf.stale_concepts(bundle_id bigint DEFAULT NULL, as_of timestamptz DEFAULT NULL) → SETOF pgokf.stale_concept`
+
+List concepts whose OKF `stale_after` instant has passed. `STABLE`,
+`PARALLEL SAFE`, invoker rights, **requires `pgokf_reader`**.
+
+Returns concepts whose `concept_provenance.stale_after` is earlier than `as_of`
+(or `now()` when `as_of` is `NULL`), optionally scoped to one `bundle_id`.
+
+```sql
+-- Concepts already stale as of now:
+SELECT bundle_id, concept_id, path, stale_after FROM pgokf.stale_concepts();
+-- Concepts that will be stale by year end:
+SELECT concept_id, stale_after
+FROM pgokf.stale_concepts(NULL, '2026-12-31T23:59:59Z'::timestamptz);
 ```
 
 ---
@@ -530,6 +646,50 @@ Returned by `concept_neighbors`.
 | `hops` | `integer` | Shortest number of resolved edges to the neighbor. |
 | `path` | `text[]` | Concept IDs on the shortest path, start through neighbor. |
 | `title` | `text` | Neighbor title (may be `NULL`). |
+
+### `pgokf.sync_log_entry`
+
+Returned by `list_sync_log`.
+
+| Column | Type | Meaning |
+| ------ | ---- | ------- |
+| `id` | `bigint` | Audit-entry identity. |
+| `bundle_id` | `bigint` | Affected bundle (retained for `unregister` rows). |
+| `bundle_path` | `text` | Bundle path captured at operation time. |
+| `op` | `text` | `register` / `refresh` / `content` / `unregister`. |
+| `actor` | `text` | The `session_user` that ran the operation. |
+| `synced_at` | `timestamptz` | When the operation committed. |
+| `added` / `updated` / `removed` / `unchanged` / `total` | `integer` | Per-bucket change counts (`NULL` for an `unregister`). |
+
+### `pgokf.catalog_stat`
+
+Returned by `catalog_stats`.
+
+| Column | Type | Meaning |
+| ------ | ---- | ------- |
+| `bundle_id` | `bigint` | Bundle identity. |
+| `name` | `text` | Optional label (may be `NULL`). |
+| `enabled` | `boolean` | Whether the bundle is searched. |
+| `source_type` | `text` | `filesystem` or `content`. |
+| `file_count` | `integer` | Concept count recorded on the bundle row. |
+| `indexed_concepts` | `bigint` | Live count of `pgokf.concepts` rows. |
+| `link_count` | `bigint` | Total `pgokf.links` rows. |
+| `resolved_link_count` | `bigint` | Resolved internal edges. |
+| `last_synced_at` | `timestamptz` | Last successful sync (may be `NULL`). |
+| `sync_age` | `interval` | `now() - last_synced_at` (may be `NULL`). |
+| `is_stale` | `boolean` | True when the last sync is more than 24 hours old. |
+
+### `pgokf.stale_concept`
+
+Returned by `stale_concepts`.
+
+| Column | Type | Meaning |
+| ------ | ---- | ------- |
+| `bundle_id` | `bigint` | Owning bundle. |
+| `concept_id` | `text` | The stale concept's ID. |
+| `path` | `text` | Bundle-relative source path. |
+| `concept_type` | `text` | OKF concept type (may be `NULL`). |
+| `stale_after` | `timestamptz` | The instant after which the concept is stale. |
 
 ---
 
@@ -736,6 +896,28 @@ Cluster-persistent policy: a single row, managed only through `set_config` /
 | `sync_log_retention_days` | `integer` | `30` (`CHECK >= 0`) |
 | `default_exclude` | `text[]` | `'{}'` |
 | `store_source` | `boolean` | `false` |
+| `search_backend` | `text` | `'native'` (`CHECK IN ('native','bm25')`) |
+| `notify_channel` | `text` | `''` (empty disables) |
+| `okf_version_policy` | `text` | `'warn'` (`CHECK IN ('warn','reject')`) |
+
+### `pgokf_private.sync_log`
+
+Administrator-only audit trail: one row per successful `register` / `refresh` /
+`content` sync or bundle `unregister`, appended inside the operation's own
+transaction and pruned to the `sync_log_retention_days` policy. No role has
+direct access; read it through the reader-granted `pgokf.list_sync_log`
+function.
+
+| Column | Type | Notes |
+| ------ | ---- | ----- |
+| `id` | `bigint` | `GENERATED ALWAYS AS IDENTITY`, primary key. |
+| `bundle_id` | `bigint` | Affected bundle (no FK, so `unregister` rows survive the delete). |
+| `bundle_path` | `text` | Bundle path captured at operation time. |
+| `op` | `text` | `NOT NULL`, `CHECK IN ('register','refresh','content','unregister')`. |
+| `actor` | `text` | `NOT NULL DEFAULT session_user`. |
+| `synced_at` | `timestamptz` | `NOT NULL DEFAULT now()`; the column retention prunes on. |
+| `added` / `updated` / `removed` / `unchanged` / `total` | `integer` | Per-bucket change counts (`NULL` for an `unregister`). |
+| `sync_hash` | `text` | Aggregate BLAKE3 digest of the synced snapshot (`NULL` for an `unregister`). |
 
 ---
 

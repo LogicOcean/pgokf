@@ -55,12 +55,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use okf_parser::{ParserLimits, index_okf_version, is_reserved_path, parse_concept};
+use okf_parser::{
+    ParserLimits, index_okf_version, is_reserved_path, is_supported_okf_version, parse_concept,
+};
 use okf_sync::{FileMetadata, SyncConfig, SyncReport, discover, hash_bytes};
 use pgrx::Spi;
 
 use crate::catalog::batch::{self, BATCH_SIZE};
-use crate::catalog::types::StagedConcept;
+use crate::catalog::types::{StagedConcept, count_to_i32};
 use crate::errors::CatalogError;
 use crate::guc;
 use crate::security;
@@ -68,6 +70,32 @@ use crate::security;
 /// Namespace prefix mixed into every advisory-lock key so `pgokf` locks
 /// cannot collide with another subsystem hashing similar strings.
 const ADVISORY_LOCK_NAMESPACE: &str = "pgokf.bundle";
+
+/// The catalog-mutating operation a [`run_bundle_sync`] call is serving.
+///
+/// Threaded into the sync so the audit row it appends and the change
+/// notification it emits name the right operation. The wire names match the
+/// `pgokf_private.sync_log.op` domain and the `pgokf.list_sync_log` contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SyncOp {
+    /// A first-time filesystem registration (`pgokf.register_bundle`).
+    Register,
+    /// A filesystem re-synchronization (`pgokf.refresh_bundle`).
+    Refresh,
+    /// An in-memory content ingest/resync (`pgokf.register_bundle_content`).
+    Content,
+}
+
+impl SyncOp {
+    /// The wire name recorded in `sync_log.op` and emitted in the notification.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Register => "register",
+            Self::Refresh => "refresh",
+            Self::Content => "content",
+        }
+    }
+}
 
 /// Per-input character bounds for the three weighted `to_tsvector` operands
 /// (title `A`, metadata `B`, body `D`) whose concatenation forms `body_tsv`.
@@ -744,6 +772,70 @@ fn update_bundle_row(
     .map_err(|error| spi_error("failed to update bundle sync state", &error))
 }
 
+/// Apply the durable `okf_version_policy` to a bundle's declared OKF version.
+///
+/// An absent version (`None`) is always accepted unchanged. A *declared* but
+/// unsupported version is either warned about and indexed anyway (`warn`, the
+/// default — the value is still stored on `pgokf.bundles.okf_version`) or
+/// rejected with SQLSTATE `22023`, aborting the sync (`reject`). A declared,
+/// supported version passes silently.
+fn apply_okf_version_policy(
+    version: Option<String>,
+    policy: &str,
+) -> Result<Option<String>, CatalogError> {
+    if let Some(declared) = &version
+        && !is_supported_okf_version(declared)
+    {
+        if policy == "reject" {
+            return Err(CatalogError::invalid_parameter(
+                format!(
+                    "bundle declares unsupported OKF version {declared} \
+                     (this build supports 0.2 / 0.2.x); okf_version_policy=reject"
+                ),
+                Path::new(""),
+            ));
+        }
+        pgrx::warning!(
+            "pgokf: bundle declares unsupported OKF version {declared} \
+             (this build supports 0.2 / 0.2.x); indexing anyway (okf_version_policy=warn)"
+        );
+    }
+    Ok(version)
+}
+
+/// Emit the opt-in change notification for a completed sync.
+///
+/// Fires `pg_notify(<channel>, <json>)` with a JSON payload of the bundle id,
+/// operation, and change counts. The channel and payload are bound as
+/// parameters, never interpolated. Off by default (no channel configured), so
+/// this is only called when `notify_channel` is set.
+fn emit_change_notification(
+    channel: &str,
+    bundle_id: i64,
+    op: SyncOp,
+    report: &SyncReport,
+) -> Result<(), CatalogError> {
+    Spi::run_with_args(
+        "SELECT pg_catalog.pg_notify($1, pg_catalog.jsonb_build_object(
+             'bundle_id', $2::bigint,
+             'op', $3::text,
+             'added', $4::integer,
+             'updated', $5::integer,
+             'removed', $6::integer,
+             'total', $7::integer)::text)",
+        &[
+            channel.into(),
+            bundle_id.into(),
+            op.as_str().into(),
+            count_to_i32(report.added).into(),
+            count_to_i32(report.updated).into(),
+            count_to_i32(report.removed).into(),
+            count_to_i32(report.total()).into(),
+        ],
+    )
+    .map_err(|error| spi_error("failed to emit change notification", &error))
+}
+
 /// The shared sync engine used by `register_bundle`, `refresh_bundle`, and
 /// `register_bundle_content`; see the module docs for the full step list.
 ///
@@ -751,9 +843,17 @@ fn update_bundle_row(
 /// pipeline is identical whether the bytes come from an on-disk
 /// [`FilesystemSource`] or an in-memory [`ContentSource`]. Callers must already
 /// hold the bundle advisory lock and have authorized the operation.
+///
+/// `op` and `bundle_path` identify the operation for the audit trail and the
+/// change notification appended at the successful tail. Both the
+/// `pgokf_private.sync_log` row and the `pg_notify` announcement commit
+/// atomically with the sync transaction, so a logged row (or a delivered
+/// notification, on commit) always corresponds to a committed operation.
 pub(crate) fn run_bundle_sync<S: ByteSource>(
     bundle_id: i64,
     source: &S,
+    op: SyncOp,
+    bundle_path: &str,
 ) -> Result<SyncReport, CatalogError> {
     let defaults = crate::catalog::config::sync_defaults()?;
     let stored = load_stored_hashes(bundle_id)?;
@@ -786,12 +886,32 @@ pub(crate) fn run_bundle_sync<S: ByteSource>(
     // depends on the concept rows existing, which the upsert above guarantees.
     crate::catalog::source::project(bundle_id, &staged)?;
 
-    let okf_version = source.root_okf_version();
-    update_bundle_row(
+    // Apply the OKF-version conformance policy before finalizing the bundle
+    // row: under `reject` an unsupported declared version aborts the sync here,
+    // so a rejected bundle is never recorded as synced.
+    let okf_version =
+        apply_okf_version_policy(source.root_okf_version(), &defaults.okf_version_policy)?;
+    let sync_hash = bundle_sync_hash(&current);
+    update_bundle_row(bundle_id, &sync_hash, okf_version.as_deref())?;
+
+    // Audit trail: append exactly one row for this operation and prune history
+    // to the retention policy — the mechanism that activates
+    // sync_log_retention_days. Commits atomically with the sync.
+    crate::catalog::audit::record(
         bundle_id,
-        &bundle_sync_hash(&current),
-        okf_version.as_deref(),
+        bundle_path,
+        op.as_str(),
+        Some(&delta.report),
+        Some(&sync_hash),
+        defaults.sync_log_retention_days,
     )?;
+
+    // Opt-in change notification (LISTEN/NOTIFY). Zero overhead when the
+    // notify_channel key is empty (no channel resolved).
+    if let Some(channel) = &defaults.notify_channel {
+        emit_change_notification(channel, bundle_id, op, &delta.report)?;
+    }
+
     Ok(delta.report)
 }
 
@@ -874,7 +994,12 @@ fn register_bundle_impl(
     }
 
     let bundle_id = insert_bundle_row(&canonical_text, name, options)?;
-    let report = run_bundle_sync(bundle_id, &FilesystemSource::new(canonical_root))?;
+    let report = run_bundle_sync(
+        bundle_id,
+        &FilesystemSource::new(canonical_root),
+        SyncOp::Register,
+        &canonical_text,
+    )?;
     Ok((bundle_id, canonical_text, report))
 }
 
@@ -907,7 +1032,12 @@ fn refresh_bundle_impl(bundle_id: i64) -> Result<(String, SyncReport), CatalogEr
     // root before touching the filesystem.
     acquire_bundle_lock(&stored_path)?;
     let canonical_root = resolve_bundle_root(&stored_path)?;
-    let report = run_bundle_sync(bundle_id, &FilesystemSource::new(canonical_root))?;
+    let report = run_bundle_sync(
+        bundle_id,
+        &FilesystemSource::new(canonical_root),
+        SyncOp::Refresh,
+        &stored_path,
+    )?;
     Ok((stored_path, report))
 }
 

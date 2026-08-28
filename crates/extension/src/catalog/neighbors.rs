@@ -15,6 +15,10 @@
 //!   `22023`;
 //! - only resolved internal edges (`resolved AND NOT is_external`) become
 //!   traversal edges; external and unresolved rows never do;
+//! - only edges in an **enabled** bundle are traversed (both the seed and the
+//!   recursive step join `pgokf.bundles ... AND b.enabled`), matching
+//!   [`crate::catalog::search`]; a disabled bundle's concepts are never
+//!   returned;
 //! - authorization is reader-level via
 //!   [`crate::security::authorize_current_user`] with
 //!   [`crate::security::Operation::Search`];
@@ -84,6 +88,7 @@ const TRAVERSAL_QUERY: &str = "
                1 AS hops,
                ARRAY[l.source_id, l.target_id]::text[] AS path
         FROM pgokf.links l
+        JOIN pgokf.bundles b ON b.id = l.bundle_id AND b.enabled
         WHERE l.bundle_id = $1
           AND l.source_id = $2
           AND l.resolved
@@ -97,6 +102,7 @@ const TRAVERSAL_QUERY: &str = "
         JOIN pgokf.links l
           ON l.bundle_id = $1
          AND l.source_id = w.neighbor_id
+        JOIN pgokf.bundles b ON b.id = l.bundle_id AND b.enabled
         WHERE l.resolved
           AND NOT l.is_external
           AND w.hops < $3
@@ -324,7 +330,7 @@ mod pgokf {
 REVOKE ALL ON FUNCTION pgokf.concept_neighbors(text, integer, bigint) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pgokf.concept_neighbors(text, integer, bigint) TO pgokf_reader;
 COMMENT ON FUNCTION pgokf.concept_neighbors(text, integer, bigint) IS
-    'Cycle-safe recursive traversal of resolved internal links from a concept. Reader-level; capped at pgokf.max_graph_hops. Raises 22023 on max_hops < 1 or an ambiguous concept_id.';
+    'Cycle-safe recursive traversal of resolved internal links from a concept, over enabled bundles only (matching concept_search). Reader-level; capped at pgokf.max_graph_hops. Raises 22023 on max_hops < 1 or an ambiguous concept_id.';
 ",
         name = "concept_neighbors_hardening",
         requires = [concept_neighbors]

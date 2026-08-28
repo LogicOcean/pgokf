@@ -248,7 +248,53 @@ fn unregister_bundle_impl(bundle_id: i64) -> Result<BundleInfo, CatalogError> {
     // Serialize with a concurrent register/refresh/unregister of the same
     // bundle on its stored canonical path before mutating catalog state.
     acquire_bundle_lock(&stored_path)?;
-    delete_bundle(bundle_id)?.ok_or_else(|| unknown_bundle_error(bundle_id))
+    let removed = delete_bundle(bundle_id)?.ok_or_else(|| unknown_bundle_error(bundle_id))?;
+
+    // Audit trail: record the unregister in the same transaction as the delete,
+    // so a logged row always means the bundle was actually removed. The counts
+    // and sync_hash are NULL — an unregister has no diff. sync_log.bundle_id is
+    // intentionally FK-free, so the row survives the bundle row's deletion.
+    let retention_days = crate::catalog::config::sync_log_retention_days()?;
+    crate::catalog::audit::record(
+        bundle_id,
+        &stored_path,
+        "unregister",
+        None,
+        None,
+        retention_days,
+    )?;
+    Ok(removed)
+}
+
+/// Authorize, lock on the stored canonical path, and flip the bundle's
+/// `enabled` flag, returning the updated projection.
+///
+/// A disabled bundle's concepts are excluded from ranked search
+/// ([`crate::catalog::search`]) and graph traversal
+/// ([`crate::catalog::neighbors`]) without removing any catalog rows, so
+/// re-enabling restores the bundle exactly. Serializes on the bundle advisory
+/// lock so the toggle cannot race a concurrent sync of the same bundle. An
+/// unknown `bundle_id` raises SQLSTATE `22023`.
+fn set_bundle_enabled_impl(bundle_id: i64, enabled: bool) -> Result<BundleInfo, CatalogError> {
+    security::authorize_current_user(security::Operation::Ingest, Path::new(""))?;
+    let stored_path =
+        select_bundle_path(bundle_id)?.ok_or_else(|| unknown_bundle_error(bundle_id))?;
+
+    acquire_bundle_lock(&stored_path)?;
+    let statement = format!(
+        "UPDATE pgokf.bundles SET enabled = $2 WHERE id = $1 RETURNING {BUNDLE_INFO_COLUMNS}"
+    );
+    Spi::connect_mut(|client| {
+        let mut table = client
+            .update(
+                statement.as_str(),
+                None,
+                &[bundle_id.into(), enabled.into()],
+            )
+            .map_err(|error| spi_error("failed to set bundle enabled flag", &error))?;
+        table.next().map(|row| read_bundle_info(&row)).transpose()
+    })?
+    .ok_or_else(|| unknown_bundle_error(bundle_id))
 }
 
 /// SQL-facing administration entry points, installed into the `pgokf` schema.
@@ -258,8 +304,8 @@ mod pgokf {
     use pgrx::{extension_sql, pg_extern};
 
     use super::{
-        bundle_info_impl, bundle_info_tuple, list_bundles_impl, unknown_bundle_error,
-        unregister_bundle_impl,
+        bundle_info_impl, bundle_info_tuple, list_bundles_impl, set_bundle_enabled_impl,
+        unknown_bundle_error, unregister_bundle_impl,
     };
 
     extension_sql!(
@@ -320,10 +366,33 @@ COMMENT ON TYPE pgokf.bundle_info IS
         bundle_info_tuple(info).unwrap_or_else(|error| error.raise())
     }
 
+    /// Enable or disable a registered bundle, returning the updated info.
+    ///
+    /// Requires membership in `pgokf_writer` (an admin qualifies by
+    /// inheritance). A disabled bundle's concepts are excluded from ranked
+    /// search and graph traversal without deleting any rows, so the toggle is
+    /// fully reversible. Serializes on the bundle advisory lock. Raises SQLSTATE
+    /// `22023` when `bundle_id` is not registered.
+    #[pg_extern(requires = ["bundle_info_type"])]
+    fn set_bundle_enabled(
+        bundle_id: i64,
+        enabled: bool,
+    ) -> pgrx::composite_type!('static, "pgokf.bundle_info") {
+        let info =
+            set_bundle_enabled_impl(bundle_id, enabled).unwrap_or_else(|error| error.raise());
+        bundle_info_tuple(info).unwrap_or_else(|error| error.raise())
+    }
+
     extension_sql!(
         r"
 ALTER FUNCTION pgokf.unregister_bundle(bigint)
     SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
+ALTER FUNCTION pgokf.set_bundle_enabled(bigint, boolean)
+    SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
+REVOKE ALL ON FUNCTION pgokf.set_bundle_enabled(bigint, boolean) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pgokf.set_bundle_enabled(bigint, boolean) TO pgokf_writer;
+COMMENT ON FUNCTION pgokf.set_bundle_enabled(bigint, boolean) IS
+    'Enable or disable a registered bundle, returning the updated pgokf.bundle_info. Writer-tier (pgokf_writer; admin inherits it); a disabled bundle is hidden from concept_search and concept_neighbors without deleting rows (reversible). Raises 22023 if the bundle_id is unknown.';
 REVOKE ALL ON FUNCTION pgokf.unregister_bundle(bigint) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pgokf.unregister_bundle(bigint) TO pgokf_writer;
 REVOKE ALL ON FUNCTION pgokf.list_bundles() FROM PUBLIC;
@@ -338,7 +407,12 @@ COMMENT ON FUNCTION pgokf.bundle_info(bigint) IS
     'Return one registered bundle as pgokf.bundle_info. Reader-level; raises 22023 if the bundle_id is unknown.';
 ",
         name = "admin_function_hardening",
-        requires = [unregister_bundle, list_bundles, bundle_info]
+        requires = [
+            unregister_bundle,
+            list_bundles,
+            bundle_info,
+            set_bundle_enabled
+        ]
     );
 }
 

@@ -12,6 +12,54 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 Nothing yet.
 
+## [0.1.5] - 2026-08-28
+
+An additive **audit, lifecycle, and observability** batch. Everything is
+backward compatible — a new admin-only table, three composite types, five new
+functions, three new configuration keys, and two functions whose *behavior*
+gained a filter — so `ALTER EXTENSION pgokf UPDATE TO '0.1.5'` migrates an
+existing install in a single transaction (the `0.1.4 → 0.1.5` upgrade script
+adds the `sync_log` table, the three types, the five functions, and the two
+config columns; the rest lives in the shared library and activates on load).
+
+### Added
+
+- **Sync/audit log.** A new administrator-only `pgokf_private.sync_log` records
+  one row per successful `register` / `refresh` / `register_bundle_content` sync
+  and per `unregister`, inside the operation's own transaction (so a logged row
+  always means the operation committed). Read it with the reader-level
+  **`pgokf.list_sync_log(bundle_id, max_rows)`** (returning the new
+  `pgokf.sync_log_entry`). This also **activates the previously dead
+  `sync_log_retention_days` key**: after each append, history older than the
+  window is pruned in the same transaction (`0` keeps it indefinitely).
+- **Bundle enable/disable lifecycle.** **`pgokf.set_bundle_enabled(bundle_id,
+  enabled)`** (writer-tier) hides a bundle from ranked search *and* graph
+  traversal without deleting any rows, and is fully reversible.
+- **`concept_neighbors` now excludes disabled bundles**, matching
+  `concept_search`, so a disabled bundle's concepts are neither returned nor
+  traversed.
+- **Change notification.** A new `notify_channel` configuration key: when set to
+  a safe channel identifier, a successful sync emits
+  `pg_notify(<channel>, {bundle_id, op, added, updated, removed, total})`.
+  Off by default (empty) with zero overhead.
+- **Observability functions** (all reader-level): **`pgokf.catalog_stats()`**
+  (per-bundle indexed-concept / link / resolved-link counts, sync recency, and a
+  24-hour staleness flag → `pgokf.catalog_stat`), **`pgokf.health()`** (a
+  `jsonb` liveness/readiness document: `ok`, counts, `search_backend`,
+  `bm25_ready`, `in_recovery`, `roles_ok`, `config_ok`), and
+  **`pgokf.stale_concepts(bundle_id, as_of)`** (concepts past their OKF
+  `stale_after` → `pgokf.stale_concept`).
+- **OKF version conformance.** A new `okf_version_policy` key (`warn` | `reject`,
+  default `warn`): a bundle declaring an OKF `okf_version` this build does not
+  support (only `0.2` / `0.2.x`) is warned about and indexed under `warn`, or
+  rejected with `22023` under `reject`. An absent `okf_version` is unaffected.
+  The `okf-parser` crate gains a small, centralized `is_supported_okf_version`.
+
+### Changed
+
+- `sync_log_retention_days` moves from **defined-but-dead** to **active** (see
+  above). `notify_channel` and `okf_version_policy` are new, active keys.
+
 ## [0.1.4] - 2026-08-28
 
 Two additive capabilities landed together: a **`pgokf_writer` ingestion role
@@ -283,7 +331,8 @@ queries, native full-text search, and link-graph traversal.
 - The `pgokf_private` schema and its `config` table are readable and writable
   only by the extension owner and `pgokf_admin`; readers cannot see policy.
 
-[Unreleased]: https://github.com/LogicOcean/pgokf/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/LogicOcean/pgokf/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/LogicOcean/pgokf/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/LogicOcean/pgokf/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/LogicOcean/pgokf/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/LogicOcean/pgokf/compare/v0.1.1...v0.1.2
