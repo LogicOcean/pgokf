@@ -94,6 +94,35 @@ pub fn is_reserved_path(normalized_path: &str) -> bool {
     RESERVED_FILE_NAMES.contains(&file_name)
 }
 
+/// Whether a normalized bundle-relative path names the reserved OKF `log.md`
+/// activity log at any directory level.
+///
+/// `log.md` is reserved like `index.md` (both are excluded from
+/// [`is_reserved_path`]-guarded concept discovery), but unlike `index.md` it is
+/// projected as a per-directory activity log rather than consulted for the
+/// bundle version. Callers use this predicate to single out the log files in a
+/// discovered snapshot so they can be read and projected without ever becoming
+/// concepts.
+#[must_use]
+pub fn is_reserved_log(normalized_path: &str) -> bool {
+    let file_name = normalized_path
+        .rsplit_once('/')
+        .map_or(normalized_path, |(_, name)| name);
+    file_name == "log.md"
+}
+
+/// The bundle-relative directory that contains a normalized file path.
+///
+/// Returns the empty string for a file at the bundle root, or the parent path
+/// (forward-slash separated, no trailing slash) otherwise. Used to key a
+/// directory-scoped projection such as the `log.md` activity log.
+#[must_use]
+pub fn parent_directory(normalized_path: &str) -> &str {
+    normalized_path
+        .rsplit_once('/')
+        .map_or("", |(directory, _)| directory)
+}
+
 /// Resolve an internal Markdown link destination to a normalized
 /// bundle-relative path, applying the same rules as concept paths.
 ///
@@ -174,7 +203,9 @@ fn parent_components(normalized_path: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{concept_id, is_reserved_path, resolve_link_target};
+    use super::{
+        concept_id, is_reserved_log, is_reserved_path, parent_directory, resolve_link_target,
+    };
 
     #[test]
     fn concept_id_strips_md_suffix_only() {
@@ -191,6 +222,23 @@ mod tests {
         assert!(is_reserved_path("nested/log.md"));
         assert!(!is_reserved_path("nested/reindex.md"));
         assert!(!is_reserved_path("catalog.md"));
+    }
+
+    #[test]
+    fn is_reserved_log_matches_only_log_files_at_any_depth() {
+        assert!(is_reserved_log("log.md"));
+        assert!(is_reserved_log("nested/deeper/log.md"));
+        assert!(!is_reserved_log("index.md"));
+        assert!(!is_reserved_log("nested/index.md"));
+        assert!(!is_reserved_log("nested/catalog-log.md"));
+        assert!(!is_reserved_log("blog.md"));
+    }
+
+    #[test]
+    fn parent_directory_returns_the_containing_directory_or_empty_root() {
+        assert_eq!(parent_directory("log.md"), "");
+        assert_eq!(parent_directory("nested/log.md"), "nested");
+        assert_eq!(parent_directory("a/b/log.md"), "a/b");
     }
 
     #[test]

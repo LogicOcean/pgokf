@@ -37,7 +37,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The 36 stable public functions, as `(name, argument-type list)`. The pair
+/// The 37 stable public functions, as `(name, argument-type list)`. The pair
 /// renders to the exact `COMMENT ON FUNCTION pgokf.<name>(<args>)` prefix that
 /// the hardening blocks emit.
 const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
@@ -75,6 +75,7 @@ const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
     ("list_sync_log", "bigint, integer"),
     ("list_sync_changes", "bigint, integer"),
     ("list_access_log", "bigint, integer"),
+    ("list_bundle_log", "bigint, text, integer"),
     ("catalog_stats", ""),
     ("health", ""),
     ("stale_concepts", "bigint, timestamptz"),
@@ -85,7 +86,7 @@ const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
     ("version", ""),
 ];
 
-/// The 12 stable public composite types.
+/// The 13 stable public composite types.
 const PUBLIC_TYPES: &[&str] = &[
     "bundle_sync_result",
     "concept_search_result",
@@ -99,9 +100,10 @@ const PUBLIC_TYPES: &[&str] = &[
     "access_log_entry",
     "duplicate_group",
     "search_facet",
+    "bundle_log_entry",
 ];
 
-/// The 13 catalog tables, as fully-qualified `schema.table` identifiers. Nine
+/// The 14 catalog tables, as fully-qualified `schema.table` identifiers. Ten
 /// are public (`pgokf`); the singleton policy row and the three admin-only
 /// history/audit logs live in the `pgokf_private` schema and are documented all
 /// the same.
@@ -115,6 +117,7 @@ const CATALOG_TABLES: &[&str] = &[
     "pgokf.concept_provenance_source",
     "pgokf.concept_source",
     "pgokf.concept_embedding",
+    "pgokf.bundle_log",
     "pgokf_private.config",
     "pgokf_private.sync_log",
     "pgokf_private.sync_log_change",

@@ -1187,7 +1187,7 @@ The gamma concept is introduced during the refresh cycle.\n";
         // an existing install can be stepped up to this release.
         let upgrade_script = manifest_dir
             .join("sql")
-            .join(format!("pgokf--0.1.8--{crate_version}.sql"));
+            .join(format!("pgokf--0.1.9--{crate_version}.sql"));
         let metadata =
             fs::metadata(&upgrade_script).expect("the current upgrade script ships on disk");
         assert!(
@@ -3533,6 +3533,394 @@ An added concept for the resync diff.\n";
         assert!(
             !removed,
             "unschedule_refresh is a no-op when pg_cron is absent"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // 0.1.10 F1: Attested Computation type-specific fields as graph edges.
+    // ---------------------------------------------------------------------
+
+    /// An Attested Computation whose computation / executor / attester are
+    /// declared ONLY in frontmatter (the body carries no Markdown links), so the
+    /// concept can reach those targets only through the new attestation edges.
+    const ATTESTED_RICH: &str = "---\n\
+type: Attested Computation\n\
+title: Monthly active accounts\n\
+computation: /computation.md\n\
+executor:\n  resource: /executor.md\n  receipt: [query_id]\n\
+attester:\n  resource: /attester.md\n\
+---\n\
+\n\
+# Definition\n\
+\n\
+The computation, executor, and attester are declared only in frontmatter.\n";
+
+    /// A NON-attested concept carrying the identical reference-shaped
+    /// frontmatter keys and body — only its `type` differs. It must project no
+    /// attestation edges, so it reaches none of the targets.
+    const ATTESTED_PLAIN: &str = "---\n\
+type: Reference\n\
+title: Plain reference with attestation-shaped frontmatter\n\
+computation: /computation.md\n\
+executor:\n  resource: /executor.md\n\
+attester:\n  resource: /attester.md\n\
+---\n\
+\n\
+# Plain\n\
+\n\
+The same reference keys, but this is not an Attested Computation.\n";
+
+    const ATTEST_COMPUTATION: &str =
+        "---\ntype: Reference\ntitle: Monthly active account SQL\n---\n\nThe sanctioned SQL.\n";
+    const ATTEST_EXECUTOR: &str =
+        "---\ntype: Skill\ntitle: PostgreSQL read-only executor\n---\n\nRun sanctioned SQL.\n";
+    const ATTEST_ATTESTER: &str =
+        "---\ntype: Reference\ntitle: SQL equality attester\n---\n\nCompare receipts.\n";
+
+    /// Register the five-concept attested fixture as a content bundle.
+    fn register_attested_fixture() -> i64 {
+        let paths = vec![
+            "rich.md".to_owned(),
+            "plain.md".to_owned(),
+            "computation.md".to_owned(),
+            "executor.md".to_owned(),
+            "attester.md".to_owned(),
+        ];
+        let contents = vec![
+            ATTESTED_RICH.as_bytes().to_vec(),
+            ATTESTED_PLAIN.as_bytes().to_vec(),
+            ATTEST_COMPUTATION.as_bytes().to_vec(),
+            ATTEST_EXECUTOR.as_bytes().to_vec(),
+            ATTEST_ATTESTER.as_bytes().to_vec(),
+        ];
+        let (bundle_id, added, ..) = register_content("attested", paths, contents);
+        assert_eq!(added, 5, "the attested fixture registers five concepts");
+        bundle_id
+    }
+
+    #[pg_test]
+    fn attested_computation_reference_fields_become_traversable_typed_edges() {
+        // Arrange: the attested rich concept and an otherwise-identical plain
+        // (non-attested) concept sharing the same reference frontmatter.
+        let bundle_id = register_attested_fixture();
+
+        // Act / Assert: from the Attested Computation, concept_neighbors now
+        // reaches all three reference targets purely through the frontmatter
+        // edges (the body has no links to them).
+        let reached = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concept_neighbors('rich', 2, $1)
+             WHERE neighbor_id IN ('computation', 'executor', 'attester')",
+            &[bundle_id.into()],
+        )
+        .expect("concept_neighbors executes")
+        .expect("count is not NULL");
+        assert_eq!(
+            reached, 3,
+            "the attested concept reaches its computation, executor, and attester"
+        );
+
+        // Assert: the non-attested peer with identical frontmatter reaches NONE
+        // of them — the edges exist only for the Attested Computation type (the
+        // before/after contrast: previously the attested concept could not reach
+        // executor either).
+        let plain_reached = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concept_neighbors('plain', 2, $1)
+             WHERE neighbor_id IN ('computation', 'executor', 'attester')",
+            &[bundle_id.into()],
+        )
+        .expect("concept_neighbors executes")
+        .expect("count is not NULL");
+        assert_eq!(
+            plain_reached, 0,
+            "a non-attested concept projects no attestation edges"
+        );
+
+        // Assert: the links projection surfaces the typed relation, resolved.
+        let resolved_edges = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.links
+             WHERE bundle_id = $1 AND source_id = 'rich'
+               AND link_relation LIKE 'attestation:%' AND resolved",
+            &[bundle_id.into()],
+        )
+        .expect("links query executes")
+        .expect("count is not NULL");
+        assert_eq!(resolved_edges, 3, "all three attestation edges resolved");
+
+        let executor_relation = Spi::get_one_with_args::<String>(
+            "SELECT link_relation FROM pgokf.links
+             WHERE bundle_id = $1 AND source_id = 'rich' AND target_id = 'executor'",
+            &[bundle_id.into()],
+        )
+        .expect("relation query executes")
+        .expect("the executor edge exists");
+        assert_eq!(executor_relation, "attestation:executor");
+
+        // Assert: the plain concept contributes no attestation rows at all.
+        let plain_edges = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.links
+             WHERE bundle_id = $1 AND source_id = 'plain'
+               AND link_relation LIKE 'attestation:%'",
+            &[bundle_id.into()],
+        )
+        .expect("links query executes")
+        .expect("count is not NULL");
+        assert_eq!(
+            plain_edges, 0,
+            "the non-attested concept has no typed edges"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // 0.1.10 F2: reserved log.md parsing / projection.
+    // ---------------------------------------------------------------------
+
+    const LOG_CONCEPT_ALPHA: &str =
+        "---\ntype: Reference\ntitle: Alpha\n---\n\nA concept beside the log.\n";
+    const LOG_CONCEPT_NESTED: &str =
+        "---\ntype: Reference\ntitle: Nested\n---\n\nA nested concept.\n";
+
+    /// A root-level activity log: a heading (no timestamp), two ISO-8601-dated
+    /// bullets, and a freeform note (no timestamp) — four entries.
+    const ROOT_LOG: &str = "# Activity\n\
+- 2026-07-01T12:00:00Z Registered the bundle\n\
+- 2026-07-02T09:30:00Z Refreshed after an edit\n\
+Freeform note without a timestamp\n";
+
+    /// A nested directory's activity log: a single dated bullet.
+    const NESTED_LOG: &str = "- 2026-08-01T00:00:00Z Nested directory activity\n";
+
+    /// Register the log fixture (two concepts, a root and a nested log.md) as a
+    /// content bundle, returning `(bundle_id, added)`.
+    fn register_log_fixture(name: &str, root_log: &str) -> (i64, i32) {
+        let paths = vec![
+            "alpha.md".to_owned(),
+            "log.md".to_owned(),
+            "nested/beta.md".to_owned(),
+            "nested/log.md".to_owned(),
+        ];
+        let contents = vec![
+            LOG_CONCEPT_ALPHA.as_bytes().to_vec(),
+            root_log.as_bytes().to_vec(),
+            LOG_CONCEPT_NESTED.as_bytes().to_vec(),
+            NESTED_LOG.as_bytes().to_vec(),
+        ];
+        let (bundle_id, added, ..) = register_content(name, paths, contents);
+        (bundle_id, added)
+    }
+
+    #[pg_test]
+    fn reserved_log_md_projects_ordered_entries_without_becoming_concepts() {
+        // Arrange / Act: a bundle with a root and a nested log.md alongside two
+        // concepts.
+        let (bundle_id, added) = register_log_fixture("logbook", ROOT_LOG);
+
+        // Assert: the two log.md files are NOT concepts — only alpha and
+        // nested/beta register.
+        assert_eq!(
+            added, 2,
+            "reserved log.md files are never counted as concepts"
+        );
+        let concept_count = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concepts WHERE bundle_id = $1",
+            &[bundle_id.into()],
+        )
+        .expect("concept count executes")
+        .expect("count is not NULL");
+        assert_eq!(
+            concept_count, 2,
+            "the bundle holds exactly the two concepts"
+        );
+
+        // Assert: list_bundle_log returns every entry, ordered by directory then
+        // ordinal (root '' before 'nested'): 4 root + 1 nested = 5.
+        let total = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.list_bundle_log($1)",
+            &[bundle_id.into()],
+        )
+        .expect("list_bundle_log executes")
+        .expect("count is not NULL");
+        assert_eq!(total, 5, "every log entry projects");
+
+        // Assert: the first entry is the root heading, ordinal 0, no timestamp.
+        let (directory, ordinal, entry, has_ts) = Spi::connect(|client| {
+            let row = client
+                .select(
+                    "SELECT directory, ordinal, entry, logged_at IS NOT NULL AS has_ts
+                     FROM pgokf.list_bundle_log($1) LIMIT 1",
+                    Some(1),
+                    &[bundle_id.into()],
+                )
+                .expect("list_bundle_log executes")
+                .first();
+            (
+                row.get::<String>(1)
+                    .expect("directory readable")
+                    .expect("not NULL"),
+                row.get::<i32>(2)
+                    .expect("ordinal readable")
+                    .expect("not NULL"),
+                row.get::<String>(3)
+                    .expect("entry readable")
+                    .expect("not NULL"),
+                row.get::<bool>(4)
+                    .expect("has_ts readable")
+                    .expect("not NULL"),
+            )
+        });
+        assert_eq!(
+            directory, "",
+            "the root log's directory is the empty string"
+        );
+        assert_eq!(ordinal, 0);
+        assert_eq!(entry, "# Activity");
+        assert!(!has_ts, "the heading entry carries no timestamp");
+
+        // Assert: a dated bullet parsed its leading ISO-8601 timestamp.
+        let dated = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.list_bundle_log($1)
+             WHERE logged_at = timestamptz '2026-07-01T12:00:00Z'",
+            &[bundle_id.into()],
+        )
+        .expect("timestamp query executes")
+        .expect("count is not NULL");
+        assert_eq!(
+            dated, 1,
+            "the dated bullet's timestamp is parsed to timestamptz"
+        );
+
+        // Assert: the freeform note is stored losslessly with a NULL timestamp.
+        let freeform_ts_null = Spi::get_one_with_args::<bool>(
+            "SELECT logged_at IS NULL FROM pgokf.list_bundle_log($1)
+             WHERE entry = 'Freeform note without a timestamp'",
+            &[bundle_id.into()],
+        )
+        .expect("freeform query executes")
+        .expect("the freeform entry exists");
+        assert!(
+            freeform_ts_null,
+            "an untimestamped entry projects a NULL logged_at"
+        );
+
+        // Assert: the nested directory's log is scoped correctly.
+        let nested = Spi::get_one_with_args::<String>(
+            "SELECT entry FROM pgokf.list_bundle_log($1, 'nested')",
+            &[bundle_id.into()],
+        )
+        .expect("nested list_bundle_log executes")
+        .expect("the nested log has one entry");
+        assert_eq!(nested, "- 2026-08-01T00:00:00Z Nested directory activity");
+    }
+
+    /// An edited root log.md with a single entry, used to prove a refresh
+    /// replaces a directory's projected log.
+    const ROOT_LOG_V2: &str = "# Activity\n- 2026-09-09T09:09:09Z Only entry after the edit\n";
+
+    #[pg_test]
+    fn reserved_log_md_is_replaced_on_refresh() {
+        // Arrange: an initial log fixture.
+        let (bundle_id, _added) = register_log_fixture("logbook-refresh", ROOT_LOG);
+        let before = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.list_bundle_log($1, '')",
+            &[bundle_id.into()],
+        )
+        .expect("count executes")
+        .expect("count is not NULL");
+        assert_eq!(before, 4, "the initial root log has four entries");
+
+        // Act: resync the same content bundle with an edited root log.md (one
+        // entry), leaving the nested log unchanged.
+        let (resynced_id, _added) = register_log_fixture("logbook-refresh", ROOT_LOG_V2);
+        assert_eq!(resynced_id, bundle_id, "the resync targets the same bundle");
+
+        // Assert: the root log now reflects the edit — the projection tracks the
+        // file (old entries gone, the new one present); nested is untouched.
+        let after = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.list_bundle_log($1, '')",
+            &[bundle_id.into()],
+        )
+        .expect("count executes")
+        .expect("count is not NULL");
+        assert_eq!(after, 2, "the edited root log now has two entries");
+        let stale = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.list_bundle_log($1, '')
+             WHERE entry LIKE '%Registered the bundle%'",
+            &[bundle_id.into()],
+        )
+        .expect("stale query executes")
+        .expect("count is not NULL");
+        assert_eq!(stale, 0, "the pre-edit entries are gone");
+        let nested_kept = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.list_bundle_log($1, 'nested')",
+            &[bundle_id.into()],
+        )
+        .expect("nested count executes")
+        .expect("count is not NULL");
+        assert_eq!(nested_kept, 1, "the unchanged nested log is preserved");
+    }
+
+    #[pg_test]
+    fn a_bundle_without_a_log_md_has_no_log_entries() {
+        // Arrange / Act: a content bundle with only a concept, no log.md.
+        let (bundle_id, added, ..) = register_content(
+            "no-log",
+            vec!["alpha.md".to_owned()],
+            vec![LOG_CONCEPT_ALPHA.as_bytes().to_vec()],
+        );
+        assert_eq!(added, 1);
+
+        // Assert: no log rows at all.
+        let rows = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.list_bundle_log($1)",
+            &[bundle_id.into()],
+        )
+        .expect("list_bundle_log executes")
+        .expect("count is not NULL");
+        assert_eq!(rows, 0, "a bundle without a log.md has no bundle_log rows");
+    }
+
+    #[pg_test]
+    fn bundle_log_is_tenant_isolated_for_a_reader() {
+        // Arrange: register a log-bearing bundle under the acme tenant.
+        Spi::run("SET pgokf.tenant = 'acme'").expect("pgokf.tenant is settable");
+        let (bundle_id, _added) = register_log_fixture("tenant-log", ROOT_LOG);
+
+        // A non-superuser reader (so RLS is enforced) and a probe reporting how
+        // many log rows it sees for the session's tenant.
+        Spi::run("CREATE ROLE pgokf_log_reader").expect("reader role is creatable");
+        Spi::run("GRANT pgokf_reader TO pgokf_log_reader").expect("reader role is grantable");
+        Spi::run(
+            "CREATE FUNCTION pg_temp.log_reader_count(bid bigint, OUT logs bigint)
+             LANGUAGE plpgsql
+             SET role TO pgokf_log_reader
+             AS $probe$
+             BEGIN
+                 logs := (SELECT count(*) FROM pgokf.list_bundle_log(bid));
+             END
+             $probe$;",
+        )
+        .expect("log reader probe is creatable");
+
+        // Act / Assert: as acme, the reader sees the bundle's five log rows.
+        Spi::run("SET pgokf.tenant = 'acme'").expect("pgokf.tenant is settable");
+        let acme_logs = Spi::get_one_with_args::<i64>(
+            "SELECT logs FROM pg_temp.log_reader_count($1)",
+            &[bundle_id.into()],
+        )
+        .expect("probe executes")
+        .expect("count is not NULL");
+        assert_eq!(acme_logs, 5, "an acme reader sees acme's log entries");
+
+        // As a different tenant, row-level security hides every entry.
+        Spi::run("SET pgokf.tenant = 'globex'").expect("pgokf.tenant is settable");
+        let globex_logs = Spi::get_one_with_args::<i64>(
+            "SELECT logs FROM pg_temp.log_reader_count($1)",
+            &[bundle_id.into()],
+        )
+        .expect("probe executes")
+        .expect("count is not NULL");
+        assert_eq!(
+            globex_logs, 0,
+            "a foreign tenant sees none of acme's log entries"
         );
     }
 }

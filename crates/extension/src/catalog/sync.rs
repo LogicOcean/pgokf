@@ -56,7 +56,8 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use okf_parser::{
-    ParserLimits, index_okf_version, is_reserved_path, is_supported_okf_version, parse_concept,
+    ParserLimits, index_okf_version, is_reserved_log, is_reserved_path, is_supported_okf_version,
+    parent_directory, parse_concept,
 };
 use okf_sync::{FileMetadata, SyncConfig, SyncReport, discover, hash_bytes};
 use pgrx::Spi;
@@ -925,6 +926,47 @@ fn run_projection_seam(bundle_id: i64, staged: &[StagedConcept]) -> Result<(), C
     Ok(())
 }
 
+/// Project every reserved `log.md` in the current snapshot into
+/// `pgokf.bundle_log`.
+///
+/// Reserved OKF files are never concepts, so a `log.md` never reaches the
+/// staged set the projection seam consumes; this pass reconciles them
+/// separately. It scans the whole current snapshot (which includes reserved
+/// files), reads each `log.md` through the [`ByteSource`] — the same seam the
+/// concept bytes come from — parses it into ordered entries, and hands the
+/// per-directory entries to [`crate::catalog::bundle_log::project`], which
+/// replaces the bundle's log rows wholesale so the projection tracks the files
+/// (added, edited, and removed logs alike). It runs inside the sync transaction
+/// after the concept projections. A `log.md` that cannot be *read* is warned
+/// about and skipped so an unreadable auxiliary file can never abort a sync;
+/// parsing itself is infallible.
+fn project_bundle_logs<S: ByteSource>(
+    bundle_id: i64,
+    source: &S,
+    current: &[FileMetadata],
+) -> Result<(), CatalogError> {
+    let mut directory_logs = Vec::new();
+    for metadata in current {
+        let path_text = metadata.path.to_string_lossy();
+        if !is_reserved_log(&path_text) {
+            continue;
+        }
+        let bytes = match source.read_bytes(&metadata.path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                pgrx::warning!(
+                    "pgokf: skipping unreadable reserved log {}: {error}",
+                    metadata.path.display()
+                );
+                continue;
+            }
+        };
+        let directory = parent_directory(&path_text).to_owned();
+        directory_logs.push((directory, crate::catalog::bundle_log::parse_log(&bytes)));
+    }
+    crate::catalog::bundle_log::project(bundle_id, &directory_logs)
+}
+
 /// The shared sync engine used by `register_bundle`, `refresh_bundle`, and
 /// `register_bundle_content`; see the module docs for the full step list.
 ///
@@ -966,6 +1008,11 @@ pub(crate) fn run_bundle_sync<S: ByteSource>(
     // here (link graph and its bundle-wide re-resolution, provenance, then
     // opt-in source-byte storage).
     run_projection_seam(bundle_id, &staged)?;
+
+    // Reserved log.md activity logs are not concepts, so they are reconciled
+    // separately from the whole snapshot (which includes reserved files),
+    // reading each through the same ByteSource.
+    project_bundle_logs(bundle_id, source, &current)?;
 
     // Apply the OKF-version conformance policy before finalizing the bundle
     // row: under `reject` an unsupported declared version aborts the sync here,

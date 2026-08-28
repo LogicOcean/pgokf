@@ -50,6 +50,7 @@ exercised against a live PostgreSQL 18 cluster.
 | `set_concept_embedding(bundle_id, concept_id, embedding)` | `void` | VOLATILE | DEFINER | `pgokf_writer` |
 | `rebuild_embedding_index()` | `boolean` | VOLATILE | DEFINER | `pgokf_admin` |
 | `concept_neighbors(concept_id, max_hops, bundle_id)` | `SETOF concept_neighbor` | STABLE | invoker | `pgokf_reader` |
+| `list_bundle_log(bundle_id, directory, max_rows)` | `SETOF bundle_log_entry` | STABLE | invoker | `pgokf_reader` |
 | `set_config(key, value)` | `void` | VOLATILE | DEFINER | `pgokf_admin` |
 | `reset_config(key)` | `void` | VOLATILE | DEFINER | `pgokf_admin` |
 | `get_config()` | `jsonb` | VOLATILE | DEFINER | `pgokf_reader` |
@@ -77,8 +78,10 @@ other function — including `list_bundles`, `bundle_info`, `catalog_stats`,
 `list_sync_changes`, `set_concept_embedding`, `rebuild_embedding_index`,
 `schedule_refresh`, and `unschedule_refresh` — is `STRICT`.
 `concept_search`, `search_facets`, `find_similar`, `concept_search_semantic`,
-`concept_search_hybrid`, `concept_neighbors`, `catalog_stats`,
+`concept_search_hybrid`, `concept_neighbors`, `list_bundle_log`, `catalog_stats`,
 `duplicate_concepts`, and `stale_concepts` are also `PARALLEL SAFE`.
+`list_bundle_log` accepts a `NULL`-defaulting `directory`, so it is **not**
+`STRICT`.
 
 The `register_bundle` / `refresh_bundle` / `unregister_bundle` /
 `set_bundle_enabled` / `retire_bundle` / `unretire_bundle` ingestion functions
@@ -614,6 +617,60 @@ ORDER BY hops, neighbor_id;
 The `pgokf.links` table (below) supports direct edge and backlink queries; see
 [`examples/queries/graph.sql`](https://github.com/LogicOcean/pgokf/blob/main/examples/queries/graph.sql).
 
+**Attestation edges.** For a concept whose `type` is `Attested Computation`, its
+type-specific reference fields — `computation`, `executor`, and `attester` —
+are resolved into `pgokf.links` as additional internal edges (numbered after the
+concept's body links), so `concept_neighbors` traverses them like any resolved
+internal edge. Each carries a `link_relation` of `attestation:computation`,
+`attestation:executor`, or `attestation:attester`, so a reader can single out the
+typed edges:
+
+```sql
+SELECT source_id, target_id, link_relation, resolved
+FROM pgokf.links
+WHERE source_id = 'metrics/monthly-active-accounts'
+  AND link_relation LIKE 'attestation:%';
+```
+
+A reference that is external or names no concept in the bundle behaves exactly
+like any other external/unresolved link (`is_external` / `resolved = false`) and
+is never traversed. Non-attested concepts are unaffected: their edges keep the
+default `reference` relation.
+
+---
+
+### `pgokf.list_bundle_log(bundle_id bigint, directory text DEFAULT NULL, max_rows int DEFAULT 500) → SETOF pgokf.bundle_log_entry`
+
+List a bundle's reserved-`log.md` activity-log entries. `STABLE PARALLEL SAFE`,
+invoker rights (the caller's tenant row-level security applies), **requires
+`pgokf_reader`**.
+
+| Parameter | Type | Default | Meaning |
+| --------- | ---- | ------- | ------- |
+| `bundle_id` | `bigint` | — | The bundle whose logs to list. |
+| `directory` | `text` | `NULL` | Scope to one directory's log (the empty string `''` for a root-level `log.md`); `NULL` lists every directory. |
+| `max_rows` | `int` | `500` | Row cap; must be `>= 0` (`22023` otherwise). |
+
+OKF reserves `log.md` as a per-directory **activity log** (never a concept). On
+every sync each `log.md` in the bundle is parsed line by line into ordered
+entries — a leading ISO 8601 timestamp (after any Markdown bullet or heading
+marker) is lifted into `logged_at`, and the trimmed line is stored losslessly in
+`entry` — and projected into `pgokf.bundle_log`. The projection is replaced
+wholesale each sync, so it tracks edits, additions, and removals of the files; a
+bundle with no `log.md` has no rows. Rows are returned ordered by directory then
+ordinal.
+
+```sql
+SELECT directory, ordinal, logged_at, entry
+FROM pgokf.list_bundle_log(1)
+ORDER BY directory, ordinal;
+--  directory | ordinal |       logged_at        |                    entry
+-- -----------+---------+------------------------+----------------------------------------------
+--            |       0 |                        | # Activity log
+--            |       1 | 2026-07-01 12:00:00+00 | - 2026-07-01T12:00:00Z Registered the bundle
+--  runbooks  |       0 | 2026-07-02 09:30:00+00 | - 2026-07-02T09:30:00Z Failover rehearsed
+```
+
 ---
 
 ## Configuration functions
@@ -1018,6 +1075,18 @@ Returned by `concept_neighbors`.
 | `path` | `text[]` | Concept IDs on the shortest path, start through neighbor. |
 | `title` | `text` | Neighbor title (may be `NULL`). |
 
+### `pgokf.bundle_log_entry`
+
+Returned by `list_bundle_log`.
+
+| Column | Type | Meaning |
+| ------ | ---- | ------- |
+| `bundle_id` | `bigint` | The bundle the entry belongs to. |
+| `directory` | `text` | Bundle-relative directory of the source `log.md` (empty string at the root). |
+| `ordinal` | `integer` | Zero-based in-file entry position. |
+| `logged_at` | `timestamptz` | Parsed leading ISO 8601 timestamp (`NULL` when absent). |
+| `entry` | `text` | The lossless log entry text. |
+
 ### `pgokf.sync_log_entry`
 
 Returned by `list_sync_log`.
@@ -1180,12 +1249,36 @@ Directed Markdown links extracted per concept, one row per outgoing link.
 | `link_kind` | `text` | `NOT NULL` — `inline`, `reference`, `autolink`, `email`, or `image`. |
 | `resolved` | `boolean` | `NOT NULL DEFAULT false` — true only for an internal link whose target concept exists in the same bundle. |
 | `is_external` | `boolean` | `NOT NULL DEFAULT false` — true for scheme-qualified / protocol-relative / email destinations. |
-| `ordinal` | `integer` | `NOT NULL` — zero-based document-order position. |
+| `ordinal` | `integer` | `NOT NULL` — zero-based document-order position; attestation edges are numbered after the source's body links. |
+| `link_relation` | `text` | `NOT NULL DEFAULT 'reference'` — semantic relation, distinct from the Markdown `link_kind`: `reference` for an ordinary link; `attestation:computation` / `attestation:executor` / `attestation:attester` for an Attested Computation concept's type-specific reference edges. |
 
 Primary key `(bundle_id, source_id, ordinal)`; FK `(bundle_id, source_id)` to
 `pgokf.concepts(bundle_id, id)` `ON DELETE CASCADE`. Index on
 `(bundle_id, target_id)`. Unresolved internal links and external links are
-retained (OKF permits broken links).
+retained (OKF permits broken links). Rows with an `attestation:*`
+`link_relation` come from an Attested Computation concept's `computation` /
+`executor` / `attester` frontmatter rather than its Markdown body (see
+[Graph](#graph)).
+
+### `pgokf.bundle_log`
+
+Projection of a bundle's reserved per-directory `log.md` **activity logs** — one
+row per parsed log entry. Reserved `log.md` files are never concepts; this table
+is the only place they are projected. Read it through `pgokf.list_bundle_log`.
+
+| Column | Type | Notes |
+| ------ | ---- | ----- |
+| `bundle_id` | `bigint` | `NOT NULL`, FK to `pgokf.bundles(id)` `ON DELETE CASCADE`. |
+| `tenant_id` | `text` | `NOT NULL DEFAULT 'default'` — denormalized bundle tenant for the row-level-security predicate. |
+| `directory` | `text` | `NOT NULL` — bundle-relative directory of the source `log.md`; the empty string for a root-level log. Part of the PK. |
+| `ordinal` | `integer` | `NOT NULL` — zero-based in-file entry position. Part of the PK. |
+| `logged_at` | `timestamptz` | The entry's leading ISO 8601 timestamp (after any bullet/heading marker); `NULL` when the entry carries no parseable leading timestamp. |
+| `entry` | `text` | `NOT NULL` — the log entry text, stored losslessly as the trimmed source line. |
+
+Primary key `(bundle_id, directory, ordinal)`; FK `bundle_id` to
+`pgokf.bundles(id)` `ON DELETE CASCADE`. Replaced wholesale on every sync so it
+tracks the files. Opt-in multi-tenant row-level security on `tenant_id`, like
+`pgokf.links`.
 
 ### `pgokf.concept_provenance`
 

@@ -21,7 +21,7 @@ the database. Complete comment coverage is a release gate (see
 
 ## The stable surface
 
-### Functions (36)
+### Functions (37)
 
 | Function | Role required | Purpose |
 | -------- | ------------- | ------- |
@@ -51,6 +51,7 @@ the database. Complete comment coverage is a release gate (see
 | `pgokf.list_sync_log(bigint, integer)` | `pgokf_reader` | Sync/audit history rows (from the admin-only `pgokf_private.sync_log`) |
 | `pgokf.list_sync_changes(bigint, integer)` | `pgokf_reader` | Per-concept change manifest (added/updated/removed) for one sync |
 | `pgokf.list_access_log(bigint, integer)` | `pgokf_admin` | Exfiltration/access audit rows (exports + `get_concept_source`) |
+| `pgokf.list_bundle_log(bigint, text, integer)` | `pgokf_reader` | Reserved OKF `log.md` activity-log entries, projected per directory |
 | `pgokf.catalog_stats()` | `pgokf_reader` | Per-bundle counts, sync recency, and staleness for operators |
 | `pgokf.health()` | `pgokf_reader` | Liveness/readiness document as jsonb (counts, backend, `in_recovery`) |
 | `pgokf.stale_concepts(bigint, timestamptz)` | `pgokf_reader` | Concepts past their OKF `stale_after` |
@@ -68,25 +69,25 @@ arguments (`name`/`options` on `register_bundle`, `bundle_id`/`limit` on search
 and neighbors) are contractual too: an existing call that omits them keeps
 working.
 
-### Composite types (12)
+### Composite types (13)
 
 `pgokf.bundle_sync_result`, `pgokf.concept_search_result`,
 `pgokf.concept_neighbor`, `pgokf.bundle_info`, `pgokf.export_result`,
 `pgokf.sync_log_entry`, `pgokf.catalog_stat`, `pgokf.stale_concept`,
 `pgokf.sync_change`, `pgokf.access_log_entry`, `pgokf.duplicate_group`,
-`pgokf.search_facet`.
+`pgokf.search_facet`, `pgokf.bundle_log_entry`.
 
 The set of columns, their names, and their types are stable. New columns are
 **not** added to an existing composite type in a compatible release, because
 `SELECT *` and positional row expansion would break; a new field ships as a new
 type or a new function instead.
 
-### Tables (9 public + 4 documented-internal)
+### Tables (10 public + 4 documented-internal)
 
 Public, `SELECT`-able by `pgokf_reader`: `pgokf.bundles`, `pgokf.concepts`,
 `pgokf.concept_metadata`, `pgokf.links`, `pgokf.concept_provenance`,
 `pgokf.concept_verification`, `pgokf.concept_provenance_source`,
-`pgokf.concept_source`, `pgokf.concept_embedding`.
+`pgokf.concept_source`, `pgokf.concept_embedding`, `pgokf.bundle_log`.
 
 These are a **read projection**. Callers may `SELECT` from them and depend on
 existing column names and types; the columns listed in

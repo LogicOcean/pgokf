@@ -2,7 +2,7 @@
    "name": "pgokf",
    "abstract": "Materialized PostgreSQL catalog for Open Knowledge Format bundles",
    "description": "pgokf materializes Open Knowledge Format (OKF) bundles -- directories of UTF-8 Markdown concept documents with YAML frontmatter -- into a transactional, queryable PostgreSQL catalog with native full-text search and link-graph traversal. The on-disk bundle remains the portable source of truth; PostgreSQL becomes a projection optimized for metadata queries. Built with Rust and pgrx; no third-party search extension is required.",
-   "version": "0.1.9",
+   "version": "0.1.10",
    "maintainer": [
       "David Saroka <david.saroka@gmail.com>"
    ],
@@ -10,9 +10,9 @@
    "provides": {
       "pgokf": {
          "abstract": "Materialized PostgreSQL catalog for Open Knowledge Format bundles",
-         "file": "crates/extension/sql/pgokf--0.1.9.sql",
+         "file": "crates/extension/sql/pgokf--0.1.10.sql",
          "docfile": "docs/sql-api.md",
-         "version": "0.1.9"
+         "version": "0.1.10"
       }
    },
    "prereqs": {

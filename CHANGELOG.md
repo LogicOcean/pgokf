@@ -12,6 +12,49 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 Nothing yet.
 
+## [0.1.10] - 2026-08-28
+
+**OKF-conformance batch**: an Attested Computation concept's type-specific
+reference fields now become traversable graph edges, and the reserved per-
+directory `log.md` activity log is now projected instead of dropped. Everything
+is additive and backward compatible, so `ALTER EXTENSION pgokf UPDATE TO '0.1.10'`
+migrates an existing install in a single transaction and yields a catalog
+identical to a fresh 0.1.10. The one new `pgokf.links` column is backfilled by
+its default.
+
+### Added
+
+- **Attested Computation reference fields as graph edges** — for a concept whose
+  `type` is `Attested Computation`, its `computation`, `executor`, and `attester`
+  reference fields (each a bare resource path or a `{resource: …}` mapping) are
+  resolved into **`pgokf.links`** as typed internal edges, numbered after the
+  concept's body links. `pgokf.concept_neighbors` now traverses them like any
+  resolved internal edge, so the executor/attester/computation concepts are
+  reachable even when the body links to none of them. A missing, external, or
+  dangling reference is retained as `is_external` / `resolved = false` and never
+  traversed, exactly like any other link. Non-attested concepts are unaffected.
+- **`pgokf.links.link_relation`** (`text NOT NULL DEFAULT 'reference'`) — a new
+  additive column carrying the edge's semantic relation, distinct from the
+  Markdown-construct `link_kind`: `reference` for every ordinary link, or
+  `attestation:computation` / `attestation:executor` / `attestation:attester`
+  for the new typed edges. Existing rows are backfilled to `reference`.
+- **Reserved `log.md` projection** — the per-directory OKF `log.md` activity
+  logs, previously skipped entirely, are now parsed and projected into a new
+  **`pgokf.bundle_log`** table (`bundle_id`, `tenant_id`, `directory`, `ordinal`,
+  `logged_at`, `entry`; PK `(bundle_id, directory, ordinal)`; cascades from
+  `pgokf.bundles`; opt-in multi-tenant RLS). Each non-blank line becomes one
+  entry, with a leading ISO 8601 timestamp lifted into `logged_at` and the line
+  stored losslessly. The projection is replaced wholesale on every sync, so it
+  tracks edits/additions/removals; a `log.md` is still **never** a concept and
+  never counts toward the bundle's `file_count`. `index.md` handling is
+  unchanged.
+- **`pgokf.list_bundle_log(bundle_id bigint, directory text DEFAULT NULL,
+  max_rows int DEFAULT 500)`** (`SETOF pgokf.bundle_log_entry`, reader-level,
+  `STABLE PARALLEL SAFE`, invoker rights) — lists a bundle's log entries ordered
+  by directory then ordinal, optionally scoped to one directory (`''` for the
+  root). New composite **`pgokf.bundle_log_entry(bundle_id, directory, ordinal,
+  logged_at, entry)`**. Raises `22023` when `max_rows < 0`.
+
 ## [0.1.9] - 2026-08-28
 
 **Search and scheduling batch**: keyset pagination and faceted counts on search,

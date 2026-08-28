@@ -39,9 +39,16 @@
 //! Feature-extension stubs, each to be filled by a later wave without
 //! touching [`sync`]:
 //!
-//! - [`links`] — link-graph projection (`pgokf.links`).
+//! - [`links`] — link-graph projection (`pgokf.links`), including the typed
+//!   attestation edges of Attested Computation concepts.
 //! - [`neighbors`] — recursive graph traversal APIs.
 //! - [`provenance`] — provenance/trust/lifecycle projection.
+//! - [`bundle_log`] — the reserved-`log.md` per-directory activity-log
+//!   projection (`pgokf.bundle_log`, `pgokf.list_bundle_log`); the sync engine
+//!   reads each `log.md` through the `ByteSource` and projects it without ever
+//!   staging it as a concept.
+//! - [`iso8601`] — shared defensive ISO 8601 timestamp parsing used by the
+//!   provenance and bundle-log projections.
 //! - [`source`] — opt-in verbatim source-byte storage (`pgokf.concept_source`)
 //!   and retrieval, gated by the `store_source` configuration key.
 //! - [`config`] — the `pgokf.allowed_roots` style configuration surface.
@@ -70,12 +77,14 @@ pub mod access;
 pub mod admin;
 pub mod audit;
 mod batch;
+pub mod bundle_log;
 pub mod config;
 pub mod content;
 pub mod dedup;
 pub mod embedding;
 pub mod export;
 pub mod facets;
+mod iso8601;
 pub mod links;
 pub mod neighbors;
 pub mod provenance;

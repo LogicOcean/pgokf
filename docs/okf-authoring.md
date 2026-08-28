@@ -372,14 +372,55 @@ status: stable
 The type-specific fields are `runtime`, `parameters`, `computation`,
 `executor`, and `attester`.
 
-> **pgokf gives these no dedicated columns.** They are not provenance keys, so
-> they are retained as producer metadata in `concept_metadata` — exactly like
-> any other non-modeled key. Verified live: registering the file above lands
-> `runtime`, `parameters`, `computation`, `executor`, and `attester` as
-> `concept_metadata` rows, while `generated`/`verified`/`status` additionally
-> populate the provenance tables (here yielding a `machine-confirmed` trust
-> tier, since the sole verifier is an agent, not a `human:` actor). No other
-> type — `skill` included — has spec-mandated fields.
+> **`runtime` and `parameters` get no dedicated columns.** They are not
+> provenance keys, so they are retained as producer metadata in
+> `concept_metadata` — exactly like any other non-modeled key. `generated` /
+> `verified` / `status` additionally populate the provenance tables (the example
+> above yields a `machine-confirmed` trust tier, since the sole verifier is an
+> agent, not a `human:` actor). No other type — `skill` included — has
+> spec-mandated fields.
+
+### `computation` / `executor` / `attester` become graph edges
+
+The three **reference-bearing** type-specific fields point at other concepts,
+so pgokf resolves them into `pgokf.links` as typed, traversable edges — the same
+resolution ordinary Markdown links get. Each field may be written as a bare
+resource path or as a `{resource: …}` mapping (the shape the OKF v0.2 spec uses
+to attach a `receipt`):
+
+```yaml
+---
+type: Attested Computation
+title: Monthly active accounts
+computation: /computation.md
+executor:
+  resource: /executor.md
+  receipt: [query_id, executed_sql, result]
+attester:
+  resource: /attester.md
+---
+```
+
+Registering this projects three edges from the concept, each carrying a
+`link_relation` of `attestation:computation`, `attestation:executor`, or
+`attestation:attester`. They are numbered after the concept's body links and
+resolve exactly like an internal Markdown link — an internal reference to a
+concept in the bundle is `resolved = true` and is **traversed by
+`pgokf.concept_neighbors`**, while an external or dangling reference is retained
+as `is_external` / `resolved = false` and never traversed. Verified live, the
+concept above reaches its `computation`, `executor`, and `attester` concepts even
+though its body links to none of them:
+
+```
+ source_id | target_id   |      link_relation      | resolved | is_external
+-----------+-------------+-------------------------+----------+-------------
+ rich      | computation | attestation:computation | t        | f
+ rich      | executor    | attestation:executor    | t        | f
+ rich      | attester    | attestation:attester    | t        | f
+```
+
+Only the `Attested Computation` type resolves these keys; on any other type the
+same keys stay ordinary `concept_metadata`.
 
 ---
 
@@ -462,7 +503,7 @@ Free-form overview for humans. Only `okf_version` above is read by the catalog.
 
 Both `okf_version: "0.2"` and the unquoted `okf_version: 0.2` are accepted. An
 absent or malformed value leaves `bundles.okf_version` `NULL` and never aborts
-a sync. Everything else in a reserved file's frontmatter and body is ignored by
+a sync. Everything else in an `index.md`'s frontmatter and body is ignored by
 the parser — use the body freely for a table of contents or overview.
 
 Verified live: a bundle whose root `index.md` declares `okf_version: "0.2"`
@@ -477,6 +518,38 @@ registers with:
 (The five concepts are the non-reserved `.md` files; `index.md` is not one of
 them.)
 
+### `log.md` is projected as a per-directory activity log
+
+Unlike `index.md`, a `log.md` **is** projected — into `pgokf.bundle_log`, one
+row per entry — while still never becoming a concept. On every sync each
+`log.md` in the bundle is parsed line by line: a leading ISO 8601 timestamp
+(after any list bullet or heading marker) is lifted into `logged_at`, and the
+trimmed line is stored losslessly in `entry`. Blank lines are skipped. Write it
+as an ordinary Markdown log:
+
+```markdown
+# Activity
+
+- 2026-07-01T12:00:00Z Registered the bundle
+- 2026-07-02T09:30:00Z Refreshed after an edit
+Freeform note without a timestamp
+```
+
+Read a directory's log with `pgokf.list_bundle_log(bundle_id[, directory])`; the
+`directory` column is the empty string for a root-level `log.md`. The projection
+is replaced wholesale on every sync, so it tracks edits, additions, and removals
+of the files, and a bundle with no `log.md` simply has no rows. Verified live,
+the log above projects (ordered by directory, then ordinal):
+
+```
+ directory | ordinal |       logged_at        |                    entry
+-----------+---------+------------------------+----------------------------------------------
+           |       0 |                        | # Activity
+           |       1 | 2026-07-01 12:00:00+00 | - 2026-07-01T12:00:00Z Registered the bundle
+           |       2 | 2026-07-02 09:30:00+00 | - 2026-07-02T09:30:00Z Refreshed after an edit
+           |       3 |                        | Freeform note without a timestamp
+```
+
 ---
 
 ## How the whole file projects — at a glance
@@ -488,12 +561,14 @@ them.)
 | `resource` | `pgokf.concepts.resource` (verbatim JSON) |
 | Markdown body | `pgokf.concepts.body_text` + weighted `body_tsv` |
 | Markdown links | `pgokf.links` (internal resolve; external flagged) |
+| `Attested Computation` `computation` / `executor` / `attester` | typed edges in `pgokf.links` (`link_relation = attestation:*`) **and** `concept_metadata` |
 | **any non-modeled key** | one row in `pgokf.concept_metadata` (JSON) |
 | `generated` / `status` / `stale_after` / top-level `usage_window` | `pgokf.concept_provenance` (scalar) + `details` **and** `concept_metadata` |
 | `verified[]` | `pgokf.concept_verification` (one row per event) **and** `concept_metadata` |
 | `sources[]` | `pgokf.concept_provenance_source` (one row per entry) **and** `concept_metadata` |
 | derived trust tier | `pgokf.concept_provenance.trust_tier` |
 | bundle-root `index.md` `okf_version` | `pgokf.bundles.okf_version` |
+| per-directory `log.md` entries | `pgokf.bundle_log` (one row per entry) |
 
 The search vector `body_tsv` is weighted: **title `A`**, **tags / type /
 description `B`**, **body `D`** — which is why the same query term ranks a title

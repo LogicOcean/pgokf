@@ -73,6 +73,53 @@ impl PendingLink {
     }
 }
 
+/// A resolved OKF resource reference, classified with the same internal/
+/// external rules Markdown link extraction applies.
+///
+/// Produced by [`resolve_reference`] for the reference-bearing type-specific
+/// fields of an OKF v0.2 concept (for example an Attested Computation's
+/// `computation` / `executor` / `attester`), so those references can become
+/// graph edges alongside the Markdown links extracted from the body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedReference {
+    /// Whether the destination is an external URL (scheme-qualified or
+    /// protocol-relative). External references never become internal edges.
+    pub is_external: bool,
+    /// Normalized bundle-relative target path (with `.md`) for an internal,
+    /// resolvable destination; `None` for external or unresolvable references.
+    pub target_path: Option<String>,
+    /// OKF concept ID of the target (`target_path` without `.md`); `None`
+    /// whenever `target_path` is.
+    pub target_id: Option<String>,
+}
+
+/// Classify and resolve an OKF resource reference relative to a source
+/// document, applying the identical external/internal rules
+/// [`extract`] applies to Markdown link destinations.
+///
+/// `source_path` must be the normalized bundle-relative path of the document
+/// that declares the reference. A scheme-qualified or protocol-relative
+/// destination is external (`target_path` / `target_id` `None`); every other
+/// destination is normalized against the source document's directory with
+/// [`normalize::resolve_link_target`], yielding `None` when it cannot name a
+/// concept (empty, bundle-escaping, or non-Markdown). Existence against actual
+/// bundle contents is the sync layer's job, exactly as for Markdown links.
+#[must_use]
+pub fn resolve_reference(reference: &str, source_path: &str) -> ResolvedReference {
+    let is_external = is_external_target(reference);
+    let target_path = if is_external {
+        None
+    } else {
+        normalize::resolve_link_target(reference, source_path)
+    };
+    let target_id = target_path.as_deref().map(normalize::concept_id);
+    ResolvedReference {
+        is_external,
+        target_path,
+        target_id,
+    }
+}
+
 /// Extract Markdown links and images while preserving document order.
 ///
 /// `source_path` is the normalized bundle-relative path of the document being
@@ -173,7 +220,50 @@ fn classify(link_type: LinkType) -> LinkKind {
 
 #[cfg(test)]
 mod tests {
-    use super::is_external_target;
+    use super::{is_external_target, resolve_reference};
+
+    #[test]
+    fn resolve_reference_resolves_an_internal_rooted_destination() {
+        // Arrange / Act: a leading-slash reference resolves from the bundle root.
+        let resolved = resolve_reference("/computation.md", "rich-concept.md");
+
+        // Assert
+        assert!(!resolved.is_external);
+        assert_eq!(resolved.target_path.as_deref(), Some("computation.md"));
+        assert_eq!(resolved.target_id.as_deref(), Some("computation"));
+    }
+
+    #[test]
+    fn resolve_reference_resolves_relative_to_the_source_directory() {
+        // Arrange / Act: a bare reference resolves against the source's directory.
+        let resolved = resolve_reference("executor.md", "metrics/rich-concept.md");
+
+        // Assert
+        assert_eq!(resolved.target_path.as_deref(), Some("metrics/executor.md"));
+        assert_eq!(resolved.target_id.as_deref(), Some("metrics/executor"));
+    }
+
+    #[test]
+    fn resolve_reference_marks_an_external_destination_external() {
+        // Arrange / Act: a scheme-qualified URL is external, with no target.
+        let resolved = resolve_reference("https://example.test/x", "a.md");
+
+        // Assert
+        assert!(resolved.is_external);
+        assert_eq!(resolved.target_path, None);
+        assert_eq!(resolved.target_id, None);
+    }
+
+    #[test]
+    fn resolve_reference_yields_no_target_for_an_unresolvable_destination() {
+        // Arrange / Act: a bundle-escaping reference names no concept.
+        let resolved = resolve_reference("../../escape.md", "a.md");
+
+        // Assert: internal (not external) but unresolvable, so no target.
+        assert!(!resolved.is_external);
+        assert_eq!(resolved.target_path, None);
+        assert_eq!(resolved.target_id, None);
+    }
 
     #[test]
     fn is_external_target_detects_schemes_and_protocol_relative() {
