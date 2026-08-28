@@ -21,12 +21,13 @@ the database. Complete comment coverage is a release gate (see
 
 ## The stable surface
 
-### Functions (15)
+### Functions (16)
 
 | Function | Role required | Purpose |
 | -------- | ------------- | ------- |
-| `pgokf.register_bundle(text, text, jsonb)` | `pgokf_writer` | Register and sync an OKF bundle root |
-| `pgokf.refresh_bundle(bigint)` | `pgokf_writer` | Incrementally re-sync a registered bundle |
+| `pgokf.register_bundle(text, text, jsonb)` | `pgokf_writer` | Register and sync an OKF bundle root from a filesystem path |
+| `pgokf.register_bundle_content(text, text[], bytea[], jsonb)` | `pgokf_writer` | Register or resync a bundle from in-memory `(path, bytes)` content — the mountless object-store ingestion path (no filesystem, no network I/O in the extension) |
+| `pgokf.refresh_bundle(bigint)` | `pgokf_writer` | Incrementally re-sync a filesystem-sourced bundle (content bundles are re-synced via `register_bundle_content`) |
 | `pgokf.unregister_bundle(bigint)` | `pgokf_writer` | Remove a bundle (rows cascade) |
 | `pgokf.list_bundles()` | `pgokf_reader` | List registered bundles |
 | `pgokf.bundle_info(bigint)` | `pgokf_reader` | Info for one registered bundle |

@@ -40,7 +40,7 @@ real login user; nobody logs in *as* them.
 | Role | Capabilities |
 | ---- | ------------ |
 | `pgokf_reader` | `USAGE` on schema `pgokf`; `SELECT` on the projection tables (including `concept_source`); `EXECUTE` on read paths: `concept_search`, `concept_neighbors`, `list_bundles`, `bundle_info`, `get_config`, `get_concept_source`. |
-| `pgokf_writer` | Inherits `pgokf_reader` (it is `GRANT`ed the reader role), plus `USAGE` on schema `pgokf` and `EXECUTE` on the **ingestion** mutators: `register_bundle`, `refresh_bundle`, `unregister_bundle`. It cannot change configuration, write exports, or read `pgokf_private`. This is the intended account for an automated ingestion pipeline / the future content-ingestion API. |
+| `pgokf_writer` | Inherits `pgokf_reader` (it is `GRANT`ed the reader role), plus `USAGE` on schema `pgokf` and `EXECUTE` on the **ingestion** mutators: `register_bundle`, `refresh_bundle`, `unregister_bundle`. It cannot change configuration, write exports, or read `pgokf_private`. This is the intended account for an automated ingestion pipeline and the mountless content-ingestion API (`register_bundle_content`), which streams object-store bytes into the catalog with no filesystem mount. |
 | `pgokf_admin` | Inherits `pgokf_writer` (and thus `pgokf_reader`), plus `USAGE` on `pgokf_private` and `EXECUTE` on the admin-only surface: configuration (`set_config`, `reset_config`) and the file-writing exports (`export_parquet`, `export_sources`). |
 
 The hierarchy is established with two role grants — `GRANT pgokf_reader TO

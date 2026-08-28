@@ -31,10 +31,16 @@
 //!   and retrieval, gated by the `store_source` configuration key.
 //! - [`config`] — the `pgokf.allowed_roots` style configuration surface.
 //! - [`admin`] — `bundle_info`, `unregister_bundle`, `list_bundles`.
+//! - [`content`] — `pgokf.register_bundle_content`, the mountless
+//!   content-ingestion path: it wraps caller-supplied bytes in the sync
+//!   engine's `ContentSource` and runs the identical shared pipeline, so a
+//!   companion process can stream an object store into the catalog without the
+//!   extension performing any network or filesystem I/O.
 
 pub mod admin;
 mod batch;
 pub mod config;
+pub mod content;
 pub mod export;
 pub mod links;
 pub mod neighbors;

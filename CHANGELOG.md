@@ -12,6 +12,64 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 Nothing yet.
 
+## [0.1.4] - 2026-08-28
+
+Two additive capabilities landed together: a **`pgokf_writer` ingestion role
+tier** paired with an **optional BM25 search backend**, and a **mountless
+object-store ingestion path** (`register_bundle_content` plus the standalone
+`pgokf-ingest` companion). Everything here is backward compatible — new
+functions, a new role, a new projection column, and a new configuration key —
+so `ALTER EXTENSION pgokf UPDATE TO '0.1.4'` migrates an existing install in a
+single transaction (the `0.1.3 → 0.1.4` upgrade script creates the writer role,
+adds `rebuild_search_index`, and adds `register_bundle_content` +
+`bundles.source_type`).
+
+### Added
+
+- **`pgokf_writer` role — a new ingestion tier** between `pgokf_reader` and
+  `pgokf_admin` (`pgokf_reader` < `pgokf_writer` < `pgokf_admin`, each inheriting
+  the tier below). It is the intended account for an automated ingestion
+  pipeline: it can register/refresh/unregister bundles but cannot change
+  configuration, write exports, or read `pgokf_private`.
+- **`pgokf.register_bundle_content(name text, paths text[], contents bytea[], options jsonb)`**
+  — the *mountless* ingestion path. A companion process reads an object store and
+  streams the collected `(path, bytes)` into PostgreSQL; the extension itself
+  performs no network or filesystem I/O. Re-calling it resyncs the bundle
+  (changed concepts upserted, missing ones deleted) exactly like a filesystem
+  refresh, with the same `max_bundle_files` / `max_file_bytes` bounds and
+  `store_source` round-trip. Writer-tier, `SECURITY DEFINER`.
+- **`pgokf.bundles.source_type`** (`'filesystem'` | `'content'`, default
+  `'filesystem'`) distinguishing a bundle registered from a canonical on-disk
+  root from one streamed in memory (keyed on the synthetic path `content:<name>`).
+- **`pgokf.rebuild_search_index()`** — admin function that (re)builds the optional
+  `pg_search` BM25 index; a no-op with a notice when `pg_search` is not installed.
+- **`search_backend` configuration key** (`native` | `bm25`, default `native`).
+  `native` uses the built-in `websearch_to_tsquery` / `ts_rank_cd` ranking;
+  `bm25` routes `concept_search` through ParadeDB `pg_search` at runtime via SPI
+  when available, falling back to native (with a warning) when it is not — so the
+  extension takes no hard dependency on `pg_search`.
+- **`pgokf-ingest` companion crate** — a standalone async binary that lists an
+  S3-compatible object store (MinIO / SeaweedFS / AWS S3 / GCS / Azure via
+  `object_store`), downloads the objects, and streams them to
+  `register_bundle_content` as `pgokf_writer`. Object-store credentials live in
+  the companion and never reach PostgreSQL. It is a separate workspace member and
+  does not affect the extension build.
+
+### Changed
+
+- **Ingestion moved to the writer tier (backward compatible).**
+  `pgokf.register_bundle`, `pgokf.refresh_bundle`, and `pgokf.unregister_bundle`
+  now require `pgokf_writer` instead of `pgokf_admin`. Existing admin callers keep
+  working because `pgokf_admin` inherits `pgokf_writer`; configuration and the
+  file-writing exports remain admin-only.
+- **`refresh_bundle` rejects content-sourced bundles.** A `source_type = 'content'`
+  bundle has no filesystem root, so `refresh_bundle` raises `22023` for it —
+  re-sync those by calling `register_bundle_content` again.
+- **Internal:** the sync engine was refactored around a `ByteSource` seam so the
+  filesystem path (walk + read) and the content path (caller-supplied bytes)
+  share one classify → parse → upsert → project pipeline. Filesystem
+  `register_bundle` / `refresh_bundle` behavior is unchanged.
+
 ## [0.1.3] - 2026-08-28
 
 OKF v0.2 conformance re-model of the provenance / trust / lifecycle projection,
@@ -225,7 +283,8 @@ queries, native full-text search, and link-graph traversal.
 - The `pgokf_private` schema and its `config` table are readable and writable
   only by the extension owner and `pgokf_admin`; readers cannot see policy.
 
-[Unreleased]: https://github.com/LogicOcean/pgokf/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/LogicOcean/pgokf/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/LogicOcean/pgokf/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/LogicOcean/pgokf/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/LogicOcean/pgokf/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/LogicOcean/pgokf/compare/v0.1.0...v0.1.1

@@ -1187,13 +1187,338 @@ The gamma concept is introduced during the refresh cycle.\n";
         // an existing install can be stepped up to this release.
         let upgrade_script = manifest_dir
             .join("sql")
-            .join(format!("pgokf--0.1.2--{crate_version}.sql"));
+            .join(format!("pgokf--0.1.3--{crate_version}.sql"));
         let metadata =
             fs::metadata(&upgrade_script).expect("the current upgrade script ships on disk");
         assert!(
             metadata.len() > 0,
             "the upgrade script {} must be non-empty",
             upgrade_script.display(),
+        );
+    }
+
+    // ---- Mountless content ingestion (pgokf.register_bundle_content) --------
+
+    /// `alpha` content concept: a distinctive search term (`quokka`),
+    /// provenance frontmatter, and a resolved internal link to the nested
+    /// `beta` concept.
+    const CONTENT_ALPHA: &str = "---\n\
+type: Reference\n\
+title: Alpha Content Concept\n\
+tags: [quokka, mountless]\n\
+generated_by: pipeline/content\n\
+status: stable\n\
+---\n\
+\n\
+# Alpha\n\
+\n\
+The alpha content concept documents the quokka ingestion path.\n\
+See [beta](/nested/beta.md) for the companion definition.\n";
+
+    /// `nested/beta` content concept: the nested destination of alpha's link.
+    const CONTENT_BETA: &str = "---\n\
+type: Reference\n\
+title: Beta Content Concept\n\
+tags: [mountless]\n\
+---\n\
+\n\
+# Beta\n\
+\n\
+The nested beta content concept, linked from alpha.\n";
+
+    /// `gamma` content concept: added on the resync to exercise the added
+    /// bucket.
+    const CONTENT_GAMMA: &str = "---\n\
+type: Reference\n\
+title: Gamma Content Concept\n\
+tags: [mountless]\n\
+---\n\
+\n\
+# Gamma\n\
+\n\
+An added concept for the resync diff.\n";
+
+    /// Register (or resync) a content bundle, returning
+    /// `(bundle_id, added, updated, removed, unchanged)`.
+    fn register_content(
+        name: &str,
+        paths: Vec<String>,
+        contents: Vec<Vec<u8>>,
+    ) -> (i64, i32, i32, i32, i32) {
+        Spi::connect(|client| {
+            let row = client
+                .select(
+                    "SELECT bundle_id, added, updated, removed, unchanged
+                     FROM pgokf.register_bundle_content($1, $2, $3) AS r",
+                    Some(1),
+                    &[name.into(), paths.into(), contents.into()],
+                )
+                .expect("register_bundle_content executes")
+                .first();
+            let read_i64 = |ord| {
+                row.get::<i64>(ord)
+                    .expect("bigint column is readable")
+                    .expect("bigint column is not NULL")
+            };
+            let read_i32 = |ord| {
+                row.get::<i32>(ord)
+                    .expect("integer column is readable")
+                    .expect("integer column is not NULL")
+            };
+            (
+                read_i64(1),
+                read_i32(2),
+                read_i32(3),
+                read_i32(4),
+                read_i32(5),
+            )
+        })
+    }
+
+    #[pg_test]
+    fn register_bundle_content_projects_concepts_links_and_provenance() {
+        // Arrange: two in-memory concepts, one at a nested path, alpha carrying
+        // provenance frontmatter and a link to the nested beta.
+        let paths = vec!["alpha.md".to_owned(), "nested/beta.md".to_owned()];
+        let contents = vec![
+            CONTENT_ALPHA.as_bytes().to_vec(),
+            CONTENT_BETA.as_bytes().to_vec(),
+        ];
+
+        // Act
+        let (bundle_id, added, updated, removed, unchanged) =
+            register_content("handbook", paths, contents);
+
+        // Assert: both concepts registered as added.
+        assert_eq!(
+            (added, updated, removed, unchanged),
+            (2, 0, 0, 0),
+            "a first content sync classifies both concepts as added",
+        );
+
+        // Assert: the bundle is recorded as content-sourced under its
+        // synthetic key.
+        let source_type = Spi::get_one_with_args::<String>(
+            "SELECT source_type FROM pgokf.bundles WHERE id = $1",
+            &[bundle_id.into()],
+        )
+        .expect("source_type query executes")
+        .expect("source_type is not NULL");
+        assert_eq!(source_type, "content", "content bundles record source_type");
+        let path = Spi::get_one_with_args::<String>(
+            "SELECT path FROM pgokf.bundles WHERE id = $1",
+            &[bundle_id.into()],
+        )
+        .expect("path query executes")
+        .expect("path is not NULL");
+        assert_eq!(path, "content:handbook", "the synthetic key is stored");
+
+        // Assert: full-text search finds the distinctive term in alpha.
+        let hit = Spi::get_one_with_args::<String>(
+            "SELECT concept_id FROM pgokf.concept_search('quokka') LIMIT 1",
+            &[],
+        )
+        .expect("concept_search executes")
+        .expect("the search term matches the alpha concept");
+        assert_eq!(hit, "alpha");
+
+        // Assert: the nested concept projected at its nested path.
+        let nested = Spi::get_one_with_args::<String>(
+            "SELECT path FROM pgokf.concepts WHERE bundle_id = $1 AND id = 'nested/beta'",
+            &[bundle_id.into()],
+        )
+        .expect("nested concept query executes")
+        .expect("the nested concept exists");
+        assert_eq!(nested, "nested/beta.md");
+
+        // Assert: alpha's provenance frontmatter projected.
+        let generated_by = Spi::get_one_with_args::<String>(
+            "SELECT generated_by FROM pgokf.concept_provenance
+             WHERE bundle_id = $1 AND concept_id = 'alpha'",
+            &[bundle_id.into()],
+        )
+        .expect("concept_provenance query executes")
+        .expect("alpha carries a provenance row");
+        assert_eq!(generated_by, "pipeline/content");
+
+        // Assert: alpha's internal link resolved to the nested beta.
+        let neighbor = Spi::get_one_with_args::<String>(
+            "SELECT neighbor_id FROM pgokf.concept_neighbors('alpha', 2, $1)
+             WHERE neighbor_id = 'nested/beta'",
+            &[bundle_id.into()],
+        )
+        .expect("concept_neighbors executes")
+        .expect("alpha reaches the nested beta across a resolved link");
+        assert_eq!(neighbor, "nested/beta");
+    }
+
+    #[pg_test]
+    fn register_bundle_content_resync_diffs_changed_removed_and_added() {
+        // Arrange: an initial two-concept content bundle.
+        let (_bundle_id, added, ..) = register_content(
+            "handbook",
+            vec!["alpha.md".to_owned(), "nested/beta.md".to_owned()],
+            vec![
+                CONTENT_ALPHA.as_bytes().to_vec(),
+                CONTENT_BETA.as_bytes().to_vec(),
+            ],
+        );
+        assert_eq!(added, 2, "the first sync adds both concepts");
+
+        // Act: resync with a changed alpha, the nested beta removed, and a new
+        // gamma added.
+        let changed_alpha = format!("{CONTENT_ALPHA}\nAn appended paragraph changes the hash.\n");
+        let (_id2, added2, updated2, removed2, unchanged2) = register_content(
+            "handbook",
+            vec!["alpha.md".to_owned(), "gamma.md".to_owned()],
+            vec![
+                changed_alpha.into_bytes(),
+                CONTENT_GAMMA.as_bytes().to_vec(),
+            ],
+        );
+
+        // Assert: alpha updated, gamma added, nested beta removed, none
+        // unchanged.
+        assert_eq!(
+            (added2, updated2, removed2, unchanged2),
+            (1, 1, 1, 0),
+            "the resync diffs added/updated/removed against the stored projection",
+        );
+    }
+
+    #[pg_test]
+    fn register_bundle_content_rejects_a_traversing_path() {
+        // Arrange: a probe that reports the SQLSTATE of a traversing path.
+        Spi::run(
+            "CREATE FUNCTION pg_temp.content_path_sqlstate() RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.register_bundle_content(
+                     'evil',
+                     ARRAY['../escape.md']::text[],
+                     ARRAY['data'::bytea]::bytea[]);
+                 RETURN 'no-error';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("content path probe is creatable");
+
+        // Act
+        let sqlstate = Spi::get_one::<String>("SELECT pg_temp.content_path_sqlstate()")
+            .expect("content path probe executes")
+            .expect("the probe reports a SQLSTATE");
+
+        // Assert: a path escaping the bundle is invalid_parameter (22023).
+        assert_eq!(
+            sqlstate, "22023",
+            "a traversing content path must be rejected with 22023",
+        );
+    }
+
+    #[pg_test]
+    fn refresh_bundle_rejects_a_content_bundle() {
+        // Arrange: a content bundle that has no filesystem root to refresh from.
+        let (bundle_id, ..) = register_content(
+            "handbook",
+            vec!["alpha.md".to_owned()],
+            vec![CONTENT_ALPHA.as_bytes().to_vec()],
+        );
+        Spi::run(
+            "CREATE FUNCTION pg_temp.refresh_content_sqlstate(bid bigint) RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.refresh_bundle(bid);
+                 RETURN 'no-error';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("refresh probe is creatable");
+
+        // Act
+        let sqlstate = Spi::get_one_with_args::<String>(
+            "SELECT pg_temp.refresh_content_sqlstate($1)",
+            &[bundle_id.into()],
+        )
+        .expect("refresh probe executes")
+        .expect("the probe reports a SQLSTATE");
+
+        // Assert: refreshing a content bundle from disk is a caller error
+        // (22023).
+        assert_eq!(
+            sqlstate, "22023",
+            "refresh_bundle must reject a content-sourced bundle with 22023",
+        );
+    }
+
+    #[pg_test]
+    fn register_bundle_content_denies_a_reader_role() {
+        // Arrange: a role granted only pgokf_reader, and a probe that runs
+        // register_bundle_content as that role.
+        Spi::run("CREATE ROLE pgokf_content_reader").expect("reader role is creatable");
+        Spi::run("GRANT pgokf_reader TO pgokf_content_reader").expect("reader role is grantable");
+        Spi::run(
+            "CREATE FUNCTION pg_temp.content_denied_sqlstate() RETURNS text
+             LANGUAGE plpgsql
+             SET role TO pgokf_content_reader
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.register_bundle_content(
+                     'denied',
+                     ARRAY['a.md']::text[],
+                     ARRAY['data'::bytea]::bytea[]);
+                 RETURN 'not-denied';
+             EXCEPTION WHEN insufficient_privilege THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("content authz probe is creatable");
+
+        // Act
+        let sqlstate = Spi::get_one::<String>("SELECT pg_temp.content_denied_sqlstate()")
+            .expect("content authz probe executes")
+            .expect("the probe reports a SQLSTATE");
+
+        // Assert: a plain reader is denied ingestion with 42501.
+        assert_eq!(
+            sqlstate, "42501",
+            "a reader role must be denied register_bundle_content with 42501",
+        );
+    }
+
+    #[pg_test]
+    fn register_bundle_content_with_store_source_round_trips_bytes() {
+        // Arrange: enable the store_source tier, then ingest content.
+        enable_store_source();
+        let (bundle_id, ..) = register_content(
+            "handbook",
+            vec!["alpha.md".to_owned(), "nested/beta.md".to_owned()],
+            vec![
+                CONTENT_ALPHA.as_bytes().to_vec(),
+                CONTENT_BETA.as_bytes().to_vec(),
+            ],
+        );
+
+        // Act: retrieve the stored source bytes for alpha.
+        let stored = Spi::get_one_with_args::<Vec<u8>>(
+            "SELECT pgokf.get_concept_source($1, 'alpha')",
+            &[bundle_id.into()],
+        )
+        .expect("get_concept_source executes")
+        .expect("alpha carries stored source bytes");
+
+        // Assert: the stored bytes equal the exact in-memory content that was
+        // streamed in.
+        assert_eq!(
+            stored,
+            CONTENT_ALPHA.as_bytes(),
+            "store_source must persist the exact content bytes for a content bundle",
         );
     }
 }

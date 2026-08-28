@@ -17,8 +17,11 @@ exercised against a live PostgreSQL 18 cluster.
   caller) or `SECURITY DEFINER` (the function runs as the extension owner with a
   pinned `search_path = pg_catalog, pg_temp`). See
   [security.md](security.md) for why each choice was made.
-- **Required role** is the membership enforced by both the SQL `EXECUTE` grant and
-  an in-function role check (`pgokf_reader` or `pgokf_admin`).
+- **Required role** is the *minimum* membership enforced by both the SQL `EXECUTE`
+  grant and an in-function role check, on the tier hierarchy
+  `pgokf_reader` < `pgokf_writer` < `pgokf_admin`. Because each tier inherits the
+  one below, a higher tier always satisfies a lower requirement (an admin can do
+  anything a writer or reader can).
 - SQLSTATEs raised: `22023` invalid parameter, `42501` insufficient privilege,
   `23505` unique violation (duplicate registration), `XX000` internal error. See
   [troubleshooting.md](troubleshooting.md).
@@ -57,8 +60,9 @@ every other function — including `list_bundles` and `bundle_info`, which take 
 Report the version of the loaded `pgokf` shared library (the crate version).
 `IMMUTABLE STRICT PARALLEL SAFE`, invoker rights. Although the function itself
 carries no role check, `USAGE` on schema `pgokf` is revoked from `PUBLIC`, so a
-caller needs membership in `pgokf_reader` or `pgokf_admin` (or superuser);
-a role with neither gets `42501` (`permission denied for schema pgokf`). Useful
+caller needs membership in `pgokf_reader` (which `pgokf_writer` and `pgokf_admin`
+inherit) or superuser; a role with none of them gets `42501`
+(`permission denied for schema pgokf`). Useful
 to confirm the installed SQL and the loaded module agree after an upgrade.
 
 ```sql
@@ -71,7 +75,7 @@ SELECT pgokf.version();
 ### `pgokf.register_bundle(path text, name text DEFAULT NULL, options jsonb DEFAULT '{}') → pgokf.bundle_sync_result`
 
 Register an OKF bundle root and synchronize it into the catalog. `VOLATILE`,
-`SECURITY DEFINER`, **requires `pgokf_admin`**.
+`SECURITY DEFINER`, **requires `pgokf_writer`**.
 
 | Parameter | Type | Default | Meaning |
 | --------- | ---- | ------- | ------- |
@@ -101,15 +105,59 @@ SELECT * FROM pgokf.register_bundle('/abs/path/to/examples/sample-bundle');
 --          1 | /abs/path/to/examples/sample-bundle      |     4 |       0 |       0 |         0 |     4
 ```
 
+### `pgokf.register_bundle_content(name text, paths text[], contents bytea[], options jsonb DEFAULT '{}') → pgokf.bundle_sync_result`
+
+Register or resynchronize a bundle from **in-memory content** rather than a
+filesystem path — the *mountless* ingestion path. `VOLATILE`, `SECURITY
+DEFINER`, **requires `pgokf_writer`**. The extension performs no network or
+filesystem I/O here: a companion process (see the [`pgokf-ingest`
+crate](deployment-topologies.md#mountless-object-store-ingestion)) reads an
+object store and streams the collected `(path, bytes)` pairs into this function.
+
+| Parameter | Type | Default | Meaning |
+| --------- | ---- | ------- | ------- |
+| `name` | `text` | — | Logical bundle name. The bundle is keyed on the synthetic path `content:<name>` (`source_type = 'content'`), which cannot collide with an absolute filesystem path. |
+| `paths` | `text[]` | — | Bundle-relative paths, one per element. Each must be relative, traversal-free (no `..`), and NUL-free. |
+| `contents` | `bytea[]` | — | The bytes for each path; must be the **same length** as `paths`, with no `NULL` element. |
+| `options` | `jsonb` | `'{}'` | Stored verbatim on `pgokf.bundles.options`. |
+
+Behavior:
+
+- Calling it again with the same `name` **resyncs**: contents are hashed
+  (BLAKE3) and diffed against the stored projection exactly like a filesystem
+  refresh — changed concepts are upserted, missing ones deleted, unchanged rows
+  left untouched. This is how the companion re-ingests incrementally.
+- The same discovery bounds apply: `max_bundle_files` / `max_file_bytes` are
+  enforced on the provided content, and reserved files (`index.md`, `log.md`)
+  are handled as in `register_bundle` (a root `index.md` supplies `okf_version`).
+- A length mismatch, a `NULL` content element, or an unsafe path raises `22023`;
+  the whole call is atomic under the bundle advisory lock.
+- With `store_source` enabled, the provided bytes round-trip through
+  `get_concept_source` / `export_sources` just like filesystem-sourced bundles.
+
+```sql
+SELECT added, total FROM pgokf.register_bundle_content(
+    'handbook',
+    ARRAY['runbooks/deploy.md'],
+    ARRAY[convert_to(E'---\ntype: runbook\ntitle: Deploy\n---\nsteps', 'UTF8')::bytea]
+);
+--  added | total
+-- -------+-------
+--      1 |     1
+```
+
 ### `pgokf.refresh_bundle(bundle_id bigint) → pgokf.bundle_sync_result`
 
-Incrementally re-synchronize a registered bundle from its stored canonical path.
-`VOLATILE STRICT`, `SECURITY DEFINER`, **requires `pgokf_admin`**.
+Incrementally re-synchronize a **filesystem-sourced** bundle from its stored
+canonical path. `VOLATILE STRICT`, `SECURITY DEFINER`, **requires
+`pgokf_writer`**.
 
 Only files whose BLAKE3 content hash changed are re-parsed; unchanged rows are
 left untouched (preserving their `indexed_at`), and rows for deleted files are
 removed. An unknown `bundle_id` raises `22023`. A concurrent register/refresh of
-the same bundle serializes on a bundle-scoped advisory lock.
+the same bundle serializes on a bundle-scoped advisory lock. A **content-sourced**
+bundle (`source_type = 'content'`) has no filesystem root, so `refresh_bundle`
+raises `22023` for it — re-sync those by calling `register_bundle_content` again.
 
 ```sql
 SELECT added, updated, removed, unchanged, total FROM pgokf.refresh_bundle(1);
@@ -121,7 +169,8 @@ SELECT added, updated, removed, unchanged, total FROM pgokf.refresh_bundle(1);
 ### `pgokf.unregister_bundle(bundle_id bigint) → pgokf.bundle_info`
 
 Delete a bundle and return the removed bundle's `bundle_info`. `VOLATILE STRICT`,
-`SECURITY DEFINER`, **requires `pgokf_admin`**.
+`SECURITY DEFINER`, **requires `pgokf_writer`**. Works for both filesystem- and
+content-sourced bundles.
 
 Serializes on the bundle advisory lock, then deletes the `pgokf.bundles` row;
 concepts, metadata, links, and provenance cascade through their foreign keys.
@@ -499,7 +548,8 @@ One registered OKF bundle root.
 | Column | Type | Notes |
 | ------ | ---- | ----- |
 | `id` | `bigint` | Primary key, `GENERATED ALWAYS AS IDENTITY`. |
-| `path` | `text` | `NOT NULL`, `UNIQUE` — the canonical path. |
+| `path` | `text` | `NOT NULL`, `UNIQUE` — the canonical filesystem path for a filesystem bundle, or the synthetic key `content:<name>` for a content bundle. |
+| `source_type` | `text` | `NOT NULL DEFAULT 'filesystem'`, `CHECK (source_type IN ('filesystem','content'))` — how bytes reach the catalog: `filesystem` (`register_bundle` / `refresh_bundle`) or `content` (`register_bundle_content`). |
 | `name` | `text` | Optional label. |
 | `okf_version` | `text` | The bundle's declared OKF version, read from the reserved bundle-root `index.md` `okf_version` frontmatter (e.g. `0.2`). `NULL` when the bundle has no root `index.md` or it declares no `okf_version`. |
 | `file_count` | `integer` | `NOT NULL DEFAULT 0`. |

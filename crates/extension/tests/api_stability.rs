@@ -37,11 +37,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The 14 stable public functions, as `(name, argument-type list)`. The pair
+/// The 16 stable public functions, as `(name, argument-type list)`. The pair
 /// renders to the exact `COMMENT ON FUNCTION pgokf.<name>(<args>)` prefix that
 /// the hardening blocks emit.
 const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
     ("register_bundle", "text, text, jsonb"),
+    ("register_bundle_content", "text, text[], bytea[], jsonb"),
     ("refresh_bundle", "bigint"),
     ("unregister_bundle", "bigint"),
     ("list_bundles", ""),

@@ -1,12 +1,17 @@
 //! The shared register/refresh engine.
 //!
-//! `pgokf.register_bundle` and `pgokf.refresh_bundle` both funnel into
-//! [`run_bundle_sync`], which is a single-transaction, set-based diff:
+//! `pgokf.register_bundle`, `pgokf.refresh_bundle`, and
+//! `pgokf.register_bundle_content` all funnel into [`run_bundle_sync`], which is
+//! a single-transaction, set-based diff generic over the [`ByteSource`] seam so
+//! the identical downstream pipeline serves both the on-disk
+//! [`FilesystemSource`] and the mountless in-memory [`ContentSource`]:
 //!
 //! 1. serialize on a bundle-scoped advisory lock ([`advisory_lock_key`]);
 //! 2. load the stored `path -> file_hash` projection for the bundle;
-//! 3. discover the current filesystem state via [`okf_sync::discover`]
-//!    (symlink-escape safe, size/count limited from the `pgokf.*` GUCs);
+//! 3. take the current `{path, blake3_hash}` snapshot from the [`ByteSource`]
+//!    (the filesystem source uses [`okf_sync::discover`] — symlink-escape safe,
+//!    size/count limited from the `pgokf.*` GUCs; the content source hashes the
+//!    caller-supplied bytes in memory);
 //! 4. classify changes against the stored hashes ([`classify_changes`]) so
 //!    unchanged rows are never rewritten and `indexed_at` is preserved;
 //! 5. parse only added/updated files with [`okf_parser::parse_concept`];
@@ -50,8 +55,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use okf_parser::{ParserLimits, is_reserved_path, parse_concept};
-use okf_sync::{FileMetadata, Snapshot, SyncConfig, SyncReport, discover, hash_bytes};
+use okf_parser::{ParserLimits, index_okf_version, is_reserved_path, parse_concept};
+use okf_sync::{FileMetadata, SyncConfig, SyncReport, discover, hash_bytes};
 use pgrx::Spi;
 
 use crate::catalog::batch::{self, BATCH_SIZE};
@@ -130,12 +135,15 @@ pub struct BundleDelta {
 /// skipped entirely and count toward no bucket. A file whose stored BLAKE3
 /// hash matches its current hash is unchanged and will not be rewritten.
 #[must_use]
-pub fn classify_changes(stored: &BTreeMap<String, String>, current: &Snapshot) -> BundleDelta {
+pub fn classify_changes(
+    stored: &BTreeMap<String, String>,
+    current: &[FileMetadata],
+) -> BundleDelta {
     let mut delta = BundleDelta::default();
     let mut current_paths = BTreeSet::new();
 
-    for (path, metadata) in current.files() {
-        let path_text = path.to_string_lossy().into_owned();
+    for metadata in current {
+        let path_text = metadata.path.to_string_lossy().into_owned();
         if is_reserved_path(&path_text) {
             continue;
         }
@@ -171,10 +179,10 @@ pub fn classify_changes(stored: &BTreeMap<String, String>, current: &Snapshot) -
 /// Stored on `pgokf.bundles.sync_hash` after every successful sync so
 /// operators (and later waves) can detect drift without re-hashing files.
 #[must_use]
-pub fn bundle_sync_hash(current: &Snapshot) -> String {
+pub fn bundle_sync_hash(current: &[FileMetadata]) -> String {
     let mut buffer = String::new();
-    for (path, metadata) in current.files() {
-        let path_text = path.to_string_lossy();
+    for metadata in current {
+        let path_text = metadata.path.to_string_lossy();
         if is_reserved_path(&path_text) {
             continue;
         }
@@ -227,7 +235,7 @@ fn canonical_path_text(canonical: &Path) -> Result<&str, CatalogError> {
     })
 }
 
-fn acquire_bundle_lock(canonical_path: &str) -> Result<(), CatalogError> {
+pub(crate) fn acquire_bundle_lock(canonical_path: &str) -> Result<(), CatalogError> {
     let key = advisory_lock_key(canonical_path);
     Spi::run_with_args("SELECT pg_catalog.pg_advisory_xact_lock($1)", &[key.into()])
         .map_err(|error| spi_error("failed to acquire bundle advisory lock", &error))
@@ -283,6 +291,150 @@ fn parser_limits_from_gucs() -> ParserLimits {
     }
 }
 
+/// The seam that decouples the shared classify/parse/upsert/project pipeline
+/// from *where the bundle bytes come from*.
+///
+/// A `ByteSource` yields a whole-bundle snapshot of `{path, blake3_hash}` pairs
+/// ([`ByteSource::snapshot`]) that [`classify_changes`] diffs against the stored
+/// projection, produces the raw bytes for any changed path on demand
+/// ([`ByteSource::read_bytes`]), and reports the bundle-root OKF format version
+/// ([`ByteSource::root_okf_version`]). [`run_bundle_sync`] is generic over it, so
+/// the identical downstream logic serves both the on-disk
+/// [`FilesystemSource`] (walk + BLAKE3 + `std::fs::read`) and the mountless
+/// [`ContentSource`] (caller-supplied `(paths, contents)` held in memory).
+pub(crate) trait ByteSource {
+    /// The full bundle snapshot as `{path, blake3_hash}` entries. Reserved OKF
+    /// files (`index.md` / `log.md`) may be present; [`classify_changes`] and
+    /// [`bundle_sync_hash`] skip them, exactly as for the filesystem scan.
+    ///
+    /// `exclude` carries the durable `default_exclude` globs so the filesystem
+    /// scan can honor them; sources with no notion of on-disk exclusion ignore
+    /// it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`CatalogError`] when the snapshot cannot be produced (for the
+    /// filesystem source, when the directory scan fails or a resource ceiling
+    /// is exceeded).
+    fn snapshot(&self, exclude: &[String]) -> Result<Vec<FileMetadata>, CatalogError>;
+
+    /// Produce the raw bytes for one changed bundle-relative path.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`CatalogError`] when the bytes cannot be produced (an I/O
+    /// failure for the filesystem source, or a path the content source was
+    /// never given).
+    fn read_bytes(&self, path: &Path) -> Result<Vec<u8>, CatalogError>;
+
+    /// The OKF format version declared in the bundle-root `index.md`, when one
+    /// is present and carries a scalar `okf_version`; `None` otherwise. Fully
+    /// defensive so it can never abort a sync.
+    fn root_okf_version(&self) -> Option<String>;
+}
+
+/// On-disk [`ByteSource`]: the historical register/refresh behavior, unchanged.
+///
+/// The snapshot is [`okf_sync::discover`] (symlink-escape-safe walk + BLAKE3
+/// hashing, size/count limited from the `pgokf.*` GUCs); changed bytes are read
+/// with `std::fs::read`; the version comes from the bundle-root `index.md`.
+pub(crate) struct FilesystemSource {
+    canonical_root: PathBuf,
+}
+
+impl FilesystemSource {
+    /// Wrap an already-resolved, canonical bundle root.
+    pub(crate) fn new(canonical_root: PathBuf) -> Self {
+        Self { canonical_root }
+    }
+}
+
+impl ByteSource for FilesystemSource {
+    fn snapshot(&self, exclude: &[String]) -> Result<Vec<FileMetadata>, CatalogError> {
+        let config = sync_config_from_gucs(&self.canonical_root, exclude);
+        let snapshot = discover(&config).map_err(|error| {
+            CatalogError::invalid_parameter(format!("bundle scan failed: {error}"), Path::new(""))
+        })?;
+        Ok(snapshot.files().values().cloned().collect())
+    }
+
+    fn read_bytes(&self, path: &Path) -> Result<Vec<u8>, CatalogError> {
+        let absolute = self.canonical_root.join(path);
+        std::fs::read(&absolute).map_err(|error| {
+            CatalogError::internal(format!("failed to read bundle file: {error}"), path)
+        })
+    }
+
+    fn root_okf_version(&self) -> Option<String> {
+        read_root_okf_version(&self.canonical_root)
+    }
+}
+
+/// In-memory [`ByteSource`]: the mountless content-ingestion path.
+///
+/// Built from caller-supplied `(paths, contents)` (validated as safe
+/// bundle-relative paths by [`crate::catalog::content`] before construction).
+/// Each content's BLAKE3 hash is computed once with [`okf_sync::hash_bytes`] so
+/// the shared pipeline diffs it against the stored projection exactly as it does
+/// the filesystem hashes; the bytes are served straight from memory. The
+/// bundle-root version is read from a provided root `index.md`, if any.
+pub(crate) struct ContentSource {
+    /// Snapshot entries, sorted by path for a deterministic `sync_hash`.
+    entries: Vec<FileMetadata>,
+    /// The exact bytes for every provided path, keyed by path.
+    contents: BTreeMap<PathBuf, Vec<u8>>,
+}
+
+impl ContentSource {
+    /// Build a content source from validated, equal-length `paths` / `contents`.
+    ///
+    /// Callers ([`crate::catalog::content`]) must already have rejected NULL and
+    /// traversing paths and enforced the `pgokf.max_bundle_files` /
+    /// `pgokf.max_file_bytes` ceilings; this constructor only hashes each
+    /// content and materializes the snapshot.
+    pub(crate) fn new(paths: Vec<String>, contents: Vec<Vec<u8>>) -> Self {
+        let mut entries = Vec::with_capacity(paths.len());
+        let mut map = BTreeMap::new();
+        for (path, content) in paths.into_iter().zip(contents) {
+            let hash = hash_bytes(&content);
+            let size_bytes = u64::try_from(content.len()).unwrap_or(u64::MAX);
+            let path_buf = PathBuf::from(path);
+            entries.push(FileMetadata {
+                path: path_buf.clone(),
+                hash,
+                size_bytes,
+                modified_at: None,
+            });
+            map.insert(path_buf, content);
+        }
+        entries.sort_by(|left, right| left.path.cmp(&right.path));
+        Self {
+            entries,
+            contents: map,
+        }
+    }
+}
+
+impl ByteSource for ContentSource {
+    fn snapshot(&self, _exclude: &[String]) -> Result<Vec<FileMetadata>, CatalogError> {
+        Ok(self.entries.clone())
+    }
+
+    fn read_bytes(&self, path: &Path) -> Result<Vec<u8>, CatalogError> {
+        self.contents.get(path).cloned().ok_or_else(|| {
+            CatalogError::internal(
+                format!("no content was provided for path {}", path.display()),
+                path,
+            )
+        })
+    }
+
+    fn root_okf_version(&self) -> Option<String> {
+        let index = self.contents.get(Path::new("index.md"))?;
+        index_okf_version(index, guc::max_frontmatter_bytes())
+    }
+}
+
 /// The concepts staged for the projection seam plus the files skipped over.
 ///
 /// `skipped` is always empty under the strict policy (a malformed file aborts
@@ -317,8 +469,8 @@ struct StagingOutcome {
 /// concepts and `pgokf.max_file_bytes` caps each source file — while the SQL
 /// writes themselves are chunked ([`upsert_concepts`],
 /// [`replace_concept_metadata`]) so no single statement is unbounded.
-fn stage_changed_concepts(
-    root: &Path,
+fn stage_changed_concepts<S: ByteSource>(
+    source: &S,
     delta: &BundleDelta,
     strict: bool,
     store_source: bool,
@@ -327,13 +479,7 @@ fn stage_changed_concepts(
     let mut staged = Vec::with_capacity(delta.to_parse.len());
     let mut skipped = Vec::new();
     for metadata in &delta.to_parse {
-        let absolute = root.join(&metadata.path);
-        let bytes = std::fs::read(&absolute).map_err(|error| {
-            CatalogError::internal(
-                format!("failed to read bundle file: {error}"),
-                &metadata.path,
-            )
-        })?;
+        let bytes = source.read_bytes(&metadata.path)?;
         let concept = match parse_concept(&bytes, &metadata.path, limits) {
             Ok(concept) => concept,
             Err(error) if strict => {
@@ -598,25 +744,22 @@ fn update_bundle_row(
     .map_err(|error| spi_error("failed to update bundle sync state", &error))
 }
 
-/// The shared sync engine used by both `register_bundle` and
-/// `refresh_bundle`; see the module docs for the full step list.
+/// The shared sync engine used by `register_bundle`, `refresh_bundle`, and
+/// `register_bundle_content`; see the module docs for the full step list.
 ///
-/// Callers must already hold the bundle advisory lock and have authorized
-/// the operation.
-fn run_bundle_sync(bundle_id: i64, canonical_root: &Path) -> Result<SyncReport, CatalogError> {
+/// Generic over the [`ByteSource`] seam so the classify/parse/upsert/project
+/// pipeline is identical whether the bytes come from an on-disk
+/// [`FilesystemSource`] or an in-memory [`ContentSource`]. Callers must already
+/// hold the bundle advisory lock and have authorized the operation.
+pub(crate) fn run_bundle_sync<S: ByteSource>(
+    bundle_id: i64,
+    source: &S,
+) -> Result<SyncReport, CatalogError> {
     let defaults = crate::catalog::config::sync_defaults()?;
     let stored = load_stored_hashes(bundle_id)?;
-    let config = sync_config_from_gucs(canonical_root, &defaults.exclude);
-    let current = discover(&config).map_err(|error| {
-        CatalogError::invalid_parameter(format!("bundle scan failed: {error}"), Path::new(""))
-    })?;
+    let current = source.snapshot(&defaults.exclude)?;
     let mut delta = classify_changes(&stored, &current);
-    let outcome = stage_changed_concepts(
-        canonical_root,
-        &delta,
-        defaults.strict,
-        defaults.store_source,
-    )?;
+    let outcome = stage_changed_concepts(source, &delta, defaults.strict, defaults.store_source)?;
     // Keep the report honest: files skipped under the non-strict policy were
     // classified but never written.
     adjust_report_for_skips(&mut delta, &stored, &outcome.skipped);
@@ -643,7 +786,7 @@ fn run_bundle_sync(bundle_id: i64, canonical_root: &Path) -> Result<SyncReport, 
     // depends on the concept rows existing, which the upsert above guarantees.
     crate::catalog::source::project(bundle_id, &staged)?;
 
-    let okf_version = read_root_okf_version(canonical_root);
+    let okf_version = source.root_okf_version();
     update_bundle_row(
         bundle_id,
         &bundle_sync_hash(&current),
@@ -686,22 +829,27 @@ fn insert_bundle_row(
     .ok_or_else(|| CatalogError::internal("bundle insert returned no id", Path::new("")))
 }
 
-fn lookup_bundle_path(bundle_id: i64) -> Result<Option<String>, CatalogError> {
+fn lookup_bundle_path_and_type(bundle_id: i64) -> Result<Option<(String, String)>, CatalogError> {
     Spi::connect(|client| {
         let table = client
             .select(
-                "SELECT path FROM pgokf.bundles WHERE id = $1",
+                "SELECT path, source_type FROM pgokf.bundles WHERE id = $1",
                 Some(1),
                 &[bundle_id.into()],
             )
             .map_err(|error| spi_error("failed to look up bundle path", &error))?;
-        if table.is_empty() {
+        let Some(row) = table.into_iter().next() else {
             return Ok(None);
-        }
-        table
-            .first()
-            .get_one::<String>()
-            .map_err(|error| spi_error("failed to read bundle path", &error))
+        };
+        let path = row
+            .get::<String>(1)
+            .map_err(|error| spi_error("failed to read bundle path", &error))?
+            .ok_or_else(|| CatalogError::internal("bundle path is NULL", Path::new("")))?;
+        let source_type = row
+            .get::<String>(2)
+            .map_err(|error| spi_error("failed to read bundle source_type", &error))?
+            .ok_or_else(|| CatalogError::internal("bundle source_type is NULL", Path::new("")))?;
+        Ok(Some((path, source_type)))
     })
 }
 
@@ -726,25 +874,40 @@ fn register_bundle_impl(
     }
 
     let bundle_id = insert_bundle_row(&canonical_text, name, options)?;
-    let report = run_bundle_sync(bundle_id, &canonical_root)?;
+    let report = run_bundle_sync(bundle_id, &FilesystemSource::new(canonical_root))?;
     Ok((bundle_id, canonical_text, report))
 }
 
 fn refresh_bundle_impl(bundle_id: i64) -> Result<(String, SyncReport), CatalogError> {
     security::authorize_current_user(security::Operation::Ingest, Path::new(""))?;
-    let stored_path = lookup_bundle_path(bundle_id)?.ok_or_else(|| {
+    let (stored_path, source_type) = lookup_bundle_path_and_type(bundle_id)?.ok_or_else(|| {
         CatalogError::invalid_parameter(
             format!("bundle {bundle_id} is not registered"),
             Path::new(""),
         )
     })?;
 
+    // A content-sourced bundle has no filesystem root to refresh from: its
+    // bytes live only in whatever caller supplied them. Re-syncing it means
+    // calling register_bundle_content again with the current content, so
+    // refreshing it from disk is a caller error (22023).
+    if source_type == "content" {
+        return Err(CatalogError::invalid_parameter(
+            format!(
+                "bundle {bundle_id} is content-sourced; content bundles are \
+                 re-synced by calling pgokf.register_bundle_content, not \
+                 pgokf.refresh_bundle"
+            ),
+            Path::new(""),
+        ));
+    }
+
     // Lock on the stored canonical path so refresh serializes with a
     // concurrent register/refresh of the same bundle, then re-validate the
     // root before touching the filesystem.
     acquire_bundle_lock(&stored_path)?;
     let canonical_root = resolve_bundle_root(&stored_path)?;
-    let report = run_bundle_sync(bundle_id, &canonical_root)?;
+    let report = run_bundle_sync(bundle_id, &FilesystemSource::new(canonical_root))?;
     Ok((stored_path, report))
 }
 
@@ -842,8 +1005,13 @@ mod tests {
             fs::write(path, contents).expect("write bundle file");
         }
 
-        fn snapshot(&self) -> Snapshot {
-            discover(&SyncConfig::new(&self.root)).expect("discover temp bundle")
+        fn snapshot(&self) -> Vec<FileMetadata> {
+            discover(&SyncConfig::new(&self.root))
+                .expect("discover temp bundle")
+                .files()
+                .values()
+                .cloned()
+                .collect()
         }
     }
 

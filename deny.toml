@@ -22,6 +22,12 @@ allow = [
   # arrow-array (arrow -> ahash -> const-random -> tiny-keccak). CC0-1.0 imposes
   # no attribution or copyleft obligations.
   "CC0-1.0",
+  # Carried by webpki-root-certs (the Mozilla root-CA bundle reqwest/rustls use
+  # to verify TLS to a real S3 endpoint), a transitive dependency of the
+  # pgokf-ingest companion: object_store -> reqwest -> rustls-platform-verifier
+  # -> webpki-root-certs. CDLA-Permissive-2.0 is a permissive data license with
+  # no copyleft or attribution obligations on the consuming code.
+  "CDLA-Permissive-2.0",
   "ISC",
   "MIT",
   "MPL-2.0",

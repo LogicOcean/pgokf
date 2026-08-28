@@ -555,7 +555,7 @@ the first `register_bundle`. See the
    cp templates/service.md /abs/path/to/my-bundle/payments-api.md
    ```
 
-2. **Register** the bundle (requires `pgokf_admin`):
+2. **Register** the bundle (requires `pgokf_writer`):
 
    ```sql
    SELECT * FROM pgokf.register_bundle('/abs/path/to/my-bundle', 'payments');

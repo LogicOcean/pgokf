@@ -35,7 +35,9 @@ CREATE TABLE pgokf.bundles (
     sync_hash      text,
     options        jsonb NOT NULL DEFAULT '{}'::jsonb,
     enabled        boolean NOT NULL DEFAULT true,
-    CONSTRAINT bundles_path_key UNIQUE (path)
+    source_type    text NOT NULL DEFAULT 'filesystem',
+    CONSTRAINT bundles_path_key UNIQUE (path),
+    CONSTRAINT bundles_source_type_chk CHECK (source_type IN ('filesystem', 'content'))
 );
 
 CREATE TABLE pgokf.concepts (
@@ -113,6 +115,8 @@ COMMENT ON COLUMN pgokf.concepts.body_tsv IS
     'Weighted search vector: title (A), tags/type/description (B), body text (D).';
 COMMENT ON COLUMN pgokf.bundles.sync_hash IS
     'Aggregate BLAKE3 digest over the sorted (path, file_hash) pairs of the last successful sync.';
+COMMENT ON COLUMN pgokf.bundles.source_type IS
+    'How the bundle bytes reach the catalog: ''filesystem'' (registered from a canonical on-disk root via pgokf.register_bundle and refreshed from disk via pgokf.refresh_bundle) or ''content'' (streamed in memory via pgokf.register_bundle_content — a mountless object-store companion or any client — where path is the synthetic key ''content:''||name and refresh_bundle is rejected).';
 
 GRANT SELECT ON pgokf.bundles, pgokf.concepts, pgokf.concept_metadata TO pgokf_reader;
 ",

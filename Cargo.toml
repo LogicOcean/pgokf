@@ -3,12 +3,13 @@ members = [
     "crates/extension",
     "crates/okf-parser",
     "crates/okf-sync",
+    "crates/pgokf-ingest",
 ]
 default-members = ["crates/okf-parser", "crates/okf-sync"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 rust-version = "1.96"
 license = "MIT"

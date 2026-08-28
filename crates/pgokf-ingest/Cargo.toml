@@ -1,0 +1,23 @@
+[package]
+name = "pgokf-ingest"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Mountless OKF ingestion companion: reads an S3-compatible object store and streams bundle bytes into pgokf via register_bundle_content."
+
+[[bin]]
+name = "pgokf-ingest"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive", "env"] }
+futures = "0.3"
+object_store = { version = "0.14", features = ["aws"] }
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread"] }
+tokio-postgres = "0.7"
+
+[lints]
+workspace = true

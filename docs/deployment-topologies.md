@@ -6,8 +6,10 @@ the search index always live in PostgreSQL. The source files can live either
 inside PostgreSQL or in an external object store / data lake. That single choice
 — the `store_source` policy key — defines the two supported tiers.
 
-This guide covers both tiers in depth, how to scale reads horizontally with
-replicas, how to isolate tenants, and how to choose. For the mechanics of the
+This guide covers both tiers in depth — including feeding the enterprise tier
+either through a filesystem mount or **mountless**, with a network companion that
+streams the bytes in — how to scale reads horizontally with replicas, how to
+isolate tenants, and how to choose. For the mechanics of the
 knobs referenced here see [configuration.md](configuration.md); for the trust
 boundary around filesystem access see [security.md](security.md).
 
@@ -165,6 +167,103 @@ bucket remains the single source of truth for the files.
 **When to pick it:** a large corpus, files already curated and governed in a
 lake, a policy that the DB must not hold document bytes, or many bundles sharing
 one governed store.
+
+---
+
+## Enterprise tier, mountless: the ingestion companion
+
+The mount above puts the object store *behind the filesystem* so the PostgreSQL
+backend can read it. That is not always possible or desirable: a managed
+PostgreSQL (RDS, Cloud SQL, a Kubernetes operator) may not let you attach a FUSE
+mount to the database host at all, and a mount couples database availability to
+mount availability. The **mountless** variant of the enterprise tier removes the
+mount entirely.
+
+Instead of the backend reading files, a small standalone companion —
+[`pgokf-ingest`](../crates/pgokf-ingest) — reads the object store over the
+network and streams the bytes into PostgreSQL through a new writer-tier
+function:
+
+```
+pgokf.register_bundle_content(name text, paths text[], contents bytea[],
+                              options jsonb DEFAULT '{}')
+    RETURNS pgokf.bundle_sync_result
+```
+
+The extension still performs **no network I/O**. It receives only the bytes the
+companion hands it, runs them through the identical classify/parse/upsert/project
+pipeline `register_bundle` uses, and records the bundle with
+`source_type = 'content'` under the synthetic key `content:<name>`. A content
+bundle is diffed against its stored projection exactly like a filesystem bundle,
+so **re-running the companion is an incremental resync** — changed concepts are
+upserted and removed ones deleted. (A content bundle has no on-disk root, so
+`pgokf.refresh_bundle` on it raises `22023`: you resync by calling
+`register_bundle_content` again. `unregister_bundle`, search, graph, and
+`export_parquet` all behave identically to any other bundle.)
+
+### Mount vs. mountless — which enterprise variant
+
+| | **Mounted** (`register_bundle` over a FUSE mount) | **Mountless** (`register_bundle_content` via the companion) |
+| --- | --- | --- |
+| Where object-store I/O happens | The PostgreSQL backend, through the mount | The companion process, over the network |
+| Needs a FUSE mount on the DB host | Yes | **No** |
+| Works with managed PostgreSQL (RDS/Cloud SQL) | Rarely (no host mount) | **Yes** |
+| Object-store credentials | On the DB host (mount driver / IAM role) | On the companion only — never near the DB |
+| Availability coupling | DB register/refresh depends on the mount | DB is decoupled; the companion runs anywhere |
+| Incremental sync | `refresh_bundle` re-lists the mount | Re-run the companion; server-side diff |
+
+### Credentials never touch PostgreSQL
+
+This is the whole point of the split. The object-store credentials live in the
+**companion's** environment — the standard `AWS_ACCESS_KEY_ID` /
+`AWS_SECRET_ACCESS_KEY`, or, preferably, an EC2/ECS **instance profile / IAM
+role** that the companion assumes with no static keys at all. PostgreSQL is
+reached separately, through a connection string for a login role that is a member
+of **`pgokf_writer`** (the ingest tier `register_bundle_content` requires). That
+account carries no object-store credentials. Neither secret ever lands in
+`pgokf_private.config`, in a backup, or in the extension's view of the world.
+
+### Concrete example: MinIO bucket → managed PostgreSQL, no mount
+
+```bash
+# The bucket okf-bundles holds the OKF bundle under the handbook/ prefix:
+#   handbook/attester.md
+#   handbook/computation.md
+#   handbook/rich-concept.md   ...
+
+# Object-store credentials live here, in the companion's environment (or, in
+# production, an attached IAM role so there is no static key at all).
+export AWS_ACCESS_KEY_ID=okfadmin
+export AWS_SECRET_ACCESS_KEY=…            # out of band; never sent to PostgreSQL
+
+# PostgreSQL is reached as a pgokf_writer login role, separately.
+export OKF_PG_URL="postgresql://okf_ingest@db.internal/app"
+
+pgokf-ingest \
+  --bucket okf-bundles \
+  --prefix handbook/ \
+  --endpoint http://minio.internal:9000 \  # required for MinIO; omit for real AWS S3
+  --allow-http \                            # only for a plain-HTTP endpoint
+  --bundle-name handbook
+```
+
+```text
+pgokf-ingest: collected 5 object(s) from s3://okf-bundles/handbook
+pgokf-ingest: registered content bundle 'handbook' (bundle_id=1, source_type=content)
+	added=5 updated=0 removed=0 unchanged=0 total=5
+```
+
+From here `concept_search`, `concept_neighbors`, `list_bundles`, and
+`export_parquet` work exactly as for a mounted or local bundle — the catalog
+cannot tell how the bytes arrived, only that `source_type = 'content'`. Because
+`store_source` defaults to `false`, no source bytes are retained in PostgreSQL;
+the bucket remains the source of truth. Set `store_source = true` first if you
+also want the originals captured in `pgokf.concept_source` (the small tier —
+useful even here for a self-contained backup). Re-run the companion whenever the
+bucket changes; the server-side diff makes it incremental. See the companion's
+[README](https://github.com/LogicOcean/pgokf/blob/main/crates/pgokf-ingest/README.md) for the full flag/environment
+reference and its v1 scope (one-shot sync; whole-bundle call for correct
+removals; `NoTls` transport, so front a public endpoint with TLS).
 
 ---
 
