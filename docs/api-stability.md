@@ -21,7 +21,7 @@ the database. Complete comment coverage is a release gate (see
 
 ## The stable surface
 
-### Functions (32)
+### Functions (36)
 
 | Function | Role required | Purpose |
 | -------- | ------------- | ------- |
@@ -36,7 +36,9 @@ the database. Complete comment coverage is a release gate (see
 | `pgokf.list_bundles()` | `pgokf_reader` | List registered bundles |
 | `pgokf.bundle_info(bigint)` | `pgokf_reader` | Info for one registered bundle |
 | `pgokf.duplicate_concepts(bigint, integer)` | `pgokf_reader` | Concepts sharing a BLAKE3 `file_hash` across bundles (dedup) |
-| `pgokf.concept_search(text, bigint, integer, text, text[], text, text)` | `pgokf_reader` | Ranked full-text search with optional `concept_type`/`tags`/`status`/`trust_tier` filters (trailing args default `NULL`; the historical 3-arg call still resolves) |
+| `pgokf.concept_search(text, bigint, integer, text, text[], text, text, jsonb)` | `pgokf_reader` | Ranked full-text search with optional filters and an optional trailing `after_cursor` jsonb for stable keyset pagination (trailing args default `NULL`; the historical 3-arg call still resolves) |
+| `pgokf.search_facets(text, bigint, text, text, text[], text, text)` | `pgokf_reader` | Faceted result counts for a query (by type/tag/bundle/status/trust_tier) |
+| `pgokf.search_index_status()` | `pgokf_reader` | Search-index availability + coverage report (native/bm25/pgvector) as jsonb |
 | `pgokf.find_similar(text, bigint, integer)` | `pgokf_reader` | Content more-like-this for a seed concept (distinct from the link graph) |
 | `pgokf.concept_search_semantic(real[], bigint, integer)` | `pgokf_reader` | Vector nearest-neighbor search by a caller-supplied query embedding (requires pgvector) |
 | `pgokf.concept_search_hybrid(text, real[], bigint, integer)` | `pgokf_reader` | RRF fusion of lexical + semantic (degrades to lexical when pgvector absent) |
@@ -56,6 +58,8 @@ the database. Complete comment coverage is a release gate (see
 | `pgokf.export_parquet(bigint, text)` | `pgokf_admin` | Export a bundle projection to Parquet files |
 | `pgokf.export_sources(bigint, text)` | `pgokf_admin` | Reconstruct a bundle's stored source files on disk, hash-verified |
 | `pgokf.rebuild_search_index()` | `pgokf_admin` | (Re)build the optional pg_search BM25 index; a no-op with a notice when pg_search is not installed |
+| `pgokf.schedule_refresh(bigint, text)` | `pgokf_admin` | Schedule periodic `refresh_bundle` via pg_cron (raises when pg_cron is absent) |
+| `pgokf.unschedule_refresh(bigint)` | `pgokf_admin` | Remove a bundle's scheduled refresh |
 | `pgokf.version()` | `pgokf_reader` | Loaded shared-library version |
 
 The function **name, schema, argument types, argument order, and result shape**
@@ -64,12 +68,13 @@ arguments (`name`/`options` on `register_bundle`, `bundle_id`/`limit` on search
 and neighbors) are contractual too: an existing call that omits them keeps
 working.
 
-### Composite types (11)
+### Composite types (12)
 
 `pgokf.bundle_sync_result`, `pgokf.concept_search_result`,
 `pgokf.concept_neighbor`, `pgokf.bundle_info`, `pgokf.export_result`,
 `pgokf.sync_log_entry`, `pgokf.catalog_stat`, `pgokf.stale_concept`,
-`pgokf.sync_change`, `pgokf.access_log_entry`, `pgokf.duplicate_group`.
+`pgokf.sync_change`, `pgokf.access_log_entry`, `pgokf.duplicate_group`,
+`pgokf.search_facet`.
 
 The set of columns, their names, and their types are stable. New columns are
 **not** added to an existing composite type in a compatible release, because

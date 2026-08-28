@@ -31,7 +31,7 @@ use std::path::Path;
 
 use pgrx::Spi;
 
-use crate::catalog::search_backend::{self, SearchRequest};
+use crate::catalog::search_backend::{self, Cursor, SearchRequest};
 use crate::catalog::types::SearchHit;
 use crate::errors::CatalogError;
 use crate::security;
@@ -149,11 +149,17 @@ impl<'a> Filters<'a> {
 
 /// Authorize, validate, and dispatch one ranked search through the configured
 /// backend. Shared by `concept_search` and the hybrid fusion path.
+///
+/// `after` is the optional keyset cursor: when `Some`, the backend returns the
+/// page that continues strictly *after* it in the stable total order. The
+/// content more-like-this and hybrid fusion paths pass `None` (they consume a
+/// whole ranked list, not a page).
 pub(crate) fn run_ranked_search(
     query: &str,
     bundle_id: Option<i64>,
     limit: i64,
     filters: Filters,
+    after: Option<&Cursor>,
 ) -> Result<Vec<SearchHit>, CatalogError> {
     let text_search_config = effective_text_search_config()?;
     let backend = search_backend::select(&effective_search_backend()?);
@@ -166,7 +172,58 @@ pub(crate) fn run_ranked_search(
         tags: filters.tags,
         status: filters.status,
         trust_tier: filters.trust_tier,
+        after,
     })
+}
+
+/// Parse the opaque `after_cursor` JSON into a typed [`Cursor`], or `None` for a
+/// first-page request.
+///
+/// The caller copies the `rank`, `bundle_id`, and `concept_id` of the previous
+/// page's last row into a JSON object; this reads them back and binds them as
+/// typed parameters (never interpolated). A present-but-malformed cursor — not an
+/// object, or missing/ill-typed a field — is rejected with SQLSTATE `22023`
+/// rather than silently ignored, so a corrupt cursor never quietly restarts
+/// pagination from the first page.
+// The rank round-trips real -> JSON number -> f64 here; narrowing back to the
+// f32 the `rank` column stores is exact for a value that originated as a real.
+#[allow(clippy::cast_possible_truncation)]
+pub(crate) fn parse_cursor(
+    after_cursor: Option<pgrx::JsonB>,
+) -> Result<Option<Cursor>, CatalogError> {
+    let Some(json) = after_cursor else {
+        return Ok(None);
+    };
+    let cursor_error = || {
+        CatalogError::invalid_parameter(
+            "after_cursor must be a JSON object with numeric 'rank', integer 'bundle_id', \
+             and string 'concept_id' (copy them from the last row of the previous page)",
+            Path::new(""),
+        )
+    };
+    let value = json.0;
+    let object = value.as_object().ok_or_else(cursor_error)?;
+    let rank = object
+        .get("rank")
+        .ok_or_else(cursor_error)?
+        .as_f64()
+        .ok_or_else(cursor_error)?;
+    let bundle_id = object
+        .get("bundle_id")
+        .ok_or_else(cursor_error)?
+        .as_i64()
+        .ok_or_else(cursor_error)?;
+    let concept_id = object
+        .get("concept_id")
+        .ok_or_else(cursor_error)?
+        .as_str()
+        .ok_or_else(cursor_error)?
+        .to_owned();
+    Ok(Some(Cursor {
+        rank: rank as f32,
+        bundle_id,
+        concept_id,
+    }))
 }
 
 fn concept_search_impl(
@@ -174,11 +231,12 @@ fn concept_search_impl(
     bundle_id: Option<i64>,
     limit_count: i32,
     filters: Filters,
+    after: Option<&Cursor>,
 ) -> Result<Vec<SearchHit>, CatalogError> {
     security::authorize_current_user(security::Operation::Search, Path::new(""))?;
     validate_query(query)?;
     let limit = validate_limit_count(limit_count)?;
-    run_ranked_search(query, bundle_id, limit, filters)
+    run_ranked_search(query, bundle_id, limit, filters, after)
 }
 
 /// SQL-facing search entry point, installed into the `pgokf` schema.
@@ -198,11 +256,19 @@ mod pgokf {
     /// the search to one bundle. `limit_count` must lie in `1..=500` (SQLSTATE
     /// `22023` otherwise).
     ///
-    /// The four trailing filters are each a no-op when `NULL` (the default), so
-    /// the historical three-argument call is unchanged: `concept_type` matches
+    /// The four structured filters are each a no-op when `NULL` (the default),
+    /// so the historical three-argument call is unchanged: `concept_type` matches
     /// the concept type exactly, `tags` matches with **ALL-of** containment (a
     /// hit must carry every listed tag), and `status` / `trust_tier` match the
     /// OKF lifecycle status and derived trust tier from `concept_provenance`.
+    ///
+    /// `after_cursor` is the optional **keyset pagination** cursor (default
+    /// `NULL` = first page). Results have a stable total order — `rank DESC`,
+    /// then `bundle_id ASC`, then `concept_id ASC` — so a caller copies the
+    /// `rank`, `bundle_id`, and `concept_id` of a page's last row into a JSON
+    /// object `{"rank":..,"bundle_id":..,"concept_id":..}` and passes it back to
+    /// fetch the next page, which continues strictly after that position with no
+    /// `OFFSET` drift. A present-but-malformed cursor raises SQLSTATE `22023`.
     ///
     /// The ranking backend follows the durable `search_backend` configuration
     /// key: `native` `PostgreSQL` FTS by default, or `ParadeDB` `pg_search`
@@ -212,7 +278,10 @@ mod pgokf {
     // `tags` is a `Vec<String>` because that is the SQL `text[]` boundary type;
     // it is only borrowed (`as_deref`) into the filter set, so pass-by-value is
     // inherent to the pgrx signature rather than a smell.
-    #[allow(clippy::needless_pass_by_value)]
+    // Eight SQL arguments is inherent to the backward-compatible signature (the
+    // three original inputs, the four structured filters, and the pagination
+    // cursor), not a decomposable Rust smell.
+    #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
     #[pg_extern(stable, parallel_safe, requires = ["catalog_tables", "provenance_table"])]
     fn concept_search(
         query: &str,
@@ -222,9 +291,11 @@ mod pgokf {
         tags: default!(Option<Vec<String>>, "NULL"),
         status: default!(Option<&str>, "NULL"),
         trust_tier: default!(Option<&str>, "NULL"),
+        after_cursor: default!(Option<pgrx::JsonB>, "NULL"),
     ) -> SetOfIterator<'static, pgrx::composite_type!('static, "pgokf.concept_search_result")> {
         let filters = Filters::new(concept_type, tags.as_deref(), status, trust_tier);
-        let hits = concept_search_impl(query, bundle_id, limit_count, filters)
+        let after = super::parse_cursor(after_cursor).unwrap_or_else(|error| error.raise());
+        let hits = concept_search_impl(query, bundle_id, limit_count, filters, after.as_ref())
             .unwrap_or_else(|error| error.raise());
         let rows: Vec<_> = hits
             .into_iter()
@@ -235,10 +306,10 @@ mod pgokf {
 
     extension_sql!(
         r"
-REVOKE ALL ON FUNCTION pgokf.concept_search(text, bigint, integer, text, text[], text, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION pgokf.concept_search(text, bigint, integer, text, text[], text, text) TO pgokf_reader;
-COMMENT ON FUNCTION pgokf.concept_search(text, bigint, integer, text, text[], text, text) IS
-    'Rank catalog concepts. Reader-level; searches active bundles only (enabled AND not retired). Optional trailing filters (each a no-op when NULL): concept_type (exact type), tags (ALL-of containment), status and trust_tier (from concept_provenance). Uses the search_backend configuration: native full-text search (websearch_to_tsquery + ts_rank_cd) by default, or ParadeDB pg_search BM25 when set to bm25 (falling back to native if pg_search or its index is absent).';
+REVOKE ALL ON FUNCTION pgokf.concept_search(text, bigint, integer, text, text[], text, text, jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pgokf.concept_search(text, bigint, integer, text, text[], text, text, jsonb) TO pgokf_reader;
+COMMENT ON FUNCTION pgokf.concept_search(text, bigint, integer, text, text[], text, text, jsonb) IS
+    'Rank catalog concepts. Reader-level; searches active bundles only (enabled AND not retired). Optional structured filters (each a no-op when NULL): concept_type (exact type), tags (ALL-of containment), status and trust_tier (from concept_provenance). Stable total order rank DESC, bundle_id ASC, concept_id ASC; pass after_cursor (a {rank,bundle_id,concept_id} JSON object copied from the previous page''s last row) for OFFSET-free keyset pagination (a malformed cursor raises 22023). Uses the search_backend configuration: native full-text search (websearch_to_tsquery + ts_rank_cd) by default, or ParadeDB pg_search BM25 when set to bm25 (falling back to native if pg_search or its index is absent).';
 ",
         name = "search_function_hardening",
         requires = [concept_search]

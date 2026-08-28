@@ -175,6 +175,36 @@ SELECT concept_id, stale_after
   FROM pgokf.stale_concepts(NULL, date_trunc('month', now()) + interval '1 month');
 ```
 
+### Search-index health and coverage
+
+`pgokf.search_index_status()` (reader-level) reports, in one `jsonb` document,
+whether the optional accelerators are installed, whether their indexes exist, and
+how much of the catalog they cover — so an operator can confirm the BM25 and
+embedding indexes are built and *current* before relying on them:
+
+```sql
+SELECT jsonb_pretty(pgokf.search_index_status());
+```
+
+```jsonc
+{
+  "search_backend": "native",
+  "native": true,
+  "bm25":      { "available": false, "index_exists": false,
+                 "indexed_rows": 0, "total_rows": 44000, "coverage_pct": 0.0 },
+  "embedding": { "pgvector_available": true, "index_exists": true,
+                 "embedded_rows": 41800, "total_concepts": 44000,
+                 "coverage_pct": 95.0, "dim": 1536 }
+}
+```
+
+Coverage counts are tenant-scoped (RLS-filtered). BM25 coverage is all-or-nothing
+(the index spans every concept row); embedding coverage is the fraction of
+concepts that carry a stored vector — watch it fall as new concepts are ingested
+faster than the embedder streams their vectors in, and re-run
+`rebuild_embedding_index` after a bulk load. `coverage_pct` is `NULL` when there
+are no concepts to cover.
+
 ### Search-index residency
 
 Broad ranked searches are only fast while the `body_tsv` GIN index is
@@ -239,7 +269,36 @@ SELECT * FROM pgokf.refresh_bundle(1);
 
 Because it is incremental and idempotent, `refresh_bundle` is safe to run on a
 schedule. Drive it from `cron`, a systemd timer, `pg_cron`, or your orchestrator.
-A minimal cron shape (an admin login role, membership in `pgokf_admin`):
+
+#### In-database scheduling with `pg_cron`
+
+When [`pg_cron`](https://github.com/citusdata/pg_cron) is installed (in
+`shared_preload_libraries`, then `CREATE EXTENSION pg_cron`), the built-in
+adapter registers the recurring refresh for you — no external cron entry to
+maintain:
+
+```sql
+-- hourly refresh of bundle 7; returns the deterministic job name 'pgokf_refresh_7'
+SELECT pgokf.schedule_refresh(7, '0 * * * *');
+
+-- stop it
+SELECT pgokf.unschedule_refresh(7);
+```
+
+`schedule_refresh` (admin-tier, `SECURITY DEFINER`, tenant-confined) is
+idempotent: re-scheduling the same bundle updates the one `pgokf_refresh_<id>`
+job in place. The coupling to `pg_cron` is **runtime-only** — `pgokf` installs
+and runs without it — so when `pg_cron` is absent `schedule_refresh` raises a
+clear `22023` naming the missing dependency (never a silent success) and
+`unschedule_refresh` is a clean no-op. The scheduled command is a fixed
+`SELECT pgokf.refresh_bundle(<id>)` with the id bound as a trusted integer
+literal and the schedule bound as a parameter.
+
+#### External scheduling
+
+Prefer an external scheduler when `pg_cron` is not available, or when you want one
+place that fans out over every enabled bundle. A minimal cron shape (an admin
+login role, membership in `pgokf_admin`):
 
 ```bash
 # refresh every bundle every 15 minutes

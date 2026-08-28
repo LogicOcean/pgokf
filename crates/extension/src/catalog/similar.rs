@@ -187,7 +187,7 @@ fn find_similar_impl(
     // Fetch one extra hit so removing the seed still leaves room for `limit`
     // similar concepts; the seed always matches its own salient terms and ranks
     // highly, so it is reliably within this window.
-    let hits = search::run_ranked_search(&query, bundle_id, limit + 1, Filters::default())?;
+    let hits = search::run_ranked_search(&query, bundle_id, limit + 1, Filters::default(), None)?;
 
     let mut similar: Vec<SearchHit> = hits
         .into_iter()

@@ -12,6 +12,61 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 Nothing yet.
 
+## [0.1.9] - 2026-08-28
+
+**Search and scheduling batch**: keyset pagination and faceted counts on search,
+a search-index coverage report, and an optional `pg_cron` scheduled re-sync.
+Everything is additive and backward compatible, so
+`ALTER EXTENSION pgokf UPDATE TO '0.1.9'` migrates an existing install in a single
+transaction and yields a catalog identical to a fresh 0.1.9. `concept_search`
+gains one optional trailing argument (documented below); no existing type or
+default changes.
+
+### Added
+
+- **Keyset / cursor pagination on `concept_search`** — a new optional trailing
+  argument **`after_cursor jsonb DEFAULT NULL`**. Ranked results now have a stable
+  total order (`rank DESC`, then `bundle_id ASC`, then `concept_id ASC`); copy the
+  `rank`, `bundle_id`, and `concept_id` of a page's last row into `after_cursor`
+  and the next page continues strictly after it, with **no `OFFSET` drift and no
+  duplicates or skips even when ranks tie**. Applied in both the native and BM25
+  backends. A malformed cursor raises `22023`. The historical three- through
+  seven-argument calls are unchanged (`after_cursor` defaults to the first page).
+- **Faceted result counts** — **`pgokf.search_facets(query, bundle_id DEFAULT
+  NULL, facet DEFAULT 'type', concept_type DEFAULT NULL, tags DEFAULT NULL, status
+  DEFAULT NULL, trust_tier DEFAULT NULL)`** (`SETOF pgokf.search_facet`,
+  reader-level) counts the same matching set `concept_search` would, grouped by
+  one facet — `type`, `bundle`, `status`, `trust_tier`, or `tag` (any other value
+  raises `22023`; the facet is dispatched on, never interpolated). The `tag` facet
+  counts a concept once per tag. New composite **`pgokf.search_facet(facet_value
+  text, count bigint)`**.
+- **Search-index health / coverage** — **`pgokf.search_index_status()`**
+  (`jsonb`, reader-level) reports the configured backend, that native FTS is
+  always available, and for each optional index whether its extension is
+  installed, whether the index exists, and how much of the catalog it covers
+  (BM25 rows and embedding-vector coverage vs. total concepts). Coverage counts
+  are tenant-scoped.
+- **Optional `pg_cron` scheduled re-sync** — **`pgokf.schedule_refresh(bundle_id,
+  schedule)`** (`text`, admin-tier) registers an idempotent
+  `pgokf_refresh_<bundle_id>` cron job running `SELECT pgokf.refresh_bundle(<id>)`
+  on the given schedule, and **`pgokf.unschedule_refresh(bundle_id)`** (`boolean`,
+  admin-tier) removes it. The coupling to `pg_cron` is runtime-only (mirroring the
+  pgvector / `pg_search` optional-dependency seam): `CREATE EXTENSION pgokf`
+  succeeds without `pg_cron`, and when it is absent `schedule_refresh` raises a
+  clear `22023` naming the missing dependency while `unschedule_refresh` is a
+  clean no-op. Full scheduling requires `pg_cron` in `shared_preload_libraries`.
+
+### Changed
+
+- **`concept_search` result order is now a stable total order** (`rank DESC,
+  bundle_id ASC, concept_id ASC`), replacing the previous `rank DESC, concept_id
+  ASC`. This only refines the tiebreak for equal-rank hits and is what makes
+  keyset pagination exact.
+- The `0.1.8 → 0.1.9` upgrade replaces the seven-argument `concept_search`
+  overload with the eight-argument superset (`DROP` old + `CREATE` new, in one
+  transaction), exactly as `0.1.5 → 0.1.6` did, so an upgraded catalog carries a
+  single `concept_search` overload identical to a fresh install.
+
 ## [0.1.8] - 2026-08-28
 
 **Lifecycle and audit batch**: a per-sync change manifest, a reversible bundle

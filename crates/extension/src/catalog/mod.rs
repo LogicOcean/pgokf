@@ -27,6 +27,14 @@
 //!   `concept_search_semantic`, `concept_search_hybrid`,
 //!   `rebuild_embedding_index`), reached only through runtime SQL and storing
 //!   the vector as `real[]` so `CREATE EXTENSION` needs no pgvector.
+//! - [`facets`] — `pgokf.search_facets`, faceted result counts over the same
+//!   matching set `concept_search` produces, grouped by a validated facet.
+//! - [`search_status`] — `pgokf.search_index_status`, the reader-level jsonb
+//!   report of optional-index availability and coverage.
+//! - [`schedule`] — the optional `pg_cron` scheduled re-sync adapter
+//!   (`pgokf.schedule_refresh`, `unschedule_refresh`), reached only through
+//!   runtime SPI and mirroring the `pgvector` / `pg_search` optional-dependency
+//!   seam.
 //!
 //! Feature-extension stubs, each to be filled by a later wave without
 //! touching [`sync`]:
@@ -67,12 +75,15 @@ pub mod content;
 pub mod dedup;
 pub mod embedding;
 pub mod export;
+pub mod facets;
 pub mod links;
 pub mod neighbors;
 pub mod provenance;
+pub mod schedule;
 pub mod schema;
 pub mod search;
 pub mod search_backend;
+pub mod search_status;
 pub mod similar;
 pub mod source;
 pub(crate) mod spi_read;

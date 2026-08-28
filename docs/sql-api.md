@@ -41,7 +41,9 @@ exercised against a live PostgreSQL 18 cluster.
 | `purge_retired(older_than)` | `bigint` | VOLATILE | DEFINER | `pgokf_admin` |
 | `list_bundles()` | `SETOF bundle_info` | STABLE | invoker | `pgokf_reader` |
 | `bundle_info(bundle_id)` | `bundle_info` | STABLE | invoker | `pgokf_reader` |
-| `concept_search(query, bundle_id, limit_count, concept_type, tags, status, trust_tier)` | `SETOF concept_search_result` | STABLE | invoker | `pgokf_reader` |
+| `concept_search(query, bundle_id, limit_count, concept_type, tags, status, trust_tier, after_cursor)` | `SETOF concept_search_result` | STABLE | invoker | `pgokf_reader` |
+| `search_facets(query, bundle_id, facet, concept_type, tags, status, trust_tier)` | `SETOF search_facet` | STABLE | invoker | `pgokf_reader` |
+| `search_index_status()` | `jsonb` | STABLE | invoker | `pgokf_reader` |
 | `find_similar(concept_id, bundle_id, limit_count)` | `SETOF concept_search_result` | STABLE | invoker | `pgokf_reader` |
 | `concept_search_semantic(query_embedding, bundle_id, limit_count)` | `SETOF concept_search_result` | STABLE | invoker | `pgokf_reader` |
 | `concept_search_hybrid(query, query_embedding, bundle_id, limit_count)` | `SETOF concept_search_result` | STABLE | invoker | `pgokf_reader` |
@@ -59,19 +61,22 @@ exercised against a live PostgreSQL 18 cluster.
 | `stale_concepts(bundle_id, as_of)` | `SETOF stale_concept` | STABLE | invoker | `pgokf_reader` |
 | `duplicate_concepts(bundle_id, min_group)` | `SETOF duplicate_group` | STABLE | invoker | `pgokf_reader` |
 | `rebuild_search_index()` | `boolean` | VOLATILE | DEFINER | `pgokf_admin` |
+| `schedule_refresh(bundle_id, schedule)` | `text` | VOLATILE | DEFINER | `pgokf_admin` |
+| `unschedule_refresh(bundle_id)` | `boolean` | VOLATILE | DEFINER | `pgokf_admin` |
 | `export_parquet(bundle_id, dest_dir)` | `export_result` | VOLATILE | DEFINER | `pgokf_admin` |
 | `get_concept_source(bundle_id, concept_id)` | `bytea` | STABLE | DEFINER | `pgokf_reader` |
 | `export_sources(bundle_id, dest_dir)` | `export_result` | VOLATILE | DEFINER | `pgokf_admin` |
 
-`register_bundle`, `concept_search`, `find_similar`,
+`register_bundle`, `concept_search`, `search_facets`, `find_similar`,
 `concept_search_semantic`, `concept_search_hybrid`, `concept_neighbors`,
 `reset_config`, `list_sync_log`, `list_access_log`, `duplicate_concepts`,
 `purge_retired`, and `stale_concepts` accept `NULL`-defaulting (or
 default-valued) arguments and are therefore **not** declared `STRICT`; every
 other function — including `list_bundles`, `bundle_info`, `catalog_stats`,
-`health`, `retire_bundle`, `unretire_bundle`, `list_sync_changes`,
-`set_concept_embedding`, and `rebuild_embedding_index` — is `STRICT`.
-`concept_search`, `find_similar`, `concept_search_semantic`,
+`health`, `search_index_status`, `retire_bundle`, `unretire_bundle`,
+`list_sync_changes`, `set_concept_embedding`, `rebuild_embedding_index`,
+`schedule_refresh`, and `unschedule_refresh` — is `STRICT`.
+`concept_search`, `search_facets`, `find_similar`, `concept_search_semantic`,
 `concept_search_hybrid`, `concept_neighbors`, `catalog_stats`,
 `duplicate_concepts`, and `stale_concepts` are also `PARALLEL SAFE`.
 
@@ -302,7 +307,7 @@ SELECT id, file_count, last_synced_at FROM pgokf.bundle_info(1);
 
 ## Search
 
-### `pgokf.concept_search(query text, bundle_id bigint DEFAULT NULL, limit_count int DEFAULT 20, concept_type text DEFAULT NULL, tags text[] DEFAULT NULL, status text DEFAULT NULL, trust_tier text DEFAULT NULL) → SETOF pgokf.concept_search_result`
+### `pgokf.concept_search(query text, bundle_id bigint DEFAULT NULL, limit_count int DEFAULT 20, concept_type text DEFAULT NULL, tags text[] DEFAULT NULL, status text DEFAULT NULL, trust_tier text DEFAULT NULL, after_cursor jsonb DEFAULT NULL) → SETOF pgokf.concept_search_result`
 
 Rank catalog concepts against a `websearch_to_tsquery` query over the weighted
 `body_tsv` column, with optional structured filters. `STABLE PARALLEL SAFE`,
@@ -317,12 +322,30 @@ invoker rights, **requires `pgokf_reader`**.
 | `tags` | `text[]` | `NULL` | Keep only hits whose `tags` contain **every** listed tag (ALL-of, `tags @> filter`). `NULL` or empty = no filter. |
 | `status` | `text` | `NULL` | Keep only hits whose `concept_provenance.status` equals this. `NULL` = no filter. |
 | `trust_tier` | `text` | `NULL` | Keep only hits whose derived `concept_provenance.trust_tier` equals this (`unverified` / `machine-confirmed` / `human-reviewed`). `NULL` = no filter. |
+| `after_cursor` | `jsonb` | `NULL` | Keyset pagination cursor: a `{"rank":…,"bundle_id":…,"concept_id":…}` object copied from the previous page's last row. Results continue strictly after it in the total order. `NULL` = first page. A malformed cursor raises `22023`. |
 
-> **Backward compatible.** The four trailing filters are optional and each a
-> no-op when `NULL`, so the historical `concept_search(query, bundle_id,
-> limit_count)` call is unchanged. Concepts with no `concept_provenance` row have
-> a `NULL` `status`/`trust_tier` and are therefore excluded by a non-`NULL`
-> `status`/`trust_tier` filter.
+> **Backward compatible.** The four structured filters and the pagination cursor
+> are optional and each a no-op when `NULL`, so the historical
+> `concept_search(query, bundle_id, limit_count)` call is unchanged. Concepts with
+> no `concept_provenance` row have a `NULL` `status`/`trust_tier` and are therefore
+> excluded by a non-`NULL` `status`/`trust_tier` filter.
+
+> **Keyset pagination.** Results have a stable total order — `rank DESC`, then
+> `bundle_id ASC`, then `concept_id ASC` — so a page can continue strictly *after*
+> a known row without `OFFSET` (which drifts and re-scans as the catalog grows).
+> Copy the `rank`, `bundle_id`, and `concept_id` of a page's last row into the
+> `after_cursor` object to fetch the next page; the pages tile the full result set
+> with no duplicates and no skips even when ranks tie. See the
+> [Search guide](search-guide.md#keyset-pagination).
+>
+> ```sql
+> -- first page
+> SELECT concept_id, rank FROM pgokf.concept_search('postgres failover', limit_count => 20);
+> -- next page: pass the last row's identity as the cursor
+> SELECT concept_id, rank
+> FROM pgokf.concept_search('postgres failover', limit_count => 20,
+>          after_cursor => '{"rank":0.0067,"bundle_id":3,"concept_id":"services/postgresql"}'::jsonb);
+> ```
 
 Details:
 
@@ -334,9 +357,10 @@ Details:
 - Only **enabled** bundles are searched (`pgokf.bundles.enabled`).
 - Each hit carries a `ts_headline` snippet over title, description, and body,
   computed with the same configured text-search configuration.
-- Rows are ordered by descending rank, then ascending `concept_id` as a stable
-  tiebreaker. Ranks are comparable **only within one query** — order by them,
-  never persist them.
+- Rows are ordered by descending rank, then ascending `bundle_id`, then ascending
+  `concept_id` — a stable total order that makes keyset pagination via
+  `after_cursor` exact. Ranks are comparable **only within one query** — order by
+  them, never persist them.
 
 > **⚠️ `default_text_search_config` is applied but not retroactive.** The query
 > is parsed under the current `default_text_search_config`, while each row's
@@ -369,6 +393,63 @@ JOIN pgokf.concepts AS c
 WHERE c.type = 'Runbook'
 ORDER BY s.rank DESC, s.concept_id ASC;
 ```
+
+### `pgokf.search_facets(query text, bundle_id bigint DEFAULT NULL, facet text DEFAULT 'type', concept_type text DEFAULT NULL, tags text[] DEFAULT NULL, status text DEFAULT NULL, trust_tier text DEFAULT NULL) → SETOF pgokf.search_facet`
+
+Count the **same matching set** `concept_search` would produce (the native
+full-text match of `query` plus the identical `concept_type` / `tags` / `status`
+/ `trust_tier` filters), grouped by one facet — so a UI can render "42 runbooks,
+15 wikis" filter chips before drilling in. `STABLE PARALLEL SAFE`, invoker rights,
+**requires `pgokf_reader`**.
+
+| Parameter | Type | Default | Meaning |
+| --------- | ---- | ------- | ------- |
+| `query` | `text` | — | Free-text query; must contain a non-whitespace character (`22023` otherwise). |
+| `bundle_id` | `bigint` | `NULL` | Scope to one bundle; `NULL` = all active bundles. |
+| `facet` | `text` | `'type'` | The grouping dimension: one of `type`, `bundle`, `status`, `trust_tier`, `tag`. Any other value raises `22023`. |
+| `concept_type`, `tags`, `status`, `trust_tier` | — | `NULL` | The same structured filters as `concept_search`, each a no-op when `NULL`. |
+
+Returns `pgokf.search_facet(facet_value text, count bigint)` rows ordered by
+descending `count` then `facet_value`. `NULL` facet values are omitted; the `tag`
+facet counts a concept once per tag it carries. The facet is **dispatched on**,
+never interpolated into SQL.
+
+```sql
+SELECT * FROM pgokf.search_facets('incident response', facet => 'type');
+--  facet_value | count
+-- -------------+-------
+--  Runbook     |    42
+--  Wiki        |    15
+```
+
+### `pgokf.search_index_status() → jsonb`
+
+Report search-index health and coverage as one `jsonb` document, so an operator
+can see whether the optional BM25 and embedding indexes exist and how much of the
+catalog they cover. `STABLE`, invoker rights (coverage counts are tenant-scoped by
+RLS), **requires `pgokf_reader`**.
+
+```jsonc
+{
+  "search_backend": "native",       // configured backend
+  "native": true,                   // always available
+  "bm25": {
+    "available": false,             // pg_search installed?
+    "index_exists": false,          // a bm25 index on pgokf.concepts?
+    "indexed_rows": 0, "total_rows": 7, "coverage_pct": 0.0
+  },
+  "embedding": {
+    "pgvector_available": true,     // pgvector installed?
+    "index_exists": true,           // an HNSW index on pgokf.concept_embedding?
+    "embedded_rows": 3, "total_concepts": 7, "coverage_pct": 42.86,
+    "dim": 1536                     // configured embedding_dim
+  }
+}
+```
+
+`coverage_pct` is `NULL` when there are no concepts to cover. BM25 coverage is
+all-or-nothing (the index spans every concept row); embedding coverage is the
+fraction of concepts that carry a stored vector.
 
 ### `pgokf.find_similar(concept_id text, bundle_id bigint DEFAULT NULL, limit_count int DEFAULT 10) → SETOF pgokf.concept_search_result`
 
@@ -462,6 +543,41 @@ configured `embedding_dim`. `STRICT`, `SECURITY DEFINER`, **requires
 pgvector's 2000-dimension HNSW limit (semantic search then uses an exact scan).
 Run it after enabling pgvector, after bulk-loading embeddings, or after changing
 `embedding_dim`.
+
+---
+
+## Scheduled refresh (optional, pg_cron)
+
+Register a recurring `refresh_bundle` on the external
+[`pg_cron`](https://github.com/citusdata/pg_cron) scheduler. Like the pgvector and
+`pg_search` surfaces, the coupling is **runtime-only**: `CREATE EXTENSION pgokf`
+succeeds without `pg_cron`, and every `cron.*` object is reached only at call time.
+Full scheduling requires `pg_cron` in `shared_preload_libraries`.
+
+### `pgokf.schedule_refresh(bundle_id bigint, schedule text) → text`
+
+Schedule (or re-schedule, idempotently) a `SELECT pgokf.refresh_bundle(<bundle_id>)`
+under the deterministic `pg_cron` job name `pgokf_refresh_<bundle_id>`, returning
+the job name. `VOLATILE`, **SECURITY DEFINER**, tenant-confined, **requires
+`pgokf_admin`**. The `schedule` is a 5-field cron expression or a `pg_cron`
+interval phrase (`'30 minutes'`); it and the job name bind as parameters, and the
+scheduled command's bundle id is a trusted integer literal.
+
+- **Requires `pg_cron`**: raises `22023` naming the missing dependency when it is
+  not installed — never a silent success.
+- Raises `22023` for an unknown or cross-tenant `bundle_id`, or an empty/oversized
+  `schedule`.
+
+```sql
+SELECT pgokf.schedule_refresh(7, '0 * * * *');   -- hourly; → 'pgokf_refresh_7'
+```
+
+### `pgokf.unschedule_refresh(bundle_id bigint) → boolean`
+
+Remove the `pgokf_refresh_<bundle_id>` job when present (returns `true`); a clean
+no-op returning `false` (with a `NOTICE`) when `pg_cron` is not installed or no such
+job exists. `VOLATILE`, **SECURITY DEFINER**, tenant-confined, **requires
+`pgokf_admin`**; raises `22023` for an unknown or cross-tenant `bundle_id`.
 
 ---
 
@@ -852,6 +968,15 @@ and there is **no** `tags` column — join `pgokf.concepts` to recover it.
 | `type` | `text` | OKF concept type (may be `NULL`). |
 | `rank` | `real` | `ts_rank_cd` score; comparable only within one query. |
 | `headline` | `text` | `ts_headline` snippet (may be `NULL`). |
+
+### `pgokf.search_facet`
+
+Returned by `search_facets`. One faceted-count bucket.
+
+| Column | Type | Meaning |
+| ------ | ---- | ------- |
+| `facet_value` | `text` | A distinct facet value (a type, bundle id as text, status, trust tier, or tag). |
+| `count` | `bigint` | How many matching concepts carry that value. |
 
 ### `pgokf.bundle_info`
 

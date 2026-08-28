@@ -207,7 +207,8 @@ pgokf.concept_search(
     concept_type text    DEFAULT NULL,  -- exact type match
     tags         text[]  DEFAULT NULL,  -- ALL-of: hit must carry every listed tag
     status       text    DEFAULT NULL,  -- concept_provenance.status
-    trust_tier   text    DEFAULT NULL   -- concept_provenance.trust_tier
+    trust_tier   text    DEFAULT NULL,  -- concept_provenance.trust_tier
+    after_cursor jsonb   DEFAULT NULL   -- keyset pagination cursor (see below)
 ) RETURNS SETOF pgokf.concept_search_result
 ```
 
@@ -224,6 +225,66 @@ tag. `status` and `trust_tier` match the concept's `pgokf.concept_provenance`
 row, so a concept with no provenance frontmatter (no provenance row) is excluded
 by a non-`NULL` `status`/`trust_tier` filter. The historical three-argument call
 is unchanged.
+
+### Keyset pagination
+
+`concept_search` returns rows in a **stable total order**: `rank DESC`, then
+`bundle_id ASC`, then `concept_id ASC`. That total order is what makes paginating
+a large result set exact. Rather than `LIMIT … OFFSET n` — which re-scans the
+first *n* rows on every page and drifts when the catalog changes underneath you —
+pass the last row of a page back as an opaque **cursor** and the next page
+continues strictly *after* it:
+
+```sql
+-- Page 1: first 20 hits.
+SELECT concept_id, bundle_id, rank
+FROM pgokf.concept_search('payments restart', limit_count => 20)
+ORDER BY rank DESC, bundle_id, concept_id;   -- already this order; explicit for clarity
+
+-- Page 2: copy the last row's (rank, bundle_id, concept_id) into after_cursor.
+SELECT concept_id, bundle_id, rank
+FROM pgokf.concept_search('payments restart', limit_count => 20,
+         after_cursor => '{"rank":0.0731,"bundle_id":3,"concept_id":"runbooks/appendix"}'::jsonb);
+```
+
+An application typically builds the cursor for the next page directly in SQL from
+the last row it received:
+
+```sql
+SELECT jsonb_build_object('rank', rank, 'bundle_id', bundle_id, 'concept_id', concept_id)
+FROM pgokf.concept_search('payments restart', limit_count => 20)
+ORDER BY rank DESC, bundle_id, concept_id
+OFFSET 19 LIMIT 1;   -- the 20th (last) row of the page
+```
+
+Because the order is a genuine total order, the pages **tile the full result set
+with no duplicates and no skips even when many hits share the same rank** — the
+`(bundle_id, concept_id)` tiebreak keeps tied ranks in a deterministic sequence.
+The cursor is opaque: copy it verbatim; a malformed cursor raises `22023` rather
+than silently restarting from the first page. `NULL` (the default) is the first
+page. Pagination works identically under the native and BM25 backends.
+
+### Faceted result counts
+
+To render "42 runbooks, 15 wikis" filter chips *before* a user drills in, count
+the result set by a facet instead of fetching rows. `pgokf.search_facets` counts
+the **same matching set** `concept_search` would (the full-text match plus the
+identical structured filters), grouped by one facet:
+
+```sql
+SELECT * FROM pgokf.search_facets('incident response', facet => 'type');
+--  facet_value | count
+-- -------------+-------
+--  Runbook     |    42
+--  Wiki        |    15
+```
+
+`facet` is one of `type`, `bundle`, `status`, `trust_tier`, or `tag` (any other
+value raises `22023`); it is dispatched on, never interpolated into SQL. The
+`tag` facet counts a concept once per tag it carries. Pass the same
+`concept_type` / `tags` / `status` / `trust_tier` filters you would pass to
+`concept_search` to facet a pre-narrowed set. Results are ordered by descending
+count then facet value, and `NULL` facet values are omitted.
 
 ---
 

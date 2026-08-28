@@ -439,7 +439,8 @@ fn concept_search_hybrid_impl(
     let limit = search::validate_limit_count(limit_count)?;
 
     // Lexical list through the configured search_backend (native or BM25).
-    let lexical_hits = search::run_ranked_search(query, bundle_id, limit, Filters::default())?;
+    let lexical_hits =
+        search::run_ranked_search(query, bundle_id, limit, Filters::default(), None)?;
     let lexical = RankKeys::from_hits(&lexical_hits);
 
     // Semantic list when pgvector is present; otherwise degrade to lexical-only.

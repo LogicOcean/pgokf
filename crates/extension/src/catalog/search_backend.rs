@@ -70,11 +70,31 @@ pub fn supported_display() -> String {
     format!("'{NATIVE}', '{BM25}'")
 }
 
+/// An opaque keyset-pagination cursor: the total-order position of the last row
+/// of the previous page.
+///
+/// Ranked search has a **stable total order** — `rank DESC, bundle_id ASC,
+/// concept_id ASC` — so a page can continue strictly *after* a known row without
+/// `OFFSET` (which drifts and re-scans as the result set grows). A caller copies
+/// the three fields from the last `pgokf.concept_search_result` row of a page
+/// into a JSON object `{"rank":..,"bundle_id":..,"concept_id":..}` and passes it
+/// back as `after_cursor`; [`crate::catalog::search`] parses it into this struct
+/// and both backends resume from it (see [`bind_search_args`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Cursor {
+    /// The `rank` of the previous page's last row (the descending primary key).
+    pub rank: f32,
+    /// That row's `bundle_id` (the first ascending tiebreaker).
+    pub bundle_id: i64,
+    /// That row's `concept_id` (the final ascending tiebreaker).
+    pub concept_id: String,
+}
+
 /// One ranked-search request, resolved from the SQL-facing call.
 ///
-/// Groups the four inputs every backend needs so the [`SearchBackend`] trait
-/// stays a single-method Strategy and new backends receive the whole request
-/// without a widening argument list.
+/// Groups the inputs every backend needs so the [`SearchBackend`] trait stays a
+/// single-method Strategy and new backends receive the whole request without a
+/// widening argument list.
 #[derive(Debug, Clone, Copy)]
 pub struct SearchRequest<'a> {
     /// Validated, non-empty user query text.
@@ -98,6 +118,10 @@ pub struct SearchRequest<'a> {
     /// Optional derived `trust_tier` filter, matched against
     /// `concept_provenance.trust_tier`; `None` is a no-op.
     pub trust_tier: Option<&'a str>,
+    /// Optional keyset cursor: when `Some`, results continue strictly *after*
+    /// this position in the total order (see [`Cursor`]). `None` is the first
+    /// page.
+    pub after: Option<&'a Cursor>,
 }
 
 /// A ranked-search execution strategy.
@@ -135,9 +159,10 @@ fn spi_error(context: &'static str) -> impl Fn(pgrx::spi::Error) -> CatalogError
     move |error| CatalogError::internal(format!("{context}: {error}"), Path::new(""))
 }
 
-/// Bind one [`SearchRequest`] to the eight positional parameters both backend
-/// queries share (`$1`..`$8`), so the native and BM25 strategies stay in lockstep
-/// on argument order and the structured-filter binding lives in one place.
+/// Bind one [`SearchRequest`] to the eleven positional parameters both backend
+/// queries share (`$1`..`$11`), so the native and BM25 strategies stay in
+/// lockstep on argument order and the structured-filter and cursor binding lives
+/// in one place.
 ///
 /// A `NULL`-typed parameter still carries its column type OID (pgrx supplies it
 /// from the Rust type), so a `NULL` filter binds as a correctly typed `NULL` and
@@ -145,7 +170,13 @@ fn spi_error(context: &'static str) -> impl Fn(pgrx::spi::Error) -> CatalogError
 /// as no filter — `Some([])` would otherwise bind `'{}'::text[]`, which every
 /// non-NULL `tags` array contains but a `NULL` `tags` column does not, silently
 /// dropping untagged concepts — so the caller normalizes it to `None` upstream.
-fn bind_search_args<'a>(request: &'a SearchRequest) -> [DatumWithOid<'a>; 8] {
+///
+/// The final three parameters (`$9`..`$11`) are the keyset cursor — rank,
+/// `bundle_id`, `concept_id`. They are all-or-nothing: an absent cursor binds
+/// three typed `NULL`s and the `$9 IS NULL OR ...` guard makes the keyset
+/// predicate a no-op (the first page). The cursor `concept_id` binds by borrow
+/// (`as_str`), so nothing is cloned.
+fn bind_search_args<'a>(request: &'a SearchRequest) -> [DatumWithOid<'a>; 11] {
     [
         request.query.into(),
         request.bundle_id.into(),
@@ -155,6 +186,12 @@ fn bind_search_args<'a>(request: &'a SearchRequest) -> [DatumWithOid<'a>; 8] {
         request.tags.map(<[String]>::to_vec).into(),
         request.status.into(),
         request.trust_tier.into(),
+        request.after.map(|cursor| cursor.rank).into(),
+        request.after.map(|cursor| cursor.bundle_id).into(),
+        request
+            .after
+            .map(|cursor| cursor.concept_id.as_str())
+            .into(),
     ]
 }
 
@@ -192,6 +229,27 @@ fn read_hits(table: SpiTupleTable) -> Result<Vec<SearchHit>, CatalogError> {
 /// query parsing uses the configuration that built each row's `body_tsv`.
 pub struct NativeBackend;
 
+/// The keyset-pagination predicate and stable total order both backends share.
+///
+/// Wrapped around a `hits` subquery that projects the seven result columns plus
+/// a computed `rank`, this continues strictly *after* the cursor (`$9`,`$10`,
+/// `$11`) in the total order `rank DESC, bundle_id ASC, concept_id ASC`. Because
+/// the order mixes directions, the keyset is the expanded lexicographic
+/// comparison (not a single row-value `<`): a strictly smaller rank, or an equal
+/// rank with a strictly greater `bundle_id`, or an equal `(rank, bundle_id)` with
+/// a strictly greater `concept_id`. When `$9` is `NULL` (no cursor) the whole
+/// predicate is a no-op and the first page is returned. Applying the filter
+/// *outside* the ranked subquery — then `ORDER BY ... LIMIT $3` — is what makes
+/// the pages tile the full result set with no duplicates and no skips even when
+/// ranks tie.
+const KEYSET_ORDER_LIMIT: &str = "
+    WHERE $9 IS NULL
+       OR hits.rank < $9
+       OR (hits.rank = $9 AND hits.bundle_id > $10)
+       OR (hits.rank = $9 AND hits.bundle_id = $10 AND hits.concept_id > $11)
+    ORDER BY hits.rank DESC, hits.bundle_id ASC, hits.concept_id ASC
+    LIMIT $3";
+
 // `ts_rank_cd` takes no configuration; the regconfig `$4` drives both
 // `websearch_to_tsquery` and `ts_headline`.
 //
@@ -203,37 +261,47 @@ pub struct NativeBackend;
 // concept with no provenance row has NULL status/tier and is excluded by a
 // non-NULL filter, as intended). The LEFT JOIN never multiplies rows —
 // `concept_provenance`'s primary key is `(bundle_id, concept_id)` — so an
-// all-NULL-filter call returns exactly what it did before.
+// all-NULL-filter call returns exactly what it did before. The match and the
+// filters live in the `hits` subquery; the shared KEYSET_ORDER_LIMIT tail applies
+// the cursor, the stable total order, and the limit over it.
 const NATIVE_QUERY: &str = "
-    SELECT c.bundle_id,
-           c.id,
-           c.path,
-           c.title,
-           c.type,
-           pg_catalog.ts_rank_cd(c.body_tsv, q.query),
-           pg_catalog.ts_headline(
-               $4::pg_catalog.regconfig,
-               pg_catalog.concat_ws(' ', c.title, c.description, c.body_text),
-               q.query)
-    FROM pgokf.concepts c
-    JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled AND b.retired_at IS NULL
-    LEFT JOIN pgokf.concept_provenance cp
-           ON cp.bundle_id = c.bundle_id AND cp.concept_id = c.id,
-         pg_catalog.websearch_to_tsquery($4::pg_catalog.regconfig, $1) AS q(query)
-    WHERE c.body_tsv @@ q.query
-      AND ($2 IS NULL OR c.bundle_id = $2)
-      AND ($5 IS NULL OR c.type = $5)
-      AND ($6 IS NULL OR c.tags @> $6)
-      AND ($7 IS NULL OR cp.status = $7)
-      AND ($8 IS NULL OR cp.trust_tier = $8)
-    ORDER BY pg_catalog.ts_rank_cd(c.body_tsv, q.query) DESC, c.id ASC
-    LIMIT $3";
+    SELECT hits.bundle_id,
+           hits.concept_id,
+           hits.path,
+           hits.title,
+           hits.type,
+           hits.rank,
+           hits.headline
+    FROM (
+        SELECT c.bundle_id AS bundle_id,
+               c.id AS concept_id,
+               c.path AS path,
+               c.title AS title,
+               c.type AS type,
+               pg_catalog.ts_rank_cd(c.body_tsv, q.query) AS rank,
+               pg_catalog.ts_headline(
+                   $4::pg_catalog.regconfig,
+                   pg_catalog.concat_ws(' ', c.title, c.description, c.body_text),
+                   q.query) AS headline
+        FROM pgokf.concepts c
+        JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled AND b.retired_at IS NULL
+        LEFT JOIN pgokf.concept_provenance cp
+               ON cp.bundle_id = c.bundle_id AND cp.concept_id = c.id,
+             pg_catalog.websearch_to_tsquery($4::pg_catalog.regconfig, $1) AS q(query)
+        WHERE c.body_tsv @@ q.query
+          AND ($2 IS NULL OR c.bundle_id = $2)
+          AND ($5 IS NULL OR c.type = $5)
+          AND ($6 IS NULL OR c.tags @> $6)
+          AND ($7 IS NULL OR cp.status = $7)
+          AND ($8 IS NULL OR cp.trust_tier = $8)
+    ) AS hits";
 
 impl SearchBackend for NativeBackend {
     fn search(&self, request: &SearchRequest) -> Result<Vec<SearchHit>, CatalogError> {
+        let query = format!("{NATIVE_QUERY}{KEYSET_ORDER_LIMIT}");
         Spi::connect(|client| {
             let table = client
-                .select(NATIVE_QUERY, None, &bind_search_args(request))
+                .select(&query, None, &bind_search_args(request))
                 .map_err(spi_error("native search query failed"))?;
             read_hits(table)
         })
@@ -263,33 +331,43 @@ pub struct Bm25Backend {
 // takes the whole-row relation reference `c`, so it scores per scanned tuple
 // (by ctid) rather than by key — cross-bundle duplicate `id` values are ranked
 // independently and correctly. The regconfig binds as `$4` and drives only the
-// `ts_headline` snippet, keeping snippets identical to the native backend.
+// `ts_headline` snippet, keeping snippets identical to the native backend. The
+// `@@@` match, `paradedb.score`, and the filters live in the `hits` subquery so
+// the shared KEYSET_ORDER_LIMIT tail applies the cursor, the stable total order,
+// and the limit over the already-scored rows.
 const BM25_QUERY: &str = "
-    SELECT c.bundle_id,
-           c.id,
-           c.path,
-           c.title,
-           c.type,
-           paradedb.score(c),
-           pg_catalog.ts_headline(
-               $4::pg_catalog.regconfig,
-               pg_catalog.concat_ws(' ', c.title, c.description, c.body_text),
-               pg_catalog.websearch_to_tsquery($4::pg_catalog.regconfig, $1))
-    FROM pgokf.concepts c
-    JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled AND b.retired_at IS NULL
-    LEFT JOIN pgokf.concept_provenance cp
-           ON cp.bundle_id = c.bundle_id AND cp.concept_id = c.id
-    WHERE c.id @@@ paradedb.boolean(should => ARRAY[
-              paradedb.match('title', $1),
-              paradedb.match('description', $1),
-              paradedb.match('body_text', $1)])
-      AND ($2 IS NULL OR c.bundle_id = $2)
-      AND ($5 IS NULL OR c.type = $5)
-      AND ($6 IS NULL OR c.tags @> $6)
-      AND ($7 IS NULL OR cp.status = $7)
-      AND ($8 IS NULL OR cp.trust_tier = $8)
-    ORDER BY paradedb.score(c) DESC, c.id ASC
-    LIMIT $3";
+    SELECT hits.bundle_id,
+           hits.concept_id,
+           hits.path,
+           hits.title,
+           hits.type,
+           hits.rank,
+           hits.headline
+    FROM (
+        SELECT c.bundle_id AS bundle_id,
+               c.id AS concept_id,
+               c.path AS path,
+               c.title AS title,
+               c.type AS type,
+               paradedb.score(c) AS rank,
+               pg_catalog.ts_headline(
+                   $4::pg_catalog.regconfig,
+                   pg_catalog.concat_ws(' ', c.title, c.description, c.body_text),
+                   pg_catalog.websearch_to_tsquery($4::pg_catalog.regconfig, $1)) AS headline
+        FROM pgokf.concepts c
+        JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled AND b.retired_at IS NULL
+        LEFT JOIN pgokf.concept_provenance cp
+               ON cp.bundle_id = c.bundle_id AND cp.concept_id = c.id
+        WHERE c.id @@@ paradedb.boolean(should => ARRAY[
+                  paradedb.match('title', $1),
+                  paradedb.match('description', $1),
+                  paradedb.match('body_text', $1)])
+          AND ($2 IS NULL OR c.bundle_id = $2)
+          AND ($5 IS NULL OR c.type = $5)
+          AND ($6 IS NULL OR c.tags @> $6)
+          AND ($7 IS NULL OR cp.status = $7)
+          AND ($8 IS NULL OR cp.trust_tier = $8)
+    ) AS hits";
 
 impl Bm25Backend {
     #[must_use]
@@ -300,9 +378,10 @@ impl Bm25Backend {
     }
 
     fn run_bm25(request: &SearchRequest) -> Result<Vec<SearchHit>, CatalogError> {
+        let query = format!("{BM25_QUERY}{KEYSET_ORDER_LIMIT}");
         Spi::connect(|client| {
             let table = client
-                .select(BM25_QUERY, None, &bind_search_args(request))
+                .select(&query, None, &bind_search_args(request))
                 .map_err(spi_error("bm25 search query failed"))?;
             read_hits(table)
         })

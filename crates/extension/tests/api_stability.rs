@@ -37,7 +37,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The 32 stable public functions, as `(name, argument-type list)`. The pair
+/// The 36 stable public functions, as `(name, argument-type list)`. The pair
 /// renders to the exact `COMMENT ON FUNCTION pgokf.<name>(<args>)` prefix that
 /// the hardening blocks emit.
 const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
@@ -54,8 +54,15 @@ const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
     ("duplicate_concepts", "bigint, integer"),
     (
         "concept_search",
-        "text, bigint, integer, text, text[], text, text",
+        "text, bigint, integer, text, text[], text, text, jsonb",
     ),
+    (
+        "search_facets",
+        "text, bigint, text, text, text[], text, text",
+    ),
+    ("search_index_status", ""),
+    ("schedule_refresh", "bigint, text"),
+    ("unschedule_refresh", "bigint"),
     ("find_similar", "text, bigint, integer"),
     ("concept_search_semantic", "real[], bigint, integer"),
     ("concept_search_hybrid", "text, real[], bigint, integer"),
@@ -78,7 +85,7 @@ const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
     ("version", ""),
 ];
 
-/// The 11 stable public composite types.
+/// The 12 stable public composite types.
 const PUBLIC_TYPES: &[&str] = &[
     "bundle_sync_result",
     "concept_search_result",
@@ -91,6 +98,7 @@ const PUBLIC_TYPES: &[&str] = &[
     "sync_change",
     "access_log_entry",
     "duplicate_group",
+    "search_facet",
 ];
 
 /// The 13 catalog tables, as fully-qualified `schema.table` identifiers. Nine

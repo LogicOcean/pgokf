@@ -1187,7 +1187,7 @@ The gamma concept is introduced during the refresh cycle.\n";
         // an existing install can be stepped up to this release.
         let upgrade_script = manifest_dir
             .join("sql")
-            .join(format!("pgokf--0.1.7--{crate_version}.sql"));
+            .join(format!("pgokf--0.1.8--{crate_version}.sql"));
         let metadata =
             fs::metadata(&upgrade_script).expect("the current upgrade script ships on disk");
         assert!(
@@ -3161,6 +3161,378 @@ An added concept for the resync diff.\n";
         assert!(
             spans_both,
             "the duplicate group spans both the on-disk and the content bundle",
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // F1: keyset / cursor pagination on concept_search.
+    // ---------------------------------------------------------------------
+
+    /// Register a content bundle of `count` concepts that all match the term
+    /// `paginationterm`, alternating the term frequency so consecutive concepts
+    /// tie on rank — exercising the (bundle_id, concept_id) tiebreak. Returns the
+    /// bundle id.
+    fn register_pagination_bundle(count: usize) -> i64 {
+        let mut paths = Vec::with_capacity(count);
+        let mut contents = Vec::with_capacity(count);
+        for index in 0..count {
+            // Even concepts carry the term twice, odd concepts once, so the set
+            // splits into two rank tiers with real ties inside each tier. Bodies
+            // within a tier are identical, so ts_rank_cd is exactly equal.
+            let body = if index % 2 == 0 {
+                "paginationterm paginationterm anchor.".to_owned()
+            } else {
+                "paginationterm anchor.".to_owned()
+            };
+            let concept =
+                format!("---\ntype: Reference\ntitle: P{index}\n---\n\n# P{index}\n\n{body}\n");
+            paths.push(format!("p{index}.md"));
+            contents.push(concept.into_bytes());
+        }
+        let (bundle_id, added, ..) = register_content("pagination", paths, contents);
+        assert_eq!(
+            usize::try_from(added).expect("added fits usize"),
+            count,
+            "every pagination concept registers as added",
+        );
+        bundle_id
+    }
+
+    #[pg_test]
+    fn concept_search_pages_tile_the_full_result_with_no_dup_or_skip() {
+        // Arrange: seven matching concepts with tied ranks (more than one page of
+        // size two), all in one bundle.
+        let _bundle_id = register_pagination_bundle(7);
+
+        // The full, unpaginated result in the stable total order.
+        let full: Vec<String> = Spi::connect(|client| {
+            let table = client
+                .select(
+                    "SELECT concept_id FROM pgokf.concept_search('paginationterm', NULL, 500)",
+                    None,
+                    &[],
+                )
+                .expect("full search executes");
+            table
+                .map(|row| {
+                    row.get::<String>(1)
+                        .expect("concept_id readable")
+                        .expect("concept_id not NULL")
+                })
+                .collect()
+        });
+        assert_eq!(full.len(), 7, "all seven concepts match the term");
+
+        // Act: page through with limit 2, carrying the JSON cursor built from each
+        // page's last row (as text so the real rank round-trips exactly).
+        let page_size: i32 = 2;
+        let mut paged: Vec<String> = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _guard in 0..100 {
+            let (ids, next_cursor): (Vec<String>, Option<String>) = Spi::connect(|client| {
+                let table = client
+                    .select(
+                        "SELECT concept_id,
+                                (pg_catalog.jsonb_build_object(
+                                     'rank', rank,
+                                     'bundle_id', bundle_id,
+                                     'concept_id', concept_id))::pg_catalog.text
+                         FROM pgokf.concept_search('paginationterm', NULL, $1, NULL, NULL, NULL, NULL, $2::pg_catalog.jsonb)",
+                        None,
+                        &[page_size.into(), cursor.as_deref().into()],
+                    )
+                    .expect("page search executes");
+                let mut ids = Vec::new();
+                let mut last_cursor = None;
+                for row in table {
+                    ids.push(
+                        row.get::<String>(1)
+                            .expect("concept_id readable")
+                            .expect("concept_id not NULL"),
+                    );
+                    last_cursor = Some(
+                        row.get::<String>(2)
+                            .expect("cursor readable")
+                            .expect("cursor not NULL"),
+                    );
+                }
+                (ids, last_cursor)
+            });
+
+            let fetched = ids.len();
+            paged.extend(ids);
+            if fetched < usize::try_from(page_size).expect("page size fits usize") {
+                break;
+            }
+            cursor = next_cursor;
+        }
+
+        // Assert: the paged concept ids tile the full result exactly — same order,
+        // no duplicate, no skip — even across tied ranks.
+        assert_eq!(
+            paged, full,
+            "keyset pages must reproduce the full ordered result with no dup/skip",
+        );
+        let mut deduped = paged.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(
+            deduped.len(),
+            paged.len(),
+            "no concept may appear on more than one page",
+        );
+    }
+
+    #[pg_test]
+    fn concept_search_rejects_a_malformed_after_cursor() {
+        // Arrange: any registered bundle; the cursor is malformed (missing fields).
+        let _bundle_id = register_pagination_bundle(2);
+        Spi::run(
+            "CREATE FUNCTION pg_temp.cursor_sqlstate(cur jsonb) RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.concept_search('paginationterm', NULL, 2, NULL, NULL, NULL, NULL, cur);
+                 RETURN 'no-error';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("cursor probe is creatable");
+
+        // Act: a cursor object missing bundle_id / concept_id.
+        let sqlstate =
+            Spi::get_one::<String>("SELECT pg_temp.cursor_sqlstate('{\"rank\": 0.1}'::jsonb)")
+                .expect("cursor probe executes")
+                .expect("probe reports a SQLSTATE");
+
+        // Assert: a malformed cursor is an invalid parameter (22023), never a
+        // silent first-page restart.
+        assert_eq!(
+            sqlstate, "22023",
+            "a malformed after_cursor must raise 22023",
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // F2: faceted result counts (pgokf.search_facets).
+    // ---------------------------------------------------------------------
+
+    /// Register a content bundle of typed concepts all matching `facetterm`: two
+    /// Runbooks and one Wiki. Returns the bundle id.
+    fn register_facet_bundle() -> i64 {
+        let concept = |kind: &str, name: &str| {
+            format!("---\ntype: {kind}\ntitle: {name}\ntags: [ops, {kind}]\n---\n\n# {name}\n\nThe facetterm appears in this {kind}.\n")
+                .into_bytes()
+        };
+        let (bundle_id, added, ..) = register_content(
+            "facets",
+            vec!["r1.md".to_owned(), "r2.md".to_owned(), "w1.md".to_owned()],
+            vec![
+                concept("Runbook", "R1"),
+                concept("Runbook", "R2"),
+                concept("Wiki", "W1"),
+            ],
+        );
+        assert_eq!(added, 3, "the facet fixture registers three concepts");
+        bundle_id
+    }
+
+    #[pg_test]
+    fn search_facets_counts_by_type_and_bundle() {
+        // Arrange: two Runbooks and one Wiki, all matching facetterm.
+        let bundle_id = register_facet_bundle();
+
+        // Act / Assert: the type facet reports two Runbooks and one Wiki.
+        let runbooks = Spi::get_one::<i64>(
+            "SELECT count FROM pgokf.search_facets('facetterm', NULL, 'type')
+             WHERE facet_value = 'Runbook'",
+        )
+        .expect("type facet executes")
+        .expect("a Runbook bucket exists");
+        assert_eq!(runbooks, 2, "two concepts are Runbooks");
+        let wikis = Spi::get_one::<i64>(
+            "SELECT count FROM pgokf.search_facets('facetterm', NULL, 'type')
+             WHERE facet_value = 'Wiki'",
+        )
+        .expect("type facet executes")
+        .expect("a Wiki bucket exists");
+        assert_eq!(wikis, 1, "one concept is a Wiki");
+
+        // Assert: exactly two type buckets (ordered by count DESC, Runbook first).
+        let first_value = Spi::get_one::<String>(
+            "SELECT facet_value FROM pgokf.search_facets('facetterm', NULL, 'type') LIMIT 1",
+        )
+        .expect("type facet executes")
+        .expect("at least one bucket");
+        assert_eq!(first_value, "Runbook", "the larger bucket sorts first");
+
+        // Assert: the bundle facet groups all three matches under the one bundle.
+        let bundle_count = Spi::get_one_with_args::<i64>(
+            "SELECT count FROM pgokf.search_facets('facetterm', NULL, 'bundle')
+             WHERE facet_value = $1::text",
+            &[bundle_id.into()],
+        )
+        .expect("bundle facet executes")
+        .expect("the bundle bucket exists");
+        assert_eq!(bundle_count, 3, "all three matches share one bundle");
+
+        // Assert: the tag facet counts a concept once per tag (ops appears on all
+        // three).
+        let ops_tag = Spi::get_one::<i64>(
+            "SELECT count FROM pgokf.search_facets('facetterm', NULL, 'tag')
+             WHERE facet_value = 'ops'",
+        )
+        .expect("tag facet executes")
+        .expect("the ops tag bucket exists");
+        assert_eq!(ops_tag, 3, "every concept carries the ops tag");
+    }
+
+    #[pg_test]
+    fn search_facets_rejects_a_bogus_facet_with_22023() {
+        // Arrange: a matching set plus a probe that reports the denial SQLSTATE.
+        let _bundle_id = register_facet_bundle();
+        Spi::run(
+            "CREATE FUNCTION pg_temp.facet_sqlstate(f text) RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.search_facets('facetterm', NULL, f);
+                 RETURN 'no-error';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("facet probe is creatable");
+
+        // Act
+        let sqlstate = Spi::get_one::<String>("SELECT pg_temp.facet_sqlstate('bogus')")
+            .expect("facet probe executes")
+            .expect("probe reports a SQLSTATE");
+
+        // Assert: an off-allow-list facet is an invalid parameter (22023).
+        assert_eq!(sqlstate, "22023", "a bogus facet must raise 22023");
+    }
+
+    // ---------------------------------------------------------------------
+    // F3: search-index health / coverage (pgokf.search_index_status).
+    // ---------------------------------------------------------------------
+
+    #[pg_test]
+    fn search_index_status_reports_shape_and_rising_embedding_coverage() {
+        // Arrange: a two-concept bundle and a small embedding dimension so a
+        // single vector can be stored without pgvector.
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        Spi::run("SELECT pgokf.set_config('embedding_dim', '3'::jsonb)")
+            .expect("embedding_dim is configurable");
+
+        // Assert: native is always available and the coverage baseline is zero.
+        let native =
+            Spi::get_one::<bool>("SELECT (pgokf.search_index_status() ->> 'native')::boolean")
+                .expect("status executes")
+                .expect("native key present");
+        assert!(native, "native FTS is always available");
+
+        let total = Spi::get_one::<i64>(
+            "SELECT (pgokf.search_index_status() -> 'embedding' ->> 'total_concepts')::bigint",
+        )
+        .expect("status executes")
+        .expect("total_concepts present");
+        assert_eq!(total, 2, "the bundle has two concepts");
+
+        let embedded_before = Spi::get_one::<i64>(
+            "SELECT (pgokf.search_index_status() -> 'embedding' ->> 'embedded_rows')::bigint",
+        )
+        .expect("status executes")
+        .expect("embedded_rows present");
+        assert_eq!(embedded_before, 0, "no embeddings stored yet");
+
+        // The bm25 sub-object exposes its availability and existence flags.
+        let bm25_index = Spi::get_one::<bool>(
+            "SELECT (pgokf.search_index_status() -> 'bm25' ->> 'index_exists')::boolean",
+        )
+        .expect("status executes")
+        .expect("bm25.index_exists present");
+        assert!(!bm25_index, "no bm25 index exists in the test cluster");
+
+        // Act: store one embedding, so coverage rises to 1 of 2 (50%).
+        Spi::run_with_args(
+            "SELECT pgokf.set_concept_embedding($1, 'alpha', ARRAY[0.1, 0.2, 0.3]::real[])",
+            &[bundle_id.into()],
+        )
+        .expect("set_concept_embedding executes");
+
+        let embedded_after = Spi::get_one::<i64>(
+            "SELECT (pgokf.search_index_status() -> 'embedding' ->> 'embedded_rows')::bigint",
+        )
+        .expect("status executes")
+        .expect("embedded_rows present");
+        assert_eq!(embedded_after, 1, "one embedding is now stored");
+
+        let coverage = Spi::get_one::<f64>(
+            "SELECT (pgokf.search_index_status() -> 'embedding' ->> 'coverage_pct')::float8",
+        )
+        .expect("status executes")
+        .expect("coverage_pct present");
+        assert!(
+            (coverage - 50.0).abs() < 0.001,
+            "embedding coverage must rise to 50% (1 of 2 concepts), got {coverage}",
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // F4: pg_cron scheduled re-sync (pg_cron-absent path).
+    // ---------------------------------------------------------------------
+
+    #[pg_test]
+    fn schedule_refresh_raises_22023_when_pg_cron_is_absent() {
+        // Arrange: a registered bundle and a probe that reports the SQLSTATE of a
+        // scheduling attempt. pg_cron is not installed in the test cluster.
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        Spi::run(
+            "CREATE FUNCTION pg_temp.schedule_sqlstate(bid bigint) RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.schedule_refresh(bid, '0 * * * *');
+                 RETURN 'no-error';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("schedule probe is creatable");
+
+        // Act: attempt to schedule with pg_cron absent.
+        let sqlstate = Spi::get_one_with_args::<String>(
+            "SELECT pg_temp.schedule_sqlstate($1)",
+            &[bundle_id.into()],
+        )
+        .expect("schedule probe executes")
+        .expect("probe reports a SQLSTATE");
+
+        // Assert: scheduling names the missing dependency with 22023, never a
+        // silent success.
+        assert_eq!(
+            sqlstate, "22023",
+            "schedule_refresh must raise 22023 when pg_cron is absent",
+        );
+
+        // Assert: unschedule is a clean no-op returning false when pg_cron is
+        // absent (and there is no job to remove).
+        let removed = Spi::get_one_with_args::<bool>(
+            "SELECT pgokf.unschedule_refresh($1)",
+            &[bundle_id.into()],
+        )
+        .expect("unschedule_refresh executes")
+        .expect("unschedule returns a boolean");
+        assert!(
+            !removed,
+            "unschedule_refresh is a no-op when pg_cron is absent"
         );
     }
 }
