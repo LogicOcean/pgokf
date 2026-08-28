@@ -51,6 +51,8 @@ exercised against a live PostgreSQL 18 cluster.
 | `rebuild_embedding_index()` | `boolean` | VOLATILE | DEFINER | `pgokf_admin` |
 | `concept_neighbors(concept_id, max_hops, bundle_id)` | `SETOF concept_neighbor` | STABLE | invoker | `pgokf_reader` |
 | `list_bundle_log(bundle_id, directory, max_rows)` | `SETOF bundle_log_entry` | STABLE | invoker | `pgokf_reader` |
+| `concept_history(bundle_id, concept_id, max_rows)` | `SETOF concept_version` | STABLE | invoker | `pgokf_reader` |
+| `concept_as_of(bundle_id, concept_id, as_of)` | `SETOF concept_version` | STABLE | invoker | `pgokf_reader` |
 | `set_config(key, value)` | `void` | VOLATILE | DEFINER | `pgokf_admin` |
 | `reset_config(key)` | `void` | VOLATILE | DEFINER | `pgokf_admin` |
 | `get_config()` | `jsonb` | VOLATILE | DEFINER | `pgokf_reader` |
@@ -79,7 +81,8 @@ other function — including `list_bundles`, `bundle_info`, `catalog_stats`,
 `schedule_refresh`, and `unschedule_refresh` — is `STRICT`.
 `concept_search`, `search_facets`, `find_similar`, `concept_search_semantic`,
 `concept_search_hybrid`, `concept_neighbors`, `list_bundle_log`, `catalog_stats`,
-`duplicate_concepts`, and `stale_concepts` are also `PARALLEL SAFE`.
+`duplicate_concepts`, `stale_concepts`, `concept_history`, and `concept_as_of`
+are also `PARALLEL SAFE`.
 `list_bundle_log` accepts a `NULL`-defaulting `directory`, so it is **not**
 `STRICT`.
 
@@ -673,6 +676,75 @@ ORDER BY directory, ordinal;
 
 ---
 
+## Version history (opt-in)
+
+Concept version history is **opt-in and off by default**. It records anything
+only while the `track_history` configuration key is enabled; with it off (the
+default) `pgokf.concept_history` stays empty, both readers below return no rows,
+and there is zero storage or behavior change. See
+[Version History](version-history.md) for the temporal model and
+[configuration.md](configuration.md#version-history--track_history--history_retention_days)
+for the switch and retention.
+
+### `pgokf.concept_history(bundle_id bigint, concept_id text, max_rows int DEFAULT 100) → SETOF pgokf.concept_version`
+
+List one concept's recorded version timeline, newest version first.
+`STABLE PARALLEL SAFE`, invoker rights (the caller's tenant row-level security
+applies), **requires `pgokf_reader`**.
+
+| Parameter | Type | Default | Meaning |
+| --------- | ---- | ------- | ------- |
+| `bundle_id` | `bigint` | — | The concept's bundle. |
+| `concept_id` | `text` | — | The path-derived OKF concept id. |
+| `max_rows` | `int` | `100` | Row cap; must be `>= 0` (`22023` otherwise). |
+
+Each row is a `pgokf.concept_version`: the per-concept `version`, its validity
+interval `[valid_from, valid_to)` (`valid_to` `NULL` = the current open version),
+the `change_kind` (`added` / `updated` / `removed`), and a snapshot of the
+concept core (`type`, `title`, `description`, `file_hash`) at that version (all
+`NULL` for a removal tombstone). Empty when the bundle was synced with
+`track_history` off.
+
+```sql
+SELECT version, change_kind, valid_from, valid_to, title
+FROM pgokf.concept_history(1, 'runbooks/database-failover');
+--  version | change_kind |       valid_from       |        valid_to        |         title
+-- ---------+-------------+------------------------+------------------------+------------------------
+--        3 | removed     | 2026-08-27 09:15:00+00 | 2026-08-27 09:15:00+00 |
+--        2 | updated     | 2026-08-20 14:02:00+00 | 2026-08-27 09:15:00+00 | Database Failover (v2)
+--        1 | added       | 2026-08-13 11:00:00+00 | 2026-08-20 14:02:00+00 | Database Failover
+```
+
+### `pgokf.concept_as_of(bundle_id bigint, concept_id text, as_of timestamptz) → SETOF pgokf.concept_version`
+
+Return the single concept version that was valid at `as_of` — the point-in-time
+*"what did this say then?"* answer. `STABLE PARALLEL SAFE`, invoker rights,
+**requires `pgokf_reader`**.
+
+| Parameter | Type | Default | Meaning |
+| --------- | ---- | ------- | ------- |
+| `bundle_id` | `bigint` | — | The concept's bundle. |
+| `concept_id` | `text` | — | The path-derived OKF concept id. |
+| `as_of` | `timestamptz` | — | The instant to resolve. |
+
+Returns the one `pgokf.concept_version` whose interval covers `as_of`
+(`valid_from <= as_of AND (valid_to IS NULL OR as_of < valid_to)`), or **zero
+rows** when the concept did not yet exist — or had already been removed — at that
+instant (a removal tombstone is zero-width, so an as-of at or after the removal
+returns nothing). Intervals are contiguous and non-overlapping, so at most one
+version matches.
+
+```sql
+-- What did the failover runbook say last Tuesday?
+SELECT version, title, description
+FROM pgokf.concept_as_of(1, 'runbooks/database-failover', TIMESTAMPTZ '2026-08-25 00:00:00+00');
+--  version |         title          |     description
+-- ---------+------------------------+---------------------
+--        2 | Database Failover (v2) | Revised failover ...
+```
+
+---
+
 ## Configuration functions
 
 These manage the durable policy row in `pgokf_private.config`. See
@@ -1087,6 +1159,21 @@ Returned by `list_bundle_log`.
 | `logged_at` | `timestamptz` | Parsed leading ISO 8601 timestamp (`NULL` when absent). |
 | `entry` | `text` | The lossless log entry text. |
 
+### `pgokf.concept_version`
+
+Returned by `concept_history` and `concept_as_of`.
+
+| Column | Type | Meaning |
+| ------ | ---- | ------- |
+| `version` | `bigint` | Per-concept monotonic version number. |
+| `valid_from` | `timestamptz` | When this version became valid. |
+| `valid_to` | `timestamptz` | When it stopped being valid; `NULL` for the current open version. |
+| `change_kind` | `text` | `added` / `updated` / `removed`. |
+| `type` | `text` | Snapshot of the concept's OKF type (`NULL` for a removal tombstone). |
+| `title` | `text` | Snapshot of the title (`NULL` for a removal tombstone). |
+| `description` | `text` | Snapshot of the description (`NULL` when none, or a tombstone). |
+| `file_hash` | `text` | Snapshot of the source-file BLAKE3 digest (`NULL` for a tombstone). |
+
 ### `pgokf.sync_log_entry`
 
 Returned by `list_sync_log`.
@@ -1381,6 +1468,36 @@ bundle on disk with `pgokf.export_sources`.
 ```sql
 SELECT concept_id, byte_size FROM pgokf.concept_source
 WHERE bundle_id = 1 ORDER BY concept_id;
+```
+
+### `pgokf.concept_history`
+
+Opt-in append-only SCD Type-2 version trail of each concept. Populated **only**
+when the bundle was synced with the `track_history` policy enabled; empty
+otherwise. Reader-`SELECT`able (or read through `pgokf.concept_history` /
+`pgokf.concept_as_of`).
+
+| Column | Type | Notes |
+| ------ | ---- | ----- |
+| `bundle_id` | `bigint` | `NOT NULL`, part of FK to `pgokf.bundles`. |
+| `concept_id` | `text` | `NOT NULL` — path-derived OKF id; retained across the concept's deletion. |
+| `tenant_id` | `text` | `NOT NULL DEFAULT 'default'` — denormalized RLS discriminator. |
+| `version` | `bigint` | `NOT NULL` — per-concept monotonic version number. |
+| `valid_from` | `timestamptz` | `NOT NULL` — when this version became valid. |
+| `valid_to` | `timestamptz` | When it stopped; `NULL` for the current open version. |
+| `change_kind` | `text` | `NOT NULL`, one of `added` / `updated` / `removed`. |
+| `type` / `title` / `description` / `tags` / `resource` / `body_text` / `file_hash` | (various) | Snapshot of the concept core at this version; all `NULL` for a removal tombstone. |
+
+Primary key `(bundle_id, concept_id, version)`; FK to **`pgokf.bundles`** (not
+`pgokf.concepts`) `ON DELETE CASCADE`, so a removed concept keeps its history
+until the bundle is unregistered. Opt-in `tenant_id` row-level security and a
+`(bundle_id, concept_id, valid_from)` lookup index. Intervals are contiguous and
+non-overlapping, with exactly one open version (`valid_to IS NULL`) per live
+concept.
+
+```sql
+SELECT concept_id, version, change_kind, valid_from, valid_to
+FROM pgokf.concept_history WHERE bundle_id = 1 ORDER BY concept_id, version;
 ```
 
 ### `pgokf.concept_embedding`

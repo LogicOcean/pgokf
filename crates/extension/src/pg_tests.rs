@@ -1187,7 +1187,7 @@ The gamma concept is introduced during the refresh cycle.\n";
         // an existing install can be stepped up to this release.
         let upgrade_script = manifest_dir
             .join("sql")
-            .join(format!("pgokf--0.1.9--{crate_version}.sql"));
+            .join(format!("pgokf--0.1.10--{crate_version}.sql"));
         let metadata =
             fs::metadata(&upgrade_script).expect("the current upgrade script ships on disk");
         assert!(
@@ -3921,6 +3921,502 @@ Freeform note without a timestamp\n";
         assert_eq!(
             globex_logs, 0,
             "a foreign tenant sees none of acme's log entries"
+        );
+    }
+
+    // ---- Opt-in concept version history (pgokf.concept_history) --------------
+
+    /// Enable the opt-in `track_history` tier for the current (rolled-back) test
+    /// transaction, so subsequent syncs record an SCD-2 version trail.
+    fn enable_track_history() {
+        Spi::run("SELECT pgokf.set_config('track_history', 'true'::jsonb)")
+            .expect("track_history can be enabled");
+    }
+
+    /// `runbook.md` revision one: distinctive title/description so a version
+    /// snapshot is identifiable.
+    const RUNBOOK_V1: &str = "---\n\
+type: Runbook\n\
+title: Runbook Revision One\n\
+description: The first cut of the deploy runbook.\n\
+tags: [ops]\n\
+---\n\
+\n\
+# Runbook\n\
+\n\
+Revision one documents the alfa deploy step.\n";
+
+    /// `runbook.md` revision two: changed title/description/body.
+    const RUNBOOK_V2: &str = "---\n\
+type: Runbook\n\
+title: Runbook Revision Two\n\
+description: The second cut of the deploy runbook.\n\
+tags: [ops]\n\
+---\n\
+\n\
+# Runbook\n\
+\n\
+Revision two documents the bravo deploy step.\n";
+
+    /// `runbook.md` revision three: changed again.
+    const RUNBOOK_V3: &str = "---\n\
+type: Runbook\n\
+title: Runbook Revision Three\n\
+description: The third cut of the deploy runbook.\n\
+tags: [ops]\n\
+---\n\
+\n\
+# Runbook\n\
+\n\
+Revision three documents the charlie deploy step.\n";
+
+    /// An unchanging anchor concept, so the bundle is never empty and the
+    /// unchanged bucket is exercised alongside the tracked concept's lifecycle.
+    const HISTORY_ANCHOR: &str = "---\n\
+type: Reference\n\
+title: Anchor Concept\n\
+tags: [ops]\n\
+---\n\
+\n\
+# Anchor\n\
+\n\
+The anchor concept never changes across the runbook's revisions.\n";
+
+    /// Materialize a fresh two-file bundle (`runbook.md` at `RUNBOOK_V1`, plus an
+    /// unchanging `anchor.md`) and return the managed fixture.
+    fn create_history_bundle() -> FixtureBundle {
+        let bundle = FixtureBundle::create();
+        // Replace the default alpha/beta fixture with the history lifecycle files.
+        fs::remove_file(bundle.root.join("alpha.md")).expect("alpha removable");
+        fs::remove_file(bundle.root.join("beta.md")).expect("beta removable");
+        fs::write(bundle.root.join("runbook.md"), RUNBOOK_V1).expect("runbook v1 writable");
+        fs::write(bundle.root.join("anchor.md"), HISTORY_ANCHOR).expect("anchor writable");
+        bundle
+    }
+
+    /// Sleep briefly so `clock_timestamp()` strictly advances between syncs that
+    /// share this single test transaction, giving each version a distinct instant
+    /// (the point-in-time and contiguity assertions need strict separation).
+    fn advance_clock() {
+        Spi::run("SELECT pg_catalog.pg_sleep(0.05)").expect("pg_sleep executes");
+    }
+
+    fn refresh(bundle_id: i64) {
+        Spi::run_with_args("SELECT pgokf.refresh_bundle($1)", &[bundle_id.into()])
+            .expect("refresh_bundle executes");
+    }
+
+    #[pg_test]
+    fn track_history_off_records_no_history() {
+        // Arrange: the DEFAULT policy (track_history off). Register, then edit and
+        // refresh — the exact flow that would record history if it were on.
+        let bundle = create_history_bundle();
+        let bundle_id = Spi::get_one_with_args::<i64>(
+            "SELECT bundle_id FROM pgokf.register_bundle($1) AS r",
+            &[bundle.path().into()],
+        )
+        .expect("register executes")
+        .expect("bundle_id is not NULL");
+        fs::write(bundle.root.join("runbook.md"), RUNBOOK_V2).expect("runbook v2 writable");
+        refresh(bundle_id);
+
+        // Assert: with history off, not a single concept_history row is written —
+        // zero extra storage, behavior unchanged.
+        let rows = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concept_history WHERE bundle_id = $1",
+            &[bundle_id.into()],
+        )
+        .expect("history count executes")
+        .expect("count is not NULL");
+        assert_eq!(rows, 0, "track_history off records no history rows");
+
+        // Assert: the reader function likewise returns nothing for the concept.
+        let via_reader = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concept_history($1, 'runbook')",
+            &[bundle_id.into()],
+        )
+        .expect("concept_history reader executes")
+        .expect("count is not NULL");
+        assert_eq!(
+            via_reader, 0,
+            "the reader returns no versions when history off"
+        );
+    }
+
+    #[pg_test]
+    fn track_history_on_records_a_contiguous_version_chain() {
+        // Arrange: enable history, then drive runbook through add -> update ->
+        // update -> remove, sleeping so each sync gets a strictly later instant.
+        enable_track_history();
+        let bundle = create_history_bundle();
+        let bundle_id = Spi::get_one_with_args::<i64>(
+            "SELECT bundle_id FROM pgokf.register_bundle($1) AS r",
+            &[bundle.path().into()],
+        )
+        .expect("register executes")
+        .expect("bundle_id is not NULL");
+
+        advance_clock();
+        fs::write(bundle.root.join("runbook.md"), RUNBOOK_V2).expect("runbook v2 writable");
+        refresh(bundle_id);
+
+        advance_clock();
+        fs::write(bundle.root.join("runbook.md"), RUNBOOK_V3).expect("runbook v3 writable");
+        refresh(bundle_id);
+
+        advance_clock();
+        fs::remove_file(bundle.root.join("runbook.md")).expect("runbook removable");
+        refresh(bundle_id);
+
+        // Assert: exactly four versions with the expected kinds, newest first.
+        let kinds = Spi::connect(|client| {
+            let table = client
+                .select(
+                    "SELECT version, change_kind FROM pgokf.concept_history($1, 'runbook')
+                     ORDER BY version",
+                    None,
+                    &[bundle_id.into()],
+                )
+                .expect("concept_history reader executes");
+            let mut out = Vec::new();
+            for row in table {
+                let version = row.get::<i64>(1).expect("readable").expect("not NULL");
+                let kind = row.get::<String>(2).expect("readable").expect("not NULL");
+                out.push((version, kind));
+            }
+            out
+        });
+        assert_eq!(
+            kinds,
+            vec![
+                (1_i64, "added".to_owned()),
+                (2, "updated".to_owned()),
+                (3, "updated".to_owned()),
+                (4, "removed".to_owned()),
+            ],
+            "the lifecycle records added, updated, updated, removed in order",
+        );
+
+        // Assert: after removal there is NO open version left (the tombstone is
+        // zero-width and its predecessor was closed).
+        let open = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concept_history
+             WHERE bundle_id = $1 AND concept_id = 'runbook' AND valid_to IS NULL",
+            &[bundle_id.into()],
+        )
+        .expect("open-version count executes")
+        .expect("count is not NULL");
+        assert_eq!(open, 0, "a removed concept has no open version");
+
+        // Assert: the tombstone is zero-width, every closed interval is well
+        // formed (valid_from <= valid_to), and the chain is contiguous
+        // (valid_to of version N equals valid_from of version N+1).
+        let tombstone_zero_width = Spi::get_one_with_args::<bool>(
+            "SELECT valid_from = valid_to FROM pgokf.concept_history
+             WHERE bundle_id = $1 AND concept_id = 'runbook' AND version = 4",
+            &[bundle_id.into()],
+        )
+        .expect("tombstone query executes")
+        .expect("row exists");
+        assert!(tombstone_zero_width, "the removal tombstone is zero-width");
+
+        let well_formed = Spi::get_one_with_args::<bool>(
+            "SELECT bool_and(valid_to IS NULL OR valid_from <= valid_to)
+             FROM pgokf.concept_history WHERE bundle_id = $1 AND concept_id = 'runbook'",
+            &[bundle_id.into()],
+        )
+        .expect("well-formed query executes")
+        .expect("aggregate is not NULL");
+        assert!(well_formed, "every interval has valid_from <= valid_to");
+
+        let contiguous = Spi::get_one_with_args::<bool>(
+            "SELECT bool_and(next_from = valid_to) FROM (
+                 SELECT valid_to,
+                        lead(valid_from) OVER (ORDER BY version) AS next_from
+                 FROM pgokf.concept_history
+                 WHERE bundle_id = $1 AND concept_id = 'runbook'
+             ) s
+             WHERE next_from IS NOT NULL",
+            &[bundle_id.into()],
+        )
+        .expect("contiguity query executes")
+        .expect("aggregate is not NULL");
+        assert!(
+            contiguous,
+            "each version's valid_to abuts the next version's valid_from"
+        );
+
+        // Assert: an UNCHANGED file records no extra history — the anchor stays at
+        // a single open version 1 across all the runbook refreshes.
+        let anchor_versions = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concept_history
+             WHERE bundle_id = $1 AND concept_id = 'anchor'",
+            &[bundle_id.into()],
+        )
+        .expect("anchor count executes")
+        .expect("count is not NULL");
+        assert_eq!(
+            anchor_versions, 1,
+            "an unchanged concept keeps a single version"
+        );
+    }
+
+    #[pg_test]
+    fn concept_as_of_returns_the_snapshot_valid_at_each_instant() {
+        // Arrange: the same add -> update -> update -> remove chain.
+        enable_track_history();
+        let bundle = create_history_bundle();
+        let bundle_id = Spi::get_one_with_args::<i64>(
+            "SELECT bundle_id FROM pgokf.register_bundle($1) AS r",
+            &[bundle.path().into()],
+        )
+        .expect("register executes")
+        .expect("bundle_id is not NULL");
+
+        advance_clock();
+        fs::write(bundle.root.join("runbook.md"), RUNBOOK_V2).expect("runbook v2 writable");
+        refresh(bundle_id);
+
+        advance_clock();
+        fs::write(bundle.root.join("runbook.md"), RUNBOOK_V3).expect("runbook v3 writable");
+        refresh(bundle_id);
+
+        advance_clock();
+        fs::remove_file(bundle.root.join("runbook.md")).expect("runbook removable");
+        refresh(bundle_id);
+
+        // The recorded boundary of version N (its valid_from), read back for the
+        // as-of probes. Because intervals are contiguous, version 1's valid_to
+        // equals version 2's valid_from.
+        let valid_from = |version: i64| {
+            Spi::get_one_with_args::<pgrx::datum::TimestampWithTimeZone>(
+                "SELECT valid_from FROM pgokf.concept_history
+                 WHERE bundle_id = $1 AND concept_id = 'runbook' AND version = $2",
+                &[bundle_id.into(), version.into()],
+            )
+            .expect("valid_from query executes")
+            .expect("row exists")
+        };
+
+        // At exactly version 1's valid_from, the v1 snapshot is valid.
+        let at_v1 = Spi::get_one_with_args::<String>(
+            "SELECT title FROM pgokf.concept_as_of($1, 'runbook', $2)",
+            &[bundle_id.into(), valid_from(1).into()],
+        )
+        .expect("as_of executes")
+        .expect("v1 covers its own valid_from");
+        assert_eq!(
+            at_v1, "Runbook Revision One",
+            "as-of at v1 returns the v1 title"
+        );
+
+        // A midpoint strictly between v1.valid_from and v2.valid_from still falls
+        // inside v1's half-open interval [v1.valid_from, v1.valid_to=v2.valid_from).
+        let at_mid = Spi::get_one_with_args::<String>(
+            "SELECT title FROM pgokf.concept_as_of($1, 'runbook',
+                 (SELECT vf1 + (vf2 - vf1) / 2 FROM (
+                     SELECT
+                         (SELECT valid_from FROM pgokf.concept_history
+                          WHERE bundle_id = $1 AND concept_id = 'runbook' AND version = 1) AS vf1,
+                         (SELECT valid_from FROM pgokf.concept_history
+                          WHERE bundle_id = $1 AND concept_id = 'runbook' AND version = 2) AS vf2
+                 ) b))",
+            &[bundle_id.into()],
+        )
+        .expect("as_of midpoint executes")
+        .expect("the midpoint falls within v1");
+        assert_eq!(
+            at_mid, "Runbook Revision One",
+            "the mid-interval as-of returns v1"
+        );
+
+        // At version 2's valid_from, the v2 snapshot is valid.
+        let at_v2 = Spi::get_one_with_args::<String>(
+            "SELECT title FROM pgokf.concept_as_of($1, 'runbook', $2)",
+            &[bundle_id.into(), valid_from(2).into()],
+        )
+        .expect("as_of executes")
+        .expect("v2 covers its own valid_from");
+        assert_eq!(
+            at_v2, "Runbook Revision Two",
+            "as-of at v2 returns the v2 title"
+        );
+
+        // At version 3's valid_from, the v3 snapshot is valid.
+        let at_v3 = Spi::get_one_with_args::<String>(
+            "SELECT title FROM pgokf.concept_as_of($1, 'runbook', $2)",
+            &[bundle_id.into(), valid_from(3).into()],
+        )
+        .expect("as_of executes")
+        .expect("v3 covers its own valid_from");
+        assert_eq!(
+            at_v3, "Runbook Revision Three",
+            "as-of at v3 returns the v3 title"
+        );
+
+        // At the removal instant (version 4's valid_from == v3.valid_to) and after,
+        // no version is valid: zero rows.
+        let at_removal = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concept_as_of($1, 'runbook', $2)",
+            &[bundle_id.into(), valid_from(4).into()],
+        )
+        .expect("as_of count executes")
+        .expect("count is not NULL");
+        assert_eq!(
+            at_removal, 0,
+            "as-of at the removal instant returns zero rows"
+        );
+
+        let after_removal = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concept_as_of($1, 'runbook',
+                 $2 + interval '1 day')",
+            &[bundle_id.into(), valid_from(4).into()],
+        )
+        .expect("as_of count executes")
+        .expect("count is not NULL");
+        assert_eq!(after_removal, 0, "as-of after removal returns zero rows");
+
+        // Before the concept ever existed, zero rows.
+        let before_creation = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concept_as_of($1, 'runbook',
+                 $2 - interval '1 second')",
+            &[bundle_id.into(), valid_from(1).into()],
+        )
+        .expect("as_of count executes")
+        .expect("count is not NULL");
+        assert_eq!(
+            before_creation, 0,
+            "as-of before creation returns zero rows"
+        );
+    }
+
+    #[pg_test]
+    fn history_retention_prunes_closed_versions_but_keeps_the_open_one() {
+        // Arrange: enable history and record a closed version 1 plus an open
+        // version 2 for runbook.
+        enable_track_history();
+        let bundle = create_history_bundle();
+        let bundle_id = Spi::get_one_with_args::<i64>(
+            "SELECT bundle_id FROM pgokf.register_bundle($1) AS r",
+            &[bundle.path().into()],
+        )
+        .expect("register executes")
+        .expect("bundle_id is not NULL");
+        advance_clock();
+        fs::write(bundle.root.join("runbook.md"), RUNBOOK_V2).expect("runbook v2 writable");
+        refresh(bundle_id);
+
+        // Backdate the CLOSED version 1's valid_to well beyond any short window,
+        // so a later prune would remove it (the test transaction spans only
+        // milliseconds, so day-granular retention needs a backdated row to bite).
+        Spi::run_with_args(
+            "UPDATE pgokf.concept_history
+             SET valid_to = pg_catalog.now() - interval '10 days'
+             WHERE bundle_id = $1 AND concept_id = 'runbook' AND version = 1",
+            &[bundle_id.into()],
+        )
+        .expect("backdate executes");
+
+        // Set a tight one-day retention, then trigger a sync so the prune runs.
+        Spi::run("SELECT pgokf.set_config('history_retention_days', '1'::jsonb)")
+            .expect("history_retention_days is settable");
+        advance_clock();
+        fs::write(bundle.root.join("runbook.md"), RUNBOOK_V3).expect("runbook v3 writable");
+        refresh(bundle_id);
+
+        // Assert: the backdated CLOSED version 1 is pruned.
+        let v1_present = Spi::get_one_with_args::<bool>(
+            "SELECT EXISTS (SELECT 1 FROM pgokf.concept_history
+             WHERE bundle_id = $1 AND concept_id = 'runbook' AND version = 1)",
+            &[bundle_id.into()],
+        )
+        .expect("v1 probe executes")
+        .expect("exists is not NULL");
+        assert!(
+            !v1_present,
+            "a closed version older than the window is pruned"
+        );
+
+        // Assert: the single current OPEN version is never pruned, so present-time
+        // point-in-time queries still resolve.
+        let open = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concept_history
+             WHERE bundle_id = $1 AND concept_id = 'runbook' AND valid_to IS NULL",
+            &[bundle_id.into()],
+        )
+        .expect("open count executes")
+        .expect("count is not NULL");
+        assert_eq!(open, 1, "the current open version survives pruning");
+
+        // clock_timestamp() (real "now"), not now() (this test transaction's
+        // start, which predates the clock-stamped versions), covers the open
+        // version.
+        let current_title = Spi::get_one_with_args::<String>(
+            "SELECT title FROM pgokf.concept_as_of($1, 'runbook', pg_catalog.clock_timestamp())",
+            &[bundle_id.into()],
+        )
+        .expect("as_of now executes")
+        .expect("the current version resolves");
+        assert_eq!(
+            current_title, "Runbook Revision Three",
+            "the surviving open version is the latest revision"
+        );
+    }
+
+    #[pg_test]
+    fn concept_history_respects_tenant_isolation() {
+        // Arrange: record history for a bundle owned by tenant 'acme'.
+        enable_track_history();
+        Spi::run("SET pgokf.tenant = 'acme'").expect("pgokf.tenant is settable");
+        let bundle = create_history_bundle();
+        let bundle_id = Spi::get_one_with_args::<i64>(
+            "SELECT bundle_id FROM pgokf.register_bundle($1) AS r",
+            &[bundle.path().into()],
+        )
+        .expect("register executes")
+        .expect("bundle_id is not NULL");
+        advance_clock();
+        fs::write(bundle.root.join("runbook.md"), RUNBOOK_V2).expect("runbook v2 writable");
+        refresh(bundle_id);
+
+        // A non-superuser reader (so row-level security is enforced — a superuser
+        // bypasses it) and a probe reporting how many versions it sees for the
+        // session's tenant through the invoker-rights reader function.
+        Spi::run("CREATE ROLE pgokf_history_reader").expect("reader role is creatable");
+        Spi::run("GRANT pgokf_reader TO pgokf_history_reader").expect("reader role is grantable");
+        Spi::run(
+            "CREATE FUNCTION pg_temp.history_reader_count(bid bigint, OUT versions bigint)
+             LANGUAGE plpgsql
+             SET role TO pgokf_history_reader
+             AS $probe$
+             BEGIN
+                 versions := (SELECT count(*) FROM pgokf.concept_history(bid, 'runbook'));
+             END
+             $probe$;",
+        )
+        .expect("history reader probe is creatable");
+
+        // The owning tenant sees its two recorded versions.
+        Spi::run("SET pgokf.tenant = 'acme'").expect("pgokf.tenant is settable");
+        let acme_rows = Spi::get_one_with_args::<i64>(
+            "SELECT versions FROM pg_temp.history_reader_count($1)",
+            &[bundle_id.into()],
+        )
+        .expect("acme probe executes")
+        .expect("count is not NULL");
+        assert_eq!(acme_rows, 2, "acme sees its own recorded versions");
+
+        // A different tenant sees none of it (row-level security hides the rows).
+        Spi::run("SET pgokf.tenant = 'globex'").expect("pgokf.tenant is settable");
+        let globex_rows = Spi::get_one_with_args::<i64>(
+            "SELECT versions FROM pg_temp.history_reader_count($1)",
+            &[bundle_id.into()],
+        )
+        .expect("globex probe executes")
+        .expect("count is not NULL");
+        assert_eq!(
+            globex_rows, 0,
+            "a foreign tenant sees none of acme's history"
         );
     }
 }

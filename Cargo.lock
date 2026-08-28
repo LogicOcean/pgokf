@@ -1922,7 +1922,7 @@ dependencies = [
 
 [[package]]
 name = "okf-parser"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "pulldown-cmark",
  "serde",
@@ -1934,7 +1934,7 @@ dependencies = [
 
 [[package]]
 name = "okf-sync"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "blake3",
  "globset",
@@ -2052,7 +2052,7 @@ dependencies = [
 
 [[package]]
 name = "pgokf"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "arrow",
  "okf-parser",
@@ -2064,7 +2064,7 @@ dependencies = [
 
 [[package]]
 name = "pgokf-ingest"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "clap",

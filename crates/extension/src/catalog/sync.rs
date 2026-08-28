@@ -1014,6 +1014,16 @@ pub(crate) fn run_bundle_sync<S: ByteSource>(
     // reading each through the same ByteSource.
     project_bundle_logs(bundle_id, source, &current)?;
 
+    // Opt-in SCD-2 version history. Recorded from the same delta, inside this
+    // transaction, ONLY when the durable track_history key is on — so with it
+    // off (the default) nothing is written and behavior/storage are unchanged.
+    // Runs after the concept upsert/delete so the version chain reflects the
+    // committed state, and prunes closed versions to history_retention_days.
+    if defaults.track_history {
+        crate::catalog::history::project(bundle_id, &stored, &staged, &removed_ids)?;
+        crate::catalog::history::prune(bundle_id, defaults.history_retention_days)?;
+    }
+
     // Apply the OKF-version conformance policy before finalizing the bundle
     // row: under `reject` an unsupported declared version aborts the sync here,
     // so a rejected bundle is never recorded as synced.

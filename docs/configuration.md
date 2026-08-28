@@ -104,6 +104,8 @@ admin-only).
 | `notify_channel` | string | `""` | empty (disabled) or a safe channel identifier (letters, digits, underscore; leading letter/underscore; ≤ 63 bytes) |
 | `okf_version_policy` | string | `"warn"` | one of `"warn"`, `"reject"` |
 | `embedding_dim` | integer | `1536` | between `1` and `16000` |
+| `track_history` | boolean | `false` | must be a boolean |
+| `history_retention_days` | integer | `0` | `>= 0` and fits `integer` |
 
 ### Which keys the current engine consults
 
@@ -123,6 +125,8 @@ querying, **honors `store_source`** and `search_backend`, and — new in 0.1.5 �
 | `notify_channel` | **Applied (new in 0.1.5).** When non-empty, a successful sync emits `pg_notify(<channel>, <json>)`; empty (default) disables it with zero overhead. See the change-notification section below. |
 | `okf_version_policy` | **Applied (new in 0.1.5).** Governs how sync treats a bundle that declares an unsupported OKF `okf_version`: `warn` (default) logs a `WARNING` and indexes anyway, `reject` aborts with `22023`. See the version-policy section below. |
 | `embedding_dim` | **Applied (new in 0.1.6).** The expected length of caller-supplied embeddings: `pgokf.set_concept_embedding` rejects any `real[]` whose length differs, and `pgokf.rebuild_embedding_index` builds its pgvector HNSW index with the `vector(embedding_dim)` typmod. See the embeddings section below. |
+| `track_history` | **Applied (new in 0.1.11).** When `true`, each sync records an SCD-2 version trail of every changed concept into `pgokf.concept_history` (read via `pgokf.concept_history` / `pgokf.concept_as_of`); when `false` (default) it records nothing, with zero storage/behavior change. See the version-history section below and [Version History](version-history.md). |
+| `history_retention_days` | **Applied (new in 0.1.11).** When `track_history` is on and this is positive, closed history versions older than `now() - this many days` are pruned in the same transaction after each sync; the current open version is never pruned. `0` (default) keeps history indefinitely. See the version-history section below. |
 | `default_strict` | **Stored, not yet consulted.** Sync is always strict — the first malformed file aborts the sync. |
 | `default_exclude` | **Stored, not yet consulted.** Discovery does not yet apply these exclusion globs. |
 
@@ -294,6 +298,39 @@ SELECT pgokf.set_config('okf_version_policy', '"reject"'::jsonb);  -- strict
 SELECT pgokf.set_config('okf_version_policy', '"warn"'::jsonb);    -- lenient (default)
 ```
 
+### Version history — `track_history` / `history_retention_days`
+
+`track_history` is the **opt-in switch** for concept version history, and it is
+**off by default**. When it is `false` (the default) a sync records nothing, so
+an existing install — and any bundle synced with history disabled — behaves
+**exactly as before with zero extra storage**. That is precisely what keeps the
+feature backward compatible; treat enabling it as a **storage/retention
+tradeoff**.
+
+When `track_history` is `true`, every register/refresh/content sync records an
+append-only [SCD Type-2](version-history.md) version trail of each *changed*
+concept into **`pgokf.concept_history`**, inside the same transaction (so history
+commits atomically with the sync). Read it back with
+`pgokf.concept_history(bundle_id, concept_id)` (the newest-first timeline) and
+`pgokf.concept_as_of(bundle_id, concept_id, as_of)` (the point-in-time snapshot).
+
+`history_retention_days` bounds growth: when positive, **closed** history versions
+(`valid_to IS NOT NULL`) older than `now() - this many days` are pruned in the
+same transaction after each sync. The single **current open** version of each
+concept (`valid_to IS NULL`) is never pruned, so present-time point-in-time
+queries always resolve. `0` (the default) keeps history indefinitely.
+
+```sql
+SELECT pgokf.set_config('track_history', 'true'::jsonb);            -- start recording
+SELECT pgokf.set_config('history_retention_days', '90'::jsonb);     -- prune closed versions > 90 days
+SELECT pgokf.set_config('track_history', 'false'::jsonb);           -- stop (existing history is kept)
+```
+
+> **⚠️ Not retroactive.** Enabling `track_history` starts recording at the *next*
+> sync; concepts already present are not backfilled. A concept first versioned
+> after history was enabled begins its chain at that sync's `change_kind` (its
+> version 1). See [Version History](version-history.md) for the full model.
+
 ### Reading the effective policy
 
 `get_config()` returns the whole row as a `jsonb` object (reader-level):
@@ -304,11 +341,13 @@ SELECT jsonb_pretty(pgokf.get_config());
 --     "allowed_roots": [],
 --     "notify_channel": "",
 --     "store_source": false,
+--     "track_history": false,
 --     "search_backend": "native",
 --     "default_strict": true,
 --     "default_exclude": [],
 --     "okf_version_policy": "warn",
 --     "embedding_dim": 1536,
+--     "history_retention_days": 0,
 --     "sync_log_retention_days": 30,
 --     "default_text_search_config": "pg_catalog.english"
 -- }

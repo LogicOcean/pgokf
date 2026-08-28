@@ -50,6 +50,7 @@ nav:
   - Operations: operations.md
   - SQL API: sql-api.md
   - Configuration: configuration.md
+  - Version History: version-history.md
   - Security: security.md
   - Multi-tenancy: multi-tenancy.md
   - Troubleshooting: troubleshooting.md

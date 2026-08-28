@@ -51,6 +51,10 @@
 //!   provenance and bundle-log projections.
 //! - [`source`] — opt-in verbatim source-byte storage (`pgokf.concept_source`)
 //!   and retrieval, gated by the `store_source` configuration key.
+//! - [`history`] — opt-in SCD Type-2 concept version history
+//!   (`pgokf.concept_history`, `pgokf.concept_history`/`pgokf.concept_as_of`),
+//!   gated by the `track_history` configuration key; the sync engine records the
+//!   version trail from its delta and prunes to `history_retention_days`.
 //! - [`config`] — the `pgokf.allowed_roots` style configuration surface.
 //! - [`admin`] — `bundle_info`, `unregister_bundle`, `list_bundles`,
 //!   `set_bundle_enabled`.
@@ -84,6 +88,7 @@ pub mod dedup;
 pub mod embedding;
 pub mod export;
 pub mod facets;
+pub mod history;
 mod iso8601;
 pub mod links;
 pub mod neighbors;

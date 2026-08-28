@@ -74,6 +74,13 @@ enum ConfigKey {
     /// `set_concept_embedding` length check and the `rebuild_embedding_index`
     /// HNSW index typmod.
     EmbeddingDim,
+    /// Whether sync records an append-only SCD-2 version trail of each concept
+    /// into `pgokf.concept_history` (opt-in; off by default for zero storage /
+    /// behavior change).
+    TrackHistory,
+    /// Retention window, in days, for closed `pgokf.concept_history` versions;
+    /// `0` keeps history indefinitely.
+    HistoryRetentionDays,
 }
 
 impl ConfigKey {
@@ -90,6 +97,8 @@ impl ConfigKey {
             Self::NotifyChannel => "notify_channel",
             Self::OkfVersionPolicy => "okf_version_policy",
             Self::EmbeddingDim => "embedding_dim",
+            Self::TrackHistory => "track_history",
+            Self::HistoryRetentionDays => "history_retention_days",
         }
     }
 
@@ -107,6 +116,8 @@ impl ConfigKey {
             "notify_channel" => Ok(Self::NotifyChannel),
             "okf_version_policy" => Ok(Self::OkfVersionPolicy),
             "embedding_dim" => Ok(Self::EmbeddingDim),
+            "track_history" => Ok(Self::TrackHistory),
+            "history_retention_days" => Ok(Self::HistoryRetentionDays),
             other => Err(CatalogError::invalid_parameter(
                 format!("unknown configuration key: {other}"),
                 Path::new(""),
@@ -128,6 +139,8 @@ enum ConfigValue {
     NotifyChannel(String),
     OkfVersionPolicy(String),
     EmbeddingDim(i32),
+    TrackHistory(bool),
+    HistoryRetentionDays(i32),
 }
 
 /// The two accepted values of the `okf_version_policy` key.
@@ -187,21 +200,30 @@ fn validate_exclude_patterns(patterns: &[String]) -> Result<(), CatalogError> {
     Ok(())
 }
 
-/// Validate `sync_log_retention_days`: non-negative and representable as the
-/// `integer` column that stores it.
-fn validate_retention_days(days: i64) -> Result<i32, CatalogError> {
+/// Validate a non-negative retention-days value under `key_name`: it must be
+/// `>= 0` and representable as the `integer` column that stores it.
+///
+/// Shared by `sync_log_retention_days` and `history_retention_days` so both keys
+/// enforce the identical domain while carrying their own name in the error text.
+fn validate_nonneg_days(days: i64, key_name: &str) -> Result<i32, CatalogError> {
     if days < 0 {
         return Err(CatalogError::invalid_parameter(
-            "sync_log_retention_days must be greater than or equal to 0",
+            format!("{key_name} must be greater than or equal to 0"),
             Path::new(""),
         ));
     }
     i32::try_from(days).map_err(|_| {
         CatalogError::invalid_parameter(
-            format!("sync_log_retention_days is out of range: {days}"),
+            format!("{key_name} is out of range: {days}"),
             Path::new(""),
         )
     })
+}
+
+/// Validate `sync_log_retention_days`: non-negative and representable as the
+/// `integer` column that stores it.
+fn validate_retention_days(days: i64) -> Result<i32, CatalogError> {
+    validate_nonneg_days(days, "sync_log_retention_days")
 }
 
 /// Validate the structural shape of `default_text_search_config`. Existence of
@@ -380,6 +402,19 @@ fn coerce_retention_days(value: pgrx::JsonB, key: ConfigKey) -> Result<ConfigVal
     )?))
 }
 
+/// Coerce the `history_retention_days` integer key.
+fn coerce_history_retention_days(
+    value: pgrx::JsonB,
+    key: ConfigKey,
+) -> Result<ConfigValue, CatalogError> {
+    let json = value.0;
+    let raw = json.as_i64().ok_or_else(|| type_error(key, "an integer"))?;
+    Ok(ConfigValue::HistoryRetentionDays(validate_nonneg_days(
+        raw,
+        "history_retention_days",
+    )?))
+}
+
 /// Coerce and validate a `jsonb` value for `key` into a typed [`ConfigValue`].
 ///
 /// A thin per-shape dispatch: each key owns its coercion by naming its own
@@ -428,6 +463,8 @@ fn coerce(key: ConfigKey, value: pgrx::JsonB) -> Result<ConfigValue, CatalogErro
             ConfigValue::OkfVersionPolicy,
         ),
         ConfigKey::EmbeddingDim => coerce_embedding_dim(value, key),
+        ConfigKey::TrackHistory => coerce_bool(value, key, ConfigValue::TrackHistory),
+        ConfigKey::HistoryRetentionDays => coerce_history_retention_days(value, key),
     }
 }
 
@@ -519,6 +556,14 @@ fn persist(value: &ConfigValue) -> Result<(), CatalogError> {
             "UPDATE pgokf_private.config SET embedding_dim = $1 WHERE singleton",
             &[(*dim).into()],
         ),
+        ConfigValue::TrackHistory(flag) => Spi::run_with_args(
+            "UPDATE pgokf_private.config SET track_history = $1 WHERE singleton",
+            &[(*flag).into()],
+        ),
+        ConfigValue::HistoryRetentionDays(days) => Spi::run_with_args(
+            "UPDATE pgokf_private.config SET history_retention_days = $1 WHERE singleton",
+            &[(*days).into()],
+        ),
     }
     .map_err(|error| spi_error("failed to persist configuration", &error))
 }
@@ -556,6 +601,12 @@ fn reset_key(key: ConfigKey) -> Result<(), CatalogError> {
         ConfigKey::EmbeddingDim => {
             "UPDATE pgokf_private.config SET embedding_dim = DEFAULT WHERE singleton"
         }
+        ConfigKey::TrackHistory => {
+            "UPDATE pgokf_private.config SET track_history = DEFAULT WHERE singleton"
+        }
+        ConfigKey::HistoryRetentionDays => {
+            "UPDATE pgokf_private.config SET history_retention_days = DEFAULT WHERE singleton"
+        }
     };
     Spi::run(statement).map_err(|error| spi_error("failed to reset configuration key", &error))
 }
@@ -573,7 +624,9 @@ fn reset_all() -> Result<(), CatalogError> {
              search_backend = DEFAULT, \
              notify_channel = DEFAULT, \
              okf_version_policy = DEFAULT, \
-             embedding_dim = DEFAULT \
+             embedding_dim = DEFAULT, \
+             track_history = DEFAULT, \
+             history_retention_days = DEFAULT \
          WHERE singleton",
     )
     .map_err(|error| spi_error("failed to reset configuration", &error))
@@ -610,7 +663,9 @@ fn get_config_impl() -> Result<pgrx::JsonB, CatalogError> {
              'search_backend', pg_catalog.to_jsonb(search_backend),
              'notify_channel', pg_catalog.to_jsonb(notify_channel),
              'okf_version_policy', pg_catalog.to_jsonb(okf_version_policy),
-             'embedding_dim', pg_catalog.to_jsonb(embedding_dim))
+             'embedding_dim', pg_catalog.to_jsonb(embedding_dim),
+             'track_history', pg_catalog.to_jsonb(track_history),
+             'history_retention_days', pg_catalog.to_jsonb(history_retention_days))
          FROM pgokf_private.config
          WHERE singleton",
     )
@@ -721,6 +776,14 @@ pub struct SyncDefaults {
     /// How a declared-but-unsupported bundle `okf_version` is handled: `warn`
     /// (log and index anyway) or `reject` (abort the sync).
     pub okf_version_policy: String,
+    /// Whether the sync records an append-only SCD-2 version trail into
+    /// `pgokf.concept_history`. `false` (the default) records nothing, so an
+    /// install behaves exactly as before with zero extra storage.
+    pub track_history: bool,
+    /// Retention window in days for closed `pgokf.concept_history` versions;
+    /// `0` keeps history indefinitely. Consumed by the history prune at the tail
+    /// of a sync only when `track_history` is on.
+    pub history_retention_days: i32,
 }
 
 /// Read the durable sync-time defaults from the singleton config row.
@@ -739,7 +802,8 @@ pub fn sync_defaults() -> Result<SyncDefaults, CatalogError> {
         let table = client
             .select(
                 "SELECT default_strict, default_exclude, default_text_search_config, store_source,
-                        sync_log_retention_days, notify_channel, okf_version_policy
+                        sync_log_retention_days, notify_channel, okf_version_policy,
+                        track_history, history_retention_days
                  FROM pgokf_private.config
                  WHERE singleton",
                 Some(1),
@@ -789,6 +853,18 @@ pub fn sync_defaults() -> Result<SyncDefaults, CatalogError> {
                 "failed to read okf_version_policy",
                 "okf_version_policy is NULL",
             )?,
+            track_history: spi_read::required_column(
+                &row,
+                8,
+                "failed to read track_history",
+                "track_history is NULL",
+            )?,
+            history_retention_days: spi_read::required_column(
+                &row,
+                9,
+                "failed to read history_retention_days",
+                "history_retention_days is NULL",
+            )?,
         })
     })
 }
@@ -809,11 +885,17 @@ CREATE TABLE pgokf_private.config (
     notify_channel             text    NOT NULL DEFAULT '',
     okf_version_policy         text    NOT NULL DEFAULT 'warn',
     embedding_dim              integer NOT NULL DEFAULT 1536,
+    -- track_history / history_retention_days are appended last so a fresh
+    -- install matches, column-for-column, an existing install upgraded via
+    -- ADD COLUMN (see sql/pgokf--0.1.10--0.1.11.sql).
+    track_history              boolean NOT NULL DEFAULT false,
+    history_retention_days     integer NOT NULL DEFAULT 0,
     CONSTRAINT config_singleton_chk CHECK (singleton),
     CONSTRAINT config_retention_nonneg_chk CHECK (sync_log_retention_days >= 0),
     CONSTRAINT config_search_backend_chk CHECK (search_backend IN ('native', 'bm25')),
     CONSTRAINT config_okf_version_policy_chk CHECK (okf_version_policy IN ('warn', 'reject')),
-    CONSTRAINT config_embedding_dim_chk CHECK (embedding_dim BETWEEN 1 AND 16000)
+    CONSTRAINT config_embedding_dim_chk CHECK (embedding_dim BETWEEN 1 AND 16000),
+    CONSTRAINT config_history_retention_nonneg_chk CHECK (history_retention_days >= 0)
 );
 
 INSERT INTO pgokf_private.config DEFAULT VALUES;
@@ -842,6 +924,10 @@ COMMENT ON COLUMN pgokf_private.config.okf_version_policy IS
     'How sync treats a bundle-root index.md that declares an okf_version this build does not support (only 0.2 / 0.2.x is supported): ''warn'' (the default) logs a WARNING and indexes anyway, ''reject'' aborts the sync with 22023. An absent okf_version is always accepted and leaves pgokf.bundles.okf_version NULL.';
 COMMENT ON COLUMN pgokf_private.config.embedding_dim IS
     'Expected dimension (1..=16000) of the caller-computed concept embeddings streamed in via pgokf.set_concept_embedding: the setter rejects any real[] whose length differs, and pgokf.rebuild_embedding_index builds its pgvector HNSW index with this typmod (vector(embedding_dim)). Default 1536. The extension never computes embeddings; a change is not retroactive to already-stored rows and should be followed by re-ingestion and pgokf.rebuild_embedding_index. HNSW indexing applies only up to pgvector''s 2000-dimension index limit; above it semantic search still works via an exact scan.';
+COMMENT ON COLUMN pgokf_private.config.track_history IS
+    'Whether a register/refresh/content sync records an append-only SCD-2 version trail of each changed concept into pgokf.concept_history (true = keep point-in-time history; storage/retention tradeoff) or records nothing (false, the default). Off by default so an existing install, and any bundle synced with history disabled, behaves exactly as before with zero extra storage. Not retroactive: enabling it starts recording at the next sync; a concept first versioned after it was enabled begins at version 1 with the change_kind of that sync.';
+COMMENT ON COLUMN pgokf_private.config.history_retention_days IS
+    'Retention window in days for CLOSED pgokf.concept_history versions (valid_to IS NOT NULL): closed versions whose valid_to predates now() - this many days are pruned in the same transaction after each successful sync appends its history, when track_history is on. The single current open version of a concept (valid_to IS NULL) is never pruned. 0 (the default) keeps history indefinitely; must be >= 0.';
 ",
     name = "config_table",
     requires = ["catalog_tables"]
@@ -863,8 +949,9 @@ mod pgokf {
     /// `default_text_search_config` (any installed configuration),
     /// `search_backend` (`native` or `bm25`), `notify_channel` (a safe
     /// `LISTEN`/`NOTIFY` identifier, or empty to disable),
-    /// `okf_version_policy` (`warn` or `reject`), and an integer for
-    /// `sync_log_retention_days` and `embedding_dim` (1..=16000). Unknown keys
+    /// `okf_version_policy` (`warn` or `reject`), a boolean for
+    /// `track_history`, and an integer for `sync_log_retention_days`,
+    /// `history_retention_days`, and `embedding_dim` (1..=16000). Unknown keys
     /// and wrong-shaped or out-of-domain values raise SQLSTATE `22023`.
     #[pg_extern(requires = ["config_table"])]
     fn set_config(key: &str, value: pgrx::JsonB) {
@@ -946,6 +1033,8 @@ mod tests {
             ("notify_channel", ConfigKey::NotifyChannel),
             ("okf_version_policy", ConfigKey::OkfVersionPolicy),
             ("embedding_dim", ConfigKey::EmbeddingDim),
+            ("track_history", ConfigKey::TrackHistory),
+            ("history_retention_days", ConfigKey::HistoryRetentionDays),
         ];
 
         for (name, key) in expected {
@@ -1028,6 +1117,20 @@ mod tests {
 
         // Assert
         assert_eq!(error.sqlstate(), "22023");
+    }
+
+    #[test]
+    fn validate_nonneg_days_accepts_zero_and_rejects_negative_with_key_name() {
+        // Arrange / Act: history_retention_days shares the non-negative domain
+        // but carries its own name in the error text.
+        let ok = validate_nonneg_days(0, "history_retention_days").expect("zero is valid");
+        let error = validate_nonneg_days(-1, "history_retention_days")
+            .expect_err("negative retention must fail");
+
+        // Assert
+        assert_eq!(ok, 0);
+        assert_eq!(error.sqlstate(), "22023");
+        assert!(error.message().contains("history_retention_days"));
     }
 
     #[test]

@@ -12,6 +12,67 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 Nothing yet.
 
+## [0.1.11] - 2026-08-28
+
+**Opt-in concept version history**: an append-only SCD Type-2 version trail of
+each concept, with point-in-time queries — *"what did this runbook say last
+Tuesday?"*. The feature is **off by default**: with the new `track_history` key
+disabled (the default), a sync records nothing and an existing install behaves
+**exactly as before with zero extra storage**, which is what keeps the release
+backward compatible. Everything is additive, so
+`ALTER EXTENSION pgokf UPDATE TO '0.1.11'` migrates an existing install in a
+single transaction and yields a catalog identical to a fresh 0.1.11. The two new
+config columns are backfilled by their defaults (history off, retention 0).
+
+### Added
+
+- **`pgokf.concept_history` table** — an append-only SCD Type-2 version trail. One
+  row per concept version with a per-concept monotonic `version` and a validity
+  interval `[valid_from, valid_to)` (`valid_to IS NULL` = the current open
+  version), a `change_kind` (`added` / `updated` / `removed`), and a snapshot of
+  the concept core (`type`, `title`, `description`, `tags`, `resource`,
+  `body_text`, `file_hash`) at that version. Populated only when `track_history`
+  is on. Cascades from **`pgokf.bundles`** (not `pgokf.concepts`), so a removed
+  concept keeps its history until the bundle is unregistered. Multi-tenant with
+  the standard opt-in `tenant_id` row-level security and a
+  `(bundle_id, concept_id, valid_from)` lookup index; `SELECT` granted to
+  `pgokf_reader`.
+- **`pgokf.concept_history(bundle_id, concept_id, max_rows DEFAULT 100)`** — the
+  version timeline for one concept, newest first, as `SETOF pgokf.concept_version`.
+  Reader-level, `STABLE`, invoker rights (the caller's tenant RLS applies).
+- **`pgokf.concept_as_of(bundle_id, concept_id, as_of)`** — the single version
+  valid at an instant (`valid_from <= as_of AND (valid_to IS NULL OR as_of <
+  valid_to)`), or zero rows if the concept did not exist or had been removed then.
+  The point-in-time answer. Reader-level, `STABLE`, invoker rights.
+- **`pgokf.concept_version`** composite (`version`, `valid_from`, `valid_to`,
+  `change_kind`, `type`, `title`, `description`, `file_hash`) — the row shape both
+  readers return.
+- **`track_history`** configuration key (`boolean`, default `false`) — the opt-in
+  switch. When on, every register/refresh/content sync records history from its
+  delta inside the same transaction, so history commits atomically with the sync:
+  an added concept starts at version 1; an updated concept closes its open version
+  and appends the next; a removed concept closes its open version and appends a
+  zero-width removal tombstone. Documented as a storage/retention tradeoff.
+- **`history_retention_days`** configuration key (`integer`, default `0` = keep
+  indefinitely) — bounds history growth. When positive, closed versions
+  (`valid_to IS NOT NULL`) older than the window are pruned in the same
+  transaction after each sync; the single current open version of a concept is
+  never pruned.
+
+### Compatibility
+
+- **Backward compatible and opt-in.** With `track_history` off (the default) no
+  `pgokf.concept_history` row is ever written and there is zero behavior or
+  storage change; the new reader functions simply return no rows. Enabling
+  `track_history` is not retroactive — recording begins at the next sync, and a
+  concept first versioned afterward begins its chain at that sync's `change_kind`.
+- Version-history intervals are contiguous and non-overlapping per concept, with
+  exactly one open version per live concept; each sync stamps its rows with a
+  single captured instant so a closed version's `valid_to` abuts the next
+  version's `valid_from`.
+- The public function-surface count rises from 36 to 38 (`concept_history`,
+  `concept_as_of`); see [docs/api-stability.md](docs/api-stability.md).
+
 ## [0.1.10] - 2026-08-28
 
 **OKF-conformance batch**: an Attested Computation concept's type-specific

@@ -21,7 +21,7 @@ the database. Complete comment coverage is a release gate (see
 
 ## The stable surface
 
-### Functions (37)
+### Functions (39)
 
 | Function | Role required | Purpose |
 | -------- | ------------- | ------- |
@@ -45,6 +45,8 @@ the database. Complete comment coverage is a release gate (see
 | `pgokf.set_concept_embedding(bigint, text, real[])` | `pgokf_writer` | Store a caller-computed embedding for a concept (no bundled model) |
 | `pgokf.rebuild_embedding_index()` | `pgokf_admin` | (Re)build the optional pgvector HNSW index; a no-op with a notice when pgvector is not installed |
 | `pgokf.concept_neighbors(text, integer, bigint)` | `pgokf_reader` | Walk the resolved link graph |
+| `pgokf.concept_history(bigint, text, integer)` | `pgokf_reader` | Version timeline of a concept (opt-in `track_history`) |
+| `pgokf.concept_as_of(bigint, text, timestamptz)` | `pgokf_reader` | The concept version valid at a point in time |
 | `pgokf.set_config(text, jsonb)` | `pgokf_admin` | Set a durable configuration key |
 | `pgokf.reset_config(text)` | `pgokf_admin` | Reset one/all configuration keys |
 | `pgokf.get_config()` | `pgokf_reader` | Effective configuration as jsonb |
@@ -69,25 +71,26 @@ arguments (`name`/`options` on `register_bundle`, `bundle_id`/`limit` on search
 and neighbors) are contractual too: an existing call that omits them keeps
 working.
 
-### Composite types (13)
+### Composite types (14)
 
 `pgokf.bundle_sync_result`, `pgokf.concept_search_result`,
 `pgokf.concept_neighbor`, `pgokf.bundle_info`, `pgokf.export_result`,
 `pgokf.sync_log_entry`, `pgokf.catalog_stat`, `pgokf.stale_concept`,
 `pgokf.sync_change`, `pgokf.access_log_entry`, `pgokf.duplicate_group`,
-`pgokf.search_facet`, `pgokf.bundle_log_entry`.
+`pgokf.search_facet`, `pgokf.bundle_log_entry`, `pgokf.concept_version`.
 
 The set of columns, their names, and their types are stable. New columns are
 **not** added to an existing composite type in a compatible release, because
 `SELECT *` and positional row expansion would break; a new field ships as a new
 type or a new function instead.
 
-### Tables (10 public + 4 documented-internal)
+### Tables (11 public + 4 documented-internal)
 
 Public, `SELECT`-able by `pgokf_reader`: `pgokf.bundles`, `pgokf.concepts`,
 `pgokf.concept_metadata`, `pgokf.links`, `pgokf.concept_provenance`,
 `pgokf.concept_verification`, `pgokf.concept_provenance_source`,
-`pgokf.concept_source`, `pgokf.concept_embedding`, `pgokf.bundle_log`.
+`pgokf.concept_source`, `pgokf.concept_embedding`, `pgokf.bundle_log`,
+`pgokf.concept_history`.
 
 These are a **read projection**. Callers may `SELECT` from them and depend on
 existing column names and types; the columns listed in
