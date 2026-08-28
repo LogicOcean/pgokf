@@ -8,8 +8,9 @@ from thousands to tens of millions of concepts.
 To *author* the concepts being searched, see the
 [authoring guide](okf-authoring.md). For exact signatures, result columns, and
 SQLSTATEs, see the [SQL API reference](sql-api.md). For the ranking research and
-the future BM25 adapter, see [BM25 research](bm25-research.md) and
-[benchmarks](benchmarks.md).
+the optional BM25 backend, see [BM25 research](bm25-research.md) and
+[benchmarks](benchmarks.md); the enable steps are in
+[Enabling the BM25 backend](#enabling-the-bm25-backend) below.
 
 All of the output below is **real**, captured from a live PostgreSQL 18 cluster
 with the extension's `templates/` assembled into one bundle.
@@ -49,13 +50,18 @@ LIMIT 10;
  wiki-article | article  | 0.0538
 ```
 
-The engine is **native PostgreSQL full-text search** — no extensions beyond
-`pgokf` are required, so it works on every supported server (PostgreSQL 15–19).
-Concretely, for each row:
+By default the engine is **native PostgreSQL full-text search** — no extensions
+beyond `pgokf` are required, so it works on every supported server (PostgreSQL
+15–19). Concretely, for each row:
 
 - matching is `body_tsv @@ websearch_to_tsquery(<config>, query)`,
 - ranking is `ts_rank_cd(body_tsv, query)`,
 - the snippet is `ts_headline(<config>, title ‖ description ‖ body_text, query)`.
+
+The **same function** can instead dispatch to a ParadeDB `pg_search` BM25
+backend when the durable `search_backend` policy key is set to `bm25` — the
+signature, result columns, and role checks are identical, so nothing in your
+queries changes. See [Enabling the BM25 backend](#enabling-the-bm25-backend).
 
 Only **enabled** bundles are searched. Pass `bundle_id` to scope to one bundle;
 pass `limit_count` (1–500) to cap the result set.
@@ -422,23 +428,112 @@ SELECT pgokf.set_config('default_text_search_config', '"pg_catalog.simple"'::jso
 
 ---
 
-## BM25 is a future adapter, not a current function
+## Enabling the BM25 backend
 
-There is **no `pgokf` BM25 function today.** Native `ts_rank_cd` is the shipped,
-required baseline, and it is the right default for selective queries and
-moderate corpora.
-
-BM25 is a **benchmarked, future, optional adapter**. The research — a ParadeDB
-`pg_search` top-k adapter — kept broad "rank everything" queries roughly **flat
-at ~10–15 ms** where native `ts_rank_cd` scales linearly, a **30–194×** speedup
-on broad queries, by pruning with WAND-style top-k instead of scoring the whole
-match set. It is not shipped because it is not available on arbitrary managed
-PostgreSQL and carries licensing/operational cost. The full analysis, the
-supported-version matrix, and the validation plan are in
-[BM25 research](bm25-research.md); the measured native-FTS numbers are in
+Native `ts_rank_cd` is the shipped, zero-dependency **default**, and it is the
+right choice for selective queries and moderate corpora. For **broad,
+relevance-ranked** queries — where a common term matches millions of rows and
+native ranking scales linearly (see
+[Selective vs. broad queries](#selective-vs-broad-queries)) — `pgokf` can
+instead run **BM25 top-k** over a ParadeDB `pg_search` index. Block-Max WAND
+pruning keeps broad queries roughly **flat** where native grows linearly: the
+project's research measured a **30–194× speedup on broad queries** (native stays
+the winner for selective ones). The analysis and version matrix are in
+[BM25 research](bm25-research.md); native's measured numbers are in
 [benchmarks](benchmarks.md).
 
-Until then: keep broad queries fast with the
+The BM25 backend is **opt-in** and rides on an external extension, so it is off
+until you enable it deliberately.
+
+### Honesty first — the dependency
+
+`native` is the default precisely because it needs nothing beyond `pgokf`. BM25
+requires **ParadeDB `pg_search`**, which:
+
+- is licensed **AGPL-3.0** (Community edition) — evaluate that against your
+  distribution model before adopting it;
+- must be added to **`shared_preload_libraries`** (a server restart), and
+  requires **`pgvector`** installed alongside it;
+- targets PostgreSQL **15–18** and is **not** available on every managed
+  PostgreSQL service.
+
+`pgokf` itself never links `pg_search`: `CREATE EXTENSION pgokf` succeeds with or
+without it, and the code reaches every `pg_search` object only through runtime
+SQL. If you cannot take that dependency, stay on `native` — nothing else in
+`pgokf` needs it.
+
+### Steps
+
+1. **Install `pg_search` (and `pgvector`) at the cluster level.** Add
+   `pg_search` to `shared_preload_libraries` in `postgresql.conf` and restart:
+
+   ```conf
+   # postgresql.conf
+   shared_preload_libraries = 'pg_search'
+   ```
+
+   Then, in the database that holds the catalog, create the extensions
+   (`CASCADE` pulls in `vector`):
+
+   ```sql
+   CREATE EXTENSION IF NOT EXISTS pg_search CASCADE;
+   ```
+
+2. **Switch the backend** (admin only):
+
+   ```sql
+   SELECT pgokf.set_config('search_backend', '"bm25"'::jsonb);
+   ```
+
+3. **Build the index** with the admin-only function (captured live):
+
+   ```sql
+   SELECT pgokf.rebuild_search_index();
+   -- t
+   ```
+
+   `rebuild_search_index()` (re)creates a `bm25` index on `pgokf.concepts` over
+   `id` (the key field), `title`, `description`, `body_text`, and `type`. It is
+   idempotent — safe to re-run — and returns `false` with a `NOTICE` when
+   `pg_search` is not installed (a no-op). Once the index exists, ordinary
+   incremental sync (`register_bundle` / `refresh_bundle`) maintains it
+   automatically; re-run `rebuild_search_index()` only if you want it rebuilt
+   from scratch.
+
+That's it — `pgokf.concept_search('database')` now returns BM25-ranked results
+with `paradedb.score` in the `rank` column, still carrying a `ts_headline`
+snippet so the `headline` column is unchanged.
+
+### Graceful fallback
+
+If `search_backend` is `bm25` but the prerequisites are missing, search **does
+not error** — it falls back to native and logs a `WARNING`, so a half-finished
+setup degrades instead of breaking:
+
+```sql
+-- search_backend = 'bm25', but pg_search is not installed:
+SELECT concept_id FROM pgokf.concept_search('database');
+-- WARNING:  pgokf: search_backend is 'bm25' but the pg_search extension is not
+--           installed; falling back to native full-text search. ...
+--  (native results follow)
+```
+
+The same fallback (with a "no bm25 index" warning) happens when `pg_search` is
+installed but `rebuild_search_index()` has not been run yet. To silence the
+warning, either finish the setup or set `search_backend` back to `native`.
+
+### Tokenizer differences to expect
+
+The two backends tokenize differently, so a query can rank — or match — slightly
+differently between them. Native FTS applies the `default_text_search_config`
+dictionary (English stemming by default), so `postgres` stems to match
+`PostgreSQL`. The BM25 index uses `pg_search`'s default tokenizer, which
+lowercases but does not apply that stemmer, so the literal term `postgres` will
+**not** match `postgresql`; search for the term as it appears in the text
+(`database`, `failover`, …). This is expected, not a bug: BM25 is tuned for
+broad relevance ranking, native for dictionary-faithful matching.
+
+Keep broad queries fast on native, when you are not on BM25, with the
 [pre-filter-then-rank pattern](#the-pattern-pre-filter-then-rank) above.
 
 ---
@@ -450,6 +545,6 @@ Until then: keep broad queries fast with the
 - [Configuration](configuration.md) — `default_text_search_config` and the GUC
   ceilings (`pgokf.max_graph_hops`, and more).
 - [Benchmarks](benchmarks.md) — measured FTS / filter / graph performance.
-- [BM25 research](bm25-research.md) — the future top-k adapter.
+- [BM25 research](bm25-research.md) — the `pg_search` top-k backend analysis.
 - Example queries: [`examples/queries/search.sql`](https://github.com/LogicOcean/pgokf/blob/main/examples/queries/search.sql),
   [`examples/queries/graph.sql`](https://github.com/LogicOcean/pgokf/blob/main/examples/queries/graph.sql).

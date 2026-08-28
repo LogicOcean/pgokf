@@ -82,6 +82,7 @@ admin-only).
 | `sync_log_retention_days` | integer | `30` | `>= 0` and fits `integer` |
 | `default_exclude` | array of strings | `[]` | each pattern non-empty and NUL-free |
 | `store_source` | boolean | `false` | must be a boolean |
+| `search_backend` | string | `"native"` | one of `"native"`, `"bm25"` |
 
 ### Which keys the current engine consults
 
@@ -96,6 +97,7 @@ ingest/search paths:
 | `allowed_roots` | **Enforced.** When non-empty, a registered bundle path must resolve inside one of the roots (symlink-escape safe), else `22023`. |
 | `default_text_search_config` | **Applied.** Used as the `regconfig` for `to_tsvector` when building each concept's `body_tsv` at index time, and for `websearch_to_tsquery`/`ts_headline` at query time, so query parsing matches the configuration that indexed the rows. See the caveat below. |
 | `store_source` | **Honored.** When `true`, sync stores each concept's verbatim source bytes in `pgokf.concept_source`; when `false` (default) it stores none. See the storage-tiers section below. |
+| `search_backend` | **Applied.** Selects the ranked-search backend `pgokf.concept_search` dispatches to: `native` PostgreSQL FTS (default) or `bm25` (ParadeDB `pg_search`). When `bm25` but `pg_search` or its index is absent, search falls back to native with a warning. See the search-backend section below. |
 | `default_strict` | **Stored, not yet consulted.** Sync is always strict — the first malformed file aborts the sync. |
 | `sync_log_retention_days` | **Stored, not yet consulted.** No sync-log retention is wired up yet. |
 | `default_exclude` | **Stored, not yet consulted.** Discovery does not yet apply these exclusion globs. |
@@ -148,6 +150,35 @@ exactly as one built without the feature.
 > `register_bundle` — which is currently the only way to rebuild every `body_tsv`
 > under the new config.
 
+### Search backend — `search_backend`
+
+`search_backend` selects the strategy `pgokf.concept_search` runs behind its
+fixed signature and result shape:
+
+- **`native`** (the default) — zero-dependency PostgreSQL full-text search
+  (`websearch_to_tsquery` + `ts_rank_cd` + `ts_headline` over the weighted
+  `body_tsv` GIN index). It works on every supported server (PG 15–19) with no
+  extra extension, and remains the right choice for selective queries.
+- **`bm25`** — Block-Max WAND top-k over a ParadeDB `pg_search` index, which is
+  dramatically faster for broad, relevance-ranked queries. It requires the
+  external `pg_search` extension (see below).
+
+`pgokf` never links `pg_search` at build time — `CREATE EXTENSION pgokf`
+succeeds whether or not `pg_search` is installed. When `search_backend` is
+`bm25` but `pg_search` is not installed, or no `bm25` index exists on
+`pgokf.concepts`, `concept_search` **falls back to native with a `WARNING`**
+instead of erroring. Build the index with the admin-only
+`pgokf.rebuild_search_index()`, and see [`search-guide.md`](search-guide.md) for
+the full enable-BM25 walkthrough, the honesty notes about the `pg_search`
+dependency (AGPL-3.0, `shared_preload_libraries`, PG-version constraints), and
+the tokenizer differences between the two backends.
+
+> **Honesty note — `bm25` needs an external extension.** `native` is the
+> default precisely because it has no dependencies. `bm25` is opt-in and pulls
+> in ParadeDB `pg_search` (which itself requires `pgvector` and a
+> `shared_preload_libraries` entry). If you cannot or do not want that
+> dependency, stay on `native`.
+
 ### Reading the effective policy
 
 `get_config()` returns the whole row as a `jsonb` object (reader-level):
@@ -157,6 +188,7 @@ SELECT jsonb_pretty(pgokf.get_config());
 -- {
 --     "allowed_roots": [],
 --     "store_source": false,
+--     "search_backend": "native",
 --     "default_strict": true,
 --     "default_exclude": [],
 --     "sync_log_retention_days": 30,
@@ -185,6 +217,10 @@ SELECT pgokf.set_config('default_text_search_config', '"pg_catalog.simple"'::jso
 -- the store_source retroactivity warning above.
 SELECT pgokf.set_config('store_source', 'true'::jsonb);
 
+-- Switch ranked search to ParadeDB pg_search BM25 (then run rebuild_search_index).
+-- Falls back to native, with a warning, if pg_search or its index is absent.
+SELECT pgokf.set_config('search_backend', '"bm25"'::jsonb);
+
 -- Reserved keys (stored, not yet consulted by the engine):
 SELECT pgokf.set_config('default_strict', 'false'::jsonb);
 SELECT pgokf.set_config('sync_log_retention_days', '14'::jsonb);
@@ -202,6 +238,8 @@ SELECT pgokf.set_config('sync_log_retention_days', '-1'::jsonb);
 -- ERROR:  22023: sync_log_retention_days must be greater than or equal to 0
 SELECT pgokf.set_config('default_text_search_config', '"no_such_config"'::jsonb);
 -- ERROR:  22023: text search configuration does not exist: no_such_config
+SELECT pgokf.set_config('search_backend', '"solr"'::jsonb);
+-- ERROR:  22023: search_backend must be one of 'native', 'bm25', got solr
 ```
 
 ### Resetting keys

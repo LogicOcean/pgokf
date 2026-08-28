@@ -23,8 +23,8 @@
 //! surface small while still letting each key carry its natural shape — a
 //! `jsonb` array of strings for `allowed_roots`/`default_exclude`, a boolean
 //! for `default_strict`/`store_source`, an integer for
-//! `sync_log_retention_days`, and a string for `default_text_search_config`.
-//! Every value is validated and
+//! `sync_log_retention_days`, and a string for `default_text_search_config`
+//! and `search_backend`. Every value is validated and
 //! coerced per key ([`coerce`]); an unknown key or a value of the wrong shape
 //! or domain is rejected with SQLSTATE `22023`. `pgokf.get_config()` is a
 //! reader-level projection returning the effective policy as `jsonb`.
@@ -61,6 +61,8 @@ enum ConfigKey {
     DefaultExclude,
     /// Whether sync stores each concept's verbatim source bytes in Postgres.
     StoreSource,
+    /// Ranked-search execution backend (`native` FTS or optional `bm25`).
+    SearchBackend,
 }
 
 impl ConfigKey {
@@ -73,6 +75,7 @@ impl ConfigKey {
             Self::SyncLogRetentionDays => "sync_log_retention_days",
             Self::DefaultExclude => "default_exclude",
             Self::StoreSource => "store_source",
+            Self::SearchBackend => "search_backend",
         }
     }
 
@@ -86,6 +89,7 @@ impl ConfigKey {
             "sync_log_retention_days" => Ok(Self::SyncLogRetentionDays),
             "default_exclude" => Ok(Self::DefaultExclude),
             "store_source" => Ok(Self::StoreSource),
+            "search_backend" => Ok(Self::SearchBackend),
             other => Err(CatalogError::invalid_parameter(
                 format!("unknown configuration key: {other}"),
                 Path::new(""),
@@ -103,6 +107,7 @@ enum ConfigValue {
     SyncLogRetentionDays(i32),
     DefaultExclude(Vec<String>),
     StoreSource(bool),
+    SearchBackend(String),
 }
 
 fn spi_error(context: &str, error: &pgrx::spi::Error) -> CatalogError {
@@ -174,6 +179,24 @@ fn validate_text_search_config_name(name: &str) -> Result<(), CatalogError> {
     Ok(())
 }
 
+/// Validate `search_backend`: it must name one of the supported ranked-search
+/// backends (`native` or `bm25`), matched by the shared registry in
+/// [`crate::catalog::search_backend`] so the accepted set never drifts from the
+/// backends the dispatcher can actually construct.
+fn validate_search_backend(name: &str) -> Result<(), CatalogError> {
+    if crate::catalog::search_backend::is_supported(name) {
+        Ok(())
+    } else {
+        Err(CatalogError::invalid_parameter(
+            format!(
+                "search_backend must be one of {}, got {name}",
+                crate::catalog::search_backend::supported_display()
+            ),
+            Path::new(""),
+        ))
+    }
+}
+
 /// Coerce and validate a `jsonb` value for `key` into a typed [`ConfigValue`].
 ///
 /// Consumes the wrapper so no argument is passed by value only to be borrowed,
@@ -224,6 +247,11 @@ fn coerce(key: ConfigKey, value: pgrx::JsonB) -> Result<ConfigValue, CatalogErro
             let name = json.as_str().ok_or_else(|| type_error(key, "a string"))?;
             validate_text_search_config_name(name)?;
             Ok(ConfigValue::DefaultTextSearchConfig(name.to_owned()))
+        }
+        ConfigKey::SearchBackend => {
+            let name = json.as_str().ok_or_else(|| type_error(key, "a string"))?;
+            validate_search_backend(name)?;
+            Ok(ConfigValue::SearchBackend(name.to_owned()))
         }
     }
 }
@@ -300,6 +328,10 @@ fn persist(value: &ConfigValue) -> Result<(), CatalogError> {
             "UPDATE pgokf_private.config SET store_source = $1 WHERE singleton",
             &[(*flag).into()],
         ),
+        ConfigValue::SearchBackend(name) => Spi::run_with_args(
+            "UPDATE pgokf_private.config SET search_backend = $1 WHERE singleton",
+            &[name.clone().into()],
+        ),
     }
     .map_err(|error| spi_error("failed to persist configuration", &error))
 }
@@ -325,6 +357,9 @@ fn reset_key(key: ConfigKey) -> Result<(), CatalogError> {
         ConfigKey::StoreSource => {
             "UPDATE pgokf_private.config SET store_source = DEFAULT WHERE singleton"
         }
+        ConfigKey::SearchBackend => {
+            "UPDATE pgokf_private.config SET search_backend = DEFAULT WHERE singleton"
+        }
     };
     Spi::run(statement).map_err(|error| spi_error("failed to reset configuration key", &error))
 }
@@ -338,7 +373,8 @@ fn reset_all() -> Result<(), CatalogError> {
              default_strict = DEFAULT, \
              sync_log_retention_days = DEFAULT, \
              default_exclude = DEFAULT, \
-             store_source = DEFAULT \
+             store_source = DEFAULT, \
+             search_backend = DEFAULT \
          WHERE singleton",
     )
     .map_err(|error| spi_error("failed to reset configuration", &error))
@@ -371,7 +407,8 @@ fn get_config_impl() -> Result<pgrx::JsonB, CatalogError> {
              'default_strict', pg_catalog.to_jsonb(default_strict),
              'sync_log_retention_days', pg_catalog.to_jsonb(sync_log_retention_days),
              'default_exclude', pg_catalog.to_jsonb(default_exclude),
-             'store_source', pg_catalog.to_jsonb(store_source))
+             'store_source', pg_catalog.to_jsonb(store_source),
+             'search_backend', pg_catalog.to_jsonb(search_backend))
          FROM pgokf_private.config
          WHERE singleton",
     )
@@ -507,8 +544,10 @@ CREATE TABLE pgokf_private.config (
     sync_log_retention_days    integer NOT NULL DEFAULT 30,
     default_exclude            text[]  NOT NULL DEFAULT '{}',
     store_source               boolean NOT NULL DEFAULT false,
+    search_backend             text    NOT NULL DEFAULT 'native',
     CONSTRAINT config_singleton_chk CHECK (singleton),
-    CONSTRAINT config_retention_nonneg_chk CHECK (sync_log_retention_days >= 0)
+    CONSTRAINT config_retention_nonneg_chk CHECK (sync_log_retention_days >= 0),
+    CONSTRAINT config_search_backend_chk CHECK (search_backend IN ('native', 'bm25'))
 );
 
 INSERT INTO pgokf_private.config DEFAULT VALUES;
@@ -529,6 +568,8 @@ COMMENT ON COLUMN pgokf_private.config.default_exclude IS
     'Default bundle-relative glob patterns excluded from discovery.';
 COMMENT ON COLUMN pgokf_private.config.store_source IS
     'Whether sync stores each concept''s verbatim source bytes in pgokf.concept_source (true = small self-contained tier: the original files live in Postgres) or leaves the source in its external object-store/data-lake (false, the default = enterprise tier: Postgres holds only metadata and search). Not retroactive: a change takes effect for bundles synced or refreshed afterward; existing rows keep their stored source (or absence of one) until refresh_bundle re-indexes them.';
+COMMENT ON COLUMN pgokf_private.config.search_backend IS
+    'Ranked-search execution backend for pgokf.concept_search: ''native'' (the default, zero-dependency PostgreSQL FTS available on every supported server) or ''bm25'' (Block-Max WAND top-k via the external ParadeDB pg_search extension). When set to ''bm25'' the search transparently falls back to native, with a warning, if pg_search is not installed or no bm25 index exists on pgokf.concepts (build one with pgokf.rebuild_search_index).';
 ",
     name = "config_table",
     requires = ["catalog_tables"]
@@ -547,7 +588,8 @@ mod pgokf {
     /// of strings for `allowed_roots` / `default_exclude`, a boolean for
     /// `default_strict` / `store_source`, an integer for
     /// `sync_log_retention_days`, and a string for
-    /// `default_text_search_config`. Unknown keys and wrong-shaped or
+    /// `default_text_search_config` (any installed configuration) and
+    /// `search_backend` (`native` or `bm25`). Unknown keys and wrong-shaped or
     /// out-of-domain values raise SQLSTATE `22023`.
     #[pg_extern(requires = ["config_table"])]
     fn set_config(key: &str, value: pgrx::JsonB) {
@@ -625,6 +667,7 @@ mod tests {
             ("sync_log_retention_days", ConfigKey::SyncLogRetentionDays),
             ("default_exclude", ConfigKey::DefaultExclude),
             ("store_source", ConfigKey::StoreSource),
+            ("search_backend", ConfigKey::SearchBackend),
         ];
 
         for (name, key) in expected {
@@ -745,6 +788,26 @@ mod tests {
 
         // Assert
         assert_eq!(error.sqlstate(), "22023");
+    }
+
+    #[test]
+    fn validate_search_backend_accepts_supported_backends() {
+        // Arrange & Act & Assert
+        assert!(validate_search_backend("native").is_ok());
+        assert!(validate_search_backend("bm25").is_ok());
+    }
+
+    #[test]
+    fn validate_search_backend_rejects_unknown_backend() {
+        // Arrange
+        let name = "elasticsearch";
+
+        // Act
+        let error = validate_search_backend(name).expect_err("unknown backend must be rejected");
+
+        // Assert
+        assert_eq!(error.sqlstate(), "22023");
+        assert!(error.message().contains("elasticsearch"));
     }
 
     #[test]

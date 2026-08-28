@@ -12,15 +12,16 @@
 //!   created in its own `bundle_info_type` SQL block ordered after
 //!   `catalog_tables`. The core deliberately does not create it because
 //!   neither sync nor search needs it;
-//! - `pgokf.unregister_bundle(bundle_id)` — admin-only
-//!   ([`crate::security::Operation::Register`]). It serializes on the bundle
+//! - `pgokf.unregister_bundle(bundle_id)` — writer-tier
+//!   ([`crate::security::Operation::Ingest`]). It serializes on the bundle
 //!   advisory lock ([`crate::catalog::sync::advisory_lock_key`]) keyed on the
 //!   **stored** canonical path, deletes the `pgokf.bundles` row (concepts,
 //!   metadata, and every feature projection cascade through their foreign
 //!   keys), and returns the removed [`bundle_info`](self) for good UX. An
 //!   unknown `bundle_id` raises SQLSTATE `22023`. It is `SECURITY DEFINER`
 //!   because write access to the base tables stays with the extension owner;
-//!   `EXECUTE` is revoked from `PUBLIC` and granted to `pgokf_admin`;
+//!   `EXECUTE` is revoked from `PUBLIC` and granted to `pgokf_writer` (which
+//!   `pgokf_admin` inherits);
 //! - `pgokf.list_bundles()` / `pgokf.bundle_info(bundle_id)` — reader-level
 //!   ([`crate::security::Operation::Search`]), `STABLE` projections over
 //!   `pgokf.bundles`. Like [`crate::catalog::search`], they run with invoker
@@ -240,7 +241,7 @@ fn bundle_info_impl(bundle_id: i64) -> Result<Option<BundleInfo>, CatalogError> 
 /// Authorize, lock on the stored canonical path, and delete the bundle,
 /// returning the removed projection.
 fn unregister_bundle_impl(bundle_id: i64) -> Result<BundleInfo, CatalogError> {
-    security::authorize_current_user(security::Operation::Register, Path::new(""))?;
+    security::authorize_current_user(security::Operation::Ingest, Path::new(""))?;
     let stored_path =
         select_bundle_path(bundle_id)?.ok_or_else(|| unknown_bundle_error(bundle_id))?;
 
@@ -282,11 +283,11 @@ COMMENT ON TYPE pgokf.bundle_info IS
 
     /// Unregister a bundle and return the removed bundle's info.
     ///
-    /// Requires membership in `pgokf_admin`. Serializes on the bundle
-    /// advisory lock keyed on the stored canonical path, then deletes the
-    /// `pgokf.bundles` row; concepts, metadata, and every feature projection
-    /// cascade through their foreign keys. Raises SQLSTATE `22023` when
-    /// `bundle_id` is not registered.
+    /// Requires membership in `pgokf_writer` (an admin qualifies by
+    /// inheritance). Serializes on the bundle advisory lock keyed on the
+    /// stored canonical path, then deletes the `pgokf.bundles` row; concepts,
+    /// metadata, and every feature projection cascade through their foreign
+    /// keys. Raises SQLSTATE `22023` when `bundle_id` is not registered.
     #[pg_extern(requires = ["bundle_info_type"])]
     fn unregister_bundle(bundle_id: i64) -> pgrx::composite_type!('static, "pgokf.bundle_info") {
         let info = unregister_bundle_impl(bundle_id).unwrap_or_else(|error| error.raise());
@@ -324,13 +325,13 @@ COMMENT ON TYPE pgokf.bundle_info IS
 ALTER FUNCTION pgokf.unregister_bundle(bigint)
     SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
 REVOKE ALL ON FUNCTION pgokf.unregister_bundle(bigint) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION pgokf.unregister_bundle(bigint) TO pgokf_admin;
+GRANT EXECUTE ON FUNCTION pgokf.unregister_bundle(bigint) TO pgokf_writer;
 REVOKE ALL ON FUNCTION pgokf.list_bundles() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pgokf.list_bundles() TO pgokf_reader;
 REVOKE ALL ON FUNCTION pgokf.bundle_info(bigint) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pgokf.bundle_info(bigint) TO pgokf_reader;
 COMMENT ON FUNCTION pgokf.unregister_bundle(bigint) IS
-    'Unregister a bundle and return the removed bundle_info. Admin-only; concept/metadata/feature rows cascade. Raises 22023 if the bundle_id is unknown.';
+    'Unregister a bundle and return the removed bundle_info. Writer-tier (pgokf_writer; admin inherits it); concept/metadata/feature rows cascade. Raises 22023 if the bundle_id is unknown.';
 COMMENT ON FUNCTION pgokf.list_bundles() IS
     'List every registered bundle as pgokf.bundle_info, ordered by id. Reader-level.';
 COMMENT ON FUNCTION pgokf.bundle_info(bigint) IS

@@ -32,14 +32,22 @@ and indexed, never interpreted as commands. The mechanisms below defend against:
 
 ## Roles and least privilege
 
-Two cluster-wide `NOLOGIN` roles are created idempotently at extension install
-(`sql/bootstrap.sql`). You grant them to real login users; nobody logs in *as*
-them.
+Three cluster-wide `NOLOGIN` roles are created idempotently at extension install
+(`sql/bootstrap.sql`), forming a strict least-privilege hierarchy
+**`pgokf_reader` < `pgokf_writer` < `pgokf_admin`**. You grant one of them to a
+real login user; nobody logs in *as* them.
 
 | Role | Capabilities |
 | ---- | ------------ |
 | `pgokf_reader` | `USAGE` on schema `pgokf`; `SELECT` on the projection tables (including `concept_source`); `EXECUTE` on read paths: `concept_search`, `concept_neighbors`, `list_bundles`, `bundle_info`, `get_config`, `get_concept_source`. |
-| `pgokf_admin` | Inherits `pgokf_reader` (it is `GRANT`ed the reader role), plus `USAGE` on `pgokf_private` and `EXECUTE` on the mutators: `register_bundle`, `refresh_bundle`, `unregister_bundle`, `set_config`, `reset_config`, and the file-writing exports `export_parquet` and `export_sources`. |
+| `pgokf_writer` | Inherits `pgokf_reader` (it is `GRANT`ed the reader role), plus `USAGE` on schema `pgokf` and `EXECUTE` on the **ingestion** mutators: `register_bundle`, `refresh_bundle`, `unregister_bundle`. It cannot change configuration, write exports, or read `pgokf_private`. This is the intended account for an automated ingestion pipeline / the future content-ingestion API. |
+| `pgokf_admin` | Inherits `pgokf_writer` (and thus `pgokf_reader`), plus `USAGE` on `pgokf_private` and `EXECUTE` on the admin-only surface: configuration (`set_config`, `reset_config`) and the file-writing exports (`export_parquet`, `export_sources`). |
+
+The hierarchy is established with two role grants — `GRANT pgokf_reader TO
+pgokf_writer` and `GRANT pgokf_writer TO pgokf_admin` — so each tier inherits
+everything below it: a writer can also search, and an admin can also ingest and
+search. Each grant is idempotent (`GRANT` is a no-op when the membership already
+exists), so re-installing the extension never disturbs an existing hierarchy.
 
 `PUBLIC` is stripped: `REVOKE ALL ON SCHEMA pgokf FROM PUBLIC` and
 `REVOKE ALL ON SCHEMA pgokf_private FROM PUBLIC` run first, and every function
@@ -47,9 +55,12 @@ does `REVOKE ALL … FROM PUBLIC` before granting `EXECUTE` to exactly the role
 that needs it. The one deliberate exception is `pgokf.version()`, which exposes
 only the crate version string and is left executable by everyone.
 
-Because the roles are separable, an analytics user can be granted read-only
-search access without ever being able to register a bundle, mutate the catalog,
-or read the private configuration schema.
+Because the tiers are separable, an analytics user can be granted read-only
+search access (`pgokf_reader`) without ever being able to ingest a bundle; an
+ingestion pipeline can be granted `pgokf_writer` to register, refresh, and
+unregister bundles without ever being able to rewrite configuration, write files
+back to the server, or read the private configuration schema; and only
+`pgokf_admin` reaches that last, most dangerous surface.
 
 ## Defense in depth: grants plus an in-function check
 
@@ -59,20 +70,30 @@ Authorization is enforced at **two independent layers**:
    PostgreSQL before the function body runs (`42501 permission denied for
    function …`).
 2. **An in-function role check** — every entry point calls
-   `security::authorize_current_user(Operation::{Register|Refresh|Search}, …)`,
+   `security::authorize_current_user(Operation::{Register|Ingest|Search}, …)`,
    which evaluates `pg_has_role` and raises `42501` when membership is missing.
+   The three operations map onto the three tiers: `Search` requires
+   `pgokf_reader`, `Ingest` (register/refresh/unregister) requires
+   `pgokf_writer`, and `Register` — the admin-only surface: configuration and
+   the file-writing exports — requires `pgokf_admin`. Each check accepts the
+   required role *or any higher tier*, so a higher tier is authorized for a
+   lower operation exactly as the role-grant hierarchy implies.
 
 The two layers are intentionally redundant: a future grant mistake, a `SECURITY
 DEFINER` boundary, or a superuser path cannot silently bypass the policy, because
 the role check runs regardless of how execution was reached.
 
-Observed on a live cluster:
+Observed on a live cluster (three login users granted `pgokf_reader`,
+`pgokf_writer`, and `pgokf_admin` respectively):
 
 ```text
--- reader (or an unprivileged user) invoking an admin mutator:
+-- reader invoking an ingestion mutator (grant layer rejects first):
 ERROR:  42501: permission denied for function register_bundle
--- an unprivileged user invoking search:
-ERROR:  42501: permission denied for function concept_search
+-- writer invoking an admin-only mutator:
+ERROR:  42501: permission denied for function set_config
+-- writer invoking a file-writing export:
+ERROR:  42501: permission denied for function export_parquet
+-- writer CAN ingest, and admin CAN do everything, by inheritance.
 ```
 
 ### `session_user`, not `current_user`
@@ -154,8 +175,9 @@ ERROR:  22023: resolved path /tmp/.../outside-bundle is outside allowed_roots
 
 When no roots are configured, the interim policy applies: any absolute,
 canonical, traversal-free directory is accepted — and registration is still
-restricted to `pgokf_admin`. Configuring `allowed_roots` is the recommended
-hardening step for any multi-tenant or shared cluster.
+restricted to the ingest tier `pgokf_writer` (which `pgokf_admin` inherits).
+Configuring `allowed_roots` is the recommended hardening step for any
+multi-tenant or shared cluster.
 
 `allowed_roots` entries are themselves validated as absolute, traversal-free
 paths when set, so a malformed root cannot be stored.
@@ -169,9 +191,10 @@ directory. Because a file *write* from inside the backend is strictly more
 dangerous than a read, it is guarded at least as tightly as registration:
 
 - **Admin-only.** It is `SECURITY DEFINER`, `GRANT`ed `EXECUTE` to `pgokf_admin`
-  alone, and calls `authorize_current_user(Operation::Register, …)` in its body,
-  so a reader can neither be granted it accidentally nor reach it through the
-  definer boundary. No reader-executable path writes files.
+  alone, and calls `authorize_current_user(Operation::Register, …)` — the
+  admin-tier gate — in its body, so neither a reader nor a writer can be granted
+  it accidentally nor reach it through the definer boundary. No
+  reader-executable or writer-executable path writes files.
 - **Destination validated like a bundle root.** `dest_dir` passes the same
   `validate_path_syntax` (absolute, NUL-free, traversal-free) and is
   canonicalized so a symlink cannot redirect the write. When `allowed_roots` is
@@ -257,7 +280,7 @@ than string-matching messages:
 | SQLSTATE | Meaning | Example cause |
 | -------- | ------- | ------------- |
 | `22023` | invalid parameter | relative path, `..` traversal, path outside `allowed_roots`, malformed frontmatter, bad `limit_count`/`max_hops`, unknown/invalid config |
-| `42501` | insufficient privilege | missing `pgokf_admin` / `pgokf_reader` membership or `EXECUTE` grant |
+| `42501` | insufficient privilege | missing `pgokf_reader` / `pgokf_writer` / `pgokf_admin` membership or `EXECUTE` grant |
 | `23505` | unique violation | registering an already-registered canonical path |
 | `XX000` | internal error | a broken installation invariant (should not occur in normal use) |
 

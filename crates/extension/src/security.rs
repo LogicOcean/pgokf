@@ -10,19 +10,36 @@
 use crate::errors::CatalogError;
 use std::path::{Component, Path, PathBuf};
 
-/// Role allowed to register and refresh bundles.
+/// Highest tier: configuration writes and file-writing exports.
 pub const PGOKF_ADMIN_ROLE: &str = "pgokf_admin";
-/// Role allowed to run read-only search operations.
+/// Middle tier: bundle ingestion (register / refresh / unregister).
+pub const PGOKF_WRITER_ROLE: &str = "pgokf_writer";
+/// Lowest tier: read-only search and catalog reads.
 pub const PGOKF_READER_ROLE: &str = "pgokf_reader";
 
 /// Catalog operations subject to role-based authorization.
+///
+/// Each operation names the least-privilege tier it requires, and the tiers
+/// are strictly nested — `Search` (reader) < `Ingest` (writer) <
+/// `Register` (admin). Because the roles inherit downward (`pgokf_admin`
+/// is granted `pgokf_writer`, which is granted `pgokf_reader`), a higher tier
+/// satisfies any lower requirement; [`authorize`] encodes that by accepting
+/// the required role *or any higher one*.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
-    /// Register a new bundle root.
+    /// Administrative mutation — configuration writes (`set_config`,
+    /// `reset_config`) and the file-writing exports (`export_parquet`,
+    /// `export_sources`). Requires `pgokf_admin`.
+    ///
+    /// (The variant is named for the original bundle-registration gate; bundle
+    /// ingestion has since moved to the lower-privilege [`Operation::Ingest`]
+    /// tier, and this variant now guards only the admin-only surface.)
     Register,
-    /// Re-synchronize an already registered bundle.
-    Refresh,
-    /// Query the catalog.
+    /// Bundle ingestion — register, refresh, or unregister a bundle. Requires
+    /// `pgokf_writer`; an admin satisfies it by inheritance.
+    Ingest,
+    /// Query the catalog. Requires `pgokf_reader`; a writer or admin satisfies
+    /// it by inheritance.
     Search,
 }
 
@@ -149,45 +166,65 @@ pub fn canonicalize_contained_path(
     }
 }
 
+/// The roles that satisfy an operation, in the order they are checked: the
+/// minimum tier first, then every higher tier that inherits it.
+///
+/// Listing the higher tiers makes the policy independent of `pg_has_role`'s
+/// own inheritance resolution — an admin is authorized for an `Ingest`
+/// operation even if the role-grant chain were ever misconfigured — and keeps
+/// the tier hierarchy explicit and unit-testable.
+fn satisfying_roles(operation: Operation) -> &'static [&'static str] {
+    match operation {
+        Operation::Search => &[PGOKF_READER_ROLE, PGOKF_WRITER_ROLE, PGOKF_ADMIN_ROLE],
+        Operation::Ingest => &[PGOKF_WRITER_ROLE, PGOKF_ADMIN_ROLE],
+        Operation::Register => &[PGOKF_ADMIN_ROLE],
+    }
+}
+
+/// The least-privilege role an operation requires, used only for the denial
+/// message.
+fn minimum_role(operation: Operation) -> &'static str {
+    match operation {
+        Operation::Search => PGOKF_READER_ROLE,
+        Operation::Ingest => PGOKF_WRITER_ROLE,
+        Operation::Register => PGOKF_ADMIN_ROLE,
+    }
+}
+
 /// Enforce operation-specific role policy.
 ///
-/// `Register` and `Refresh` require `pgokf_admin`; `Search` accepts
-/// `pgokf_reader` or `pgokf_admin`.
+/// `Register` requires `pgokf_admin`; `Ingest` requires `pgokf_writer`;
+/// `Search` requires `pgokf_reader`. Because the tiers inherit downward, a
+/// higher tier satisfies any lower requirement — the check accepts the
+/// required role or any higher one and short-circuits on the first match.
 ///
 /// # Errors
 ///
 /// Returns an [`crate::errors::ErrorKind::InsufficientPrivilege`] error when
-/// the user lacks the required role, or propagates the failure reported by
-/// the [`RoleMembership`] implementation with the caller's
+/// the user is a member of none of the satisfying roles, or propagates the
+/// failure reported by the [`RoleMembership`] implementation with the caller's
 /// `bundle_relative_path` attached.
 pub fn authorize<R: RoleMembership>(
     operation: Operation,
     roles: &R,
     bundle_relative_path: &Path,
 ) -> Result<(), CatalogError> {
-    let membership = |role| {
-        roles
-            .is_member_of(role)
-            .map_err(|error| CatalogError::new(error.kind(), error.message(), bundle_relative_path))
-    };
-    let is_admin = membership(PGOKF_ADMIN_ROLE)?;
-    let authorized = match operation {
-        Operation::Register | Operation::Refresh => is_admin,
-        Operation::Search => is_admin || membership(PGOKF_READER_ROLE)?,
-    };
-
-    if authorized {
-        Ok(())
-    } else {
-        let required = match operation {
-            Operation::Register | Operation::Refresh => PGOKF_ADMIN_ROLE,
-            Operation::Search => "pgokf_reader or pgokf_admin",
-        };
-        Err(CatalogError::insufficient_privilege(
-            format!("operation requires membership in {required}"),
-            bundle_relative_path,
-        ))
+    for role in satisfying_roles(operation) {
+        let is_member = roles.is_member_of(role).map_err(|error| {
+            CatalogError::new(error.kind(), error.message(), bundle_relative_path)
+        })?;
+        if is_member {
+            return Ok(());
+        }
     }
+
+    Err(CatalogError::insufficient_privilege(
+        format!(
+            "operation requires membership in {}",
+            minimum_role(operation)
+        ),
+        bundle_relative_path,
+    ))
 }
 
 /// [`RoleMembership`] backed by `PostgreSQL`'s `pg_has_role`, evaluated for the
@@ -212,6 +249,9 @@ impl RoleMembership for PostgresRoleMembership {
         let query = match role {
             PGOKF_ADMIN_ROLE => {
                 "SELECT pg_catalog.pg_has_role(session_user, 'pgokf_admin', 'MEMBER')"
+            }
+            PGOKF_WRITER_ROLE => {
+                "SELECT pg_catalog.pg_has_role(session_user, 'pgokf_writer', 'MEMBER')"
             }
             PGOKF_READER_ROLE => {
                 "SELECT pg_catalog.pg_has_role(session_user, 'pgokf_reader', 'MEMBER')"
@@ -374,16 +414,51 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::InvalidParameter);
     }
 
+    /// Fake membership oracle. Each field records *direct* membership only; the
+    /// helpers below build role-grant chains (a writer is also a reader, an
+    /// admin is also a writer and reader) so the tests exercise the same
+    /// inheritance `pg_has_role` reports in production.
     #[derive(Default)]
     struct FakeRoles {
         admin: bool,
+        writer: bool,
         reader: bool,
+    }
+
+    impl FakeRoles {
+        /// A login user granted `pgokf_reader` alone.
+        fn reader() -> Self {
+            Self {
+                reader: true,
+                ..Self::default()
+            }
+        }
+
+        /// A login user granted `pgokf_writer`, which inherits `pgokf_reader`.
+        fn writer() -> Self {
+            Self {
+                writer: true,
+                reader: true,
+                ..Self::default()
+            }
+        }
+
+        /// A login user granted `pgokf_admin`, which inherits `pgokf_writer`
+        /// and thus `pgokf_reader`.
+        fn admin() -> Self {
+            Self {
+                admin: true,
+                writer: true,
+                reader: true,
+            }
+        }
     }
 
     impl RoleMembership for FakeRoles {
         fn is_member_of(&self, role: &str) -> Result<bool, CatalogError> {
             Ok(match role {
                 PGOKF_ADMIN_ROLE => self.admin,
+                PGOKF_WRITER_ROLE => self.writer,
                 PGOKF_READER_ROLE => self.reader,
                 _ => false,
             })
@@ -391,38 +466,73 @@ mod tests {
     }
 
     #[test]
-    fn register_and_refresh_require_admin() {
+    fn ingest_requires_writer_and_rejects_reader() {
         // Arrange
-        let reader = FakeRoles {
-            reader: true,
-            admin: false,
-        };
+        let reader = FakeRoles::reader();
 
-        for operation in [Operation::Register, Operation::Refresh] {
-            // Act
-            let error = authorize(operation, &reader, Path::new("bundle"))
-                .expect_err("reader must not mutate bundles");
+        // Act
+        let error = authorize(Operation::Ingest, &reader, Path::new("bundle"))
+            .expect_err("a plain reader must not ingest bundles");
 
-            // Assert
-            assert_eq!(error.kind(), ErrorKind::InsufficientPrivilege);
-        }
+        // Assert
+        assert_eq!(error.kind(), ErrorKind::InsufficientPrivilege);
+        assert_eq!(error.sqlstate(), "42501");
+        assert!(error.message().contains(PGOKF_WRITER_ROLE));
     }
 
     #[test]
-    fn search_accepts_reader_or_admin() {
+    fn ingest_accepts_writer() {
         // Arrange
-        let reader = FakeRoles {
-            reader: true,
-            admin: false,
-        };
-        let admin = FakeRoles {
-            reader: false,
-            admin: true,
-        };
+        let writer = FakeRoles::writer();
 
         // Act & Assert
-        assert!(authorize(Operation::Search, &reader, Path::new("query")).is_ok());
-        assert!(authorize(Operation::Search, &admin, Path::new("query")).is_ok());
+        assert!(authorize(Operation::Ingest, &writer, Path::new("bundle")).is_ok());
+    }
+
+    #[test]
+    fn ingest_accepts_admin_by_inheritance() {
+        // Arrange: an admin inherits the writer tier, so it satisfies ingestion
+        // even though ingestion's minimum tier is writer.
+        let admin = FakeRoles::admin();
+
+        // Act & Assert
+        assert!(authorize(Operation::Ingest, &admin, Path::new("bundle")).is_ok());
+    }
+
+    #[test]
+    fn register_tier_requires_admin_and_rejects_writer() {
+        // Arrange: the Register operation now guards the admin-only surface
+        // (configuration writes and file-writing exports); a writer is denied.
+        let writer = FakeRoles::writer();
+
+        // Act
+        let error = authorize(Operation::Register, &writer, Path::new("config"))
+            .expect_err("a writer must not reach the admin-only surface");
+
+        // Assert
+        assert_eq!(error.kind(), ErrorKind::InsufficientPrivilege);
+        assert_eq!(error.sqlstate(), "42501");
+        assert!(error.message().contains(PGOKF_ADMIN_ROLE));
+    }
+
+    #[test]
+    fn register_tier_accepts_admin() {
+        // Arrange
+        let admin = FakeRoles::admin();
+
+        // Act & Assert
+        assert!(authorize(Operation::Register, &admin, Path::new("config")).is_ok());
+    }
+
+    #[test]
+    fn search_accepts_every_tier() {
+        // Arrange: reader, writer, and admin all satisfy the reader tier.
+        let tiers = [FakeRoles::reader(), FakeRoles::writer(), FakeRoles::admin()];
+
+        // Act & Assert
+        for roles in &tiers {
+            assert!(authorize(Operation::Search, roles, Path::new("query")).is_ok());
+        }
     }
 
     #[test]

@@ -21,13 +21,13 @@ the database. Complete comment coverage is a release gate (see
 
 ## The stable surface
 
-### Functions (14)
+### Functions (15)
 
 | Function | Role required | Purpose |
 | -------- | ------------- | ------- |
-| `pgokf.register_bundle(text, text, jsonb)` | `pgokf_admin` | Register and sync an OKF bundle root |
-| `pgokf.refresh_bundle(bigint)` | `pgokf_admin` | Incrementally re-sync a registered bundle |
-| `pgokf.unregister_bundle(bigint)` | `pgokf_admin` | Remove a bundle (rows cascade) |
+| `pgokf.register_bundle(text, text, jsonb)` | `pgokf_writer` | Register and sync an OKF bundle root |
+| `pgokf.refresh_bundle(bigint)` | `pgokf_writer` | Incrementally re-sync a registered bundle |
+| `pgokf.unregister_bundle(bigint)` | `pgokf_writer` | Remove a bundle (rows cascade) |
 | `pgokf.list_bundles()` | `pgokf_reader` | List registered bundles |
 | `pgokf.bundle_info(bigint)` | `pgokf_reader` | Info for one registered bundle |
 | `pgokf.concept_search(text, bigint, integer)` | `pgokf_reader` | Ranked full-text search |
@@ -38,6 +38,7 @@ the database. Complete comment coverage is a release gate (see
 | `pgokf.get_concept_source(bigint, text)` | `pgokf_reader` | Return one concept's stored source bytes as `bytea` (no filesystem write) |
 | `pgokf.export_parquet(bigint, text)` | `pgokf_admin` | Export a bundle projection to Parquet files |
 | `pgokf.export_sources(bigint, text)` | `pgokf_admin` | Reconstruct a bundle's stored source files on disk, hash-verified |
+| `pgokf.rebuild_search_index()` | `pgokf_admin` | (Re)build the optional pg_search BM25 index; a no-op with a notice when pg_search is not installed |
 | `pgokf.version()` | `pgokf_reader` | Loaded shared-library version |
 
 The function **name, schema, argument types, argument order, and result shape**
@@ -77,12 +78,14 @@ tables the documentation gate covers (the eight public tables plus this private
 one). It is **internal state, not API** — see
 [The private surface](#the-private-surface-not-api).
 
-### Roles (2)
+### Roles (3)
 
-`pgokf_reader` and `pgokf_admin`. Their **names** and the **privilege
-boundary** between them are stable: readers may search and read configuration;
-admins may additionally register/refresh/unregister bundles and manage
-configuration. `pgokf_admin` inherits `pgokf_reader`. These are cluster-wide
+`pgokf_reader` < `pgokf_writer` < `pgokf_admin`. Their **names** and the
+**privilege boundaries** between them are stable: readers may search and read
+configuration; writers may additionally register/refresh/unregister bundles
+(the intended tier for an ingestion pipeline); admins may additionally manage
+configuration and run the file-writing exports. Each tier inherits the one
+below (`pgokf_admin` → `pgokf_writer` → `pgokf_reader`). These are cluster-wide
 roles and survive `DROP EXTENSION`.
 
 ### GUC names (5)
@@ -150,7 +153,7 @@ disappear in any release, and callers must not depend on them:
 - **Indexes, constraints, and trigger internals** on the projection tables.
   Their existence and names are not contractual; query behavior is.
 - **The `SECURITY DEFINER` wiring, `search_path` pinning, and grant details**
-  beyond the documented reader/admin boundary.
+  beyond the documented reader/writer/admin boundaries.
 - **Rust module layout, the sync engine, and the parser crates.** Only the SQL
   surface is public.
 - **The exact text of `COMMENT ON` strings and error message wording.** SQLSTATE

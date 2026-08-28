@@ -43,7 +43,8 @@
 //! configured root is rejected with SQLSTATE `22023`. When no roots are
 //! configured the interim policy applies — any absolute, canonical,
 //! traversal-free path is accepted — and in both cases registration remains
-//! restricted to `pgokf_admin`.
+//! restricted to the ingest tier `pgokf_writer` (which `pgokf_admin`
+//! inherits).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -709,7 +710,7 @@ fn register_bundle_impl(
     name: Option<String>,
     options: Option<pgrx::JsonB>,
 ) -> Result<(i64, String, SyncReport), CatalogError> {
-    security::authorize_current_user(security::Operation::Register, Path::new(""))?;
+    security::authorize_current_user(security::Operation::Ingest, Path::new(""))?;
     let canonical_root = resolve_bundle_root(path)?;
     // Enforce configured allowed roots when present; a no-op under the interim
     // policy (no roots configured). See [`crate::catalog::config`].
@@ -730,7 +731,7 @@ fn register_bundle_impl(
 }
 
 fn refresh_bundle_impl(bundle_id: i64) -> Result<(String, SyncReport), CatalogError> {
-    security::authorize_current_user(security::Operation::Refresh, Path::new(""))?;
+    security::authorize_current_user(security::Operation::Ingest, Path::new(""))?;
     let stored_path = lookup_bundle_path(bundle_id)?.ok_or_else(|| {
         CatalogError::invalid_parameter(
             format!("bundle {bundle_id} is not registered"),
@@ -757,10 +758,11 @@ mod pgokf {
 
     /// Register an OKF bundle root and synchronize it into the catalog.
     ///
-    /// Requires membership in `pgokf_admin`. The path must be absolute,
-    /// traversal-free, and canonicalizable; the canonical path is stored and
-    /// must not already be registered (SQLSTATE `23505` otherwise — use
-    /// `pgokf.refresh_bundle` to re-synchronize).
+    /// Requires membership in `pgokf_writer` (an admin qualifies by
+    /// inheritance). The path must be absolute, traversal-free, and
+    /// canonicalizable; the canonical path is stored and must not already be
+    /// registered (SQLSTATE `23505` otherwise — use `pgokf.refresh_bundle` to
+    /// re-synchronize).
     #[pg_extern(requires = ["catalog_tables"])]
     fn register_bundle(
         path: &str,
@@ -775,9 +777,10 @@ mod pgokf {
 
     /// Re-synchronize a registered bundle from its stored canonical path.
     ///
-    /// Requires membership in `pgokf_admin`. Only files whose BLAKE3 content
-    /// hash changed are re-parsed; unchanged rows are left untouched
-    /// (preserving `indexed_at`), and rows for deleted files are removed.
+    /// Requires membership in `pgokf_writer` (an admin qualifies by
+    /// inheritance). Only files whose BLAKE3 content hash changed are
+    /// re-parsed; unchanged rows are left untouched (preserving `indexed_at`),
+    /// and rows for deleted files are removed.
     #[pg_extern(requires = ["catalog_tables"])]
     fn refresh_bundle(
         bundle_id: i64,
@@ -796,12 +799,12 @@ ALTER FUNCTION pgokf.refresh_bundle(bigint)
     SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
 REVOKE ALL ON FUNCTION pgokf.register_bundle(text, text, jsonb) FROM PUBLIC;
 REVOKE ALL ON FUNCTION pgokf.refresh_bundle(bigint) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION pgokf.register_bundle(text, text, jsonb) TO pgokf_admin;
-GRANT EXECUTE ON FUNCTION pgokf.refresh_bundle(bigint) TO pgokf_admin;
+GRANT EXECUTE ON FUNCTION pgokf.register_bundle(text, text, jsonb) TO pgokf_writer;
+GRANT EXECUTE ON FUNCTION pgokf.refresh_bundle(bigint) TO pgokf_writer;
 COMMENT ON FUNCTION pgokf.register_bundle(text, text, jsonb) IS
-    'Register an OKF bundle root and synchronize it into the catalog. Admin-only; raises 23505 if the canonical path is already registered.';
+    'Register an OKF bundle root and synchronize it into the catalog. Writer-tier (pgokf_writer; admin inherits it); raises 23505 if the canonical path is already registered.';
 COMMENT ON FUNCTION pgokf.refresh_bundle(bigint) IS
-    'Incrementally re-synchronize a registered bundle: re-parses only content-changed files, removes rows for deleted files. Admin-only.';
+    'Incrementally re-synchronize a registered bundle: re-parses only content-changed files, removes rows for deleted files. Writer-tier (pgokf_writer; admin inherits it).';
 ",
         name = "sync_function_hardening",
         requires = [register_bundle, refresh_bundle]

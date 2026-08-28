@@ -15,7 +15,11 @@
 //! - [`sync`] — the shared register/refresh engine. After concept rows are
 //!   staged it invokes the ordered projection seam ([`links::project`], then
 //!   [`provenance::project`]) before returning.
-//! - [`search`] — `pgokf.concept_search` over the weighted `tsvector`.
+//! - [`search`] — `pgokf.concept_search`, which dispatches through the
+//!   ranked-search backend seam.
+//! - [`search_backend`] — the `SearchBackend` Strategy seam: the native FTS
+//!   backend (default) and the optional `ParadeDB` `pg_search` BM25 adapter
+//!   reached only through runtime SPI, plus `pgokf.rebuild_search_index`.
 //!
 //! Feature-extension stubs, each to be filled by a later wave without
 //! touching [`sync`]:
@@ -37,6 +41,7 @@ pub mod neighbors;
 pub mod provenance;
 pub mod schema;
 pub mod search;
+pub mod search_backend;
 pub mod source;
 pub mod sync;
 pub mod types;

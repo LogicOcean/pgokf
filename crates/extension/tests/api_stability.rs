@@ -54,6 +54,7 @@ const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
     ("export_parquet", "bigint, text"),
     ("get_concept_source", "bigint, text"),
     ("export_sources", "bigint, text"),
+    ("rebuild_search_index", ""),
     ("version", ""),
 ];
 
@@ -81,8 +82,9 @@ const CATALOG_TABLES: &[&str] = &[
     "pgokf_private.config",
 ];
 
-/// The two public API roles created by `sql/bootstrap.sql`.
-const API_ROLES: &[&str] = &["pgokf_reader", "pgokf_admin"];
+/// The three public API roles created by `sql/bootstrap.sql`
+/// (`pgokf_reader` < `pgokf_writer` < `pgokf_admin`).
+const API_ROLES: &[&str] = &["pgokf_reader", "pgokf_writer", "pgokf_admin"];
 
 /// The number of `#[pg_extern]` functions defined under `src/catalog/`. The
 /// last public function, `pgokf.version()`, is declared in `src/lib.rs`, so
@@ -174,7 +176,7 @@ fn every_catalog_table_carries_a_comment() {
 }
 
 #[test]
-fn both_api_roles_carry_a_comment() {
+fn all_api_roles_carry_a_comment() {
     // Arrange
     let surface = sql_surface();
 

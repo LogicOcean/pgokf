@@ -1,12 +1,21 @@
-//! Native full-text search over the catalog: `pgokf.concept_search`.
+//! Full-text search over the catalog: `pgokf.concept_search`.
 //!
-//! The search contract is `PostgreSQL` FTS only, so every supported server
-//! works without additional extensions. Matching uses
-//! `websearch_to_tsquery` over the weighted `body_tsv` column (title `A`,
-//! tags/type/description `B`, body `D`), ranking uses `ts_rank_cd`, and each
-//! hit carries a `ts_headline` snippet computed over the stored title,
-//! description, and body text. The concept ID is the deterministic
-//! tiebreaker, so equal-rank results order stably.
+//! This module owns the SQL-facing search entry point, its input validation,
+//! and the per-call dispatch to a ranked-search **backend**. The two backends
+//! live behind the [`crate::catalog::search_backend`] Strategy seam:
+//!
+//! - **native** (the default) — `PostgreSQL` FTS only, so every supported
+//!   server works without additional extensions. Matching uses
+//!   `websearch_to_tsquery` over the weighted `body_tsv` column (title `A`,
+//!   tags/type/description `B`, body `D`), ranking uses `ts_rank_cd`, and each
+//!   hit carries a `ts_headline` snippet.
+//! - **bm25** (optional) — Block-Max WAND top-k over a `ParadeDB` `pg_search`
+//!   index, selected by the durable `search_backend` configuration key and
+//!   reached only through runtime SPI.
+//!
+//! Whichever backend runs, the concept ID is the deterministic tiebreaker so
+//! equal-rank results order stably, and the returned
+//! `pgokf.concept_search_result` shape is identical.
 //!
 //! # Security model
 //!
@@ -22,6 +31,7 @@ use std::path::Path;
 
 use pgrx::Spi;
 
+use crate::catalog::search_backend::{self, SearchRequest};
 use crate::catalog::types::SearchHit;
 use crate::errors::CatalogError;
 use crate::security;
@@ -68,29 +78,6 @@ pub fn validate_query(query: &str) -> Result<(), CatalogError> {
     }
 }
 
-// The text-search regconfig is bound as `$4` (text, cast to `regconfig` in SQL
-// so no identifier is interpolated) and drives both `websearch_to_tsquery` and
-// `ts_headline`, so query parsing uses the same configuration that built each
-// row's `body_tsv` at index time. `ts_rank_cd` takes no configuration.
-const SEARCH_QUERY: &str = "
-    SELECT c.bundle_id,
-           c.id,
-           c.path,
-           c.title,
-           c.type,
-           pg_catalog.ts_rank_cd(c.body_tsv, q.query),
-           pg_catalog.ts_headline(
-               $4::pg_catalog.regconfig,
-               pg_catalog.concat_ws(' ', c.title, c.description, c.body_text),
-               q.query)
-    FROM pgokf.concepts c
-    JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled,
-         pg_catalog.websearch_to_tsquery($4::pg_catalog.regconfig, $1) AS q(query)
-    WHERE c.body_tsv @@ q.query
-      AND ($2 IS NULL OR c.bundle_id = $2)
-    ORDER BY pg_catalog.ts_rank_cd(c.body_tsv, q.query) DESC, c.id ASC
-    LIMIT $3";
-
 fn spi_error(context: &'static str) -> impl Fn(pgrx::spi::Error) -> CatalogError {
     move |error| CatalogError::internal(format!("{context}: {error}"), Path::new(""))
 }
@@ -113,6 +100,23 @@ fn effective_text_search_config() -> Result<String, CatalogError> {
         })
 }
 
+/// Resolve the effective `search_backend` policy name for this call.
+///
+/// Read, like [`effective_text_search_config`], through the reader-granted
+/// `SECURITY DEFINER` `pgokf.get_config` projection, because `concept_search`
+/// runs with invoker rights and cannot read the administrator-only
+/// `pgokf_private.config` table directly.
+fn effective_search_backend() -> Result<String, CatalogError> {
+    Spi::get_one::<String>("SELECT pgokf.get_config() ->> 'search_backend'")
+        .map_err(spi_error("failed to read search backend configuration"))?
+        .ok_or_else(|| {
+            CatalogError::internal(
+                "search_backend is missing from configuration",
+                Path::new(""),
+            )
+        })
+}
+
 fn concept_search_impl(
     query: &str,
     bundle_id: Option<i64>,
@@ -122,52 +126,13 @@ fn concept_search_impl(
     validate_query(query)?;
     let limit = validate_limit_count(limit_count)?;
     let text_search_config = effective_text_search_config()?;
+    let backend = search_backend::select(&effective_search_backend()?);
 
-    Spi::connect(|client| {
-        let table = client
-            .select(
-                SEARCH_QUERY,
-                None,
-                &[
-                    query.into(),
-                    bundle_id.into(),
-                    limit.into(),
-                    text_search_config.as_str().into(),
-                ],
-            )
-            .map_err(spi_error("concept search query failed"))?;
-        let mut hits = Vec::with_capacity(table.len());
-        for row in table {
-            let read = spi_error("failed to read search result row");
-            let missing = |column: &str| {
-                CatalogError::internal(
-                    format!("search result column {column} is unexpectedly NULL"),
-                    Path::new(""),
-                )
-            };
-            hits.push(SearchHit {
-                bundle_id: row
-                    .get::<i64>(1)
-                    .map_err(&read)?
-                    .ok_or_else(|| missing("bundle_id"))?,
-                concept_id: row
-                    .get::<String>(2)
-                    .map_err(&read)?
-                    .ok_or_else(|| missing("id"))?,
-                path: row
-                    .get::<String>(3)
-                    .map_err(&read)?
-                    .ok_or_else(|| missing("path"))?,
-                title: row.get::<String>(4).map_err(&read)?,
-                concept_type: row.get::<String>(5).map_err(&read)?,
-                rank: row
-                    .get::<f32>(6)
-                    .map_err(&read)?
-                    .ok_or_else(|| missing("rank"))?,
-                headline: row.get::<String>(7).map_err(&read)?,
-            });
-        }
-        Ok(hits)
+    backend.search(&SearchRequest {
+        query,
+        bundle_id,
+        limit,
+        text_search_config: &text_search_config,
     })
 }
 
@@ -180,12 +145,18 @@ mod pgokf {
     use super::concept_search_impl;
     use crate::catalog::types;
 
-    /// Rank catalog concepts against a `websearch_to_tsquery` query.
+    /// Rank catalog concepts against a search query.
     ///
     /// Requires membership in `pgokf_reader` (or `pgokf_admin`). Searches
     /// only enabled bundles; pass `bundle_id` to scope the search to one
     /// bundle. `limit_count` must lie in `1..=500` (SQLSTATE `22023`
     /// otherwise).
+    ///
+    /// The ranking backend follows the durable `search_backend` configuration
+    /// key: `native` `PostgreSQL` FTS by default, or `ParadeDB` `pg_search`
+    /// BM25 when set to `bm25` (which falls back to native, with a warning, if
+    /// `pg_search` or its index is absent). The result shape is identical
+    /// either way.
     #[pg_extern(stable, parallel_safe, requires = ["catalog_tables"])]
     fn concept_search(
         query: &str,
@@ -206,7 +177,7 @@ mod pgokf {
 REVOKE ALL ON FUNCTION pgokf.concept_search(text, bigint, integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pgokf.concept_search(text, bigint, integer) TO pgokf_reader;
 COMMENT ON FUNCTION pgokf.concept_search(text, bigint, integer) IS
-    'Rank catalog concepts with native full-text search (websearch_to_tsquery + ts_rank_cd). Reader-level; searches enabled bundles only.';
+    'Rank catalog concepts. Reader-level; searches enabled bundles only. Uses the search_backend configuration: native full-text search (websearch_to_tsquery + ts_rank_cd) by default, or ParadeDB pg_search BM25 when set to bm25 (falling back to native if pg_search or its index is absent).';
 ",
         name = "search_function_hardening",
         requires = [concept_search]
