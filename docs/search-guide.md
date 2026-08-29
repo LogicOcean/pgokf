@@ -2,7 +2,7 @@
 
 This guide is for people and agents who **query** an already-loaded `pgokf`
 catalog: how to write a search query, how results are ranked, how to walk the
-link graph, and — most importantly — how to keep queries fast as a corpus grows
+link graph, and - most importantly - how to keep queries fast as a corpus grows
 from thousands to tens of millions of concepts.
 
 To *author* the concepts being searched, see the
@@ -16,8 +16,10 @@ All of the output below is **real**, captured from a live PostgreSQL 18 cluster
 with the extension's `templates/` assembled into one bundle.
 
 > **Roles.** `pgokf.concept_search` and `pgokf.concept_neighbors` require
-> membership in `pgokf_reader` (or `pgokf_admin`, which inherits it). A fresh
-> login role gets `42501` until it is `GRANT`ed one. See [security](security.md).
+> membership in `pgokf_reader` (a `pgokf_writer` or `pgokf_admin` satisfies it by
+> inheritance, on the `pgokf_reader` < `pgokf_writer` < `pgokf_admin` hierarchy). A
+> fresh login role gets `42501` until it is `GRANT`ed one. See
+> [security](security.md).
 
 ---
 
@@ -33,7 +35,7 @@ pgokf.concept_search(
 
 The result rows are `(bundle_id, concept_id, path, title, type, rank,
 headline)`. Note the search key is **`concept_id`**, and there is no `tags`
-column — join `pgokf.concepts` to recover `tags`/`description`.
+column - join `pgokf.concepts` to recover `tags`/`description`.
 
 ```sql
 SELECT concept_id, type, round(rank::numeric, 4) AS rank
@@ -50,7 +52,7 @@ LIMIT 10;
  wiki-article | article  | 0.0538
 ```
 
-By default the engine is **native PostgreSQL full-text search** — no extensions
+By default the engine is **native PostgreSQL full-text search** - no extensions
 beyond `pgokf` are required, so it works on every supported server (PostgreSQL
 15–19). Concretely, for each row:
 
@@ -59,16 +61,17 @@ beyond `pgokf` are required, so it works on every supported server (PostgreSQL
 - the snippet is `ts_headline(<config>, title ‖ description ‖ body_text, query)`.
 
 The **same function** can instead dispatch to a ParadeDB `pg_search` BM25
-backend when the durable `search_backend` policy key is set to `bm25` — the
+backend when the durable `search_backend` policy key is set to `bm25` - the
 signature, result columns, and role checks are identical, so nothing in your
 queries changes. See [Enabling the BM25 backend](#enabling-the-bm25-backend).
 
-Only **enabled** bundles are searched. Pass `bundle_id` to scope to one bundle;
-pass `limit_count` (1–500) to cap the result set.
+Only **active** bundles (enabled *and* not retired) are searched. Pass
+`bundle_id` to scope to one bundle; pass `limit_count` (1–500) to cap the
+result set.
 
 ### Query syntax (`websearch_to_tsquery`)
 
-The `query` string uses PostgreSQL's `websearch_to_tsquery` grammar — the same
+The `query` string uses PostgreSQL's `websearch_to_tsquery` grammar - the same
 "web search box" syntax users already know:
 
 | You write | Meaning |
@@ -80,7 +83,7 @@ The `query` string uses PostgreSQL's `websearch_to_tsquery` grammar — the same
 
 Unquoted words are AND-ed; `"…"` is a phrase; `OR` alternates; a leading `-`
 negates. Syntax the user can't express (e.g. a raw `tsquery` `<->`) is simply
-not reachable through this function — which is the point: untrusted input is
+not reachable through this function - which is the point: untrusted input is
 safe here because `websearch_to_tsquery` never errors on odd punctuation.
 
 Phrase search, live:
@@ -100,7 +103,7 @@ FROM pgokf.concept_search('"payments API"');
 (5 rows)
 ```
 
-All five concepts contain the adjacent phrase "payments API" — the incident,
+All five concepts contain the adjacent phrase "payments API" - the incident,
 runbook, and service score highest because the phrase appears in high-weight
 fields, while the `wiki-article` and `skill` match it only in body text
 (weight `D`), so they rank lower but are still returned.
@@ -120,7 +123,7 @@ SELECT concept_id, type FROM pgokf.concept_search('incident OR runbook');
  wiki-article | article
 ```
 
-Negation — because **tags are part of the search vector** (weight `B`), you can
+Negation - because **tags are part of the search vector** (weight `B`), you can
 exclude on a tag term. `sev2` is a tag only on the incident, so `payments -sev2`
 drops exactly that concept:
 
@@ -139,7 +142,7 @@ ORDER BY concept_id;
 
 ### Ranking
 
-Ranking is **`ts_rank_cd`** — cover-density ranking, which rewards both
+Ranking is **`ts_rank_cd`** - cover-density ranking, which rewards both
 matched-lexeme frequency **and proximity**, so documents where the query terms
 cluster together rank higher. It also honors the field weights baked into
 `body_tsv` at index time:
@@ -150,9 +153,11 @@ cluster together rank higher. It also honors the field weights baked into
 | `B` | `tags`, `type`, `description` |
 | `D` | body text |
 
-A title hit therefore far outranks a body hit for the same term. Results are
-ordered `ORDER BY ts_rank_cd(...) DESC, concept_id ASC` — the `concept_id`
-tiebreak makes equal-rank results **deterministic** across runs.
+A title hit therefore far outranks a body hit for the same term. Results come
+back in the stable total order `rank DESC, bundle_id ASC, concept_id ASC`: the
+`(bundle_id, concept_id)` tiebreak makes equal-rank results **deterministic**
+across runs, and that same total order is what
+[keyset pagination](#keyset-pagination) walks.
 
 ### Snippets (`ts_headline`)
 
@@ -179,7 +184,7 @@ SELECT concept_id FROM pgokf.concept_search('restarting') ORDER BY concept_id;
 -- incident, runbook, service, skill, wiki-article
 ```
 
-The dictionary is the `default_text_search_config` policy key — see
+The dictionary is the `default_text_search_config` policy key - see
 [choosing the text-search configuration](#the-text-search-configuration-knob).
 
 ### Input validation
@@ -230,8 +235,8 @@ is unchanged.
 
 `concept_search` returns rows in a **stable total order**: `rank DESC`, then
 `bundle_id ASC`, then `concept_id ASC`. That total order is what makes paginating
-a large result set exact. Rather than `LIMIT … OFFSET n` — which re-scans the
-first *n* rows on every page and drifts when the catalog changes underneath you —
+a large result set exact. Rather than `LIMIT … OFFSET n` - which re-scans the
+first *n* rows on every page and drifts when the catalog changes underneath you -
 pass the last row of a page back as an opaque **cursor** and the next page
 continues strictly *after* it:
 
@@ -258,7 +263,7 @@ OFFSET 19 LIMIT 1;   -- the 20th (last) row of the page
 ```
 
 Because the order is a genuine total order, the pages **tile the full result set
-with no duplicates and no skips even when many hits share the same rank** — the
+with no duplicates and no skips even when many hits share the same rank** - the
 `(bundle_id, concept_id)` tiebreak keeps tied ranks in a deterministic sequence.
 The cursor is opaque: copy it verbatim; a malformed cursor raises `22023` rather
 than silently restarting from the first page. `NULL` (the default) is the first
@@ -268,8 +273,9 @@ page. Pagination works identically under the native and BM25 backends.
 
 To render "42 runbooks, 15 wikis" filter chips *before* a user drills in, count
 the result set by a facet instead of fetching rows. `pgokf.search_facets` counts
-the **same matching set** `concept_search` would (the full-text match plus the
-identical structured filters), grouped by one facet:
+the **same matching set** `concept_search` would (the native full-text match
+plus the identical structured filters; facet counts always use the native match,
+whichever `search_backend` is configured), grouped by one facet:
 
 ```sql
 SELECT * FROM pgokf.search_facets('incident response', facet => 'type');
@@ -292,7 +298,7 @@ count then facet value, and `NULL` facet values are omitted.
 
 This is the single most important thing to understand about search at scale.
 
-- A **selective query** answers "find the few rows matching this predicate" —
+- A **selective query** answers "find the few rows matching this predicate" -
   a point lookup by ID, a **tag** filter, a **type** filter, a scan of one
   small bundle. These ride B-tree / GIN indexes and stay **sub-millisecond to
   ~10–15 ms even at ~10M concepts**.
@@ -320,7 +326,7 @@ The fix is to **shrink the match set with an indexed predicate before ranking
 it**. Narrow by `bundle_id`, `type`, or `tags` first, so `ts_rank_cd` only ever
 scores the survivors.
 
-`pgokf.concept_search` has a built-in `bundle_id` filter — always use it when a
+`pgokf.concept_search` has a built-in `bundle_id` filter - always use it when a
 search is scoped to one bundle:
 
 ```sql
@@ -351,21 +357,21 @@ ORDER BY rank DESC;
 
 > **Post-filtering `concept_search` is not the same thing.** Wrapping
 > `concept_search(...)` in an outer `WHERE type = …` still makes the function
-> rank the **whole** match set first, then discards rows — you pay the broad
+> rank the **whole** match set first, then discards rows - you pay the broad
 > cost. Pre-filtering on the base tables lets the index cut the set down
 > *before* `ts_rank_cd` runs. Reach for `concept_search` for convenience and
 > selective queries; reach for a direct pre-filtered query when a broad term
 > would otherwise score millions of rows.
 
 Use the same `default_text_search_config` value in a hand-written query that the
-catalog used to index the rows — read it with
+catalog used to index the rows - read it with
 `SELECT pgokf.get_config() ->> 'default_text_search_config'` (below).
 
 ---
 
 ## Filtering without ranking
 
-Often you don't need ranking at all — you need "all concepts of this type" or
+Often you don't need ranking at all - you need "all concepts of this type" or
 "everything tagged X". These ride dedicated indexes and are the fastest queries
 in the catalog.
 
@@ -404,7 +410,7 @@ WHERE bundle_id = 2 AND tags @> ARRAY['oncall'];
 ### Filter by trust
 
 `pgokf.concept_provenance.trust_tier` is btree-indexed, so you can gate results
-behind a trust floor cheaply — e.g. "only human-reviewed concepts":
+behind a trust floor cheaply - e.g. "only human-reviewed concepts":
 
 ```sql
 SELECT c.id, c.title, p.trust_tier
@@ -472,20 +478,20 @@ Properties worth knowing:
 
 - The traversal is **cycle-safe**: it never revisits a concept already on the
   current path, so a link cycle cannot loop forever.
-- Only **resolved** edges are followed — a broken internal link or an external
+- Only **resolved** edges are followed - a broken internal link or an external
   URL is never a graph edge, and a neighbor whose concept was deleted is never
   emitted.
 - `max_hops` must be **≥ 1** (`ERROR: 22023` otherwise) and is capped at the
   `pgokf.max_graph_hops` GUC ceiling.
 - If `bundle_id` is omitted and the concept ID exists in **more than one
-  bundle**, the call fails so you disambiguate — captured live:
+  bundle**, the call fails so you disambiguate - captured live:
 
   ```
   ERROR:  22023: concept_id 'service' exists in 2 bundles; pass bundle_id to disambiguate
   ```
 
 To inspect the raw edges (including unresolved and external ones), query
-`pgokf.links` directly — see
+`pgokf.links` directly - see
 [`examples/queries/graph.sql`](https://github.com/LogicOcean/pgokf/blob/main/examples/queries/graph.sql).
 
 ---
@@ -495,7 +501,7 @@ To inspect the raw edges (including unresolved and external ones), query
 Which dictionary stems and tokenizes text is the durable
 **`default_text_search_config`** policy key (default `pg_catalog.english`). It
 drives **both** indexing and querying: `to_tsvector` when `body_tsv` is built at
-sync time, and `websearch_to_tsquery` + `ts_headline` at query time — so query
+sync time, and `websearch_to_tsquery` + `ts_headline` at query time - so query
 parsing always matches the configuration that indexed the rows.
 
 Read the effective value (captured live):
@@ -513,12 +519,12 @@ SELECT pgokf.set_config('default_text_search_config', '"pg_catalog.simple"'::jso
 
 > **⚠️ Changing it is not retroactive.** The config is read when each concept's
 > `body_tsv` is built. Changing it does **not** re-tokenize already-indexed
-> rows — they keep the vectors built under the old configuration, and a query
+> rows - they keep the vectors built under the old configuration, and a query
 > parsed under the new one may mismatch them. Set
 > `default_text_search_config` **before the first `register_bundle`**; to change
 > it on an existing catalog, re-index by re-registering the affected bundles.
-> Full detail — including the value's validation against
-> `pg_catalog.pg_ts_config` — is in
+> Full detail - including the value's validation against
+> `pg_catalog.pg_ts_config` - is in
 > [configuration](configuration.md#which-keys-the-current-engine-consults).
 
 ---
@@ -527,9 +533,9 @@ SELECT pgokf.set_config('default_text_search_config', '"pg_catalog.simple"'::jso
 
 Native `ts_rank_cd` is the shipped, zero-dependency **default**, and it is the
 right choice for selective queries and moderate corpora. For **broad,
-relevance-ranked** queries — where a common term matches millions of rows and
+relevance-ranked** queries - where a common term matches millions of rows and
 native ranking scales linearly (see
-[Selective vs. broad queries](#selective-vs-broad-queries)) — `pgokf` can
+[Selective vs. broad queries](#selective-vs-broad-queries)) - `pgokf` can
 instead run **BM25 top-k** over a ParadeDB `pg_search` index. Block-Max WAND
 pruning keeps broad queries roughly **flat** where native grows linearly, while
 native stays the winner for selective ones. The `pg_search` version matrix and
@@ -540,12 +546,12 @@ measured numbers are in [benchmarks](benchmarks.md).
 The BM25 backend is **opt-in** and rides on an external extension, so it is off
 until you enable it deliberately.
 
-### Honesty first — the dependency
+### Honesty first - the dependency
 
 `native` is the default precisely because it needs nothing beyond `pgokf`. BM25
 requires **ParadeDB `pg_search`**, which:
 
-- is licensed **AGPL-3.0** (Community edition) — evaluate that against your
+- is licensed **AGPL-3.0** (Community edition) - evaluate that against your
   distribution model before adopting it;
 - must be added to **`shared_preload_libraries`** (a server restart), and
   requires **`pgvector`** installed alongside it;
@@ -554,7 +560,7 @@ requires **ParadeDB `pg_search`**, which:
 
 `pgokf` itself never links `pg_search`: `CREATE EXTENSION pgokf` succeeds with or
 without it, and the code reaches every `pg_search` object only through runtime
-SQL. If you cannot take that dependency, stay on `native` — nothing else in
+SQL. If you cannot take that dependency, stay on `native` - nothing else in
 `pgokf` needs it.
 
 ### Steps
@@ -589,20 +595,20 @@ SQL. If you cannot take that dependency, stay on `native` — nothing else in
 
    `rebuild_search_index()` (re)creates a `bm25` index on `pgokf.concepts` over
    `id` (the key field), `title`, `description`, `body_text`, and `type`. It is
-   idempotent — safe to re-run — and returns `false` with a `NOTICE` when
+   idempotent - safe to re-run - and returns `false` with a `NOTICE` when
    `pg_search` is not installed (a no-op). Once the index exists, ordinary
    incremental sync (`register_bundle` / `refresh_bundle`) maintains it
    automatically; re-run `rebuild_search_index()` only if you want it rebuilt
    from scratch.
 
-That's it — `pgokf.concept_search('database')` now returns BM25-ranked results
+That's it - `pgokf.concept_search('database')` now returns BM25-ranked results
 with `paradedb.score` in the `rank` column, still carrying a `ts_headline`
 snippet so the `headline` column is unchanged.
 
 ### Graceful fallback
 
 If `search_backend` is `bm25` but the prerequisites are missing, search **does
-not error** — it falls back to native and logs a `WARNING`, so a half-finished
+not error** - it falls back to native and logs a `WARNING`, so a half-finished
 setup degrades instead of breaking:
 
 ```sql
@@ -615,11 +621,13 @@ SELECT concept_id FROM pgokf.concept_search('database');
 
 The same fallback (with a "no bm25 index" warning) happens when `pg_search` is
 installed but `rebuild_search_index()` has not been run yet. To silence the
-warning, either finish the setup or set `search_backend` back to `native`.
+warning, either finish the setup or set `search_backend` back to `native`. To
+see at a glance which step is missing, call
+[`pgokf.search_index_status()`](#index-health-pgokfsearch_index_status).
 
 ### Tokenizer differences to expect
 
-The two backends tokenize differently, so a query can rank — or match — slightly
+The two backends tokenize differently, so a query can rank - or match - slightly
 differently between them. Native FTS applies the `default_text_search_config`
 dictionary (English stemming by default), so `postgres` stems to match
 `PostgreSQL`. The BM25 index uses `pg_search`'s default tokenizer, which
@@ -636,7 +644,7 @@ Keep broad queries fast on native, when you are not on BM25, with the
 ## Content similarity: `pgokf.find_similar`
 
 `find_similar(concept_id, bundle_id, limit_count)` answers "what else reads like
-this one?" — content similarity, **not** the authored link graph
+this one?" - content similarity, **not** the authored link graph
 (`concept_neighbors`). It extracts the seed concept's most salient `body_tsv`
 lexemes (highest term frequencies), runs them as an `OR` query through the
 configured `search_backend` (native FTS or BM25), and excludes the seed itself.
@@ -655,8 +663,8 @@ the seed id exists in more than one bundle, pass `bundle_id` to disambiguate
 
 ## Semantic and hybrid search (optional, pgvector)
 
-For "find things that *mean* the same" — where the words differ but the meaning
-matches — `pgokf` offers an optional **semantic** surface backed by
+For "find things that *mean* the same" - where the words differ but the meaning
+matches - `pgokf` offers an optional **semantic** surface backed by
 [`pgvector`](https://github.com/pgvector/pgvector), and a **hybrid** surface that
 fuses lexical and semantic ranking. Both are opt-in and, exactly like the BM25
 backend, add **no static dependency**: `CREATE EXTENSION pgokf` succeeds without
@@ -666,7 +674,7 @@ pgvector, and the `pgokf.concept_embedding` table stores vectors as the builtin
 ### The embedding companion (how vectors get in)
 
 `pgokf` **never computes embeddings and never does network I/O.** Embeddings are
-produced by *your* embedder — the same mountless-companion pattern as
+produced by *your* embedder - the same mountless-companion pattern as
 [`pgokf-ingest`](https://github.com/LogicOcean/pgokf/tree/main/crates/pgokf-ingest):
 a process you run computes each concept's vector (from its `body_text`, which you
 can read with `pgokf.get_concept_source` or from your own source of truth) and
@@ -691,6 +699,11 @@ SELECT pgokf.set_config('embedding_dim', '768'::jsonb);   -- admin
 SELECT pgokf.rebuild_embedding_index();   -- admin; pgvector HNSW cosine
 ```
 
+Like `rebuild_search_index`, it degrades cleanly instead of erroring: it returns
+`false` with a `NOTICE` when pgvector is absent, or when `embedding_dim` exceeds
+pgvector's 2000-dimension HNSW index limit. Above that limit semantic search
+still works, via an exact scan of the cosine distance rather than the ANN index.
+
 ### Semantic search
 
 ```sql
@@ -702,13 +715,13 @@ FROM pgokf.concept_search_semantic(ARRAY[0.0201, -0.0388, ...]::real[]);
 The `rank` column is the normalized cosine similarity (`1.0` for an identical
 vector). **Semantic search requires pgvector**: because it has no lexical
 equivalent, it raises `22023` naming the missing dependency (`CREATE EXTENSION
-vector`) when pgvector is absent — never a silent empty result.
+vector`) when pgvector is absent - never a silent empty result.
 
 ### Hybrid search (RRF)
 
 Hybrid fuses the lexical result of a text `query` (through the configured
 `search_backend`) with the semantic result of a `query_embedding`, using
-**Reciprocal Rank Fusion** (RRF, k = 60), entirely in SQL — no model is involved
+**Reciprocal Rank Fusion** (RRF, k = 60), entirely in SQL - no model is involved
 in the fusion itself:
 
 ```sql
@@ -718,7 +731,7 @@ FROM pgokf.concept_search_hybrid('database failover',
 ```
 
 RRF sums `1 / (60 + rank)` across the two lists, so a concept that ranks well in
-*both* the lexical and semantic lists outranks one strong in only one — the
+*both* the lexical and semantic lists outranks one strong in only one - the
 common case where a query is strong lexically *and* semantically. When pgvector
 is absent, hybrid **degrades to lexical-only with a `WARNING`** (unlike pure
 semantic search, a lexical-only answer is still sensible).
@@ -731,14 +744,37 @@ semantic search, a lexical-only answer is still sensible).
 
 ---
 
+## Index health: `pgokf.search_index_status`
+
+Both optional accelerators are invisible from `concept_search` alone: a query
+cannot tell whether the BM25 index or the embedding index is installed, built,
+and current with the concept set. Reader-level `pgokf.search_index_status()`
+reports exactly that in one `jsonb` document: the configured `search_backend`,
+`native: true` (native FTS is always available), a `bm25` object (`available` =
+`pg_search` installed, `index_exists`, `indexed_rows`, `total_rows`,
+`coverage_pct`) and an `embedding` object (`pgvector_available`, `index_exists`,
+`embedded_rows`, `total_concepts`, `coverage_pct`, `dim`):
+
+```sql
+SELECT jsonb_pretty(pgokf.search_index_status());
+```
+
+BM25 coverage is all-or-nothing (the index, when present, spans every concept
+row); embedding coverage is the fraction of concepts that carry a stored vector.
+The function runs with invoker rights, so under
+[multi-tenancy](multi-tenancy.md) a scoped session sees coverage for its own
+tenant's rows.
+
+---
+
 ## See also
 
-- [SQL API reference](sql-api.md) — full signatures, result columns, SQLSTATEs.
-- [Authoring guide](okf-authoring.md) — how the fields you search on get there.
-- [Configuration](configuration.md) — `default_text_search_config` and the GUC
+- [SQL API reference](sql-api.md) - full signatures, result columns, SQLSTATEs.
+- [Authoring guide](okf-authoring.md) - how the fields you search on get there.
+- [Configuration](configuration.md) - `default_text_search_config` and the GUC
   ceilings (`pgokf.max_graph_hops`, and more).
-- [Benchmarks](benchmarks.md) — measured FTS / filter / graph performance.
-- [Configuration](configuration.md#search-backend-search_backend) — the
+- [Benchmarks](benchmarks.md) - measured FTS / filter / graph performance.
+- [Configuration](configuration.md#search-backend-search_backend) - the
   `search_backend` key and the `pg_search` version matrix for the BM25 backend.
 - Example queries: [`examples/queries/search.sql`](https://github.com/LogicOcean/pgokf/blob/main/examples/queries/search.sql),
   [`examples/queries/graph.sql`](https://github.com/LogicOcean/pgokf/blob/main/examples/queries/graph.sql).

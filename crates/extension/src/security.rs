@@ -21,14 +21,14 @@ pub const PGOKF_READER_ROLE: &str = "pgokf_reader";
 /// Catalog operations subject to role-based authorization.
 ///
 /// Each operation names the least-privilege tier it requires, and the tiers
-/// are strictly nested — `Search` (reader) < `Ingest` (writer) <
+/// are strictly nested - `Search` (reader) < `Ingest` (writer) <
 /// `Register` (admin). Because the roles inherit downward (`pgokf_admin`
 /// is granted `pgokf_writer`, which is granted `pgokf_reader`), a higher tier
 /// satisfies any lower requirement; [`authorize`] encodes that by accepting
 /// the required role *or any higher one*.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
-    /// Administrative mutation — configuration writes (`set_config`,
+    /// Administrative mutation - configuration writes (`set_config`,
     /// `reset_config`) and the file-writing exports (`export_parquet`,
     /// `export_sources`). Requires `pgokf_admin`.
     ///
@@ -36,7 +36,7 @@ pub enum Operation {
     /// ingestion has since moved to the lower-privilege [`Operation::Ingest`]
     /// tier, and this variant now guards only the admin-only surface.)
     Register,
-    /// Bundle ingestion — register, refresh, or unregister a bundle. Requires
+    /// Bundle ingestion - register, refresh, or unregister a bundle. Requires
     /// `pgokf_writer`; an admin satisfies it by inheritance.
     Ingest,
     /// Query the catalog. Requires `pgokf_reader`; a writer or admin satisfies
@@ -171,8 +171,8 @@ pub fn canonicalize_contained_path(
 /// minimum tier first, then every higher tier that inherits it.
 ///
 /// Listing the higher tiers makes the policy independent of `pg_has_role`'s
-/// own inheritance resolution — an admin is authorized for an `Ingest`
-/// operation even if the role-grant chain were ever misconfigured — and keeps
+/// own inheritance resolution - an admin is authorized for an `Ingest`
+/// operation even if the role-grant chain were ever misconfigured - and keeps
 /// the tier hierarchy explicit and unit-testable.
 fn satisfying_roles(operation: Operation) -> &'static [&'static str] {
     match operation {
@@ -196,7 +196,7 @@ fn minimum_role(operation: Operation) -> &'static str {
 ///
 /// `Register` requires `pgokf_admin`; `Ingest` requires `pgokf_writer`;
 /// `Search` requires `pgokf_reader`. Because the tiers inherit downward, a
-/// higher tier satisfies any lower requirement — the check accepts the
+/// higher tier satisfies any lower requirement - the check accepts the
 /// required role or any higher one and short-circuits on the first match.
 ///
 /// # Errors
@@ -319,9 +319,9 @@ fn unknown_bundle_error(bundle_id: i64) -> CatalogError {
 /// unit-testable without a running `PostgreSQL` server:
 ///
 /// - a session with **no** tenant set (`None`) or an **empty** tenant (`""`) is
-///   cross-tenant *by design* — the backward-compatible see-all default that
+///   cross-tenant *by design* - the backward-compatible see-all default that
 ///   also lets a trusted operator/superuser operate on any bundle, exactly as
-///   the read policy's "unset = all" — so it is always permitted;
+///   the read policy's "unset = all" - so it is always permitted;
 /// - a session **with** a tenant is confined to it: the bundle must exist
 ///   (`bundle_tenant` is `Some`) and its tenant must equal the session's.
 ///
@@ -339,7 +339,7 @@ fn tenant_permits(session_tenant: Option<&str>, bundle_tenant: Option<&str>) -> 
 ///
 /// The session tenant is read with `current_setting('pgokf.tenant', true)` (the
 /// missing-ok form), which is `NULL` when unset and `''` when explicitly
-/// cleared — deliberately *not* `pgokf_private.effective_tenant()`, which
+/// cleared - deliberately *not* `pgokf_private.effective_tenant()`, which
 /// collapses both to the literal `'default'` and would wrongly confine an unset
 /// operator session to the default tenant. The bundle owner is a correlated
 /// scalar subquery, so the statement always yields exactly one row and a
@@ -379,20 +379,20 @@ fn read_bundle_tenant_context(
 /// `bundle_id` run as the table owner and so **bypass RLS**; without this guard
 /// a `pgokf_writer` / `pgokf_admin` session that has `SET pgokf.tenant = 'acme'`
 /// could still act on another tenant's bundle simply by passing its id. Calling
-/// this right after the `bundle_id` is known — and before any lock, filesystem,
-/// or catalog side effect — makes write confinement equal to read confinement.
+/// this right after the `bundle_id` is known - and before any lock, filesystem,
+/// or catalog side effect - makes write confinement equal to read confinement.
 ///
 /// The rule mirrors [`tenant_permits`] exactly: when `pgokf.tenant` is unset or
 /// empty the caller is cross-tenant by design (backward compatible; the trusted
 /// operator/superuser path), so nothing is restricted; when a tenant is set, a
-/// bundle owned by any other tenant — or one that does not exist — is rejected
+/// bundle owned by any other tenant - or one that does not exist - is rejected
 /// with the same [`unknown_bundle_error`] (`22023`) the entry points already
 /// raise for a bad id, so a cross-tenant id cannot be used to probe another
 /// tenant's catalog.
 ///
 /// Because this is an explicit check rather than RLS, it confines every caller,
 /// including a superuser or the extension owner running inside the
-/// `SECURITY DEFINER` bodies — precisely the callers RLS does not.
+/// `SECURITY DEFINER` bodies - precisely the callers RLS does not.
 ///
 /// # Errors
 ///
@@ -689,7 +689,7 @@ mod tests {
 
     #[test]
     fn tenant_permits_rejects_a_missing_bundle_for_a_scoped_session() {
-        // Arrange: a scoped session naming a bundle that does not exist — must be
+        // Arrange: a scoped session naming a bundle that does not exist - must be
         // rejected identically to a cross-tenant one so the two are
         // indistinguishable.
         // Act & Assert

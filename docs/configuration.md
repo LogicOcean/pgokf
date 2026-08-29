@@ -2,10 +2,10 @@
 
 `pgokf` has two distinct configuration surfaces, and the split is deliberate:
 
-1. **GUCs** (`pgokf.*` server settings) — hard, per-cluster **safety ceilings**.
+1. **GUCs** (`pgokf.*` server settings) - hard, per-cluster **safety ceilings**.
    They are set only in `postgresql.conf` and cannot be raised from a SQL
    session, so they stay trustworthy as limits.
-2. **Durable policy** (`pgokf_private.config`) — catalog **policy** an
+2. **Durable policy** (`pgokf_private.config`) - catalog **policy** an
    administrator manages through SQL. It persists across restarts and is edited
    with `pgokf.set_config` / `pgokf.reset_config` / `pgokf.get_config`.
 
@@ -18,8 +18,8 @@ Everything below is taken from `crates/extension/src/guc.rs` and
 
 Registered in `_PG_init`. The four numeric ceilings use the **`SIGHUP`**
 context: they change only via `postgresql.conf` plus a configuration reload
-(`SELECT pg_reload_conf();` or `pg_ctl reload`), and **no session — not even a
-superuser `SET`** — can raise them. That is what makes them dependable hard
+(`SELECT pg_reload_conf();` or `pg_ctl reload`), and **no session - not even a
+superuser `SET`** - can raise them. That is what makes them dependable hard
 limits rather than advisory defaults. (`PGC_POSTMASTER` would be stricter but
 PostgreSQL forbids defining such variables for a library loaded on demand by
 `CREATE EXTENSION`, so `SIGHUP` is the strictest usable context.) The logging
@@ -31,8 +31,8 @@ threshold uses **`SUSET`**, so a superuser can adjust it at runtime.
 | `pgokf.max_bundle_files` | integer | `100000` | `1 .. 2147483647` | `SIGHUP` | Maximum files discovered in one bundle. |
 | `pgokf.max_frontmatter_bytes` | integer | `262144` (256 KiB) | `1 .. 2147483647` | `SIGHUP` | Maximum bytes parsed as YAML frontmatter in one document. |
 | `pgokf.max_graph_hops` | integer | `5` | `1 .. 1000` | `SIGHUP` | Hard ceiling for graph traversal depth; `concept_neighbors(max_hops)` is capped to this. |
-| `pgokf.log_level` | string | `warning` | — | `SUSET` | Logging threshold used by `pgokf`. |
-| `pgokf.tenant` | string | `''` (empty = see all) | — | `USERSET` | Active tenant for multi-tenant row-level isolation. A policy selector, not a ceiling: any session may set it. |
+| `pgokf.log_level` | string | `warning` | - | `SUSET` | Logging threshold used by `pgokf`. |
+| `pgokf.tenant` | string | `''` (empty = see all) | - | `USERSET` | Active tenant for multi-tenant row-level isolation. A policy selector, not a ceiling: any session may set it. |
 
 ### Reading and setting GUCs
 
@@ -53,7 +53,7 @@ pgokf.max_graph_hops = 8
 SELECT pg_reload_conf();
 ```
 
-Attempting to raise a `SIGHUP` ceiling from SQL fails — this is by design:
+Attempting to raise a `SIGHUP` ceiling from SQL fails - this is by design:
 
 ```sql
 SET pgokf.max_graph_hops = 50;
@@ -64,7 +64,7 @@ SET pgokf.max_graph_hops = 50;
 the ceiling is silently capped to it, and `max_hops < 1` is rejected with
 `22023`.
 
-### Tenant selector — `pgokf.tenant`
+### Tenant selector - `pgokf.tenant`
 
 Unlike the ceilings above, `pgokf.tenant` is a `USERSET` policy selector, not a
 safety limit. It chooses the tenant a session reads and writes under for
@@ -109,11 +109,12 @@ admin-only).
 
 ### Which keys the current engine consults
 
-Accuracy matters here. As of this release the engine **enforces
-`allowed_roots`**, **applies `default_text_search_config`** to both indexing and
-querying, **honors `store_source`** and `search_backend`, and — new in 0.1.5 —
-**activates `sync_log_retention_days`**, `notify_channel`, and
-`okf_version_policy`:
+Accuracy matters here. As of this release the engine consults **every** key:
+it **enforces `allowed_roots`**, **applies `default_text_search_config`** to
+both indexing and querying, **honors `store_source`**, `search_backend`,
+`default_strict`, and `default_exclude`, and **activates
+`sync_log_retention_days`**, `notify_channel`, `okf_version_policy`,
+`embedding_dim`, `track_history`, and `history_retention_days`:
 
 | Key | Status in the current engine |
 | --- | ---------------------------- |
@@ -127,14 +128,10 @@ querying, **honors `store_source`** and `search_backend`, and — new in 0.1.5 �
 | `embedding_dim` | **Applied (new in 0.1.6).** The expected length of caller-supplied embeddings: `pgokf.set_concept_embedding` rejects any `real[]` whose length differs, and `pgokf.rebuild_embedding_index` builds its pgvector HNSW index with the `vector(embedding_dim)` typmod. See the embeddings section below. |
 | `track_history` | **Applied (new in 0.1.11).** When `true`, each sync records an SCD-2 version trail of every changed concept into `pgokf.concept_history` (read via `pgokf.concept_history` / `pgokf.concept_as_of`); when `false` (default) it records nothing, with zero storage/behavior change. See the version-history section below and [Version History](version-history.md). |
 | `history_retention_days` | **Applied (new in 0.1.11).** When `track_history` is on and this is positive, closed history versions older than `now() - this many days` are pruned in the same transaction after each sync; the current open version is never pruned. `0` (default) keeps history indefinitely. See the version-history section below. |
-| `default_strict` | **Stored, not yet consulted.** Sync is always strict — the first malformed file aborts the sync. |
-| `default_exclude` | **Stored, not yet consulted.** Discovery does not yet apply these exclusion globs. |
+| `default_strict` | **Applied.** When `true` (default), the first malformed concept file aborts the sync with `22023` and the surrounding transaction rolls back, so a partial projection is never committed. When `false`, a malformed file is logged as a `WARNING` and passed over (it counts toward no bucket in the returned report), so the rest of the bundle still registers. A file that cannot be *read* (an I/O failure, not a parse failure) remains a hard error in both modes. |
+| `default_exclude` | **Applied.** Bundle-relative glob patterns excluded from filesystem discovery at sync time, combined with the built-in exclusions. Content-sourced bundles (`register_bundle_content`) have no filesystem discovery, so the globs do not apply to them. |
 
-`default_strict` and `default_exclude` remain reserved for planned
-functionality; setting them is safe and persists, but does not change behavior
-today.
-
-### Storage tiers — `store_source`
+### Storage tiers - `store_source`
 
 `store_source` selects between two deployment shapes without changing any other
 behavior. It is **off by default**, so an install that never touches it behaves
@@ -147,7 +144,7 @@ exactly as one built without the feature.
   reader can fetch a concept's exact bytes with
   `pgokf.get_concept_source(bundle_id, concept_id)`, and an admin can rebuild the
   bundle on disk byte-for-byte with
-  `pgokf.export_sources(bundle_id, dest_dir)`. The cost is storage — every source
+  `pgokf.export_sources(bundle_id, dest_dir)`. The cost is storage - every source
   file is held in the database (TOAST-compressed, `lz4` where the build supports
   it, otherwise `pglz`).
 - **Enterprise data-lake (`store_source = false`, default).** The verbatim files
@@ -155,16 +152,16 @@ exactly as one built without the feature.
   metadata-and-search projection. No `concept_source` row is written, so the
   database stays lean and the lake remains the system of record.
 
-> **⚠️ Warning — changing `store_source` is not retroactive.**
+> **⚠️ Warning - changing `store_source` is not retroactive.**
 > Like `default_text_search_config`, `store_source` is read at the moment each
 > concept is synced. Turning it on does **not** backfill source bytes for bundles
 > that are already synced, and `refresh_bundle` only re-reads files whose content
 > hash changed. Set `store_source` **before the first `register_bundle`** so the
 > whole corpus is stored under one policy; to add (or drop) stored source for an
-> already-registered bundle, re-register it — `unregister_bundle` followed by
+> already-registered bundle, re-register it - `unregister_bundle` followed by
 > `register_bundle`.
 
-> **⚠️ Warning — changing `default_text_search_config` is not retroactive.**
+> **⚠️ Warning - changing `default_text_search_config` is not retroactive.**
 > The configuration is read at the moment each concept is indexed and again at
 > the moment each query runs. Changing it does **not** re-index bundles that are
 > already synced: `refresh_bundle` only re-parses files whose content hash
@@ -175,24 +172,24 @@ exactly as one built without the feature.
 >
 > Set `default_text_search_config` **before the first `register_bundle`** so the
 > whole corpus is indexed under one configuration. To move an already-registered
-> bundle to a new configuration, re-register it — `unregister_bundle` followed by
-> `register_bundle` — which is currently the only way to rebuild every `body_tsv`
+> bundle to a new configuration, re-register it - `unregister_bundle` followed by
+> `register_bundle` - which is currently the only way to rebuild every `body_tsv`
 > under the new config.
 
-### Search backend — `search_backend`
+### Search backend - `search_backend`
 
 `search_backend` selects the strategy `pgokf.concept_search` runs behind its
 fixed signature and result shape:
 
-- **`native`** (the default) — zero-dependency PostgreSQL full-text search
+- **`native`** (the default) - zero-dependency PostgreSQL full-text search
   (`websearch_to_tsquery` + `ts_rank_cd` + `ts_headline` over the weighted
   `body_tsv` GIN index). It works on every supported server (PG 15–19) with no
   extra extension, and remains the right choice for selective queries.
-- **`bm25`** — Block-Max WAND top-k over a ParadeDB `pg_search` index, which is
+- **`bm25`** - Block-Max WAND top-k over a ParadeDB `pg_search` index, which is
   dramatically faster for broad, relevance-ranked queries. It requires the
   external `pg_search` extension (see below).
 
-`pgokf` never links `pg_search` at build time — `CREATE EXTENSION pgokf`
+`pgokf` never links `pg_search` at build time - `CREATE EXTENSION pgokf`
 succeeds whether or not `pg_search` is installed. When `search_backend` is
 `bm25` but `pg_search` is not installed, or no `bm25` index exists on
 `pgokf.concepts`, `concept_search` **falls back to native with a `WARNING`**
@@ -202,13 +199,13 @@ the full enable-BM25 walkthrough, the honesty notes about the `pg_search`
 dependency (AGPL-3.0, `shared_preload_libraries`, PG-version constraints), and
 the tokenizer differences between the two backends.
 
-> **Honesty note — `bm25` needs an external extension.** `native` is the
+> **Honesty note - `bm25` needs an external extension.** `native` is the
 > default precisely because it has no dependencies. `bm25` is opt-in and pulls
 > in ParadeDB `pg_search` (which itself requires `pgvector` and a
 > `shared_preload_libraries` entry). If you cannot or do not want that
 > dependency, stay on `native`.
 
-### Embedding dimension — `embedding_dim`
+### Embedding dimension - `embedding_dim`
 
 `embedding_dim` (default `1536`) is the expected length of the caller-computed
 embedding vectors streamed in through `pgokf.set_concept_embedding`, and the
@@ -221,7 +218,7 @@ SELECT pgokf.set_config('embedding_dim', '768'::jsonb);
 ```
 
 `pgokf` **never computes embeddings** and takes **no static dependency on
-pgvector** — the `pgokf.concept_embedding` table stores each vector as the
+pgvector** - the `pgokf.concept_embedding` table stores each vector as the
 builtin `real[]`, so `CREATE EXTENSION pgokf` succeeds on a cluster without
 pgvector. The optional semantic (`concept_search_semantic`) and hybrid
 (`concept_search_hybrid`) surfaces cast that `real[]` to `vector(embedding_dim)`
@@ -235,14 +232,14 @@ the full semantic/hybrid walkthrough.
 > 2000-dimension index limit; above it semantic search still works via an exact
 > scan.
 
-### Audit-log retention — `sync_log_retention_days`
+### Audit-log retention - `sync_log_retention_days`
 
 Every successful `register` / `refresh` / `register_bundle_content` sync, and
 every `unregister_bundle`, appends one row to the administrator-only
 `pgokf_private.sync_log` audit trail, inside the operation's own transaction (so
 a logged row always means the operation committed). Immediately after appending,
 history older than `now() - sync_log_retention_days` is **pruned in the same
-transaction**. A value of `0` — or simply no rows older than the window — keeps
+transaction**. A value of `0` - or simply no rows older than the window - keeps
 history indefinitely.
 
 This is new in 0.1.5: the key was defined but dead in earlier releases. Read the
@@ -261,13 +258,13 @@ SELECT pgokf.set_config('sync_log_retention_days', '14'::jsonb);  -- keep 14 day
 SELECT pgokf.set_config('sync_log_retention_days', '0'::jsonb);   -- keep forever
 ```
 
-### Change notification — `notify_channel`
+### Change notification - `notify_channel`
 
 When `notify_channel` is a non-empty channel identifier, a successful sync emits
 `pg_notify(<channel>, <json>)` with a payload of
 `{bundle_id, op, added, updated, removed, total}`. A `LISTEN <channel>` client
 (an external indexer, a cache invalidator, a dashboard) is then woken on commit.
-Empty (the default) disables it entirely, with zero overhead — no `pg_notify`
+Empty (the default) disables it entirely, with zero overhead - no `pg_notify`
 call is made. The channel name is validated as a safe identifier and always
 bound as a parameter, never interpolated.
 
@@ -278,16 +275,16 @@ SELECT pgokf.set_config('notify_channel', '""'::jsonb);              -- disable
 LISTEN pgokf_events;
 ```
 
-### OKF version policy — `okf_version_policy`
+### OKF version policy - `okf_version_policy`
 
 A bundle-root `index.md` may declare an `okf_version`. This build models OKF
 v0.2, so it recognizes `0.2` (and its patch line `0.2.x`, lenient on a leading
 `v`). `okf_version_policy` governs a bundle that declares an *unsupported*
 version:
 
-- **`warn`** (the default) — log a `WARNING` and index the bundle anyway; the
+- **`warn`** (the default) - log a `WARNING` and index the bundle anyway; the
   declared version is still stored on `pgokf.bundles.okf_version`.
-- **`reject`** — abort the sync with `22023`, so a non-conforming bundle never
+- **`reject`** - abort the sync with `22023`, so a non-conforming bundle never
   commits.
 
 An **absent** `okf_version` is always accepted and leaves
@@ -298,11 +295,11 @@ SELECT pgokf.set_config('okf_version_policy', '"reject"'::jsonb);  -- strict
 SELECT pgokf.set_config('okf_version_policy', '"warn"'::jsonb);    -- lenient (default)
 ```
 
-### Version history — `track_history` / `history_retention_days`
+### Version history - `track_history` / `history_retention_days`
 
 `track_history` is the **opt-in switch** for concept version history, and it is
 **off by default**. When it is `false` (the default) a sync records nothing, so
-an existing install — and any bundle synced with history disabled — behaves
+an existing install - and any bundle synced with history disabled - behaves
 **exactly as before with zero extra storage**. That is precisely what keeps the
 feature backward compatible; treat enabling it as a **storage/retention
 tradeoff**.
@@ -388,7 +385,8 @@ SELECT pgokf.set_config('notify_channel', '"pgokf_events"'::jsonb);
 -- okf_version instead of warning.
 SELECT pgokf.set_config('okf_version_policy', '"reject"'::jsonb);
 
--- Reserved keys (stored, not yet consulted by the engine):
+-- Sync policy: warn-and-skip malformed files instead of aborting, and
+-- exclude scratch paths from discovery.
 SELECT pgokf.set_config('default_strict', 'false'::jsonb);
 SELECT pgokf.set_config('default_exclude', '["*.tmp", "drafts/**"]'::jsonb);
 ```
@@ -421,11 +419,14 @@ SELECT pgokf.reset_config();                 -- reset every key to its default
 
 ---
 
-## GUCs vs. durable policy — when to use which
+## GUCs vs. durable policy - when to use which
 
 - Use **GUCs** for safety ceilings that operators, not the catalog, own: how big a
   file may be, how many files a bundle may hold, how deep a graph walk may go.
   They are cluster-wide, reload-only, and cannot be relaxed from SQL.
 - Use **durable policy** for catalog behavior an administrator tunes through SQL
-  and that must survive restarts — today, principally `allowed_roots` to bound
-  where bundles may live.
+  and that must survive restarts: where bundles may live (`allowed_roots`), how
+  search runs (`search_backend`, `default_text_search_config`, `embedding_dim`),
+  what the catalog stores (`store_source`, `track_history`), how sync reacts and
+  announces (`okf_version_policy`, `notify_channel`), and how long audit and
+  history are kept (`sync_log_retention_days`, `history_retention_days`).

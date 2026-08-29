@@ -3,7 +3,7 @@
 //!
 //! # Seam contract for the links feature wave
 //!
-//! Everything here lives in **this file only** — the sync engine already calls
+//! Everything here lives in **this file only** - the sync engine already calls
 //! [`project`] and must not be edited. This module:
 //!
 //! 1. Defines the `pgokf.links` table in its own `extension_sql!` block
@@ -28,7 +28,7 @@
 //!    concepts. Because [`project`] only reprojects *staged* sources, this pass
 //!    is what keeps the inbound edges of *unchanged* concepts correct: an edge
 //!    to a target added this sync flips `false` → `true`, and an edge to a
-//!    target removed this sync flips `true` → `false` — so the graph
+//!    target removed this sync flips `true` → `false` - so the graph
 //!    self-corrects and never emits phantom neighbors for deleted targets.
 //! 4. Uses parameterized SPI only, surfacing failures as [`CatalogError`] so
 //!    the surrounding sync transaction rolls back atomically.
@@ -156,9 +156,9 @@ fn delete_staged_outgoing(bundle_id: i64, staged: &[StagedConcept]) -> Result<()
 /// Bulk-insert every staged concept's outgoing edges with one array-unnest
 /// `INSERT` per [`BATCH_SIZE`] chunk, computing `resolved` set-based.
 ///
-/// `resolved` is derived in SQL exactly as the row-by-row `INSERT` did — an
+/// `resolved` is derived in SQL exactly as the row-by-row `INSERT` did - an
 /// internal (`target_id IS NOT NULL`), non-external edge whose target concept
-/// exists in this bundle — via a correlated `EXISTS` against `pgokf.concepts`
+/// exists in this bundle - via a correlated `EXISTS` against `pgokf.concepts`
 /// evaluated per unnested row. The concept rows for the bundle are already
 /// written when the seam runs, so the check sees the full current concept set;
 /// the inbound edges of concepts that were *not* staged this sync are corrected
@@ -263,7 +263,7 @@ struct AttestationEdge {
 /// unchanged. For an attested concept each present, resolvable reference key
 /// (`computation` / `executor` / `attester`) produces one edge, resolved
 /// through [`okf_parser::resolve_reference`] exactly as a Markdown link
-/// destination is — an internal reference carries the normalized `target_path`
+/// destination is - an internal reference carries the normalized `target_path`
 /// / `target_id`, an external one carries neither and `is_external = true`, and
 /// an unresolvable internal one carries neither with `is_external = false`
 /// (retained like any broken link). Edge ordinals continue after the source's
@@ -273,7 +273,7 @@ struct AttestationEdge {
 /// # Errors
 ///
 /// Returns a [`CatalogError`] if an edge ordinal exceeds the `i32` range of the
-/// `ordinal` column — unreachable in practice (bounded by `max_file_bytes`),
+/// `ordinal` column - unreachable in practice (bounded by `max_file_bytes`),
 /// mirroring [`batch::marshal_links`].
 fn collect_attestation_edges(
     staged: &[StagedConcept],
@@ -408,7 +408,7 @@ pub fn project(bundle_id: i64, staged: &[StagedConcept]) -> Result<(), CatalogEr
 ///
 /// [`project`] only reprojects the outgoing edges of *staged* (added or
 /// updated) sources, so the inbound edges of an *unchanged* concept keep the
-/// `resolved` value they were given when their source was last written — even
+/// `resolved` value they were given when their source was last written - even
 /// after this sync added or removed the target they point at. Run once inside
 /// the sync transaction after the concept set is finalized (post upsert and
 /// delete), this bundle-wide pass recomputes `resolved` from the current

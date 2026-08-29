@@ -1,4 +1,4 @@
-site_name: "pgokf — OKF PostgreSQL Catalog"
+site_name: "pgokf - OKF PostgreSQL Catalog"
 site_description: "Documentation for pgokf, a PostgreSQL extension implementing the Open Knowledge Format (OKF) metadata catalog."
 repo_url: https://github.com/LogicOcean/pgokf
 repo_name: LogicOcean/pgokf

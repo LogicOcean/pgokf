@@ -3,17 +3,17 @@
 //!
 //! # Seam contract for the provenance feature wave
 //!
-//! Everything lives in **this file only** — the sync engine already calls
+//! Everything lives in **this file only** - the sync engine already calls
 //! [`project`] inside the advisory-locked atomic transaction and must not be
 //! edited. This wave owns three tables, all keyed on
 //! `(bundle_id, concept_id) REFERENCES pgokf.concepts (bundle_id, id)
 //! ON DELETE CASCADE` so a removed concept drops its provenance automatically
 //! (which is why removals need no seam call):
 //!
-//! 1. `pgokf.concept_provenance` — one scalar generation/trust/lifecycle row
+//! 1. `pgokf.concept_provenance` - one scalar generation/trust/lifecycle row
 //!    per provenance-bearing concept.
-//! 2. `pgokf.concept_verification` — the ordered `verified[]` event list.
-//! 3. `pgokf.concept_provenance_source` — the `sources[]` provenance
+//! 2. `pgokf.concept_verification` - the ordered `verified[]` event list.
+//! 3. `pgokf.concept_provenance_source` - the `sources[]` provenance
 //!    materials (distinct from the raw-bytes `pgokf.concept_source`).
 //!
 //! # OKF v0.2 field mapping
@@ -190,7 +190,7 @@ COMMENT ON COLUMN pgokf.concept_verification.tenant_id IS
     'Multi-tenant owner, denormalized from the concept''s bundle for a local row-level-security predicate; always equals the bundle''s tenant_id.';
 
 COMMENT ON TABLE pgokf.concept_provenance_source IS
-    'One row per OKF v0.2 sources[] provenance material for a concept — the inputs the content was derived from. Distinct from pgokf.concept_source, which holds the concept''s own raw source bytes. Cascades from pgokf.concepts.';
+    'One row per OKF v0.2 sources[] provenance material for a concept - the inputs the content was derived from. Distinct from pgokf.concept_source, which holds the concept''s own raw source bytes. Cascades from pgokf.concepts.';
 COMMENT ON COLUMN pgokf.concept_provenance_source.ordinal IS
     'Zero-based position of the entry in the concept''s sources[] list; forms the primary key with (bundle_id, concept_id).';
 COMMENT ON COLUMN pgokf.concept_provenance_source.source_id IS
@@ -577,8 +577,8 @@ const DELETE_STATEMENTS: [&str; 3] = [
 
 /// Clear every staged concept's existing provenance rows, in bounded batches.
 ///
-/// Every staged concept is cleared across all three tables — including ones that
-/// now carry no provenance frontmatter and thus contribute no replacement row —
+/// Every staged concept is cleared across all three tables - including ones that
+/// now carry no provenance frontmatter and thus contribute no replacement row -
 /// so removing provenance from a concept correctly drops its stale rows. Concept
 /// IDs are chunked at [`BATCH_SIZE`] so the `= ANY($2)` list never grows
 /// unbounded.
@@ -784,7 +784,7 @@ mod tests {
 
     #[test]
     fn extract_scalar_maps_full_okf_v0_2_frontmatter() {
-        // Arrange: the rich OKF v0.2 shape — nested generated, a usage_window,
+        // Arrange: the rich OKF v0.2 shape - nested generated, a usage_window,
         // a lifecycle status, and a stale_after instant.
         let concept = parse(
             "type: Attested Computation\n\
@@ -844,7 +844,7 @@ mod tests {
 
     #[test]
     fn extract_scalar_coerces_wrong_typed_values_without_panicking() {
-        // Arrange: generated as a number, a malformed stale_after — malformed
+        // Arrange: generated as a number, a malformed stale_after - malformed
         // producer data that must degrade to None columns, never a panic.
         let concept = parse(
             "type: Reference\n\

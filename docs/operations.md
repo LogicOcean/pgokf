@@ -34,7 +34,7 @@ SELECT jsonb_pretty(pgokf.health());
 ```
 
 `pgokf.catalog_stats()` is the per-bundle dashboard query. It folds the counts
-you used to assemble by hand — indexed concepts, links, resolved links — plus
+you used to assemble by hand - indexed concepts, links, resolved links - plus
 sync recency and a 24-hour `is_stale` flag into one row per bundle. A stale
 bundle is the first sign a scheduled refresh has stopped running.
 
@@ -51,7 +51,7 @@ SELECT bundle_id, name, enabled, indexed_concepts,
 
 Every successful `register` / `refresh` / `register_bundle_content` sync and
 every `unregister` appends one row to `pgokf_private.sync_log`, committed in the
-operation's own transaction — so a logged row always means the operation
+operation's own transaction - so a logged row always means the operation
 committed (a failed, rolled-back sync leaves none). Read it through the
 reader-level `pgokf.list_sync_log(bundle_id, max_rows)`:
 
@@ -73,7 +73,7 @@ For push-based monitoring, set the `notify_channel` policy and a `LISTEN`
 client is woken on every sync with a `{bundle_id, op, added, updated, removed,
 total}` payload.
 
-### Change manifest — what a sync actually changed
+### Change manifest - what a sync actually changed
 
 Beyond the aggregate counts, every sync records the concrete concepts it added,
 updated, or removed. Read the manifest of any `sync_log` entry through the
@@ -86,16 +86,42 @@ SELECT concept_id, change_kind
 ```
 
 The manifest lives in `pgokf_private.sync_log_change`, a child of `sync_log`
-that cascades on delete — so it shares the `sync_log_retention_days` window with
+that cascades on delete - so it shares the `sync_log_retention_days` window with
 no separate knob. Use it to answer "when did concept X change, and in which
 sync?" or to drive a downstream re-index of exactly the touched concepts.
+
+### Version-history retention
+
+When the opt-in `track_history` policy is on, every register / refresh /
+`register_bundle_content` sync appends an SCD-2 version trail of each changed
+concept to `pgokf.concept_history`, letting you answer "what did this concept
+look like then?" through the reader-level `pgokf.concept_history(bundle_id, path,
+max_rows)` and `pgokf.concept_as_of(bundle_id, path, as_of)`:
+
+```sql
+-- the version trail of one concept, newest first
+SELECT version, change_kind, valid_from, valid_to
+  FROM pgokf.concept_history(1, 'runbooks/failover.md');
+
+-- the version that was current at a past instant
+SELECT version, valid_from FROM pgokf.concept_as_of(1, 'runbooks/failover.md',
+                                                     now() - interval '30 days');
+```
+
+History is bounded by the durable `history_retention_days` policy: after each
+sync appends its trail, *closed* versions (`valid_to IS NOT NULL`) whose
+`valid_to` predates `now() - history_retention_days` are pruned in the same
+transaction. The single current open version of a concept (`valid_to IS NULL`)
+is never pruned. Set it to `0` (the default) to keep closed history
+indefinitely. Both `track_history` and `history_retention_days` are managed
+through `set_config`; see [configuration.md](configuration.md).
 
 ### Access / exfiltration audit
 
 The three operations that move concept *content* out of the database each append
 one row to `pgokf_private.access_log`: `export_parquet`, `export_sources`, and
 `get_concept_source`. Read it through the **admin-only**
-`pgokf.list_access_log(bundle_id, max_rows)` — an exfiltration audit is sensitive,
+`pgokf.list_access_log(bundle_id, max_rows)` - an exfiltration audit is sensitive,
 so it is not reader-visible:
 
 ```sql
@@ -112,7 +138,7 @@ shares the `sync_log_retention_days` retention window. Alert on unexpected
 ### Retirement (soft-delete) window
 
 `pgokf.retire_bundle(id)` hides a bundle from search, traversal, and the default
-`list_bundles` **without deleting any rows** — a reversible undo window for the
+`list_bundles` **without deleting any rows** - a reversible undo window for the
 hard `unregister_bundle` cascade. A bundle is *active* only when
 `enabled AND retired_at IS NULL`.
 
@@ -130,7 +156,7 @@ SELECT bundle_id, name, retired_at FROM pgokf.catalog_stats()
 ```
 
 When the grace period has passed, reclaim the storage with the admin-only
-`pgokf.purge_retired(older_than)` — it hard-deletes (cascading, with an
+`pgokf.purge_retired(older_than)` - it hard-deletes (cascading, with an
 `unregister` audit row) every bundle retired longer than the interval:
 
 ```sql
@@ -163,7 +189,7 @@ consolidation to see where a canonical concept has been duplicated.
 ### Stale concepts
 
 `pgokf.stale_concepts(bundle_id, as_of)` surfaces concepts whose OKF
-`stale_after` instant has passed — the lifecycle signal for content that needs
+`stale_after` instant has passed - the lifecycle signal for content that needs
 review or regeneration.
 
 ```sql
@@ -179,7 +205,7 @@ SELECT concept_id, stale_after
 
 `pgokf.search_index_status()` (reader-level) reports, in one `jsonb` document,
 whether the optional accelerators are installed, whether their indexes exist, and
-how much of the catalog they cover — so an operator can confirm the BM25 and
+how much of the catalog they cover - so an operator can confirm the BM25 and
 embedding indexes are built and *current* before relying on them:
 
 ```sql
@@ -200,10 +226,15 @@ SELECT jsonb_pretty(pgokf.search_index_status());
 
 Coverage counts are tenant-scoped (RLS-filtered). BM25 coverage is all-or-nothing
 (the index spans every concept row); embedding coverage is the fraction of
-concepts that carry a stored vector — watch it fall as new concepts are ingested
+concepts that carry a stored vector - watch it fall as new concepts are ingested
 faster than the embedder streams their vectors in, and re-run
 `rebuild_embedding_index` after a bulk load. `coverage_pct` is `NULL` when there
 are no concepts to cover.
+
+When `search_backend = bm25` but `index_exists` is `false`, searches fall back
+to native FTS with a warning until the admin-only `pgokf.rebuild_search_index()`
+creates (or rebuilds) the bm25 index; it is a clean no-op returning `false` when
+`pg_search` is not installed.
 
 ### Search-index residency
 
@@ -241,9 +272,9 @@ SELECT relname,
 - `pgokf.stale_concepts()` returning rows → content past its OKF `stale_after`
   needs review or regeneration.
 - GIN index `hit_pct` trending down on a growing corpus → broad-search latency
-  will climb; add RAM, pre-filter, or adopt the future BM25 adapter.
+  will climb; add RAM, pre-filter, or switch to the optional BM25 backend.
 - Sync errors in the PostgreSQL log (SQLSTATE `22023` invalid parameter, `23505`
-  duplicate path, parse failures) — see [troubleshooting.md](troubleshooting.md).
+  duplicate path, parse failures) - see [troubleshooting.md](troubleshooting.md).
 - For the enterprise tier: the lake mount unavailable → registers/refreshes for
   bundles under it will fail (see
   [deployment-topologies.md](deployment-topologies.md)).
@@ -274,7 +305,7 @@ schedule. Drive it from `cron`, a systemd timer, `pg_cron`, or your orchestrator
 
 When [`pg_cron`](https://github.com/citusdata/pg_cron) is installed (in
 `shared_preload_libraries`, then `CREATE EXTENSION pg_cron`), the built-in
-adapter registers the recurring refresh for you — no external cron entry to
+adapter registers the recurring refresh for you - no external cron entry to
 maintain:
 
 ```sql
@@ -287,8 +318,8 @@ SELECT pgokf.unschedule_refresh(7);
 
 `schedule_refresh` (admin-tier, `SECURITY DEFINER`, tenant-confined) is
 idempotent: re-scheduling the same bundle updates the one `pgokf_refresh_<id>`
-job in place. The coupling to `pg_cron` is **runtime-only** — `pgokf` installs
-and runs without it — so when `pg_cron` is absent `schedule_refresh` raises a
+job in place. The coupling to `pg_cron` is **runtime-only** - `pgokf` installs
+and runs without it - so when `pg_cron` is absent `schedule_refresh` raises a
 clear `22023` naming the missing dependency (never a silent success) and
 `unschedule_refresh` is a clean no-op. The scheduled command is a fixed
 `SELECT pgokf.refresh_bundle(<id>)` with the id bound as a trusted integer
@@ -297,8 +328,8 @@ literal and the schedule bound as a parameter.
 #### External scheduling
 
 Prefer an external scheduler when `pg_cron` is not available, or when you want one
-place that fans out over every enabled bundle. A minimal cron shape (an admin
-login role, membership in `pgokf_admin`):
+place that fans out over every enabled bundle. A minimal cron shape (a writer
+login role, membership in `pgokf_writer`; refreshing needs no admin rights):
 
 ```bash
 # refresh every bundle every 15 minutes
@@ -314,7 +345,7 @@ Guidance:
 - **Match the interval to change velocity and store latency.** A local
   small-tier bundle can refresh often. An object-store mount pays list + read
   latency on every refresh (it re-walks the mount), so refresh those less
-  aggressively — see
+  aggressively - see
   [deployment-topologies.md](deployment-topologies.md).
 - **Refreshes serialize per bundle.** Each `refresh_bundle` takes an advisory
   lock keyed on the bundle's canonical path, so overlapping runs of the same
@@ -327,11 +358,6 @@ Guidance:
   reads only (see
   [deployment-topologies.md](deployment-topologies.md#scaling-reads-with-replicas)).
 
-> **`sync_log_retention_days` is currently a no-op.** The key exists in
-> `pgokf_private.config` and is accepted, but the current engine does not act on
-> it — there is no sync-log table to prune yet. Do not rely on it for retention;
-> it is reserved for a future sync-history feature.
-
 ---
 
 ## Backup and restore
@@ -339,15 +365,15 @@ Guidance:
 `pgokf` state is entirely inside PostgreSQL, so **`pg_dump` / `pg_restore` and
 PITR are the backup story.** What a dump captures depends on the tier:
 
-- **Small tier (`store_source = true`)** — the dump includes
+- **Small tier (`store_source = true`)** - the dump includes
   `pgokf.concept_source`, so the **original files travel with the backup**. A
   restore reconstructs a byte-identical corpus with no external dependency.
-- **Enterprise tier (`store_source = false`)** — the dump includes metadata and
+- **Enterprise tier (`store_source = false`)** - the dump includes metadata and
   the search index but **not** the source bytes (they live in the lake). Back up
   the object store on its own schedule; the two backups together are your DR set.
 
 ```bash
-# whole database (roles are cluster-wide — see the note below)
+# whole database (roles are cluster-wide - see the note below)
 pg_dump --format=custom --file=okf.dump "$OKF_DSN"
 
 # just the catalog schemas
@@ -363,15 +389,16 @@ Notes:
 
 - **Roles are cluster-wide** and are **not** captured by a database-scoped
   `pg_dump`. Back them up with `pg_dumpall --roles-only`, or recreate them by
-  installing the extension (the bootstrap creates `pgokf_reader` / `pgokf_admin`
-  idempotently) before restoring, then re-`GRANT` them to your login users.
+  installing the extension (the bootstrap creates the three-tier hierarchy
+  `pgokf_reader` / `pgokf_writer` / `pgokf_admin` idempotently) before restoring,
+  then re-`GRANT` them to your login users.
 - **`pgokf_private.config` is in the dump**, so `allowed_roots`, `store_source`,
   and the rest of your policy restore with the catalog. Re-verify `allowed_roots`
   points at valid paths on the restore host.
 - **GUC ceilings are not catalog data.** `pgokf.max_file_bytes` and friends live
   in `postgresql.conf`; carry them with your config management, not the dump.
 - For point-in-time recovery and streaming standbys, `pgokf` needs nothing
-  special — it is table and function data and rides WAL like everything else.
+  special - it is table and function data and rides WAL like everything else.
 
 ---
 
@@ -385,21 +412,22 @@ library**. Upgrade the SQL objects with `ALTER EXTENSION`:
 ALTER EXTENSION pgokf UPDATE;
 
 -- or step to a specific version
-ALTER EXTENSION pgokf UPDATE TO '0.1.3';
+ALTER EXTENSION pgokf UPDATE TO '0.1.12';
 
 SELECT extversion FROM pg_extension WHERE extname = 'pgokf';
 SELECT pgokf.version();   -- the loaded library's version
 ```
 
 `pgokf` ships an explicit migration chain, so PostgreSQL can walk intermediate
-steps for you: the packaged scripts are `0.1.0 → 0.1.1 → 0.1.2 → 0.1.3` (plus the
-base `0.1.0` / `0.1.2` / `0.1.3` full installs). `ALTER EXTENSION pgokf UPDATE`
-applies the necessary steps in order.
+steps for you: the packaged scripts step one minor at a time from `0.1.0`
+through `0.1.13` (`0.1.0 -> 0.1.1 -> ... -> 0.1.12 -> 0.1.13`), alongside a full
+base install for the current version. `ALTER EXTENSION pgokf UPDATE` applies the
+necessary steps in order.
 
 Procedure:
 
 1. Install the new artifacts into the cluster (new `.sql` migration scripts into
-   `SHAREDIR/extension`, new shared library into `PKGLIBDIR`) — see
+   `SHAREDIR/extension`, new shared library into `PKGLIBDIR`) - see
    [packaging.md](packaging.md).
 2. If the library was already loaded by running backends, **reconnect** (or
    restart if it is in `shared_preload_libraries`) so the new `.so` is in memory.
@@ -418,7 +446,7 @@ See [api-stability.md](api-stability.md) for what may change across versions and
 Two surfaces, deliberately split (full detail in
 [configuration.md](configuration.md)):
 
-**GUC ceilings** — hard, per-cluster safety limits set only in `postgresql.conf`
+**GUC ceilings** - hard, per-cluster safety limits set only in `postgresql.conf`
 (they use the `SIGHUP` context and cannot be raised from a SQL session):
 
 ```conf
@@ -437,16 +465,16 @@ SHOW pgokf.max_file_bytes;    -- verify (library must be loaded in the session)
 
 Tuning intent:
 
-- **`max_file_bytes`** — a sync aborts on any file larger than this. Raise it if
+- **`max_file_bytes`** - a sync aborts on any file larger than this. Raise it if
   legitimate concepts exceed 4 MiB; keep it as low as your real files allow so an
   accidental huge file can't blow up a sync.
-- **`max_bundle_files`** — bounds discovery per bundle; a guard against pointing
+- **`max_bundle_files`** - bounds discovery per bundle; a guard against pointing
   `register_bundle` at an enormous tree by mistake.
-- **`max_frontmatter_bytes`** — bounds YAML parsing per document.
-- **`max_graph_hops`** — the hard ceiling `concept_neighbors(max_hops)` is capped
+- **`max_frontmatter_bytes`** - bounds YAML parsing per document.
+- **`max_graph_hops`** - the hard ceiling `concept_neighbors(max_hops)` is capped
   to; the guardrail against an unbounded traversal.
 
-**Durable policy** — catalog behavior managed through SQL, persisted in
+**Durable policy** - catalog behavior managed through SQL, persisted in
 `pgokf_private.config`, edited only via the admin functions:
 
 ```sql
@@ -469,7 +497,7 @@ re-registering it (next section).
 
 Turning on `store_source` (or changing the indexing language) does **not**
 rewrite existing rows, and `refresh_bundle` re-projects only files whose content
-changed — so an unchanged bundle is left as-is:
+changed - so an unchanged bundle is left as-is:
 
 ```sql
 SELECT pgokf.set_config('store_source', 'true'::jsonb);
@@ -489,7 +517,7 @@ SELECT bundle_id FROM pgokf.register_bundle('/srv/okf/knowledge', 'knowledge');
 
 Then `get_concept_source` / `export_sources` return the stored bytes. Anything
 referencing the old `bundle_id` (dashboards, saved queries) must be repointed at
-the new one — plan the swap accordingly.
+the new one - plan the swap accordingly.
 
 ---
 
@@ -508,8 +536,8 @@ Reading these:
 
 - **Selective queries scale well.** Point lookups, tag filters (`concepts_tags_gin`),
   type filters (`concepts_type_idx`), and path lookups (`concepts_path_idx`) stay
-  fast into the millions of rows. Design search UIs to **pre-filter** — by
-  bundle, tag, or type — before ranking, and you stay in this regime. Passing a
+  fast into the millions of rows. Design search UIs to **pre-filter** - by
+  bundle, tag, or type - before ranking, and you stay in this regime. Passing a
   `bundle_id` to `concept_search` scopes it to one bundle.
 - **Broad ranked search grows linearly.** A "rank the whole corpus against this
   phrase" query is the expensive case, reaching seconds at tens of millions of
@@ -519,14 +547,14 @@ Reading these:
   the durable `search_backend` key to `bm25` routes the same
   `pgokf.concept_search` through a ParadeDB `pg_search` index at runtime; it
   keeps broad top-k queries roughly flat where native ranking grows linearly.
-  It requires the operator to install `pg_search` separately — `pgokf` takes no
-  hard dependency on it — and search **falls back to native FTS with a warning**
+  It requires the operator to install `pg_search` separately - `pgokf` takes no
+  hard dependency on it - and search **falls back to native FTS with a warning**
   when `pg_search` or its index is absent. There is no `bm25()` function; it is a
   backend mode selected by configuration. See
   [Enabling the BM25 backend](search-guide.md#enabling-the-bm25-backend) and the
   [`search_backend` key](configuration.md#search-backend-search_backend).
 
-For horizontal read scaling, add streaming replicas and route searches to them —
+For horizontal read scaling, add streaming replicas and route searches to them -
 see [deployment-topologies.md](deployment-topologies.md#scaling-reads-with-replicas).
 
 ### Keep the GIN index RAM-resident
@@ -536,15 +564,16 @@ from memory. Size `shared_buffers` and leave enough OS page cache so the index
 (and the hot parts of `pgokf.concepts`) stay resident; use the residency query in
 [Monitoring](#search-index-residency) to confirm the hit ratio stays high as the
 corpus grows. When it starts falling and broad queries slow down, the options
-are: add RAM, pre-filter harder, or adopt the future BM25 adapter.
+are: add RAM, pre-filter harder, or switch to the optional BM25 backend
+(`search_backend = bm25`, above).
 
 ---
 
 ## Export for analytics and DR
 
 Two admin functions turn a bundle into portable files on the server (both
-require `pgokf_admin`; `dest_dir` must exist, be server-writable, and — when
-`allowed_roots` is set — resolve inside a root, exactly like a bundle path):
+require `pgokf_admin`; `dest_dir` must exist, be server-writable, and - when
+`allowed_roots` is set - resolve inside a root, exactly like a bundle path):
 
 ```sql
 -- catalog projection → four Parquet files (concepts / metadata / links / provenance)
@@ -564,14 +593,14 @@ SELECT * FROM pgokf.export_sources(1, '/srv/okf/export');
 
 Uses:
 
-- **Analytics.** The Parquet files are interoperable with columnar tools — this
-  project verified them readable in **DuckDB** — so you can query the catalog
+- **Analytics.** The Parquet files are interoperable with columnar tools - this
+  project verified them readable in **DuckDB** - so you can query the catalog
   offline, join it against other datasets, or feed a lakehouse without touching
   the live database.
 - **Disaster recovery / portability.** `export_parquet` plus `export_sources`
   (small tier) is a self-describing, engine-independent snapshot of a bundle:
   metadata *and* originals as open files, restorable or auditable without a
-  running `pgokf`. It complements `pg_dump` rather than replacing it — `pg_dump`
+  running `pgokf`. It complements `pg_dump` rather than replacing it - `pg_dump`
   is the operational backup; the Parquet/source export is the portable,
   long-lived, tool-agnostic copy.
 - **`export_sources` needs stored sources.** It only works in the small tier
@@ -589,7 +618,7 @@ Uses:
 | Change indexing language / policy | `pgokf.set_config(...)`, then re-register affected bundles to re-index |
 | Turn on stored sources | `set_config('store_source','true')`, then **re-register** each bundle |
 | Remove a bundle | `SELECT pgokf.unregister_bundle(<id>);` (cascades all its rows) |
-| Back up (small tier) | `pg_dump` — captures metadata, index, and sources |
+| Back up (small tier) | `pg_dump` - captures metadata, index, and sources |
 | Back up (enterprise tier) | `pg_dump` for metadata/index **+** back up the lake separately |
 | Upgrade | install artifacts → reconnect → `ALTER EXTENSION pgokf UPDATE` → check versions match |
 | Raise a ceiling | edit `postgresql.conf` → `SELECT pg_reload_conf();` |

@@ -137,5 +137,5 @@ fn unicode_bundle_preserves_rtl_text_without_rewriting() {
     assert_eq!(parsed.title, "دليل الاستجابة للحوادث");
     assert_eq!(parsed.tags, ["العربية", "עברית", "RTL"]);
     assert!(parsed.body_text.contains("בדקו את היומנים"));
-    assert!(parsed.body_text.contains("PostgreSQL الإصدار 17 — גרסה 17."));
+    assert!(parsed.body_text.contains("PostgreSQL الإصدار 17 - גרסה 17."));
 }

@@ -20,7 +20,7 @@ One image per PostgreSQL major (15-19), selected at build time via the
 
 ## Build
 
-The build context **must be the repository root** — the Dockerfile copies the
+The build context **must be the repository root** - the Dockerfile copies the
 whole source tree:
 
 ```bash
@@ -41,7 +41,7 @@ The image is multi-stage: stage 1 installs the pinned Rust toolchain and
 `cargo-pgrx`, then runs `cargo pgrx package` against `postgresql-server-dev-N`;
 stage 2 is the stock `postgres:N` image with the staged tree copied verbatim
 into `/usr`. Only the built `.so`, `.control`, and `.sql` survive into the
-final image — no Rust toolchain, no source.
+final image - no Rust toolchain, no source.
 
 ## Run
 

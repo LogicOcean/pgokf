@@ -3,12 +3,12 @@
 `pgokf` separates two things that other catalogs conflate: **where the source
 files live** and **where the metadata + search index live**. The metadata and
 the search index always live in PostgreSQL. The source files can live either
-inside PostgreSQL or in an external object store / data lake. That single choice
-— the `store_source` policy key — defines the two supported tiers.
+inside PostgreSQL or in an external object store / data lake. That single choice,
+the `store_source` policy key, defines the two supported tiers.
 
-This guide covers both tiers in depth — including feeding the enterprise tier
+This guide covers both tiers in depth - including feeding the enterprise tier
 either through a filesystem mount or **mountless**, with a network companion that
-streams the bytes in — how to scale reads horizontally with replicas, how to
+streams the bytes in - how to scale reads horizontally with replicas, how to
 isolate tenants, and how to choose. For the mechanics of the
 knobs referenced here see [configuration.md](configuration.md); for the trust
 boundary around filesystem access see [security.md](security.md).
@@ -30,11 +30,11 @@ changed files, backfilling an existing bundle means re-registering it (see
 | PostgreSQL holds | Metadata, search index, **and** originals | Metadata and search index only |
 | `get_concept_source` | Returns the stored bytes | Errors: "no source is stored… store_source disabled" |
 | `export_sources` | Reconstructs the files from the DB | Not usable (nothing stored to export) |
-| Backup captures sources? | Yes — `pg_dump` carries everything | No — back up the object store separately |
+| Backup captures sources? | Yes - `pg_dump` carries everything | No - back up the object store separately |
 | Best when | Self-contained install, small/medium corpus, portability matters | Large corpus, files already governed in a lake, DB stays lean |
 
-Everything else — `register_bundle`, `concept_search`, `concept_neighbors`,
-`export_parquet` — behaves identically in both tiers. Only source *retrieval*
+Everything else - `register_bundle`, `concept_search`, `concept_neighbors`,
+`export_parquet` - behaves identically in both tiers. Only source *retrieval*
 and what a backup captures differ.
 
 ---
@@ -55,7 +55,7 @@ SELECT * FROM pgokf.register_bundle('/srv/okf/knowledge', 'knowledge');
 
 - **Portability.** `pg_dump` produces a single artifact that contains metadata,
   search index, *and* the source files. Restore it anywhere and the catalog is
-  complete — no second system to rehydrate.
+  complete - no second system to rehydrate.
 - **Operational simplicity.** No mount, no bucket credentials, no lake to keep
   in sync. Backup and replication (below) cover the sources for free because
   they are just table data.
@@ -80,7 +80,7 @@ want a single restorable artifact.
 ## Enterprise tier: files in an object store / data lake
 
 Leave `store_source` at its default `false`. The source files stay where they
-already are — an S3-compatible bucket, a data lake — **mounted into the
+already are - an S3-compatible bucket, a data lake - **mounted into the
 filesystem** so the PostgreSQL backend can read them at sync time. PostgreSQL
 holds only metadata and the search index and stays lean; the lake remains the
 system of record for the bytes.
@@ -105,7 +105,7 @@ SELECT * FROM pgokf.register_bundle('/mnt/okf/knowledge', 'knowledge');
 > **Use IAM roles, not static keys.** Grant the DB host (or pod) an instance /
 > workload IAM role and let the mount driver assume it. Do not bake long-lived
 > access keys into the mount config or the environment. This keeps credentials
-> out of the database, out of backups, and out of `pgokf_private.config` — the
+> out of the database, out of backups, and out of `pgokf_private.config` - the
 > extension never sees them. `pgokf`'s CLAUDE-level rule is the same one to
 > apply here: no static secrets on the box.
 
@@ -143,7 +143,7 @@ SELECT pgokf.set_config('allowed_roots', '["/mnt/okf"]'::jsonb);
 SELECT * FROM pgokf.register_bundle('/mnt/okf/knowledge', 'knowledge');
 ```
 
-From here search, graph, and Parquet export work identically to a local bundle —
+From here search, graph, and Parquet export work identically to a local bundle -
 the backend simply reads the concept files through the FUSE mount. Because
 `store_source` stays `false`, no source bytes are copied into PostgreSQL; the
 bucket remains the single source of truth for the files.
@@ -152,7 +152,7 @@ bucket remains the single source of truth for the files.
 
 - **`allowed_roots` must resolve through the mount.** Containment is checked
   after resolving symlinks on both sides, so the requested path and the mount
-  must canonicalize into the same real directory — see
+  must canonicalize into the same real directory - see
   [security.md](security.md#allowed_roots-containment).
 - **Mount availability is a dependency.** If the FUSE mount is down, `register`
   / `refresh` for bundles under it fail (the files are unreadable); already-
@@ -179,8 +179,8 @@ mount to the database host at all, and a mount couples database availability to
 mount availability. The **mountless** variant of the enterprise tier removes the
 mount entirely.
 
-Instead of the backend reading files, a small standalone companion —
-[`pgokf-ingest`](https://github.com/LogicOcean/pgokf/tree/main/crates/pgokf-ingest) — reads the object store over the
+Instead of the backend reading files, a small standalone companion -
+[`pgokf-ingest`](https://github.com/LogicOcean/pgokf/tree/main/crates/pgokf-ingest) - reads the object store over the
 network and streams the bytes into PostgreSQL through a new writer-tier
 function:
 
@@ -195,27 +195,27 @@ companion hands it, runs them through the identical classify/parse/upsert/projec
 pipeline `register_bundle` uses, and records the bundle with
 `source_type = 'content'` under the synthetic key `content:<name>`. A content
 bundle is diffed against its stored projection exactly like a filesystem bundle,
-so **re-running the companion is an incremental resync** — changed concepts are
+so **re-running the companion is an incremental resync** - changed concepts are
 upserted and removed ones deleted. (A content bundle has no on-disk root, so
 `pgokf.refresh_bundle` on it raises `22023`: you resync by calling
 `register_bundle_content` again. `unregister_bundle`, search, graph, and
 `export_parquet` all behave identically to any other bundle.)
 
-### Mount vs. mountless — which enterprise variant
+### Mount vs. mountless - which enterprise variant
 
 | | **Mounted** (`register_bundle` over a FUSE mount) | **Mountless** (`register_bundle_content` via the companion) |
 | --- | --- | --- |
 | Where object-store I/O happens | The PostgreSQL backend, through the mount | The companion process, over the network |
 | Needs a FUSE mount on the DB host | Yes | **No** |
 | Works with managed PostgreSQL (RDS/Cloud SQL) | Rarely (no host mount) | **Yes** |
-| Object-store credentials | On the DB host (mount driver / IAM role) | On the companion only — never near the DB |
+| Object-store credentials | On the DB host (mount driver / IAM role) | On the companion only - never near the DB |
 | Availability coupling | DB register/refresh depends on the mount | DB is decoupled; the companion runs anywhere |
 | Incremental sync | `refresh_bundle` re-lists the mount | Re-run the companion; server-side diff |
 
 ### Credentials never touch PostgreSQL
 
 This is the whole point of the split. The object-store credentials live in the
-**companion's** environment — the standard `AWS_ACCESS_KEY_ID` /
+**companion's** environment - the standard `AWS_ACCESS_KEY_ID` /
 `AWS_SECRET_ACCESS_KEY`, or, preferably, an EC2/ECS **instance profile / IAM
 role** that the companion assumes with no static keys at all. PostgreSQL is
 reached separately, through a connection string for a login role that is a member
@@ -254,16 +254,47 @@ pgokf-ingest: registered content bundle 'handbook' (bundle_id=1, source_type=con
 ```
 
 From here `concept_search`, `concept_neighbors`, `list_bundles`, and
-`export_parquet` work exactly as for a mounted or local bundle — the catalog
+`export_parquet` work exactly as for a mounted or local bundle - the catalog
 cannot tell how the bytes arrived, only that `source_type = 'content'`. Because
 `store_source` defaults to `false`, no source bytes are retained in PostgreSQL;
 the bucket remains the source of truth. Set `store_source = true` first if you
-also want the originals captured in `pgokf.concept_source` (the small tier —
+also want the originals captured in `pgokf.concept_source` (the small tier -
 useful even here for a self-contained backup). Re-run the companion whenever the
-bucket changes; the server-side diff makes it incremental. See the companion's
+bucket changes, or run it with `--watch` and it becomes a daemon: after the
+initial sync it re-lists the object store every `--interval` seconds (default
+60) and re-ingests only when the collected content actually changed, stopping
+cleanly on Ctrl-C. Either way the server-side diff makes each pass incremental.
+
+The link to PostgreSQL is plaintext by default, which suits a local socket or a
+trusted private network; pass `--tls` (env `OKF_PG_TLS=true`) or put
+`sslmode=require` in the connection string and the companion instead negotiates
+a `rustls` TLS session that verifies the server certificate against the
+platform trust store. Object-store TLS is configured separately (through the
+endpoint URL and `--allow-http`). See the companion's
 [README](https://github.com/LogicOcean/pgokf/blob/main/crates/pgokf-ingest/README.md) for the full flag/environment
-reference and its v1 scope (one-shot sync; whole-bundle call for correct
-removals; `NoTls` transport, so front a public endpoint with TLS).
+reference and its scope (each sync sends the whole bundle in one
+`register_bundle_content` call, which the server-side removal diff requires).
+
+### Beyond ingestion: the other companions
+
+`pgokf-ingest` is one of three network companions built on the same split: the
+extension performs no network I/O, so anything that must reach the network runs
+outside the database and talks to the catalog through the public SQL surface.
+
+- **[`pgokf-embed`](https://github.com/LogicOcean/pgokf/tree/main/crates/pgokf-embed)** is the reference embedder for the
+  optional semantic/hybrid search: it finds concepts with no stored vector,
+  calls a configurable OpenAI-compatible embeddings endpoint, and streams each
+  vector back through the writer-tier `pgokf.set_concept_embedding`. The
+  endpoint URL, model, and API key live only in its environment; the database
+  only ever receives finished vectors.
+- **[`pgokf-mcp`](https://github.com/LogicOcean/pgokf/tree/main/crates/pgokf-mcp)** is a Model Context Protocol server that
+  exposes read-only catalog tools (search, similar, neighbors, get-concept) to
+  AI agents over stdio, connecting as a `pgokf_reader`-capable role and
+  optionally pinning `pgokf.tenant` with `--tenant`.
+
+All three share one connection helper (the `pgokf-pgconn` crate): plaintext to
+PostgreSQL by default, with the same opt-in verified-TLS session (`--tls` or
+`sslmode=require`) for reaching a database across an untrusted network.
 
 ---
 
@@ -292,10 +323,13 @@ standbys and scale recall horizontally.
 
 Guidance:
 
-- **Writes go to the primary.** `register_bundle`, `refresh_bundle`,
-  `unregister_bundle`, `set_config`, `reset_config`, `export_parquet`, and
-  `export_sources` are `VOLATILE` and must run on a writable primary; they will
-  raise on a read-only standby.
+- **Writes go to the primary.** Every mutator is `VOLATILE` and must run on a
+  writable primary: the ingestion and lifecycle functions (`register_bundle`,
+  `register_bundle_content`, `refresh_bundle`, `unregister_bundle`,
+  `set_bundle_enabled`, `retire_bundle` / `unretire_bundle`, `purge_retired`),
+  `set_concept_embedding`, the configuration functions (`set_config`,
+  `reset_config`), the index rebuilds, and the exports (`export_parquet`,
+  `export_sources`). They will raise on a read-only standby.
 - **Grant `pgokf_reader` on the replicas.** The roles are cluster-wide and
   replicate with the catalog, so a reader that can search the primary can search
   a standby.
@@ -312,7 +346,7 @@ Guidance:
   searches, either target the primary for that read or tolerate the lag.
 - **`register`/`refresh` serialize per bundle** via an advisory lock keyed on the
   bundle's canonical path, so two concurrent syncs of the same bundle cannot
-  interleave — but that lock lives on the primary and does not coordinate across
+  interleave - but that lock lives on the primary and does not coordinate across
   a failover mid-sync. After a failover, re-run any sync that was in flight;
   `refresh_bundle` is idempotent (unchanged files report `unchanged`).
 - **GUC ceilings are per-server.** `pgokf.max_file_bytes` and friends come from
@@ -324,58 +358,63 @@ Guidance:
 
 ## Multi-tenant isolation with RLS
 
-`pgokf` does not ship row-level security policies. When one catalog serves
-multiple tenants and you need hard isolation between them, the mechanism is
-PostgreSQL **Row-Level Security (RLS)** layered on top of the catalog tables —
-you build it; it is not built in yet.
-
-The shape: carry a tenant discriminator per bundle (the `bundles.options` jsonb
-is stored verbatim for exactly this kind of producer metadata), and gate the
-reader-facing tables on it.
+`pgokf` ships an **opt-in** row-level-security layer for serving many tenants
+from one catalog. Every projection table carries a denormalized `tenant_id`, and
+an RLS policy keyed on the per-session `pgokf.tenant` GUC scopes what a session
+sees: a session that sets no tenant sees all rows (the backward-compatible
+default), while a session that sets one sees only that tenant's rows. There is
+nothing to build; you enable it by using it.
 
 ```sql
--- SKETCH — you own and must review this; it is not part of the extension.
-
--- 1. Tag each bundle with its tenant at registration time.
-SELECT pgokf.register_bundle('/srv/okf/acme', 'acme',
-                             '{"tenant": "acme"}'::jsonb);
-
--- 2. Enable RLS on the reader-facing tables and gate on the tenant of the
---    owning bundle. Concepts join to their bundle's options->>'tenant'.
-ALTER TABLE pgokf.concepts ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY concepts_tenant_isolation ON pgokf.concepts
-    USING (
-        EXISTS (
-            SELECT 1 FROM pgokf.bundles b
-            WHERE b.id = concepts.bundle_id
-              AND b.options->>'tenant'
-                  = current_setting('pgokf.tenant', true)
-        )
-    );
-
--- 3. A per-tenant connection sets its tenant, and can see only its rows.
+-- A per-tenant connection selects its tenant, and both reads and writes
+-- are confined to it. A connection pool issues this on checkout; a login
+-- role can pin it with ALTER ROLE acme_app SET pgokf.tenant = 'acme'.
 SET pgokf.tenant = 'acme';
+
+-- Registering under a tenant stamps the new bundle (and its rows) with it;
+-- there is no separate "create tenant" step.
+SELECT pgokf.register_bundle('/srv/okf/acme', 'acme');
 ```
 
-Caveats to weigh before relying on this:
+How it behaves:
 
-- **`concept_search` / `concept_neighbors` are `SECURITY INVOKER`** functions
-  that query these tables as the calling role, so RLS policies on the tables *do*
-  apply to them — but you must confirm this against every code path you expose,
-  and test it, before treating it as an isolation boundary.
-- **`bundles.options` is untrusted producer input.** Do not let a tenant set its
-  own discriminator; assign it administratively at registration.
-- **Admin functions bypass tenant scoping.** `pgokf_admin` operations
-  (register/refresh/config/export) are cross-tenant by nature — keep admin a
-  separate, trusted role, per [security.md](security.md#roles-and-least-privilege).
-- **This is a sketch, not a shipped feature.** Review, harden, and test it as
-  security-critical code you own. Treat a future first-class multi-tenant mode as
-  not-yet-available.
+- **Reads filter automatically.** The invoker-rights readers (`concept_search`,
+  `concept_neighbors`, `list_bundles`, `bundle_info`, `catalog_stats`, and the
+  rest) run over the base tables, so RLS scopes them with no argument change. The
+  few `SECURITY DEFINER` readers apply the identical tenant predicate explicitly.
+- **Writes are confined too.** The `SECURITY DEFINER` write/admin functions that
+  take an explicit `bundle_id` (`refresh_bundle`, `unregister_bundle`,
+  `set_bundle_enabled`, `retire_bundle` / `unretire_bundle`,
+  `set_concept_embedding`, `schedule_refresh` / `unschedule_refresh`,
+  `export_parquet` / `export_sources`) bypass RLS as the table owner, so each one
+  additionally calls `enforce_bundle_tenant(bundle_id)`: with a tenant set, a
+  bundle owned by any other tenant is rejected with the *same* `22023` a genuinely
+  unknown id raises, so a cross-tenant id is indistinguishable from a nonexistent
+  one. See [security.md](security.md#multi-tenant-row-level-security).
+- **Per-tenant bundle keys.** Registration is unique on `(tenant_id, path)`, so
+  two tenants can register the same filesystem root or `content:<name>` key as
+  independent bundles.
 
-For the near term, the simplest hard isolation is still **one database (or one
-cluster) per tenant** — no shared tables, nothing to leak — at the cost of more
-instances to operate.
+Weigh the trust model before relying on it:
+
+- **`pgokf.tenant` is a scoping selector, not a hard boundary against a tenant
+  who can run arbitrary SQL.** It is a `USERSET` GUC, so any session that can
+  execute `SET` / `RESET` / `set_config()` can change its own value, including to
+  another tenant's or to empty (which the policy treats as *see-all*). It contains
+  an honest, cooperating client, not a hostile one submitting raw SQL. The full
+  caveat and the ways to get a hard boundary are in
+  [security.md](security.md#what-the-pgokftenant-guc-is-and-is-not) and
+  [multi-tenancy.md](multi-tenancy.md).
+- **The unset default is fail-open.** An unset or empty `pgokf.tenant` sees every
+  row, so reserve the unset session for a trusted operator and make sure
+  tenant-facing connections always carry a tenant.
+
+For a **hard** boundary against a tenant who can submit arbitrary SQL, either
+front PostgreSQL with a constrained layer (a pooler or restricted API that pins
+`pgokf.tenant` and refuses raw `SET`), or fall back to **one database (or one
+cluster) per tenant** - no shared tables, nothing to leak - at the cost of more
+instances to operate. See [multi-tenancy.md](multi-tenancy.md) for the full
+model and the strict-isolation contract.
 
 ---
 
@@ -391,9 +430,10 @@ Answer these in order:
    add **streaming replicas** and route reads to them; keep GUC ceilings
    identical across all servers.
 3. **One tenant or many, and how hard is the isolation requirement?**
-   Soft / trusted → single catalog. Hard multi-tenant now → **database/cluster
-   per tenant**. Hard multi-tenant in one catalog → **RLS you build and own**
-   (sketch above), tested as a security boundary.
+   Soft / trusted, or a cooperating client behind a constrained layer → single
+   catalog with the built-in **opt-in RLS** keyed on `pgokf.tenant` (above). A
+   hard boundary against tenants who can submit arbitrary SQL → **database/cluster
+   per tenant**, or front PostgreSQL with a pooler/API that pins `pgokf.tenant`.
 
 Then follow [operations.md](operations.md) for running whichever you pick, and
 [configuration.md](configuration.md) for the exact knobs.

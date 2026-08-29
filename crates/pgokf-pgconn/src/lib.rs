@@ -7,7 +7,7 @@
 //! required an encrypted link (`sslmode=require`) could not connect at all. This
 //! crate centralizes the connect step and adds **optional** TLS:
 //!
-//! - **`NoTls` stays the default** — a local Unix-socket or trusted-network
+//! - **`NoTls` stays the default** - a local Unix-socket or trusted-network
 //!   deployment is unchanged and links in plaintext, negotiating no TLS.
 //! - TLS is negotiated only when the operator asks for it: an `sslmode=require`
 //!   (or a stricter `verify-ca` / `verify-full`) in the connection string, or an
@@ -62,8 +62,8 @@ pub async fn connect(database_url: &str, force_tls: bool) -> Result<(Client, Joi
 /// `NoTls` is the default so a local-socket / trusted-network deployment is
 /// unchanged: TLS is used only when the operator opts in with the `--tls` flag
 /// (`force_tls`) or an `sslmode` that demands encryption. `disable` and `prefer`
-/// keep the plaintext default; `require` and the stricter verify modes — and any
-/// future non-default mode — negotiate TLS.
+/// keep the plaintext default; `require` and the stricter verify modes - and any
+/// future non-default mode - negotiate TLS.
 #[must_use]
 pub fn should_use_tls(ssl_mode: SslMode, force_tls: bool) -> bool {
     force_tls || !matches!(ssl_mode, SslMode::Disable | SslMode::Prefer)
@@ -98,7 +98,7 @@ where
 /// the platform trust store.
 ///
 /// The `aws_lc_rs` crypto provider (rustls' default) is selected explicitly so
-/// no process-wide default provider needs to be installed — avoiding a global
+/// no process-wide default provider needs to be installed - avoiding a global
 /// mutation and the ambiguity of the tree carrying more than one provider.
 fn build_rustls_connector() -> Result<MakeRustlsConnect> {
     let mut roots = rustls::RootCertStore::empty();

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! `pgokf` — a `PostgreSQL` extension that materializes Open Knowledge Format
+//! `pgokf` - a `PostgreSQL` extension that materializes Open Knowledge Format
 //! bundles into a queryable catalog.
 //!
 //! This crate is the `PostgreSQL`-facing shell: it registers configuration
 //! variables ([`guc`]), installs the bootstrap schema/role hardening
 //! (`sql/bootstrap.sql`), exposes the security ([`security`]) and error
-//! ([`errors`]) foundations, and hosts the catalog backbone ([`catalog`]) —
+//! ([`errors`]) foundations, and hosts the catalog backbone ([`catalog`]) -
 //! the base tables plus `pgokf.register_bundle`, `pgokf.refresh_bundle`, and
 //! `pgokf.concept_search`. Feature modules (links, provenance, config, admin)
 //! attach through the seams declared in [`catalog`].
@@ -62,7 +62,7 @@ mod pgokf {
 /// throwaway `PostgreSQL` instance, installs the extension, and then calls
 /// `pgrx_tests::run_test` for every `#[pg_test]` in [`pg_tests`]. Each test
 /// consults these two hooks: [`setup`] runs once before the suite (nothing to
-/// prepare here — every `#[pg_test]` builds its own fixtures), and
+/// prepare here - every `#[pg_test]` builds its own fixtures), and
 /// [`postgresql_conf_options`] contributes extra `postgresql.conf` lines (none
 /// are needed; the defaults exercise the stable SQL surface).
 #[cfg(test)]

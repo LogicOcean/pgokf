@@ -68,13 +68,13 @@ impl Snapshot {
 /// Discover Markdown files under `config.root` and calculate their BLAKE3 hashes.
 ///
 /// Symbolic links are never followed while walking. Containment is enforced only on
-/// links that are themselves candidate documents — a Markdown name selected by the
-/// include globs and not excluded — because only those could contribute content. A
+/// links that are themselves candidate documents - a Markdown name selected by the
+/// include globs and not excluded - because only those could contribute content. A
 /// candidate link whose target stays inside the bundle root is skipped, since that
 /// target is discovered at its own canonical path; a candidate link whose target
 /// resolves outside the root is rejected so a bundle can never pull content from
-/// elsewhere on the filesystem. Any other link — the wrong extension, unmatched by
-/// the globs, excluded, or dangling — is ignored without being resolved, so a stray
+/// elsewhere on the filesystem. Any other link - the wrong extension, unmatched by
+/// the globs, excluded, or dangling - is ignored without being resolved, so a stray
 /// or broken link anywhere in the tree can never abort discovery.
 ///
 /// When [`SyncConfig::max_file_bytes`] is set, each candidate's size is checked via
@@ -140,8 +140,8 @@ fn bundle_relative_path(absolute: &Path, root: &Path) -> Result<PathBuf, SyncErr
 /// document.
 ///
 /// Containment is a contract on candidate documents only: a link that is not
-/// selectable as an OKF document — the wrong extension, unmatched by the include
-/// globs, or excluded — is ignored without being resolved, so a stray link
+/// selectable as an OKF document - the wrong extension, unmatched by the include
+/// globs, or excluded - is ignored without being resolved, so a stray link
 /// elsewhere in the tree can never abort discovery. A candidate link that
 /// dangles (its target resolves to nothing) has no in-bundle content to index
 /// and nothing to escape, so it too is accepted.
@@ -256,7 +256,7 @@ fn canonicalize(path: &Path) -> Result<PathBuf, SyncError> {
 /// On Windows the native `\` separator is folded to `/`; a backslash can never
 /// appear inside a Windows file name, so the replacement only ever rewrites
 /// separators. On POSIX systems `/` is already the native separator and `\` is
-/// a legal file-name byte, so the path is kept verbatim — rewriting it there
+/// a legal file-name byte, so the path is kept verbatim - rewriting it there
 /// would produce a snapshot key that no longer resolves on disk when joined
 /// back onto the bundle root.
 #[cfg(windows)]

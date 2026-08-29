@@ -2,7 +2,7 @@
 //! Optional semantic (vector) and hybrid search over the catalog.
 //!
 //! This module adds three query surfaces plus the storage and index management
-//! behind them, all built on `pgvector` — and, exactly like the `pg_search`
+//! behind them, all built on `pgvector` - and, exactly like the `pg_search`
 //! BM25 adapter in [`crate::catalog::search_backend`], **with no build-time or
 //! install-time dependency on it**. `CREATE EXTENSION pgokf` succeeds on a
 //! cluster where `pgvector` is absent; every `vector`-typed object is reached
@@ -22,23 +22,23 @@
 //!
 //! # The three surfaces
 //!
-//! - [`set_concept_embedding`](pgokf::set_concept_embedding) — writer-tier
-//!   ingest. A companion embedder (never this extension — it performs no model
+//! - [`set_concept_embedding`](pgokf::set_concept_embedding) - writer-tier
+//!   ingest. A companion embedder (never this extension - it performs no model
 //!   inference and no network I/O) streams caller-computed embeddings in as
 //!   `real[]`; the row is validated (the concept must exist, the length must
 //!   equal the durable `embedding_dim`) and upserted.
-//! - [`concept_search_semantic`](pgokf::concept_search_semantic) — reader-tier
+//! - [`concept_search_semantic`](pgokf::concept_search_semantic) - reader-tier
 //!   nearest-neighbor search by `pgvector` cosine distance (`<=>`). Semantic
 //!   search has no lexical equivalent, so when `pgvector` is absent it raises a
 //!   clear `22023` naming the missing dependency rather than silently returning
 //!   nothing.
-//! - [`concept_search_hybrid`](pgokf::concept_search_hybrid) — reader-tier
+//! - [`concept_search_hybrid`](pgokf::concept_search_hybrid) - reader-tier
 //!   Reciprocal Rank Fusion (RRF, k = 60) of the lexical result (through the
 //!   configured `search_backend`) and the semantic result, fused entirely in
 //!   SQL. RRF needs no model, so when `pgvector` is absent this **sensibly**
 //!   degrades to lexical-only with a `WARNING`.
 //!
-//! Plus [`rebuild_embedding_index`](pgokf::rebuild_embedding_index) — admin-tier,
+//! Plus [`rebuild_embedding_index`](pgokf::rebuild_embedding_index) - admin-tier,
 //! mirroring `rebuild_search_index`: it builds a `pgvector` HNSW (cosine) index
 //! over the embeddings for the configured dimension, and is a logged no-op when
 //! `pgvector` is absent.
@@ -100,7 +100,7 @@ CREATE POLICY concept_embedding_tenant_isolation ON pgokf.concept_embedding
         OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true));
 
 COMMENT ON TABLE pgokf.concept_embedding IS
-    'Opt-in per-concept embedding vectors, streamed in by a companion embedder via pgokf.set_concept_embedding (the extension never computes embeddings or performs network I/O). The vector is stored as the builtin real[] — NOT a pgvector ''vector'' column — so CREATE EXTENSION pgokf succeeds without pgvector installed; it is cast to vector(dim) at query time and in the HNSW index only when pgvector is present. Rows cascade from pgokf.concepts, so removing a concept or unregistering a bundle drops its embedding automatically.';
+    'Opt-in per-concept embedding vectors, streamed in by a companion embedder via pgokf.set_concept_embedding (the extension never computes embeddings or performs network I/O). The vector is stored as the builtin real[] - NOT a pgvector ''vector'' column - so CREATE EXTENSION pgokf succeeds without pgvector installed; it is cast to vector(dim) at query time and in the HNSW index only when pgvector is present. Rows cascade from pgokf.concepts, so removing a concept or unregistering a bundle drops its embedding automatically.';
 COMMENT ON COLUMN pgokf.concept_embedding.embedding IS
     'The caller-computed embedding as real[]. Its length must equal the durable embedding_dim configuration key at ingest time (enforced by pgokf.set_concept_embedding); dim records that length redundantly for a size-only read.';
 COMMENT ON COLUMN pgokf.concept_embedding.dim IS
@@ -124,8 +124,8 @@ fn spi_error(context: &'static str) -> impl Fn(pgrx::spi::Error) -> CatalogError
 
 /// Report whether the `pgvector` extension is installed in this database.
 ///
-/// The probe is by `pg_extension` catalog membership — never by attempting to
-/// use a `vector`-typed expression — so it is safe to call before any SQL that
+/// The probe is by `pg_extension` catalog membership - never by attempting to
+/// use a `vector`-typed expression - so it is safe to call before any SQL that
 /// would fail to parse when `pgvector` is absent.
 fn pgvector_installed() -> Result<bool, CatalogError> {
     Spi::get_one::<bool>(
@@ -197,7 +197,7 @@ fn validate_embedding_length(len: usize, expected_dim: i32) -> Result<(), Catalo
 /// Storage is `real[]`, so a `NaN`/`Infinity` element inserts without complaint,
 /// but every query, index-build, and `rebuild_embedding_index` path casts the
 /// stored array to `vector(dim)`, and `pgvector` rejects a non-finite component
-/// at that cast — SQLSTATE `22023`. One poisoned write would therefore break
+/// at that cast - SQLSTATE `22023`. One poisoned write would therefore break
 /// semantic/hybrid search and index rebuilds catalog-wide until the row is
 /// found and fixed. Rejecting the non-finite element at write time (the same
 /// `22023` class the length check raises), naming the offending index for the
@@ -207,7 +207,7 @@ fn validate_embedding_finite(embedding: &[f32]) -> Result<(), CatalogError> {
         return Err(CatalogError::invalid_parameter(
             format!(
                 "embedding element at index {index} is not finite ({}); every element must be a \
-                 finite real number — NaN and infinity are rejected because pgvector refuses them \
+                 finite real number - NaN and infinity are rejected because pgvector refuses them \
                  when the stored real[] is cast to vector(dim) at query and index time",
                 embedding[index]
             ),
@@ -254,8 +254,8 @@ fn read_result_hits(table: SpiTupleTable) -> Result<Vec<SearchHit>, CatalogError
 /// query embedding length equals `dim` (both checked by the callers).
 ///
 /// `dim` is a trusted `integer` from validated configuration (never caller
-/// input), so formatting it into the `vector(dim)` typmod is injection-safe — an
-/// `i32` can only render as digits — and is required because a typmod cannot be
+/// input), so formatting it into the `vector(dim)` typmod is injection-safe - an
+/// `i32` can only render as digits - and is required because a typmod cannot be
 /// a bound parameter. The query embedding is bound as `$1` (never interpolated).
 /// Both the stored column and the query vector cast through the identical
 /// `embedding::vector(dim)` expression the HNSW index is built on, so the index
@@ -374,7 +374,7 @@ fn concept_search_semantic_impl(
     run_semantic_query(query_embedding, bundle_id, limit, dim)
 }
 
-/// The (`bundle_id`, `concept_id`) key of a ranked hit, in rank order — the RRF
+/// The (`bundle_id`, `concept_id`) key of a ranked hit, in rank order - the RRF
 /// fusion input.
 struct RankKeys {
     bundle_ids: Vec<i64>,
@@ -397,7 +397,7 @@ impl RankKeys {
 /// Each list contributes `1 / (k + rank)` per concept (rank = 1-based position
 /// via `WITH ORDINALITY`), summed across the `FULL OUTER JOIN` on concept
 /// identity; a concept present in both lists therefore scores higher than one in
-/// only one. Only the two key arrays cross the boundary — the fusion arithmetic
+/// only one. Only the two key arrays cross the boundary - the fusion arithmetic
 /// and final projection are SQL, needing no model. The final join re-filters to
 /// enabled bundles as defense in depth (both input lists already did).
 fn fuse_rrf(
@@ -566,7 +566,7 @@ mod pgokf {
     /// inheritance). `embedding` is a `real[]` whose length must equal the
     /// durable `embedding_dim` configuration key; the concept must already
     /// exist. This is how a companion embedder streams caller-computed vectors
-    /// in — the extension never computes embeddings and performs no network I/O.
+    /// in - the extension never computes embeddings and performs no network I/O.
     /// Raises SQLSTATE `22023` on a wrong length or an unknown concept, and
     /// `42501` for a caller outside `pgokf_writer`.
     #[pg_extern(requires = ["embedding_table"])]
@@ -583,7 +583,7 @@ mod pgokf {
     /// `query_embedding` must have `embedding_dim` dimensions. Searches enabled
     /// bundles only; `limit_count` must lie in `1..=500`. **Requires pgvector**:
     /// raises SQLSTATE `22023` naming the missing dependency when the `pgvector`
-    /// extension is not installed (semantic search has no lexical fallback — use
+    /// extension is not installed (semantic search has no lexical fallback - use
     /// `pgokf.concept_search` for that).
     // `query_embedding` is a `Vec<f32>` because that is the SQL `real[]` boundary
     // type; it is only borrowed into the impl, so pass-by-value is inherent to the

@@ -7,8 +7,8 @@
 -- in two feature waves:
 --
 --   Wave 1 (writer tier + search-index rebuild):
---     * introduces the pgokf_writer role — a least-privilege tier between
---       pgokf_reader and pgokf_admin — and wires it EXACTLY as bootstrap.sql
+--     * introduces the pgokf_writer role - a least-privilege tier between
+--       pgokf_reader and pgokf_admin - and wires it EXACTLY as bootstrap.sql
 --       does (schema USAGE, reader < writer < admin inheritance, role comment).
 --       Roles are cluster-global and bootstrap.sql does NOT re-run on
 --       `ALTER EXTENSION UPDATE`, so the role and its grants MUST be (re)made
@@ -17,7 +17,7 @@
 --       means nobody can ingest.
 --     * moves register_bundle / refresh_bundle / unregister_bundle from the
 --       admin tier (their 0.1.3 grantee) to the writer tier, with admin keeping
---       EXECUTE by inheriting pgokf_writer — matching the fresh-0.1.4 ACL, and
+--       EXECUTE by inheriting pgokf_writer - matching the fresh-0.1.4 ACL, and
 --       refreshes their comments to the writer-tier wording fresh 0.1.4 ships.
 --     * adds pgokf.rebuild_search_index() (admin-only, SECURITY DEFINER) to
 --       (re)build the optional ParadeDB pg_search bm25 index on pgokf.concepts,
@@ -82,7 +82,7 @@ COMMENT ON ROLE pgokf_writer IS
 -- grants them to pgokf_writer, with admin retaining EXECUTE by inheriting
 -- pgokf_writer (granted just above). Revoking the now-redundant direct
 -- pgokf_admin grant matches the fresh-0.1.4 ACL exactly without ever removing
--- admin capability — REVOKE withdraws a privilege, not data or an object, and
+-- admin capability - REVOKE withdraws a privilege, not data or an object, and
 -- admin still resolves EXECUTE through role inheritance.
 -- ===========================================================================
 GRANT EXECUTE ON FUNCTION pgokf.register_bundle(text, text, jsonb) TO pgokf_writer;
@@ -103,7 +103,7 @@ COMMENT ON FUNCTION pgokf.unregister_bundle(bigint) IS
     'Unregister a bundle and return the removed bundle_info. Writer-tier (pgokf_writer; admin inherits it); concept/metadata/feature rows cascade. Raises 22023 if the bundle_id is unknown.';
 
 -- ===========================================================================
--- Wave 1, step 3: pgokf.rebuild_search_index() — admin-only (re)build of the
+-- Wave 1, step 3: pgokf.rebuild_search_index() - admin-only (re)build of the
 -- optional ParadeDB pg_search bm25 index on pgokf.concepts.
 --
 -- The C symbol (rebuild_search_index_wrapper), RETURNS bool, the STRICT marker,
@@ -133,8 +133,8 @@ COMMENT ON FUNCTION pgokf.rebuild_search_index() IS
 -- Fresh 0.1.4 ships pgokf_private.config.search_backend, the durable policy
 -- pgokf.concept_search reads to pick its execution strategy (validated against
 -- 'native' | 'bm25'). The 0.1.3 config table lacks it, so add it here with the
--- same NOT NULL default 'native' — backfilling the existing singleton row
--- non-destructively — plus the guarded CHECK and column comment. Also refresh
+-- same NOT NULL default 'native' - backfilling the existing singleton row
+-- non-destructively - plus the guarded CHECK and column comment. Also refresh
 -- the concept_search comment to the bm25-aware fresh wording.
 -- ===========================================================================
 ALTER TABLE pgokf_private.config
@@ -175,7 +175,7 @@ END
 $pgokf_source_type_chk$;
 
 COMMENT ON COLUMN pgokf.bundles.source_type IS
-    'How the bundle bytes reach the catalog: ''filesystem'' (registered from a canonical on-disk root via pgokf.register_bundle and refreshed from disk via pgokf.refresh_bundle) or ''content'' (streamed in memory via pgokf.register_bundle_content — a mountless object-store companion or any client — where path is the synthetic key ''content:''||name and refresh_bundle is rejected).';
+    'How the bundle bytes reach the catalog: ''filesystem'' (registered from a canonical on-disk root via pgokf.register_bundle and refreshed from disk via pgokf.refresh_bundle) or ''content'' (streamed in memory via pgokf.register_bundle_content - a mountless object-store companion or any client - where path is the synthetic key ''content:''||name and refresh_bundle is rejected).';
 
 -- ===========================================================================
 -- Wave 2, step 2: the mountless content-ingestion entry point. The C symbol

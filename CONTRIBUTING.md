@@ -4,7 +4,7 @@ Thanks for your interest in improving pgokf.
 
 ## Contributor License Agreement (required)
 
-pgokf is **dual-licensed** (AGPL-3.0 + a commercial license — see
+pgokf is **dual-licensed** (AGPL-3.0 + a commercial license - see
 [`LICENSING.md`](LICENSING.md)). So that the project can keep offering the
 commercial option, **every contribution must be covered by a Contributor
 License Agreement (CLA)** granting LogicOcean the right to relicense your
@@ -13,14 +13,14 @@ request you agree to the CLA terms. *(The CLA signing process will be linked
 here before the repository is made public.)*
 
 If you cannot agree to the CLA, please open an issue describing the bug or idea
-instead of a pull request — we can often implement it independently.
+instead of a pull request - we can often implement it independently.
 
 ## Development setup
 
 - Rust 1.96 (see `rust-toolchain.toml`), `cargo-pgrx` 0.19.2.
 - Install a PostgreSQL 15–18 dev environment: `cargo pgrx init --pgNN=…`.
 - Optional runtime extensions the seams probe for: `pgvector` (semantic search),
-  ParadeDB `pg_search` (BM25), `pg_cron` (scheduled refresh) — all optional.
+  ParadeDB `pg_search` (BM25), `pg_cron` (scheduled refresh) - all optional.
 
 ## Before you open a PR
 

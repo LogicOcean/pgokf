@@ -2,12 +2,12 @@
 
 `pgokf` supports **opt-in, row-level multi-tenant isolation**: one catalog can
 hold many tenants' bundles side by side, and a session sees only its own
-tenant's data — or, when it declares no tenant, *all* of it. The feature is
+tenant's data - or, when it declares no tenant, *all* of it. The feature is
 strictly backward compatible: an existing install, and any session that never
 sets a tenant, behaves exactly as it did before multi-tenancy was added.
 
-It is built from two ordinary PostgreSQL primitives — a per-session GUC and
-row-level security (RLS) — so there is no new API surface to learn and nothing
+It is built from two ordinary PostgreSQL primitives - a per-session GUC and
+row-level security (RLS) - so there is no new API surface to learn and nothing
 to turn on at install time.
 
 ## The model in one paragraph
@@ -23,7 +23,7 @@ current_setting('pgokf.tenant', true) IS NULL
 ```
 
 So a session that has **not** set `pgokf.tenant` (the value is unset or empty)
-matches every row — the pre-multi-tenancy behavior — while a session that **has**
+matches every row - the pre-multi-tenancy behavior - while a session that **has**
 set it matches only that tenant's rows. Writes stamp the row's `tenant_id` from
 the same GUC, and a bundle is single-tenant: all of its concepts, links,
 provenance, embeddings, and stored source inherit the bundle's tenant.
@@ -43,7 +43,7 @@ ALTER ROLE acme_app SET pgokf.tenant = 'acme';
 --   options='-c pgokf.tenant=acme'
 ```
 
-Unset it — returning the session to the see-all default — with `SET pgokf.tenant
+Unset it - returning the session to the see-all default - with `SET pgokf.tenant
 = ''` or `RESET pgokf.tenant`.
 
 There is no separate "create tenant" step: a tenant exists exactly as long as it
@@ -52,21 +52,28 @@ creates the `acme` tenant implicitly.
 
 ## Reads: automatic and transparent
 
-The reader functions — `concept_search`, `concept_search_semantic` /
-`concept_search_hybrid`, `find_similar`, `concept_neighbors`, `list_bundles`,
-`bundle_info`, `catalog_stats`, `stale_concepts`, `get_concept_source` — run with
-**invoker rights** over the base tables, so RLS filters them automatically. No
-argument changes; a scoped session simply sees a smaller catalog.
+The **invoker-rights** reader functions (`concept_search`, `search_facets`,
+`concept_search_semantic` / `concept_search_hybrid`, `find_similar`,
+`search_index_status`, `concept_neighbors`, `list_bundles`, `bundle_info`,
+`catalog_stats`, `stale_concepts`, `duplicate_concepts`, `concept_history`,
+`concept_as_of`, and `list_bundle_log`) run over the base tables, so RLS filters
+them automatically. No argument changes; a scoped session simply sees a smaller
+catalog (and, for `search_facets` / `search_index_status`, counts computed over
+only its own rows).
 
-Two readers are `SECURITY DEFINER` and therefore bypass RLS, so they apply the
-identical tenant predicate **explicitly** instead: `list_sync_log` filters its
-rows, and `health`'s `bundle_count` / `concept_count` are tenant-scoped. Both
-still see everything for an unset session.
+The `SECURITY DEFINER` readers bypass RLS (each must reach an administrator-only
+table), so they apply the identical tenant predicate **explicitly** instead:
+`list_sync_log`, `list_sync_changes`, and the admin-only `list_access_log`
+filter their audit rows, `health`'s
+`bundle_count` / `concept_count` are tenant-scoped, and `get_concept_source`
+filters both its source read and its concept-existence probe (so a scoped session
+cannot probe another tenant's concepts through the "no source stored" vs "no such
+concept" distinction). All of them still see everything for an unset session.
 
 ## Writes: stamped from the session
 
 Every write goes through a `SECURITY DEFINER` sync/admin function that runs as
-the extension owner and so bypasses RLS — correct, because each operates strictly
+the extension owner and so bypasses RLS - correct, because each operates strictly
 within one single-tenant bundle. The bundle row is stamped with
 `effective_tenant()` (the GUC, or `'default'` when unset), and every child row
 inherits the bundle's `tenant_id`. `refresh_bundle`, `unregister_bundle`, and
@@ -76,17 +83,19 @@ change its tenant.
 ## Write confinement
 
 Setting `pgokf.tenant` confines writes as tightly as it confines reads. The
-`SECURITY DEFINER` functions that take an explicit `bundle_id` — `refresh_bundle`,
-`unregister_bundle`, `set_bundle_enabled`, `set_concept_embedding`, and the admin
-exports `export_parquet` / `export_sources` — run as the table owner and so bypass
-RLS. On its own that would let a `pgokf_writer` / `pgokf_admin` session which has
+`SECURITY DEFINER` functions that take an explicit `bundle_id` (`refresh_bundle`,
+`unregister_bundle`, `set_bundle_enabled`, `retire_bundle`, `unretire_bundle`,
+`set_concept_embedding`, the `pg_cron` mutators `schedule_refresh` /
+`unschedule_refresh`, and the admin exports `export_parquet` / `export_sources`)
+run as the table owner and so bypass RLS. On its own that would let a
+`pgokf_writer` / `pgokf_admin` session which has
 `SET pgokf.tenant = 'acme'` reach another tenant's bundle just by passing its id.
 Each of those functions therefore applies an explicit guard the moment the
 `bundle_id` is known, before any lock, file, or catalog side effect:
 
 - when `pgokf.tenant` is **set**, the target bundle must belong to that tenant. A
   bundle owned by any other tenant is rejected with the *same* SQLSTATE `22023`
-  "bundle … is not registered" error a genuinely unknown id raises — so a
+  "bundle … is not registered" error a genuinely unknown id raises - so a
   cross-tenant id is **indistinguishable from a nonexistent one** and cannot be
   used to probe whether another tenant holds a bundle;
 - when `pgokf.tenant` is **unset or empty**, nothing is restricted: the session is
@@ -95,19 +104,21 @@ Each of those functions therefore applies an explicit guard the moment the
   behavior.
 
 The guard is ordinary code, not RLS, so it holds even for a superuser or the
-extension owner — precisely the callers RLS lets through. Write confinement thus
+extension owner - precisely the callers RLS lets through. Write confinement thus
 equals read confinement: with a tenant set, a session can only mutate or export
-the bundles it can see; with no tenant set, it can operate on all of them.
+the bundles it can see; with no tenant set, it can operate on all of them. The
+bulk `purge_retired` is confined the same way by filtering: a scoped session
+hard-deletes only its own tenant's retired bundles.
 `register_bundle` / `register_bundle_content` are deliberately *not* guarded this
-way — they **create** a bundle stamped with the session's tenant, so registering
+way - they **create** a bundle stamped with the session's tenant, so registering
 the same path under a different tenant is the intended per-tenant behavior (see
 below), not a cross-tenant write.
 
 ## Per-tenant bundle keys
 
 The bundle registration key is `UNIQUE (tenant_id, path)`, not `UNIQUE (path)`.
-Two tenants can therefore register the **same** path — a filesystem root or a
-`content:<name>` key — as independent bundles:
+Two tenants can therefore register the **same** path - a filesystem root or a
+`content:<name>` key - as independent bundles:
 
 ```sql
 SET pgokf.tenant = 'acme';
@@ -125,8 +136,8 @@ re-registering *your own* tenant's path is still rejected with the usual
 
 RLS is **enabled but not forced** on the projection tables, so the table owner
 (and thus every `SECURITY DEFINER` function) bypasses it. This is deliberate and
-safe: those functions never mix tenants in one statement — they read and write
-strictly within a single bundle, which is single-tenant — and they are the only
+safe: those functions never mix tenants in one statement - they read and write
+strictly within a single bundle, which is single-tenant - and they are the only
 paths that write. Forcing RLS on the owner would break the write path (which must
 stamp `tenant_id` and read across the bundle it owns) without adding isolation
 that the single-bundle scoping does not already guarantee.
@@ -139,13 +150,13 @@ State this plainly, because it governs how the feature may safely be deployed:
 > tenant who can execute arbitrary SQL.**
 
 `pgokf.tenant` is a `USERSET` GUC, so **any session that can run SQL can change
-its own value** — with `SET pgokf.tenant = 'other'`, `RESET pgokf.tenant`, or
-`SELECT set_config('pgokf.tenant', '', false)` — to another tenant's value or to
+its own value** - with `SET pgokf.tenant = 'other'`, `RESET pgokf.tenant`, or
+`SELECT set_config('pgokf.tenant', '', false)` - to another tenant's value or to
 empty, which the policy treats as *see-all*. Pinning it with `ALTER ROLE acme_app
 SET pgokf.tenant = 'acme'` sets only a **session default**: a subsequent plain
 `SET pgokf.tenant` in that same session overrides it, and RLS then filters by the
-new value. So the GUC contains an **honest, cooperating** client — one that
-issues no `SET` of its own and simply inherits the scope it is given — but it does
+new value. So the GUC contains an **honest, cooperating** client - one that
+issues no `SET` of its own and simply inherits the scope it is given - but it does
 **not** contain a **hostile** tenant who can submit raw SQL. This is inherent to
 any GUC-based tenancy, not a defect in the RLS policies (which are correct); the
 GUC is simply the wrong anchor for a boundary the adversary can move.
@@ -165,7 +176,7 @@ Use one of:
   checkout and refuses to pass through raw `SET` or ad-hoc SQL. The GUC is then
   set by infrastructure the tenant cannot influence.
 - **A per-tenant database role.** Give each tenant its own login role and let
-  ordinary PostgreSQL privileges — not a session GUC — enforce isolation
+  ordinary PostgreSQL privileges - not a session GUC - enforce isolation
   (optionally combined with `FORCE ROW LEVEL SECURITY` and per-tenant grants).
   This holds even against a tenant issuing arbitrary SQL, because the role, not
   the GUC, is the boundary.
@@ -192,13 +203,15 @@ cross-tenant exposure:
   (see [Write confinement](#write-confinement)): a cross-tenant id is rejected as
   an unknown bundle, so it is not a cross-tenant write vector even though it
   bypasses RLS. A tenant also only sees the bundle ids it is allowed to see
-  (`list_bundles` is RLS-filtered). Reserve the unset (see-all) session — which is
-  cross-tenant for *both* reads and writes — for a trusted operator, and continue
+  (`list_bundles` is RLS-filtered). Reserve the unset (see-all) session - which is
+  cross-tenant for *both* reads and writes - for a trusted operator, and continue
   to treat `pgokf_writer` / `pgokf_admin` as trusted tiers.
 
 ## Upgrading an existing catalog
 
-`ALTER EXTENSION pgokf UPDATE TO '0.1.7'` adds the `tenant_id` column to every
+Multi-tenancy arrived in the 0.1.7 upgrade step, so a plain
+`ALTER EXTENSION pgokf UPDATE` (landing on the current version) applies it when
+updating any pre-0.1.7 catalog: it adds the `tenant_id` column to every
 projection table (backfilling all existing rows to `'default'`), swaps the
 bundles key to `UNIQUE (tenant_id, path)`, and enables the RLS policies. Because
 the policy is a no-op for a session that sets no tenant, **the upgraded catalog
@@ -207,7 +220,7 @@ behaves identically to before** until a session opts in by setting
 
 ## Limits and non-goals
 
-- Isolation is per **row**, enforced by RLS — it is not physical separation.
+- Isolation is per **row**, enforced by RLS - it is not physical separation.
   Tenants share tables, indexes, and the buffer cache. For hard physical
   separation, use separate databases or clusters.
 - The `pgokf_private.config` policy row and the resource-ceiling GUCs are

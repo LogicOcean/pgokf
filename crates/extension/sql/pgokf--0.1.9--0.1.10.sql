@@ -6,13 +6,13 @@
 -- whole file runs in a single transaction.
 --
 -- 0.1.10 is one additive OKF-conformance feature batch:
---   F1 Attested Computation type-specific fields as graph edges — the
+--   F1 Attested Computation type-specific fields as graph edges - the
 --      computation / executor / attester references of an Attested Computation
 --      concept are resolved into pgokf.links as typed, traversable internal
 --      edges. A new additive pgokf.links.link_relation column carries the
 --      relation ('reference' for every ordinary link; 'attestation:*' for the
 --      new edges).
---   F2 reserved log.md projection — the per-directory OKF log.md activity logs,
+--   F2 reserved log.md projection - the per-directory OKF log.md activity logs,
 --      previously dropped, are now projected into a new pgokf.bundle_log table
 --      and read through pgokf.list_bundle_log.
 --
@@ -101,7 +101,7 @@ GRANT SELECT ON pgokf.bundle_log TO pgokf_reader;
 -- pgokf.list_bundle_log projection.
 --
 -- INVOKER rights (no SECURITY DEFINER) over the public projection table, so the
--- caller's own opt-in tenant row-level security applies — matching
+-- caller's own opt-in tenant row-level security applies - matching
 -- concept_neighbors. Reproduces the fresh 0.1.10 bundle_log_entry_type and
 -- bundle_log_function_hardening blocks and the pgrx-generated CREATE FUNCTION.
 -- ===========================================================================

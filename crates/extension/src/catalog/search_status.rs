@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Search-index health and coverage: `pgokf.search_index_status`.
 //!
-//! The two optional ranked-search accelerators — the `ParadeDB` `pg_search`
-//! BM25 index and the `pgvector` HNSW embedding index — are invisible from the
+//! The two optional ranked-search accelerators - the `ParadeDB` `pg_search`
+//! BM25 index and the `pgvector` HNSW embedding index - are invisible from the
 //! ordinary catalog: an operator cannot tell from `concept_search` alone whether
 //! either is installed, built, and *current* with the concept set. This function
 //! reports exactly that in one `jsonb` document: the configured backend, that
@@ -16,8 +16,8 @@
 //! `embedding_dim` only through the reader-granted `SECURITY DEFINER`
 //! `pgokf.get_config` projection (never the admin-only config table directly),
 //! probes extension and index presence through the always-readable system
-//! catalogs, and counts `pgokf.concepts` / `pgokf.concept_embedding` — both
-//! reader-`SELECT`-granted — as the invoker, so row-level security scopes the
+//! catalogs, and counts `pgokf.concepts` / `pgokf.concept_embedding` - both
+//! reader-`SELECT`-granted - as the invoker, so row-level security scopes the
 //! coverage counts to the session's tenant automatically.
 
 use std::path::Path;
@@ -29,8 +29,8 @@ use crate::security;
 
 /// The status document, assembled in SQL. Kept as a single query so the config
 /// read, the presence probes, and the coverage counts are one consistent
-/// snapshot. bm25 coverage is all-or-nothing — the index, when present, spans
-/// every concept row — so its `indexed_rows` is the total concept count when the
+/// snapshot. bm25 coverage is all-or-nothing - the index, when present, spans
+/// every concept row - so its `indexed_rows` is the total concept count when the
 /// index exists and zero otherwise; embedding coverage is the fraction of
 /// concepts that carry a stored vector. Coverage percentages are `NULL` when
 /// there are no concepts to cover.

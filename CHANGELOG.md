@@ -12,8 +12,8 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 ### Changed
 
-- **Relicensed to dual AGPL-3.0 + commercial** (previously MIT). The core — the
-  extension and the `okf-parser` / `okf-sync` crates — is now `AGPL-3.0-only`;
+- **Relicensed to dual AGPL-3.0 + commercial** (previously MIT). The core - the
+  extension and the `okf-parser` / `okf-sync` crates - is now `AGPL-3.0-only`;
   the companion tools (`pgokf-ingest`, `pgokf-embed`, `pgokf-mcp`,
   `pgokf-pgconn`) are `MIT`; and a commercial license is available for use the
   AGPL does not permit. See `LICENSING.md`.
@@ -22,7 +22,7 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 **Security and bugfix remediation.** This release fixes a set of audited defects
 in the shipped catalog and companions. **The in-database SQL surface is
-unchanged from 0.1.12** — no table, type, function signature, index, grant,
+unchanged from 0.1.12** - no table, type, function signature, index, grant,
 comment, role, or configuration key is added, dropped, renamed, or rewritten, so
 `ALTER EXTENSION pgokf UPDATE TO '0.1.13'` is a documented no-op that yields a
 catalog identical to a fresh 0.1.13, with every bundle, concept, embedding, link,
@@ -39,7 +39,7 @@ the no-data-loss upgrade guarantees are preserved.
   bundle could spin the backend on millions of walk rows for a tiny answer. The
   traversal is rewritten as a set-based, cycle-safe **breadth-first search** that
   records the first (minimum-hop) visit of each neighbor and never re-expands a
-  visited node — `O(V + E)` work — returning **identical results** (distinct
+  visited node - `O(V + E)` work - returning **identical results** (distinct
   neighbors, shortest hop distance, cycle-safe, active-bundle-scoped) for normal
   graphs. A dense `K30` bundle that formerly timed out now answers in
   milliseconds.
@@ -47,7 +47,7 @@ the no-data-loss upgrade guarantees are preserved.
   validates that every element of the supplied vector is finite, raising SQLSTATE
   `22023` (naming the offending index) for a `NaN`/`Infinity` element *before* the
   upsert. Storage is `real[]`, so such a value inserted silently but was rejected
-  by pgvector at every query/index cast — one bad write could break semantic and
+  by pgvector at every query/index cast - one bad write could break semantic and
   hybrid search and `rebuild_embedding_index` catalog-wide until the row was found
   and fixed.
 - **`purge_retired` data-loss race closed (HIGH).** `purge_retired` snapshotted
@@ -55,8 +55,8 @@ the no-data-loss upgrade guarantees are preserved.
   concurrent `unretire_bundle` that committed in between could have its restored
   bundle (and its concept history) silently deleted. The per-bundle delete now
   re-evaluates the eligibility predicate (`retired_at IS NOT NULL AND retired_at <
-  now() - older_than`) atomically under the bundle advisory lock, skipping — never
-  deleting — a bundle that is no longer eligible.
+  now() - older_than`) atomically under the bundle advisory lock, skipping - never
+  deleting - a bundle that is no longer eligible.
 - **Multi-tenancy trust model documented honestly.** `docs/security.md` and
   `docs/multi-tenancy.md` now state plainly that the `pgokf.tenant` GUC is a
   **scoping selector, not a hard security boundary** against a tenant who can run
@@ -106,7 +106,7 @@ the no-data-loss upgrade guarantees are preserved.
 
 **Companion tooling**: three new out-of-process binaries that pair with the
 already-shipped catalog surface. **The in-database extension is functionally
-unchanged from 0.1.11** — no table, type, function, index, grant, comment, or
+unchanged from 0.1.11** - no table, type, function, index, grant, comment, or
 configuration key is added, dropped, renamed, or rewritten, so
 `ALTER EXTENSION pgokf UPDATE TO '0.1.12'` is a documented no-op that yields a
 catalog identical to a fresh 0.1.12 with every bundle, concept, embedding,
@@ -117,7 +117,7 @@ guarantee.
 
 ### Added
 
-- **`pgokf-embed`** (new `crates/pgokf-embed`) — the reference **embedding
+- **`pgokf-embed`** (new `crates/pgokf-embed`) - the reference **embedding
   generator** that pairs with the shipped semantic search. A standalone async
   binary that connects as a `pgokf_writer` role, finds concepts in
   `pgokf.concepts` with no matching `pgokf.concept_embedding` row (optionally
@@ -128,9 +128,9 @@ guarantee.
   `pgokf.set_concept_embedding(bundle_id, concept_id, embedding)`. The endpoint,
   model, and API key are supplied by CLI/env and are **never** stored in
   PostgreSQL or hard-coded; the target dimension comes from `pgokf.get_config`
-  (`embedding_dim`) or `--dim`. Any OpenAI-compatible server works — OpenAI, a
+  (`embedding_dim`) or `--dim`. Any OpenAI-compatible server works - OpenAI, a
   local `text-embeddings-inference` / `llama.cpp` server, or a mock.
-- **`pgokf-mcp`** (new `crates/pgokf-mcp`) — a **Model Context Protocol** server
+- **`pgokf-mcp`** (new `crates/pgokf-mcp`) - a **Model Context Protocol** server
   that exposes the catalog to AI agents over stdio JSON-RPC 2.0. A hand-rolled,
   dependency-light server (no MCP SDK) implementing the MCP handshake
   (`initialize` → `serverInfo`/`capabilities`, `tools/list`, `tools/call`) and
@@ -140,7 +140,7 @@ guarantee.
   `concept_neighbors` (`concept_id`, `max_hops?`, `bundle_id?`), and
   `get_concept` (`concept_id`, `bundle_id?`). Connection string and optional
   `pgokf.tenant` come from CLI/env.
-- **`pgokf-ingest --watch`** — the mountless ingestion companion gains a **watch
+- **`pgokf-ingest --watch`** - the mountless ingestion companion gains a **watch
   daemon** mode (`--watch`, with `--interval` seconds, default 60) that
   periodically re-lists the object store and re-ingests through
   `register_bundle_content` (which diffs server-side, so a changed object
@@ -157,7 +157,7 @@ guarantee.
 ## [0.1.11] - 2026-08-28
 
 **Opt-in concept version history**: an append-only SCD Type-2 version trail of
-each concept, with point-in-time queries — *"what did this runbook say last
+each concept, with point-in-time queries - *"what did this runbook say last
 Tuesday?"*. The feature is **off by default**: with the new `track_history` key
 disabled (the default), a sync records nothing and an existing install behaves
 **exactly as before with zero extra storage**, which is what keeps the release
@@ -168,7 +168,7 @@ config columns are backfilled by their defaults (history off, retention 0).
 
 ### Added
 
-- **`pgokf.concept_history` table** — an append-only SCD Type-2 version trail. One
+- **`pgokf.concept_history` table** - an append-only SCD Type-2 version trail. One
   row per concept version with a per-concept monotonic `version` and a validity
   interval `[valid_from, valid_to)` (`valid_to IS NULL` = the current open
   version), a `change_kind` (`added` / `updated` / `removed`), and a snapshot of
@@ -179,24 +179,24 @@ config columns are backfilled by their defaults (history off, retention 0).
   the standard opt-in `tenant_id` row-level security and a
   `(bundle_id, concept_id, valid_from)` lookup index; `SELECT` granted to
   `pgokf_reader`.
-- **`pgokf.concept_history(bundle_id, concept_id, max_rows DEFAULT 100)`** — the
+- **`pgokf.concept_history(bundle_id, concept_id, max_rows DEFAULT 100)`** - the
   version timeline for one concept, newest first, as `SETOF pgokf.concept_version`.
   Reader-level, `STABLE`, invoker rights (the caller's tenant RLS applies).
-- **`pgokf.concept_as_of(bundle_id, concept_id, as_of)`** — the single version
+- **`pgokf.concept_as_of(bundle_id, concept_id, as_of)`** - the single version
   valid at an instant (`valid_from <= as_of AND (valid_to IS NULL OR as_of <
   valid_to)`), or zero rows if the concept did not exist or had been removed then.
   The point-in-time answer. Reader-level, `STABLE`, invoker rights.
 - **`pgokf.concept_version`** composite (`version`, `valid_from`, `valid_to`,
-  `change_kind`, `type`, `title`, `description`, `file_hash`) — the row shape both
+  `change_kind`, `type`, `title`, `description`, `file_hash`) - the row shape both
   readers return.
-- **`track_history`** configuration key (`boolean`, default `false`) — the opt-in
+- **`track_history`** configuration key (`boolean`, default `false`) - the opt-in
   switch. When on, every register/refresh/content sync records history from its
   delta inside the same transaction, so history commits atomically with the sync:
   an added concept starts at version 1; an updated concept closes its open version
   and appends the next; a removed concept closes its open version and appends a
   zero-width removal tombstone. Documented as a storage/retention tradeoff.
 - **`history_retention_days`** configuration key (`integer`, default `0` = keep
-  indefinitely) — bounds history growth. When positive, closed versions
+  indefinitely) - bounds history growth. When positive, closed versions
   (`valid_to IS NOT NULL`) older than the window are pruned in the same
   transaction after each sync; the single current open version of a concept is
   never pruned.
@@ -206,7 +206,7 @@ config columns are backfilled by their defaults (history off, retention 0).
 - **Backward compatible and opt-in.** With `track_history` off (the default) no
   `pgokf.concept_history` row is ever written and there is zero behavior or
   storage change; the new reader functions simply return no rows. Enabling
-  `track_history` is not retroactive — recording begins at the next sync, and a
+  `track_history` is not retroactive - recording begins at the next sync, and a
   concept first versioned afterward begins its chain at that sync's `change_kind`.
 - Version-history intervals are contiguous and non-overlapping per concept, with
   exactly one open version per live concept; each sync stamps its rows with a
@@ -227,7 +227,7 @@ its default.
 
 ### Added
 
-- **Attested Computation reference fields as graph edges** — for a concept whose
+- **Attested Computation reference fields as graph edges** - for a concept whose
   `type` is `Attested Computation`, its `computation`, `executor`, and `attester`
   reference fields (each a bare resource path or a `{resource: …}` mapping) are
   resolved into **`pgokf.links`** as typed internal edges, numbered after the
@@ -236,12 +236,12 @@ its default.
   reachable even when the body links to none of them. A missing, external, or
   dangling reference is retained as `is_external` / `resolved = false` and never
   traversed, exactly like any other link. Non-attested concepts are unaffected.
-- **`pgokf.links.link_relation`** (`text NOT NULL DEFAULT 'reference'`) — a new
+- **`pgokf.links.link_relation`** (`text NOT NULL DEFAULT 'reference'`) - a new
   additive column carrying the edge's semantic relation, distinct from the
   Markdown-construct `link_kind`: `reference` for every ordinary link, or
   `attestation:computation` / `attestation:executor` / `attestation:attester`
   for the new typed edges. Existing rows are backfilled to `reference`.
-- **Reserved `log.md` projection** — the per-directory OKF `log.md` activity
+- **Reserved `log.md` projection** - the per-directory OKF `log.md` activity
   logs, previously skipped entirely, are now parsed and projected into a new
   **`pgokf.bundle_log`** table (`bundle_id`, `tenant_id`, `directory`, `ordinal`,
   `logged_at`, `entry`; PK `(bundle_id, directory, ordinal)`; cascades from
@@ -253,7 +253,7 @@ its default.
   unchanged.
 - **`pgokf.list_bundle_log(bundle_id bigint, directory text DEFAULT NULL,
   max_rows int DEFAULT 500)`** (`SETOF pgokf.bundle_log_entry`, reader-level,
-  `STABLE PARALLEL SAFE`, invoker rights) — lists a bundle's log entries ordered
+  `STABLE PARALLEL SAFE`, invoker rights) - lists a bundle's log entries ordered
   by directory then ordinal, optionally scoped to one directory (`''` for the
   root). New composite **`pgokf.bundle_log_entry(bundle_id, directory, ordinal,
   logged_at, entry)`**. Raises `22023` when `max_rows < 0`.
@@ -270,7 +270,7 @@ default changes.
 
 ### Added
 
-- **Keyset / cursor pagination on `concept_search`** — a new optional trailing
+- **Keyset / cursor pagination on `concept_search`** - a new optional trailing
   argument **`after_cursor jsonb DEFAULT NULL`**. Ranked results now have a stable
   total order (`rank DESC`, then `bundle_id ASC`, then `concept_id ASC`); copy the
   `rank`, `bundle_id`, and `concept_id` of a page's last row into `after_cursor`
@@ -278,21 +278,21 @@ default changes.
   duplicates or skips even when ranks tie**. Applied in both the native and BM25
   backends. A malformed cursor raises `22023`. The historical three- through
   seven-argument calls are unchanged (`after_cursor` defaults to the first page).
-- **Faceted result counts** — **`pgokf.search_facets(query, bundle_id DEFAULT
+- **Faceted result counts** - **`pgokf.search_facets(query, bundle_id DEFAULT
   NULL, facet DEFAULT 'type', concept_type DEFAULT NULL, tags DEFAULT NULL, status
   DEFAULT NULL, trust_tier DEFAULT NULL)`** (`SETOF pgokf.search_facet`,
   reader-level) counts the same matching set `concept_search` would, grouped by
-  one facet — `type`, `bundle`, `status`, `trust_tier`, or `tag` (any other value
+  one facet - `type`, `bundle`, `status`, `trust_tier`, or `tag` (any other value
   raises `22023`; the facet is dispatched on, never interpolated). The `tag` facet
   counts a concept once per tag. New composite **`pgokf.search_facet(facet_value
   text, count bigint)`**.
-- **Search-index health / coverage** — **`pgokf.search_index_status()`**
+- **Search-index health / coverage** - **`pgokf.search_index_status()`**
   (`jsonb`, reader-level) reports the configured backend, that native FTS is
   always available, and for each optional index whether its extension is
   installed, whether the index exists, and how much of the catalog it covers
   (BM25 rows and embedding-vector coverage vs. total concepts). Coverage counts
   are tenant-scoped.
-- **Optional `pg_cron` scheduled re-sync** — **`pgokf.schedule_refresh(bundle_id,
+- **Optional `pg_cron` scheduled re-sync** - **`pgokf.schedule_refresh(bundle_id,
   schedule)`** (`text`, admin-tier) registers an idempotent
   `pgokf_refresh_<bundle_id>` cron job running `SELECT pgokf.refresh_bundle(<id>)`
   on the given schedule, and **`pgokf.unschedule_refresh(bundle_id)`** (`boolean`,
@@ -324,14 +324,14 @@ functions are added; no existing signature, type, or default changes.
 
 ### Added
 
-- **Per-concept change manifest** — every `register` / `refresh` / `content`
+- **Per-concept change manifest** - every `register` / `refresh` / `content`
   sync now records which concepts it added, updated, or removed, not just the
   aggregate counts. Stored in the new administrator-only
   `pgokf_private.sync_log_change` (a child of `pgokf_private.sync_log`, cascading
   on delete so it shares the `sync_log_retention_days` window) and read through
   the reader-level **`pgokf.list_sync_changes(sync_id, max_rows DEFAULT 1000)`**
   (`SETOF pgokf.sync_change`), tenant-scoped like `list_sync_log`.
-- **Bundle retirement / soft-delete window** — a new `bundles.retired_at`
+- **Bundle retirement / soft-delete window** - a new `bundles.retired_at`
   timestamp and three functions: **`pgokf.retire_bundle(bundle_id)`** and
   **`pgokf.unretire_bundle(bundle_id)`** (writer-tier), and
   **`pgokf.purge_retired(older_than interval DEFAULT '7 days')`** (admin-tier).
@@ -342,20 +342,20 @@ functions are added; no existing signature, type, or default changes.
   `purge_retired` hard-deletes bundles retired longer than the interval (writing
   one `unregister` audit row each). Retirement is idempotent (re-retiring keeps
   the original instant) and does not touch `enabled`.
-- **Exfiltration / access audit** — the three content-exporting operations
+- **Exfiltration / access audit** - the three content-exporting operations
   (`export_parquet`, `export_sources`, `get_concept_source`) now each append one
   row to the new administrator-only `pgokf_private.access_log` (who read/exported
   what, and when), read through the admin-tier
   **`pgokf.list_access_log(bundle_id DEFAULT NULL, max_rows DEFAULT 100)`**
   (`SETOF pgokf.access_log_entry`). The log shares the `sync_log_retention_days`
   retention window.
-- **Cross-bundle content deduplication** —
+- **Cross-bundle content deduplication** -
   **`pgokf.duplicate_concepts(bundle_id DEFAULT NULL, min_group int DEFAULT 2)`**
   (`SETOF pgokf.duplicate_group`, reader-level) groups byte-identical concepts by
   their stored BLAKE3 `file_hash`, so an operator can find the same runbook or
   reference copied across bundles.
 - **`retired_at`** on the `pgokf.catalog_stat` composite (returned by
-  `catalog_stats`), so retired bundles — hidden from `list_bundles` — stay
+  `catalog_stats`), so retired bundles - hidden from `list_bundles` - stay
   visible with their retirement instant.
 
 ### Changed
@@ -377,17 +377,17 @@ install, and any session that never sets a tenant, sees all rows and behaves
 exactly as under 0.1.6, so `ALTER EXTENSION pgokf UPDATE TO '0.1.7'` migrates an
 existing install in a single transaction and yields a catalog identical to a
 fresh 0.1.7 (every existing row backfills to the `default` tenant). No public API
-surface changes — no new functions, types, or arguments.
+surface changes - no new functions, types, or arguments.
 
 ### Added
 
 - **Denormalized `tenant_id`** (`text NOT NULL DEFAULT 'default'`) on every
-  projection table — `bundles`, `concepts`, `concept_metadata`, `links`,
+  projection table - `bundles`, `concepts`, `concept_metadata`, `links`,
   `concept_provenance`, `concept_verification`, `concept_provenance_source`,
-  `concept_source`, `concept_embedding` — and on `pgokf_private.sync_log`.
+  `concept_source`, `concept_embedding` - and on `pgokf_private.sync_log`.
   Indexed where it helps (a dedicated index on `concepts`; on `bundles` the new
   `UNIQUE (tenant_id, path)` index already leads with it).
-- **`pgokf.tenant` GUC** (`USERSET`, empty default) — the per-session tenant
+- **`pgokf.tenant` GUC** (`USERSET`, empty default) - the per-session tenant
   selector. Set it per session (`SET pgokf.tenant = 'acme'`), per login role
   (`ALTER ROLE r SET pgokf.tenant = ...`), or as a connection option; empty (the
   default) means the session declares no tenant and sees every row.
@@ -421,8 +421,8 @@ surface changes — no new functions, types, or arguments.
 
 An additive **search-enhancement** batch: structured filters on ranked search, a
 content more-like-this, and an optional pgvector semantic / hybrid surface.
-Everything is backward compatible — the historical `concept_search(query,
-bundle_id, limit_count)` call is unchanged — so `ALTER EXTENSION pgokf UPDATE TO
+Everything is backward compatible - the historical `concept_search(query,
+bundle_id, limit_count)` call is unchanged - so `ALTER EXTENSION pgokf UPDATE TO
 '0.1.6'` migrates an existing install in a single transaction and yields a
 catalog byte-identical to a fresh `0.1.6` (verified by diffing the two).
 
@@ -430,17 +430,17 @@ catalog byte-identical to a fresh `0.1.6` (verified by diffing the two).
 
 - **Structured filters on `pgokf.concept_search`.** Four optional trailing
   arguments, each a no-op when `NULL`: `concept_type text`, `tags text[]`
-  (**ALL-of** containment — a hit must carry every listed tag), `status text`,
+  (**ALL-of** containment - a hit must carry every listed tag), `status text`,
   and `trust_tier text` (matched against `pgokf.concept_provenance`). The filters
   are parameter-bound `AND` clauses applied in both the native and BM25 backends,
   reusing the existing `tags`, `type`, and provenance indexes.
 - **`pgokf.find_similar(concept_id text, bundle_id bigint DEFAULT NULL,
-  limit_count int DEFAULT 10)`** — content more-like-this. It extracts a seed
+  limit_count int DEFAULT 10)`** - content more-like-this. It extracts a seed
   concept's most salient `body_tsv` lexemes and ranks other concepts against them
   through the configured `search_backend` (native FTS or BM25), excluding the
   seed. Distinct from `concept_neighbors` (the authored link graph).
 - **Optional semantic + hybrid search via pgvector** (mirroring the optional
-  BM25 seam exactly — `CREATE EXTENSION pgokf` still succeeds without pgvector):
+  BM25 seam exactly - `CREATE EXTENSION pgokf` still succeeds without pgvector):
   - **`pgokf.concept_embedding`** stores per-concept vectors as the builtin
     `real[]` (never a `vector` column, so the extension takes no static pgvector
     dependency), cast to `vector(embedding_dim)` only at query and index time.
@@ -467,16 +467,16 @@ catalog byte-identical to a fresh `0.1.6` (verified by diffing the two).
 - `pgokf.concept_search` gained the four trailing filter arguments (a new
   function *identity* in `pg_proc`). The upgrade script removes the superseded
   three-argument overload and creates the seven-argument one, so an upgraded
-  catalog carries exactly one `concept_search` overload — identical to a fresh
-  install — and every historical one-, two-, and three-argument call still
+  catalog carries exactly one `concept_search` overload - identical to a fresh
+  install - and every historical one-, two-, and three-argument call still
   resolves through the new defaults.
 
 ## [0.1.5] - 2026-08-28
 
 An additive **audit, lifecycle, and observability** batch. Everything is
-backward compatible — a new admin-only table, three composite types, five new
+backward compatible - a new admin-only table, three composite types, five new
 functions, three new configuration keys, and two functions whose *behavior*
-gained a filter — so `ALTER EXTENSION pgokf UPDATE TO '0.1.5'` migrates an
+gained a filter - so `ALTER EXTENSION pgokf UPDATE TO '0.1.5'` migrates an
 existing install in a single transaction (the `0.1.4 → 0.1.5` upgrade script
 adds the `sync_log` table, the three types, the five functions, and the two
 config columns; the rest lives in the shared library and activates on load).
@@ -519,9 +519,9 @@ config columns; the rest lives in the shared library and activates on load).
 - `sync_log_retention_days` moves from **defined-but-dead** to **active** (see
   above). `notify_channel` and `okf_version_policy` are new, active keys.
 - **Internal:** a behavior-preserving complexity refactor of the parser,
-  config-coercion, and SPI-row-reading hot paths — a shared `spi_read` tuple
+  config-coercion, and SPI-row-reading hot paths - a shared `spi_read` tuple
   helper (DRY), per-key config coercion/defaults, and decomposed ISO-8601
-  parsers — dropping the worst function's cyclomatic complexity from 39 to 18
+  parsers - dropping the worst function's cyclomatic complexity from 39 to 18
   with no change to any behavior, signature, SQL surface, or test.
 
 ## [0.1.4] - 2026-08-28
@@ -529,8 +529,8 @@ config columns; the rest lives in the shared library and activates on load).
 Two additive capabilities landed together: a **`pgokf_writer` ingestion role
 tier** paired with an **optional BM25 search backend**, and a **mountless
 object-store ingestion path** (`register_bundle_content` plus the standalone
-`pgokf-ingest` companion). Everything here is backward compatible — new
-functions, a new role, a new projection column, and a new configuration key —
+`pgokf-ingest` companion). Everything here is backward compatible - new
+functions, a new role, a new projection column, and a new configuration key -
 so `ALTER EXTENSION pgokf UPDATE TO '0.1.4'` migrates an existing install in a
 single transaction (the `0.1.3 → 0.1.4` upgrade script creates the writer role,
 adds `rebuild_search_index`, and adds `register_bundle_content` +
@@ -538,13 +538,13 @@ adds `rebuild_search_index`, and adds `register_bundle_content` +
 
 ### Added
 
-- **`pgokf_writer` role — a new ingestion tier** between `pgokf_reader` and
+- **`pgokf_writer` role - a new ingestion tier** between `pgokf_reader` and
   `pgokf_admin` (`pgokf_reader` < `pgokf_writer` < `pgokf_admin`, each inheriting
   the tier below). It is the intended account for an automated ingestion
   pipeline: it can register/refresh/unregister bundles but cannot change
   configuration, write exports, or read `pgokf_private`.
 - **`pgokf.register_bundle_content(name text, paths text[], contents bytea[], options jsonb)`**
-  — the *mountless* ingestion path. A companion process reads an object store and
+  - the *mountless* ingestion path. A companion process reads an object store and
   streams the collected `(path, bytes)` into PostgreSQL; the extension itself
   performs no network or filesystem I/O. Re-calling it resyncs the bundle
   (changed concepts upserted, missing ones deleted) exactly like a filesystem
@@ -553,14 +553,14 @@ adds `rebuild_search_index`, and adds `register_bundle_content` +
 - **`pgokf.bundles.source_type`** (`'filesystem'` | `'content'`, default
   `'filesystem'`) distinguishing a bundle registered from a canonical on-disk
   root from one streamed in memory (keyed on the synthetic path `content:<name>`).
-- **`pgokf.rebuild_search_index()`** — admin function that (re)builds the optional
+- **`pgokf.rebuild_search_index()`** - admin function that (re)builds the optional
   `pg_search` BM25 index; a no-op with a notice when `pg_search` is not installed.
 - **`search_backend` configuration key** (`native` | `bm25`, default `native`).
   `native` uses the built-in `websearch_to_tsquery` / `ts_rank_cd` ranking;
   `bm25` routes `concept_search` through ParadeDB `pg_search` at runtime via SPI
-  when available, falling back to native (with a warning) when it is not — so the
+  when available, falling back to native (with a warning) when it is not - so the
   extension takes no hard dependency on `pg_search`.
-- **`pgokf-ingest` companion crate** — a standalone async binary that lists an
+- **`pgokf-ingest` companion crate** - a standalone async binary that lists an
   S3-compatible object store (MinIO / SeaweedFS / AWS S3 / GCS / Azure via
   `object_store`), downloads the objects, and streams them to
   `register_bundle_content` as `pgokf_writer`. Object-store credentials live in
@@ -575,7 +575,7 @@ adds `rebuild_search_index`, and adds `register_bundle_content` +
   working because `pgokf_admin` inherits `pgokf_writer`; configuration and the
   file-writing exports remain admin-only.
 - **`refresh_bundle` rejects content-sourced bundles.** A `source_type = 'content'`
-  bundle has no filesystem root, so `refresh_bundle` raises `22023` for it —
+  bundle has no filesystem root, so `refresh_bundle` raises `22023` for it -
   re-sync those by calling `register_bundle_content` again.
 - **Internal:** the sync engine was refactored around a `ByteSource` seam so the
   filesystem path (walk + read) and the content path (caller-supplied bytes)
@@ -610,11 +610,11 @@ compatibility shim.
 
 ### Added
 
-- **`pgokf.concept_verification` table** — the ordered OKF `verified[]` event
+- **`pgokf.concept_verification` table** - the ordered OKF `verified[]` event
   list, one `(bundle_id, concept_id, ordinal)` row per `{by, at}` event (a single
   `verified` mapping is stored as one `ordinal = 0` row; actorless events are
   skipped). Cascades from `pgokf.concepts`; reader-`SELECT`able.
-- **`pgokf.concept_provenance_source` table** — the OKF `sources[]` provenance
+- **`pgokf.concept_provenance_source` table** - the OKF `sources[]` provenance
   materials, one row per entry (`source_id`, `resource`, `title`, `author`,
   `usage_count`, `last_modified`, per-source `usage_window_from` / `_to`).
   Distinct from the raw-bytes `pgokf.concept_source`. Cascades from
@@ -659,20 +659,20 @@ is byte-for-byte identical to 0.1.1.
 - **`store_source` configuration key** (boolean, default `false`) on
   `pgokf_private.config`. It selects between two deployment tiers: `true` stores
   each concept's verbatim source bytes in PostgreSQL (small, self-contained
-  install — no external storage needed); `false` keeps the source in a mounted
+  install - no external storage needed); `false` keeps the source in a mounted
   object store / data lake and PostgreSQL holds only metadata and search. Like
   `default_text_search_config`, it is read at sync time and is **not
-  retroactive** — set it before the first `register_bundle`, or re-register.
-- **`pgokf.concept_source` table** — opt-in verbatim source bytes
+  retroactive** - set it before the first `register_bundle`, or re-register.
+- **`pgokf.concept_source` table** - opt-in verbatim source bytes
   (`raw_content bytea`, `byte_size integer`), keyed `(bundle_id, concept_id)` and
   cascading from `pgokf.concepts`, so removals and unregistration drop the stored
   source automatically. TOAST-compressed with `lz4` where the build supports it,
   otherwise `pglz`. Reader-`SELECT`able.
-- **`pgokf.get_concept_source(bundle_id, concept_id) → bytea`** — reader-level
+- **`pgokf.get_concept_source(bundle_id, concept_id) → bytea`** - reader-level
   retrieval of a concept's exact stored bytes to the client (no filesystem
   write). Raises `22023` when the concept exists but no source was stored, and,
   distinctly, when no such concept exists.
-- **`pgokf.export_sources(bundle_id, dest_dir) → pgokf.export_result`** —
+- **`pgokf.export_sources(bundle_id, dest_dir) → pgokf.export_result`** -
   admin-only reconstruction of a bundle's stored source files on disk,
   byte-for-byte. Reuses `export_parquet`'s destination validation and
   `O_NOFOLLOW` file creation, recreates the bundle-relative directory tree, and
@@ -704,13 +704,13 @@ Hardening, performance, and packaging. No public-API change: the stable surface
   limits can raise PostgreSQL's `tsvector` size error mid-sync; the whole
   transaction no longer rolls back on a single large-but-in-limit file.
 - **Resolved the findings from a full-repository adversarial audit** across the
-  parser, sync engine, and catalog surface — input-validation edges, error
+  parser, sync engine, and catalog surface - input-validation edges, error
   mapping, and path-handling corners hardened without changing behavior for
   well-formed input.
 
 ### Performance
 
-- **Batched SPI inserts in the sync engine** — concepts, metadata, links, and
+- **Batched SPI inserts in the sync engine** - concepts, metadata, links, and
   provenance are projected in batched statements instead of row-at-a-time,
   cutting per-file round trips on large bundles.
 - **Guarded the link re-resolution `UPDATE`** so an incremental
@@ -719,7 +719,7 @@ Hardening, performance, and packaging. No public-API change: the stable surface
 
 ### Added
 
-- **Distribution packaging** — `.deb` / `.rpm` build recipes, a PGXN
+- **Distribution packaging** - `.deb` / `.rpm` build recipes, a PGXN
   `META.json`, a Docker image, and a Homebrew formula, wired into a `packages`
   CI job so per-major artifacts build reproducibly.
 - **Proven extension upgrade path.** The example `sql/pgokf--0.1.0--0.1.1.sql`
@@ -748,7 +748,7 @@ queries, native full-text search, and link-graph traversal.
   and verification lineage).
 - **Full-text search.** `pgokf.concept_search(query, bundle_id, limit)` returns
   ranked hits with `ts_headline` snippets over a weighted `tsvector` (title A,
-  tags/type/description B, body D). Native PostgreSQL FTS only — no third-party
+  tags/type/description B, body D). Native PostgreSQL FTS only - no third-party
   search extension is required.
 - **Link-graph traversal.** `pgokf.concept_neighbors(concept_id, max_hops,
   bundle_id)` walks the resolved link graph outward from a concept.
@@ -760,9 +760,9 @@ queries, native full-text search, and link-graph traversal.
   `sync_log_retention_days`, `default_exclude`) stored in the
   administrator-only `pgokf_private.config` table.
 - **Parquet export.** `pgokf.export_parquet(bundle_id, dest_dir)` writes a
-  bundle's catalog projection to four Parquet files — `concepts.parquet`,
+  bundle's catalog projection to four Parquet files - `concepts.parquet`,
   `concept_metadata.parquet`, `links.parquet`, and `concept_provenance.parquet`
-  — inside `dest_dir` for downstream analytics.
+  - inside `dest_dir` for downstream analytics.
 - **Version introspection.** `pgokf.version()` reports the loaded shared
   library's version for post-upgrade agreement checks.
 - **Composite result types.** `pgokf.bundle_sync_result`,
@@ -779,8 +779,8 @@ queries, native full-text search, and link-graph traversal.
 - **Configurable safety limits (GUCs).** `pgokf.max_file_bytes`,
   `pgokf.max_bundle_files`, `pgokf.max_frontmatter_bytes`,
   `pgokf.max_graph_hops`, and `pgokf.log_level`.
-- **Documentation coverage.** Every public object — all 12 functions, all 5
-  composite types, all 6 catalog tables, and both API roles — carries a
+- **Documentation coverage.** Every public object - all 12 functions, all 5
+  composite types, all 6 catalog tables, and both API roles - carries a
   `COMMENT ON`, enforced by the `api_stability` test suite and by a runtime
   `obj_description` coverage gate in the release checklist.
 - **PostgreSQL 15–19 support**, built with Rust (edition 2024) and pgrx 0.19.

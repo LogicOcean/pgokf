@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! `pgokf-mcp` — a Model Context Protocol server exposing the `pgokf` catalog.
+//! `pgokf-mcp` - a Model Context Protocol server exposing the `pgokf` catalog.
 //!
 //! This standalone async binary speaks MCP over stdio: newline-delimited
 //! JSON-RPC 2.0 on stdin/stdout. It implements the MCP handshake

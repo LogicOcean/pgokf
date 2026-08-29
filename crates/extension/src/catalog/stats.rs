@@ -4,20 +4,20 @@
 //! These three reader-level functions expose the operational state of the
 //! catalog for monitoring and readiness routing, without any mutation:
 //!
-//! - [`catalog_stats`](pgokf::catalog_stats) — one row per registered bundle
+//! - [`catalog_stats`](pgokf::catalog_stats) - one row per registered bundle
 //!   with its indexed-concept, link, and resolved-link counts, sync recency,
 //!   and a staleness flag. It reads only `pgokf.bundles`, `pgokf.concepts`, and
 //!   `pgokf.links`, all of which `pgokf_reader` already holds `SELECT` on, so it
-//!   runs with **invoker rights** (like `concept_search` / `list_bundles`) — no
+//!   runs with **invoker rights** (like `concept_search` / `list_bundles`) - no
 //!   `SECURITY DEFINER` is warranted because escalating would grant nothing.
-//! - [`health`](pgokf::health) — a single `jsonb` document for
+//! - [`health`](pgokf::health) - a single `jsonb` document for
 //!   liveness/readiness probes (bundle and concept totals, the configured
 //!   search backend and whether BM25 is ready, replica-recovery state, and role
 //!   and configuration sanity). It must read the administrator-only
 //!   `pgokf_private.config`, so it is `SECURITY DEFINER` with a pinned
 //!   `search_path`, mirroring `get_config`; `EXECUTE` is granted to
 //!   `pgokf_reader`.
-//! - [`stale_concepts`](pgokf::stale_concepts) — the concepts whose OKF
+//! - [`stale_concepts`](pgokf::stale_concepts) - the concepts whose OKF
 //!   `stale_after` instant has passed as of a chosen time, surfacing the
 //!   lifecycle signal that `pgokf.concept_provenance` already models but never
 //!   exposed. It reads only reader-granted tables, so it too runs with invoker
@@ -331,7 +331,7 @@ CREATE TYPE pgokf.stale_concept AS (
 );
 
 COMMENT ON TYPE pgokf.catalog_stat IS
-    'Per-bundle operational statistics from pgokf.catalog_stats: identity and state, indexed-concept / link / resolved-link counts, sync recency (last_synced_at, sync_age), a 24-hour staleness flag, and retired_at (the soft-delete/retirement instant, NULL when active) so retired bundles — hidden from list_bundles — remain visible here.';
+    'Per-bundle operational statistics from pgokf.catalog_stats: identity and state, indexed-concept / link / resolved-link counts, sync recency (last_synced_at, sync_age), a 24-hour staleness flag, and retired_at (the soft-delete/retirement instant, NULL when active) so retired bundles - hidden from list_bundles - remain visible here.';
 COMMENT ON TYPE pgokf.stale_concept IS
     'One concept whose OKF stale_after instant has passed (as of the chosen time), from pgokf.stale_concepts: its bundle, id, path, type, and the stale_after instant.';
 ",

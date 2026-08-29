@@ -11,7 +11,7 @@ const RESERVED_FILE_NAMES: [&str; 2] = ["index.md", "log.md"];
 /// Separator handling follows the host platform: on Windows the native `\`
 /// separator is folded to `/` (a backslash can never be part of a Windows
 /// file name), while on POSIX systems `/` is the only separator and `\` is a
-/// legal file-name byte kept verbatim — folding it there would produce a
+/// legal file-name byte kept verbatim - folding it there would produce a
 /// normalized path that no longer names the file on disk.
 ///
 /// The result keeps its `.md` suffix (lowercased); use [`concept_id`] to
@@ -143,7 +143,7 @@ pub fn parent_directory(normalized_path: &str) -> &str {
 /// platform: link destinations are document *content* and must resolve
 /// identically wherever the document is parsed, so Windows-authored `\`
 /// separators are always folded. A link that intends to target a POSIX file
-/// name containing a literal `\` is therefore unresolvable by design — OKF
+/// name containing a literal `\` is therefore unresolvable by design - OKF
 /// links use `/` separators.
 #[must_use]
 pub fn resolve_link_target(target: &str, source_path: &str) -> Option<String> {

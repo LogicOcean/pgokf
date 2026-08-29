@@ -8,13 +8,13 @@
 -- 0.1.11 is one additive, OPT-IN feature: concept version history + point-in-time
 -- queries (SCD Type-2 temporal history).
 --
---   D1 track_history / history_retention_days configuration keys — two new
+--   D1 track_history / history_retention_days configuration keys - two new
 --      columns on the singleton pgokf_private.config row. track_history (boolean,
 --      default false) is the opt-in switch; when OFF (the default) nothing below
 --      records a single row and an existing install behaves EXACTLY as before with
 --      ZERO extra storage. history_retention_days (integer, default 0 = keep
 --      indefinitely) bounds growth of closed versions.
---   D2 pgokf.concept_history — an append-only SCD-2 version trail of each concept,
+--   D2 pgokf.concept_history - an append-only SCD-2 version trail of each concept,
 --      one row per version with a validity interval [valid_from, valid_to). New
 --      table; cascades from pgokf.bundles (NOT pgokf.concepts) so a removed
 --      concept keeps its history until the bundle is unregistered.
@@ -36,7 +36,7 @@
 -- Appended (ALTER TABLE ... ADD COLUMN) after embedding_dim, matching the column
 -- layout of the fresh 0.1.11 config table (whose CREATE TABLE likewise places
 -- track_history / history_retention_days last). The NOT NULL DEFAULTs backfill the
--- singleton row with history disabled and unbounded retention — identical to a
+-- singleton row with history disabled and unbounded retention - identical to a
 -- fresh install. IF NOT EXISTS keeps each step idempotent. The non-negativity
 -- CHECK on history_retention_days matches the fresh table constraint.
 -- ===========================================================================
@@ -164,7 +164,7 @@ COMMENT ON TYPE pgokf.concept_version IS
 -- pgokf.concept_as_of.
 --
 -- INVOKER rights (no SECURITY DEFINER) over the public projection table, so the
--- caller's own opt-in tenant row-level security applies — matching
+-- caller's own opt-in tenant row-level security applies - matching
 -- concept_neighbors and list_bundle_log. Reproduces the fresh 0.1.11
 -- pgrx-generated CREATE FUNCTIONs and the concept_history_function_hardening
 -- block. (The concept_history TABLE and the concept_history FUNCTION share a name

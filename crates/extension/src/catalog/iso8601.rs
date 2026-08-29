@@ -263,7 +263,7 @@ mod tests {
     #[test]
     fn parse_iso8601_epoch_rejects_calendar_invalid_instants() {
         // Arrange: shape-valid but impossible dates and out-of-range fields must
-        // degrade to None, never throw — a NULL column, not an aborted sync.
+        // degrade to None, never throw - a NULL column, not an aborted sync.
         // Act / Assert
         assert_eq!(parse_iso8601_epoch("2026-02-30T00:00:00Z"), None);
         assert_eq!(parse_iso8601_epoch("2026-13-01T00:00:00Z"), None);

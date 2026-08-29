@@ -7,8 +7,8 @@ bundle of OKF concepts, searched it full-text, walked its link graph, and
 retrieved a concept's original source bytes.
 
 Everything below was run against a live PostgreSQL 18 cluster with `pgokf`
-`0.1.3` installed; the output blocks are the real output, lightly trimmed for
-width. If your numbers differ, it is because your bundle differs — the shapes
+`0.1.13` installed; the output blocks are the real output, lightly trimmed for
+width. If your numbers differ, it is because your bundle differs, the shapes
 will match.
 
 - New to the OKF document format? See [okf-authoring.md](okf-authoring.md) and
@@ -21,11 +21,11 @@ will match.
 
 ## Prerequisites
 
-- PostgreSQL 15, 16, 17, or 18 with the `pgokf` extension files installed into
+- PostgreSQL 15, 16, 17, 18, or 19 with the `pgokf` extension files installed into
   the cluster's `SHAREDIR/extension` and the shared library into `PKGLIBDIR`
   (see [packaging.md](packaging.md) for how the artifacts get there).
 - A superuser connection for the one-time install and role setup.
-- A directory of OKF Markdown files to register — this walkthrough uses the
+- A directory of OKF Markdown files to register - this walkthrough uses the
   bundle shipped at [`examples/sample-bundle`](https://github.com/LogicOcean/pgokf/blob/main/examples/sample-bundle), which
   contains four concepts (a service, a runbook, a reference appendix, and a
   dashboard) that cross-link each other so the graph and search steps have
@@ -42,7 +42,7 @@ cp -r examples/sample-bundle /srv/okf/knowledge
 > inside the PostgreSQL backend, so the path must be readable by the OS user
 > that runs `postgres` (commonly `postgres`), not by you. A path that works in
 > your terminal but lives under `/home/you` will typically fail with a
-> permission error from the server side. Put bundles somewhere the server owns —
+> permission error from the server side. Put bundles somewhere the server owns -
 > `/srv/okf/...` here.
 
 ---
@@ -51,8 +51,8 @@ cp -r examples/sample-bundle /srv/okf/knowledge
 
 Connect as a superuser and create the extension. This runs the bootstrap SQL,
 which creates the `pgokf` (public API) and `pgokf_private` (internal state)
-schemas, the catalog tables and composite types, and the two cluster-wide roles
-`pgokf_reader` and `pgokf_admin`.
+schemas, the catalog tables and composite types, and the three cluster-wide
+roles `pgokf_reader`, `pgokf_writer`, and `pgokf_admin`.
 
 ```sql
 CREATE EXTENSION pgokf;
@@ -63,7 +63,7 @@ SELECT pgokf.version();
 CREATE EXTENSION
  version
 ---------
- 0.1.3
+ 0.1.13
 (1 row)
 ```
 
@@ -76,7 +76,7 @@ compare it against the installed SQL version to confirm the two agree (see
 > loads. The library loads lazily the first time a session calls a `pgokf`
 > function, so a brand-new session sees `unrecognized configuration parameter`
 > until it touches the extension. To make the ceilings visible in every session
-> from connection start — and to be able to set them in `postgresql.conf` — add
+> from connection start - and to be able to set them in `postgresql.conf` - add
 > the library to `shared_preload_libraries` and restart:
 >
 > ```conf
@@ -90,17 +90,18 @@ compare it against the installed SQL version to confirm the two agree (see
 
 ## 2. The role model, and the 42501 gotcha
 
-`pgokf` ships two `NOLOGIN` roles. You never log in *as* them; you `GRANT` them
-to your real login users.
+`pgokf` ships three `NOLOGIN` roles in a tier. You never log in *as* them; you
+`GRANT` them to your real login users. Each tier inherits the one below it.
 
 | Role | May do |
 | ---- | ------ |
 | `pgokf_reader` | Search and read: `concept_search`, `concept_neighbors`, `list_bundles`, `bundle_info`, `get_config`, `get_concept_source`, and `SELECT` on the catalog tables. |
-| `pgokf_admin` | Everything a reader can, **plus** `register_bundle`, `refresh_bundle`, `unregister_bundle`, `set_config`, `reset_config`, `export_parquet`, `export_sources`. `pgokf_admin` inherits `pgokf_reader`. |
+| `pgokf_writer` | Everything a reader can, **plus** ingestion: `register_bundle`, `register_bundle_content`, `refresh_bundle`, `unregister_bundle`, `set_bundle_enabled`, `retire_bundle`, `unretire_bundle`, and `set_concept_embedding`. This is the tier an ingestion pipeline runs as. `pgokf_writer` inherits `pgokf_reader`. |
+| `pgokf_admin` | Everything a writer can, **plus** configuration (`set_config`, `reset_config`), the file-writing exports (`export_parquet`, `export_sources`), `purge_retired`, the index rebuilds (`rebuild_search_index`, `rebuild_embedding_index`), and `list_access_log`. `pgokf_admin` inherits `pgokf_writer`. |
 
-The bootstrap deliberately **does not** grant either role to `PUBLIC`. Schema
-`USAGE` on `pgokf` is granted only to those two roles. So a fresh login role —
-even one you just created — gets **SQLSTATE 42501, `permission denied for
+The bootstrap deliberately **does not** grant any of these roles to `PUBLIC`. Schema
+`USAGE` on `pgokf` is granted only to those three roles. So a fresh login role,
+even one you just created, gets **SQLSTATE 42501, `permission denied for
 schema pgokf`** on its very first query, before it even reaches a function's own
 privilege check:
 
@@ -118,15 +119,19 @@ LINE 1: SELECT * FROM pgokf.list_bundles();
                       ^
 ```
 
-This is not a misconfiguration — it is the least-privilege default working as
+This is not a misconfiguration, it is the least-privilege default working as
 designed. The fix is a single grant. Back in your superuser session:
 
 ```sql
 RESET ROLE;                       -- leave the okf_app role
-GRANT pgokf_admin TO okf_app;     -- this user will manage bundles
+GRANT pgokf_admin TO okf_app;     -- this operator also configures policy and exports
 ```
 
-Grant `pgokf_reader` instead for a user that should only search and read. See
+Ingesting bundles needs only `pgokf_writer`, so an ingestion pipeline user
+should be granted that tier; grant `pgokf_reader` for a user that should only
+search and read. This walkthrough grants `pgokf_admin` to `okf_app` because the
+same operator will also set `allowed_roots` (step 3) and run the exports
+(step 8), which are admin-only. See
 [security.md](security.md#roles-and-least-privilege) for the full model,
 including why the in-function checks use `session_user`.
 
@@ -137,7 +142,7 @@ including why the in-function checks use `session_user`.
 `register_bundle` makes the PostgreSQL backend read arbitrary files from the
 host filesystem. Before registering anything, set `allowed_roots` so a bundle
 path *must* resolve inside a directory you have blessed. Any path outside every
-configured root — including one reached through a symlink — is rejected with
+configured root - including one reached through a symlink - is rejected with
 SQLSTATE 22023.
 
 `set_config` requires `pgokf_admin`, so do this as `okf_app` (or any admin):
@@ -158,7 +163,9 @@ SET
                                    get_config
 --------------------------------------------------------------------------------
  {"store_source": false, "allowed_roots": ["/srv/okf"], "default_strict": true,
-  "default_exclude": [], "sync_log_retention_days": 30,
+  "default_exclude": [], "search_backend": "native", "notify_channel": "",
+  "okf_version_policy": "warn", "embedding_dim": 1536, "track_history": false,
+  "history_retention_days": 0, "sync_log_retention_days": 30,
   "default_text_search_config": "pg_catalog.english"}
 (1 row)
 ```
@@ -170,7 +177,7 @@ the two you will care about most on day one are `allowed_roots` (just set) and
 
 > **When `allowed_roots` is empty**, the interim policy accepts any absolute,
 > traversal-free, canonical path. Setting at least one root is strongly
-> recommended for any shared or production cluster — see
+> recommended for any shared or production cluster - see
 > [security.md](security.md#allowed_roots-containment).
 
 ---
@@ -192,9 +199,11 @@ SELECT * FROM pgokf.register_bundle('/srv/okf/knowledge', 'knowledge');
 
 The returned `bundle_sync_result` is the per-bucket file accounting for the
 sync: four files discovered, all four newly `added`. Note the returned
-`bundle_id` — you pass it to `refresh_bundle`, `bundle_info`, `export_parquet`,
+`bundle_id` - you pass it to `refresh_bundle`, `bundle_info`, `export_parquet`,
 and (optionally) the search and graph functions. The reserved files `index.md`
-and `log.md` at every directory level are **not** counted as concepts.
+and `log.md` at every directory level are **not** counted as concepts (each
+`log.md` activity log is instead projected into `pgokf.bundle_log`, readable
+via `pgokf.list_bundle_log`).
 
 Confirm what is registered:
 
@@ -210,7 +219,7 @@ SELECT id, name, okf_version, file_count, enabled FROM pgokf.list_bundles();
 
 `okf_version` is blank here because the sample bundle's root `index.md` carries
 no `okf_version` frontmatter key. Add `okf_version: "0.2"` to a bundle-root
-`index.md` and the catalog will populate this column on the next sync — see
+`index.md` and the catalog will populate this column on the next sync - see
 [okf-authoring.md](okf-authoring.md) and the reserved-file rules there.
 
 ---
@@ -238,10 +247,13 @@ SELECT bundle_id, concept_id, title, type, round(rank::numeric, 4) AS rank
 
 `concept_id` is the path-derived identity: the bundle-relative path without its
 `.md` suffix (`runbooks/database-failover.md` → `runbooks/database-failover`).
-`rank` is `ts_rank`, higher is more relevant. The full result also carries a
-`headline` snippet with the matching terms highlighted — see
-[search-guide.md](search-guide.md) for query syntax, ranking, scoping to a
-single bundle, and performance characteristics.
+`rank` is `ts_rank_cd`, higher is more relevant. The full result also carries a
+`headline` snippet with the matching terms highlighted. `concept_search` also
+takes optional structured filters (concept type, tags, status, trust tier) and
+an `after_cursor` argument for keyset pagination, with `search_facets` for
+faceted counts; see [search-guide.md](search-guide.md) for query syntax,
+ranking, filters, pagination, the optional BM25 / semantic / hybrid backends,
+and performance characteristics.
 
 Constrain a search to one bundle by passing its id, and cap the result count
 (1–500) with the third argument:
@@ -281,7 +293,7 @@ returns `path`, the array of concept ids from the start to that neighbor.
 ## 7. Retrieve a concept's source
 
 Whether the original file bytes live *inside* PostgreSQL is governed by the
-`store_source` policy key, and it is the single biggest deployment decision —
+`store_source` policy key, and it is the single biggest deployment decision -
 see [deployment-topologies.md](deployment-topologies.md).
 
 `store_source` defaults to **false** (the enterprise/data-lake tier: PostgreSQL
@@ -299,7 +311,7 @@ ERROR:  no source is stored for concept runbooks/database-failover in bundle 1;
 
 To make PostgreSQL self-contained (the small tier), enable `store_source` and
 re-index. **`store_source` is not retroactive**, and `refresh_bundle`
-re-projects only files whose content changed — so on an unchanged bundle a plain
+re-projects only files whose content changed - so on an unchanged bundle a plain
 refresh will not backfill the sources:
 
 ```sql
@@ -313,7 +325,7 @@ SELECT * FROM pgokf.refresh_bundle(1);
          1 | /srv/okf/knowledge  |     0 |       0 |       0 |         4 |     4
 ```
 
-All four `unchanged` — nothing was re-projected, so still no stored bytes. To
+All four `unchanged` - nothing was re-projected, so still no stored bytes. To
 force a full re-projection of an unchanged bundle, unregister and register it
 again (or edit the files). Re-registering assigns a fresh `bundle_id`:
 
@@ -340,8 +352,8 @@ The retrieval nuance above is exactly the kind of thing
 
 ## 8. (Optional) Export for analytics or DR
 
-An admin can snapshot a bundle's catalog projection to Parquet, and — when
-sources are stored — export the original files back to disk:
+An admin can snapshot a bundle's catalog projection to Parquet, and - when
+sources are stored - export the original files back to disk:
 
 ```sql
 -- concepts / metadata / links / provenance as four Parquet files
@@ -364,8 +376,8 @@ SELECT bundle_id, concepts_rows, bytes_written
          2 |             4 |          2615
 ```
 
-`dest_dir` must already exist, be writable by the server, and — when
-`allowed_roots` is set — resolve inside one of the roots, exactly like a bundle
+`dest_dir` must already exist, be writable by the server, and - when
+`allowed_roots` is set - resolve inside one of the roots, exactly like a bundle
 path. The Parquet files are interoperable with tools such as DuckDB. See
 [operations.md](operations.md#export-for-analytics-and-dr) for using exports in
 backup/DR and analytics pipelines.
@@ -391,6 +403,6 @@ backup/DR and analytics pipelines.
 DROP EXTENSION pgokf;   -- drops the pgokf / pgokf_private schemas and their objects
 ```
 
-The two roles are cluster-wide and survive `DROP EXTENSION` (they may be shared
+The three roles are cluster-wide and survive `DROP EXTENSION` (they may be shared
 across databases); drop them explicitly with `DROP ROLE pgokf_reader,
-pgokf_admin;` only if nothing else uses them.
+pgokf_writer, pgokf_admin;` only if nothing else uses them.

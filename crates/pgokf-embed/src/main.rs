@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! `pgokf-embed` — the reference embedding-generation companion for `pgokf`.
+//! `pgokf-embed` - the reference embedding-generation companion for `pgokf`.
 //!
 //! This standalone async binary is the embedder half of the shipped semantic
 //! search feature. The `pgokf` extension stores caller-computed embedding
@@ -10,7 +10,7 @@
 //! configurable OpenAI-compatible embeddings endpoint, and streams the vectors
 //! back through the setter.
 //!
-//! Credentials live here — the endpoint URL, model name, and bearer API key all
+//! Credentials live here - the endpoint URL, model name, and bearer API key all
 //! come from the CLI or environment and are **never** hard-coded or written to
 //! PostgreSQL. Any OpenAI-compatible server works: OpenAI itself, a local
 //! `text-embeddings-inference` or `llama.cpp` server, or a test mock.
@@ -55,7 +55,7 @@ struct Cli {
     #[arg(long, env = "OKF_EMBED_MODEL")]
     model: String,
 
-    /// Bearer API key for the endpoint. Optional — a local server may need
+    /// Bearer API key for the endpoint. Optional - a local server may need
     /// none. Prefer the environment over the command line; never logged.
     #[arg(long, env = "OKF_EMBED_API_KEY", hide_env_values = true)]
     api_key: Option<String>,

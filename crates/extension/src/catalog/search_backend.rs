@@ -4,15 +4,15 @@
 //!
 //! # Why a seam
 //!
-//! `pgokf.concept_search` has one fixed contract — signature, return shape,
-//! volatility, and reader authorization — but two interchangeable execution
+//! `pgokf.concept_search` has one fixed contract - signature, return shape,
+//! volatility, and reader authorization - but two interchangeable execution
 //! strategies behind it:
 //!
-//! - [`NativeBackend`] — the zero-dependency `PostgreSQL` full-text search
+//! - [`NativeBackend`] - the zero-dependency `PostgreSQL` full-text search
 //!   (`websearch_to_tsquery` + `ts_rank_cd` + `ts_headline` over the weighted
 //!   `body_tsv` GIN index). It is the default and works on every supported
 //!   server without any extra extension.
-//! - [`Bm25Backend`] — an optional adapter over the external `ParadeDB`
+//! - [`Bm25Backend`] - an optional adapter over the external `ParadeDB`
 //!   `pg_search` extension that runs Block-Max WAND top-k over a `bm25` index,
 //!   which is dramatically faster for broad, relevance-ranked queries.
 //!
@@ -20,7 +20,7 @@
 //! configuration value into the strategy to run; [`crate::catalog::search`]
 //! reads that value once per call and dispatches through the returned trait
 //! object. Adding a third backend later means adding a struct and one `match`
-//! arm here — the SQL-facing function never changes (open for extension,
+//! arm here - the SQL-facing function never changes (open for extension,
 //! closed for modification).
 //!
 //! # Runtime-only coupling to `pg_search`
@@ -74,8 +74,8 @@ pub fn supported_display() -> String {
 /// An opaque keyset-pagination cursor: the total-order position of the last row
 /// of the previous page.
 ///
-/// Ranked search has a **stable total order** — `rank DESC, bundle_id ASC,
-/// concept_id ASC` — so a page can continue strictly *after* a known row without
+/// Ranked search has a **stable total order** - `rank DESC, bundle_id ASC,
+/// concept_id ASC` - so a page can continue strictly *after* a known row without
 /// `OFFSET` (which drifts and re-scans as the result set grows). A caller copies
 /// the three fields from the last `pgokf.concept_search_result` row of a page
 /// into a JSON object `{"rank":..,"bundle_id":..,"concept_id":..}` and passes it
@@ -168,11 +168,11 @@ fn spi_error(context: &'static str) -> impl Fn(pgrx::spi::Error) -> CatalogError
 /// A `NULL`-typed parameter still carries its column type OID (pgrx supplies it
 /// from the Rust type), so a `NULL` filter binds as a correctly typed `NULL` and
 /// its `$n IS NULL OR ...` guard short-circuits. An empty `tags` slice is treated
-/// as no filter — `Some([])` would otherwise bind `'{}'::text[]`, which every
+/// as no filter - `Some([])` would otherwise bind `'{}'::text[]`, which every
 /// non-NULL `tags` array contains but a `NULL` `tags` column does not, silently
-/// dropping untagged concepts — so the caller normalizes it to `None` upstream.
+/// dropping untagged concepts - so the caller normalizes it to `None` upstream.
 ///
-/// The final three parameters (`$9`..`$11`) are the keyset cursor — rank,
+/// The final three parameters (`$9`..`$11`) are the keyset cursor - rank,
 /// `bundle_id`, `concept_id`. They are all-or-nothing: an absent cursor binds
 /// three typed `NULL`s and the `$9 IS NULL OR ...` guard makes the keyset
 /// predicate a no-op (the first page). The cursor `concept_id` binds by borrow
@@ -199,8 +199,8 @@ fn bind_search_args<'a>(request: &'a SearchRequest) -> [DatumWithOid<'a>; 11] {
 /// Read the shared `pgokf.concept_search_result`-shaped rows from a `SPI`
 /// result table into [`SearchHit`]s.
 ///
-/// Both backends project the identical seven-column contract — `bundle_id`,
-/// `concept_id`, `path`, `title`, `type`, `rank`, `headline` — so this single
+/// Both backends project the identical seven-column contract - `bundle_id`,
+/// `concept_id`, `path`, `title`, `type`, `rank`, `headline` - so this single
 /// reader keeps their row-mapping DRY and guarantees byte-identical result
 /// construction whichever strategy produced the rows.
 fn read_hits(table: SpiTupleTable) -> Result<Vec<SearchHit>, CatalogError> {
@@ -220,7 +220,7 @@ fn read_hits(table: SpiTupleTable) -> Result<Vec<SearchHit>, CatalogError> {
     Ok(hits)
 }
 
-/// Native `PostgreSQL` full-text-search backend — the default, dependency-free
+/// Native `PostgreSQL` full-text-search backend - the default, dependency-free
 /// strategy.
 ///
 /// Matching uses `websearch_to_tsquery` over the weighted `body_tsv` column
@@ -240,7 +240,7 @@ pub struct NativeBackend;
 /// rank with a strictly greater `bundle_id`, or an equal `(rank, bundle_id)` with
 /// a strictly greater `concept_id`. When `$9` is `NULL` (no cursor) the whole
 /// predicate is a no-op and the first page is returned. Applying the filter
-/// *outside* the ranked subquery — then `ORDER BY ... LIMIT $3` — is what makes
+/// *outside* the ranked subquery - then `ORDER BY ... LIMIT $3` - is what makes
 /// the pages tile the full result set with no duplicates and no skips even when
 /// ranks tie.
 const KEYSET_ORDER_LIMIT: &str = "
@@ -260,8 +260,8 @@ const KEYSET_ORDER_LIMIT: &str = "
 // ALL-of containment against the `tags` GIN index ($6 as `c.tags @> $6`), and
 // `status`/`trust_tier` ($7/$8) match the `LEFT JOIN`ed provenance row (a
 // concept with no provenance row has NULL status/tier and is excluded by a
-// non-NULL filter, as intended). The LEFT JOIN never multiplies rows —
-// `concept_provenance`'s primary key is `(bundle_id, concept_id)` — so an
+// non-NULL filter, as intended). The LEFT JOIN never multiplies rows -
+// `concept_provenance`'s primary key is `(bundle_id, concept_id)` - so an
 // all-NULL-filter call returns exactly what it did before. The match and the
 // filters live in the `hits` subquery; the shared KEYSET_ORDER_LIMIT tail applies
 // the cursor, the stable total order, and the limit over it.
@@ -330,7 +330,7 @@ pub struct Bm25Backend {
 // The `@@@` operator lives in `pg_catalog`, so it resolves under any
 // search_path; every `paradedb.*` object is schema-qualified. `paradedb.score`
 // takes the whole-row relation reference `c`, so it scores per scanned tuple
-// (by ctid) rather than by key — cross-bundle duplicate `id` values are ranked
+// (by ctid) rather than by key - cross-bundle duplicate `id` values are ranked
 // independently and correctly. The regconfig binds as `$4` and drives only the
 // `ts_headline` snippet, keeping snippets identical to the native backend. The
 // `@@@` match, `paradedb.score`, and the filters live in the `hits` subquery so

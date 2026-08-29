@@ -3,7 +3,8 @@
 Complete reference for every object `CREATE EXTENSION pgokf;` installs: functions,
 composite types, tables, roles, and GUCs. Everything the extension exposes lives
 in the non-relocatable `pgokf` schema, except the administrator-only
-`pgokf_private.config` table.
+`pgokf_private` state tables (`config`, `sync_log`, `sync_log_change`,
+`access_log`), which callers reach only through the functions below.
 
 Every signature, volatility, security attribute, and required role below is taken
 verbatim from the extension source and the generated install SQL, and was
@@ -75,10 +76,10 @@ exercised against a live PostgreSQL 18 cluster.
 `reset_config`, `list_sync_log`, `list_access_log`, `duplicate_concepts`,
 `purge_retired`, and `stale_concepts` accept `NULL`-defaulting (or
 default-valued) arguments and are therefore **not** declared `STRICT`; every
-other function — including `list_bundles`, `bundle_info`, `catalog_stats`,
+other function - including `list_bundles`, `bundle_info`, `catalog_stats`,
 `health`, `search_index_status`, `retire_bundle`, `unretire_bundle`,
 `list_sync_changes`, `set_concept_embedding`, `rebuild_embedding_index`,
-`schedule_refresh`, and `unschedule_refresh` — is `STRICT`.
+`schedule_refresh`, and `unschedule_refresh` - is `STRICT`.
 `concept_search`, `search_facets`, `find_similar`, `concept_search_semantic`,
 `concept_search_hybrid`, `concept_neighbors`, `list_bundle_log`, `catalog_stats`,
 `duplicate_concepts`, `stale_concepts`, `concept_history`, and `concept_as_of`
@@ -108,7 +109,7 @@ to confirm the installed SQL and the loaded module agree after an upgrade.
 SELECT pgokf.version();
 --  version
 -- ---------
---  0.1.0
+--  0.1.13
 ```
 
 ### `pgokf.register_bundle(path text, name text DEFAULT NULL, options jsonb DEFAULT '{}') → pgokf.bundle_sync_result`
@@ -118,7 +119,7 @@ Register an OKF bundle root and synchronize it into the catalog. `VOLATILE`,
 
 | Parameter | Type | Default | Meaning |
 | --------- | ---- | ------- | ------- |
-| `path` | `text` | — | Absolute, traversal-free, canonicalizable server-side directory. |
+| `path` | `text` | - | Absolute, traversal-free, canonicalizable server-side directory. |
 | `name` | `text` | `NULL` | Optional human label stored on `pgokf.bundles.name`. |
 | `options` | `jsonb` | `'{}'` | Stored verbatim on `pgokf.bundles.options` for producer use. |
 
@@ -127,7 +128,7 @@ Behavior:
 - The path is validated (absolute, no `..`, no NUL), canonicalized, and confirmed
   to be a directory. When `allowed_roots` is configured the resolved path must
   fall inside one of them (see [configuration.md](configuration.md)).
-- The canonical path must not already be registered — a duplicate raises
+- The canonical path must not already be registered - a duplicate raises
   `23505`; use `refresh_bundle` to re-synchronize instead.
 - Discovery is symlink-escape safe and bounded by the `pgokf.*` GUCs
   (`max_file_bytes`, `max_bundle_files`, `max_frontmatter_bytes`). Reserved
@@ -147,7 +148,7 @@ SELECT * FROM pgokf.register_bundle('/abs/path/to/examples/sample-bundle');
 ### `pgokf.register_bundle_content(name text, paths text[], contents bytea[], options jsonb DEFAULT '{}') → pgokf.bundle_sync_result`
 
 Register or resynchronize a bundle from **in-memory content** rather than a
-filesystem path — the *mountless* ingestion path. `VOLATILE`, `SECURITY
+filesystem path - the *mountless* ingestion path. `VOLATILE`, `SECURITY
 DEFINER`, **requires `pgokf_writer`**. The extension performs no network or
 filesystem I/O here: a companion process (see the [`pgokf-ingest`
 crate](deployment-topologies.md#enterprise-tier-mountless-the-ingestion-companion)) reads an
@@ -155,16 +156,16 @@ object store and streams the collected `(path, bytes)` pairs into this function.
 
 | Parameter | Type | Default | Meaning |
 | --------- | ---- | ------- | ------- |
-| `name` | `text` | — | Logical bundle name. The bundle is keyed on the synthetic path `content:<name>` (`source_type = 'content'`), which cannot collide with an absolute filesystem path. |
-| `paths` | `text[]` | — | Bundle-relative paths, one per element. Each must be relative, traversal-free (no `..`), and NUL-free. |
-| `contents` | `bytea[]` | — | The bytes for each path; must be the **same length** as `paths`, with no `NULL` element. |
+| `name` | `text` | - | Logical bundle name. The bundle is keyed on the synthetic path `content:<name>` (`source_type = 'content'`), which cannot collide with an absolute filesystem path. |
+| `paths` | `text[]` | - | Bundle-relative paths, one per element. Each must be relative, traversal-free (no `..`), and NUL-free. |
+| `contents` | `bytea[]` | - | The bytes for each path; must be the **same length** as `paths`, with no `NULL` element. |
 | `options` | `jsonb` | `'{}'` | Stored verbatim on `pgokf.bundles.options`. |
 
 Behavior:
 
 - Calling it again with the same `name` **resyncs**: contents are hashed
   (BLAKE3) and diffed against the stored projection exactly like a filesystem
-  refresh — changed concepts are upserted, missing ones deleted, unchanged rows
+  refresh - changed concepts are upserted, missing ones deleted, unchanged rows
   left untouched. This is how the companion re-ingests incrementally.
 - The same discovery bounds apply: `max_bundle_files` / `max_file_bytes` are
   enforced on the provided content, and reserved files (`index.md`, `log.md`)
@@ -196,7 +197,7 @@ left untouched (preserving their `indexed_at`), and rows for deleted files are
 removed. An unknown `bundle_id` raises `22023`. A concurrent register/refresh of
 the same bundle serializes on a bundle-scoped advisory lock. A **content-sourced**
 bundle (`source_type = 'content'`) has no filesystem root, so `refresh_bundle`
-raises `22023` for it — re-sync those by calling `register_bundle_content` again.
+raises `22023` for it - re-sync those by calling `register_bundle_content` again.
 
 ```sql
 SELECT added, updated, removed, unchanged, total FROM pgokf.refresh_bundle(1);
@@ -220,7 +221,7 @@ SELECT id, path, file_count FROM pgokf.unregister_bundle(1);
 ```
 
 An unregister is recorded in the audit log (`op = 'unregister'`); see
-[`pgokf.list_sync_log`](#pgokflist_sync_logbundle_id-bigint-default-null-max_rows-int-default-100--setof-pgokfsync_log_entry).
+[`pgokf.list_sync_log`](#pgokflist_sync_logbundle_id-bigint-default-null-max_rows-int-default-100-setof-pgokfsync_log_entry).
 
 ### `pgokf.set_bundle_enabled(bundle_id bigint, enabled boolean) → pgokf.bundle_info`
 
@@ -229,7 +230,7 @@ Enable or disable a registered bundle, returning the updated `bundle_info`.
 
 A disabled bundle's concepts are excluded from ranked search
 (`pgokf.concept_search`) and graph traversal (`pgokf.concept_neighbors`) without
-deleting any catalog rows, so the toggle is fully reversible — re-enabling
+deleting any catalog rows, so the toggle is fully reversible - re-enabling
 restores the bundle exactly. Serializes on the bundle advisory lock. An unknown
 `bundle_id` raises `22023`.
 
@@ -246,7 +247,7 @@ Retire (soft-delete) a bundle, returning the updated `bundle_info`.
 Retirement sets `bundles.retired_at = now()`. A bundle is *active* only when
 `enabled AND retired_at IS NULL`, so a retired bundle is excluded from
 `concept_search`, `concept_neighbors`, semantic/hybrid search, and the default
-`list_bundles` — **without deleting any catalog rows**, so it is a reversible undo
+`list_bundles` - **without deleting any catalog rows**, so it is a reversible undo
 window for the hard `unregister_bundle` cascade. It does **not** touch the
 independent `enabled` flag, and it is idempotent: re-retiring keeps the original
 `retired_at` instant (so the `purge_retired` age window measures from the first
@@ -274,8 +275,8 @@ Hard-delete every bundle whose `retired_at` is older than `now() - older_than`,
 returning the count purged. `VOLATILE`, `SECURITY DEFINER`, **requires
 `pgokf_admin`**.
 
-Each purged bundle is deleted exactly like `unregister_bundle` — concepts,
-metadata, and every feature projection cascade — and one `unregister` audit row is
+Each purged bundle is deleted exactly like `unregister_bundle` - concepts,
+metadata, and every feature projection cascade - and one `unregister` audit row is
 written per purged bundle. A bundle retired *within* the window stays recoverable
 via `unretire_bundle`; `unregister_bundle` remains a separate immediate hard
 delete. Tenant-scoped: a session that set `pgokf.tenant` purges only its own
@@ -321,7 +322,7 @@ invoker rights, **requires `pgokf_reader`**.
 
 | Parameter | Type | Default | Meaning |
 | --------- | ---- | ------- | ------- |
-| `query` | `text` | — | Free-text query; must contain a non-whitespace character (`22023` otherwise). |
+| `query` | `text` | - | Free-text query; must contain a non-whitespace character (`22023` otherwise). |
 | `bundle_id` | `bigint` | `NULL` | Scope the search to one bundle; `NULL` searches all enabled bundles. |
 | `limit_count` | `int` | `20` | Maximum hits; must be in `1..=500` (`22023` otherwise). |
 | `concept_type` | `text` | `NULL` | Keep only hits whose `type` equals this exactly. `NULL` = no filter. |
@@ -336,8 +337,8 @@ invoker rights, **requires `pgokf_reader`**.
 > no `concept_provenance` row have a `NULL` `status`/`trust_tier` and are therefore
 > excluded by a non-`NULL` `status`/`trust_tier` filter.
 
-> **Keyset pagination.** Results have a stable total order — `rank DESC`, then
-> `bundle_id ASC`, then `concept_id ASC` — so a page can continue strictly *after*
+> **Keyset pagination.** Results have a stable total order - `rank DESC`, then
+> `bundle_id ASC`, then `concept_id ASC` - so a page can continue strictly *after*
 > a known row without `OFFSET` (which drifts and re-scans as the catalog grows).
 > Copy the `rank`, `bundle_id`, and `concept_id` of a page's last row into the
 > `after_cursor` object to fetch the next page; the pages tile the full result set
@@ -358,14 +359,14 @@ Details:
 - Matching uses `websearch_to_tsquery(<cfg>, query)`; ranking uses `ts_rank_cd`.
   Weights are title `A`, tags/type/description `B`, body `D`. `<cfg>` is the
   configured `default_text_search_config` (default `pg_catalog.english`), the same
-  configuration that built each `body_tsv` at index time — see the retroactivity
+  configuration that built each `body_tsv` at index time - see the retroactivity
   warning below.
 - Only **enabled** bundles are searched (`pgokf.bundles.enabled`).
 - Each hit carries a `ts_headline` snippet over title, description, and body,
   computed with the same configured text-search configuration.
 - Rows are ordered by descending rank, then ascending `bundle_id`, then ascending
-  `concept_id` — a stable total order that makes keyset pagination via
-  `after_cursor` exact. Ranks are comparable **only within one query** — order by
+  `concept_id` - a stable total order that makes keyset pagination via
+  `after_cursor` exact. Ranks are comparable **only within one query** - order by
   them, never persist them.
 
 > **⚠️ `default_text_search_config` is applied but not retroactive.** The query
@@ -388,7 +389,7 @@ FROM pgokf.concept_search('postgres failover');
 --  services/postgresql        | PostgreSQL service | Reference | 0.0067
 ```
 
-Filter or join the result with ordinary SQL — for example to recover columns
+Filter or join the result with ordinary SQL - for example to recover columns
 `concept_search` does not return (`tags`, `description`):
 
 ```sql
@@ -404,16 +405,16 @@ ORDER BY s.rank DESC, s.concept_id ASC;
 
 Count the **same matching set** `concept_search` would produce (the native
 full-text match of `query` plus the identical `concept_type` / `tags` / `status`
-/ `trust_tier` filters), grouped by one facet — so a UI can render "42 runbooks,
+/ `trust_tier` filters), grouped by one facet - so a UI can render "42 runbooks,
 15 wikis" filter chips before drilling in. `STABLE PARALLEL SAFE`, invoker rights,
 **requires `pgokf_reader`**.
 
 | Parameter | Type | Default | Meaning |
 | --------- | ---- | ------- | ------- |
-| `query` | `text` | — | Free-text query; must contain a non-whitespace character (`22023` otherwise). |
+| `query` | `text` | - | Free-text query; must contain a non-whitespace character (`22023` otherwise). |
 | `bundle_id` | `bigint` | `NULL` | Scope to one bundle; `NULL` = all active bundles. |
 | `facet` | `text` | `'type'` | The grouping dimension: one of `type`, `bundle`, `status`, `trust_tier`, `tag`. Any other value raises `22023`. |
-| `concept_type`, `tags`, `status`, `trust_tier` | — | `NULL` | The same structured filters as `concept_search`, each a no-op when `NULL`. |
+| `concept_type`, `tags`, `status`, `trust_tier` | - | `NULL` | The same structured filters as `concept_search`, each a no-op when `NULL`. |
 
 Returns `pgokf.search_facet(facet_value text, count bigint)` rows ordered by
 descending `count` then `facet_value`. `NULL` facet values are omitted; the `tag`
@@ -462,12 +463,12 @@ fraction of concepts that carry a stored vector.
 Content "more-like-this": rank the concepts whose body content is most similar to
 a seed concept. `STABLE PARALLEL SAFE`, invoker rights, **requires
 `pgokf_reader`**. This is distinct from `concept_neighbors`, which walks the
-authored link graph — `find_similar` looks at what a concept *says*, not what it
+authored link graph - `find_similar` looks at what a concept *says*, not what it
 *links to*.
 
 | Parameter | Type | Default | Meaning |
 | --------- | ---- | ------- | ------- |
-| `concept_id` | `text` | — | The seed concept's id. If it exists in more than one bundle and `bundle_id` is `NULL`, the call raises `22023`; pass `bundle_id` to disambiguate. |
+| `concept_id` | `text` | - | The seed concept's id. If it exists in more than one bundle and `bundle_id` is `NULL`, the call raises `22023`; pass `bundle_id` to disambiguate. |
 | `bundle_id` | `bigint` | `NULL` | Bundle scope for the seed. |
 | `limit_count` | `int` | `10` | Maximum similar concepts; must be in `1..=500`. |
 
@@ -490,7 +491,7 @@ These surfaces rank by **embedding similarity** and require the external
 BM25 backend, `pgokf` takes **no static dependency** on it: `CREATE EXTENSION
 pgokf` succeeds without pgvector, embeddings are stored as the builtin `real[]`
 in `pgokf.concept_embedding`, and the `vector` type is used only at query and
-index time. `pgokf` never computes embeddings — a companion embedder streams
+index time. `pgokf` never computes embeddings - a companion embedder streams
 caller-computed vectors in via `set_concept_embedding` (see
 [search-guide.md](search-guide.md)).
 
@@ -532,7 +533,7 @@ Fusion** (RRF, k = 60), entirely in SQL. `STABLE PARALLEL SAFE`, invoker rights,
 **requires `pgokf_reader`**. The `rank` column is the fused RRF score; a concept
 strong in *both* lists outranks one strong in only one. When pgvector is not
 installed, hybrid **degrades to lexical-only** with a `WARNING` (RRF needs no
-model, so this fallback is sensible — unlike pure semantic search).
+model, so this fallback is sensible - unlike pure semantic search).
 
 ```sql
 SELECT concept_id, round(rank::numeric, 6) AS rrf
@@ -570,7 +571,7 @@ interval phrase (`'30 minutes'`); it and the job name bind as parameters, and th
 scheduled command's bundle id is a trusted integer literal.
 
 - **Requires `pg_cron`**: raises `22023` naming the missing dependency when it is
-  not installed — never a silent success.
+  not installed - never a silent success.
 - Raises `22023` for an unknown or cross-tenant `bundle_id`, or an empty/oversized
   `schedule`.
 
@@ -596,7 +597,7 @@ SAFE`, invoker rights, **requires `pgokf_reader`**.
 
 | Parameter | Type | Default | Meaning |
 | --------- | ---- | ------- | ------- |
-| `concept_id` | `text` | — | Start concept (path-derived ID, no `.md`). |
+| `concept_id` | `text` | - | Start concept (path-derived ID, no `.md`). |
 | `max_hops` | `int` | `2` | Maximum traversal depth; must be `>= 1` (`22023` otherwise); capped at `pgokf.max_graph_hops`. |
 | `bundle_id` | `bigint` | `NULL` | Scope to one bundle. When `NULL` and the ID exists in more than one bundle, the call raises `22023` asking you to disambiguate. |
 
@@ -621,7 +622,7 @@ The `pgokf.links` table (below) supports direct edge and backlink queries; see
 [`examples/queries/graph.sql`](https://github.com/LogicOcean/pgokf/blob/main/examples/queries/graph.sql).
 
 **Attestation edges.** For a concept whose `type` is `Attested Computation`, its
-type-specific reference fields — `computation`, `executor`, and `attester` —
+type-specific reference fields - `computation`, `executor`, and `attester` -
 are resolved into `pgokf.links` as additional internal edges (numbered after the
 concept's body links), so `concept_neighbors` traverses them like any resolved
 internal edge. Each carries a `link_relation` of `attestation:computation`,
@@ -650,15 +651,15 @@ invoker rights (the caller's tenant row-level security applies), **requires
 
 | Parameter | Type | Default | Meaning |
 | --------- | ---- | ------- | ------- |
-| `bundle_id` | `bigint` | — | The bundle whose logs to list. |
+| `bundle_id` | `bigint` | - | The bundle whose logs to list. |
 | `directory` | `text` | `NULL` | Scope to one directory's log (the empty string `''` for a root-level `log.md`); `NULL` lists every directory. |
 | `max_rows` | `int` | `500` | Row cap; must be `>= 0` (`22023` otherwise). |
 
 OKF reserves `log.md` as a per-directory **activity log** (never a concept). On
 every sync each `log.md` in the bundle is parsed line by line into ordered
-entries — a leading ISO 8601 timestamp (after any Markdown bullet or heading
+entries - a leading ISO 8601 timestamp (after any Markdown bullet or heading
 marker) is lifted into `logged_at`, and the trimmed line is stored losslessly in
-`entry` — and projected into `pgokf.bundle_log`. The projection is replaced
+`entry` - and projected into `pgokf.bundle_log`. The projection is replaced
 wholesale each sync, so it tracks edits, additions, and removals of the files; a
 bundle with no `log.md` has no rows. Rows are returned ordered by directory then
 ordinal.
@@ -683,7 +684,7 @@ only while the `track_history` configuration key is enabled; with it off (the
 default) `pgokf.concept_history` stays empty, both readers below return no rows,
 and there is zero storage or behavior change. See
 [Version History](version-history.md) for the temporal model and
-[configuration.md](configuration.md#version-history--track_history--history_retention_days)
+[configuration.md](configuration.md#version-history-track_history-history_retention_days)
 for the switch and retention.
 
 ### `pgokf.concept_history(bundle_id bigint, concept_id text, max_rows int DEFAULT 100) → SETOF pgokf.concept_version`
@@ -694,8 +695,8 @@ applies), **requires `pgokf_reader`**.
 
 | Parameter | Type | Default | Meaning |
 | --------- | ---- | ------- | ------- |
-| `bundle_id` | `bigint` | — | The concept's bundle. |
-| `concept_id` | `text` | — | The path-derived OKF concept id. |
+| `bundle_id` | `bigint` | - | The concept's bundle. |
+| `concept_id` | `text` | - | The path-derived OKF concept id. |
 | `max_rows` | `int` | `100` | Row cap; must be `>= 0` (`22023` otherwise). |
 
 Each row is a `pgokf.concept_version`: the per-concept `version`, its validity
@@ -717,19 +718,19 @@ FROM pgokf.concept_history(1, 'runbooks/database-failover');
 
 ### `pgokf.concept_as_of(bundle_id bigint, concept_id text, as_of timestamptz) → SETOF pgokf.concept_version`
 
-Return the single concept version that was valid at `as_of` — the point-in-time
+Return the single concept version that was valid at `as_of` - the point-in-time
 *"what did this say then?"* answer. `STABLE PARALLEL SAFE`, invoker rights,
 **requires `pgokf_reader`**.
 
 | Parameter | Type | Default | Meaning |
 | --------- | ---- | ------- | ------- |
-| `bundle_id` | `bigint` | — | The concept's bundle. |
-| `concept_id` | `text` | — | The path-derived OKF concept id. |
-| `as_of` | `timestamptz` | — | The instant to resolve. |
+| `bundle_id` | `bigint` | - | The concept's bundle. |
+| `concept_id` | `text` | - | The path-derived OKF concept id. |
+| `as_of` | `timestamptz` | - | The instant to resolve. |
 
 Returns the one `pgokf.concept_version` whose interval covers `as_of`
 (`valid_from <= as_of AND (valid_to IS NULL OR as_of < valid_to)`), or **zero
-rows** when the concept did not yet exist — or had already been removed — at that
+rows** when the concept did not yet exist - or had already been removed - at that
 instant (a removal tombstone is zero-width, so an as-of at or after the removal
 returns nothing). Intervals are contiguous and non-overlapping, so at most one
 version matches.
@@ -787,11 +788,14 @@ SELECT jsonb_pretty(pgokf.get_config());
 -- {
 --     "allowed_roots": [],
 --     "notify_channel": "",
+--     "store_source": false,
+--     "track_history": false,
 --     "default_strict": true,
 --     "default_exclude": [],
 --     "search_backend": "native",
 --     "okf_version_policy": "warn",
 --     "embedding_dim": 1536,
+--     "history_retention_days": 0,
 --     "sync_log_retention_days": 30,
 --     "default_text_search_config": "pg_catalog.english"
 -- }
@@ -853,11 +857,11 @@ FROM pgokf.list_sync_changes(
 ### `pgokf.list_access_log(bundle_id bigint DEFAULT NULL, max_rows int DEFAULT 100) → SETOF pgokf.access_log_entry`
 
 List recent **exfiltration/access-audit** entries, newest first. `VOLATILE`,
-`SECURITY DEFINER`, **admin-only — requires `pgokf_admin`** (an exfiltration
+`SECURITY DEFINER`, **admin-only - requires `pgokf_admin`** (an exfiltration
 audit is sensitive).
 
-The three content-exporting operations — `export_parquet`, `export_sources`, and
-`get_concept_source` — each append one row to the administrator-only
+The three content-exporting operations - `export_parquet`, `export_sources`, and
+`get_concept_source` - each append one row to the administrator-only
 `pgokf_private.access_log` (who read or exported what, and when). Pass `bundle_id`
 to scope the listing; `max_rows` bounds the rows (must be `>= 0`, else `22023`).
 Tenant-scoped. The log shares the `sync_log_retention_days` retention window.
@@ -873,7 +877,7 @@ FROM pgokf.list_access_log();
 
 ### `pgokf.duplicate_concepts(bundle_id bigint DEFAULT NULL, min_group int DEFAULT 2) → SETOF pgokf.duplicate_group`
 
-Find groups of byte-identical concepts (same BLAKE3 `file_hash`) — the same
+Find groups of byte-identical concepts (same BLAKE3 `file_hash`) - the same
 runbook or reference copied across bundles. `STABLE`, `PARALLEL SAFE`, invoker
 rights, **requires `pgokf_reader`**.
 
@@ -881,7 +885,7 @@ Groups `pgokf.concepts` by `file_hash`, keeping groups with at least `min_group`
 members (default 2, must be `>= 1` else `22023`). Each group reports the shared
 hash, the occurrence count, and the parallel `bundle_ids` / `concept_ids` arrays
 of every occurrence. When `bundle_id` is given, only groups that *touch* that
-bundle are returned — but they still list occurrences in every bundle. RLS-filtered
+bundle are returned - but they still list occurrences in every bundle. RLS-filtered
 to the session's tenant.
 
 ```sql
@@ -900,7 +904,7 @@ invoker rights, **requires `pgokf_reader`**.
 One row per registered bundle with its indexed-concept, link, and resolved-link
 counts, sync recency (`last_synced_at`, `sync_age`), an `is_stale` flag (true when
 the last sync is more than 24 hours old), and `retired_at` (the soft-delete
-instant, `NULL` when active) — so retired bundles, which `list_bundles` hides,
+instant, `NULL` when active) - so retired bundles, which `list_bundles` hides,
 stay visible here.
 
 ```sql
@@ -1032,7 +1036,7 @@ SELECT convert_from(pgokf.get_concept_source(1, 'alpha'), 'UTF8');  -- as text
 Reconstruct a bundle's stored source files on the server filesystem, recreating
 the bundle-relative directory tree under `dest_dir` and writing each concept's
 verbatim bytes to `dest_dir/<concept path>`. `VOLATILE STRICT`,
-`SECURITY DEFINER`, **requires `pgokf_admin`** — like `export_parquet`, it
+`SECURITY DEFINER`, **requires `pgokf_admin`** - like `export_parquet`, it
 **writes files** from inside the server process. See
 [security.md](security.md#source-retrieval-and-reconstruction) for the threat
 model.
@@ -1048,7 +1052,7 @@ Behavior:
   keyset batches, so peak memory is one batch regardless of bundle size.
 - Verifies every written file against the concept's recorded BLAKE3 `file_hash`
   before writing it and raises `XX000` on any mismatch (a corrupted stored
-  source — an integrity condition, not caller input), so a reconstruction is
+  source - an integrity condition, not caller input), so a reconstruction is
   either byte-for-byte faithful or it fails without writing.
 - Appends one `export_sources` row to the exfiltration access log
   (`pgokf.list_access_log`).
@@ -1071,7 +1075,7 @@ FROM pgokf.export_sources(1, '/srv/okf-rebuild/sample');
 
 ### `pgokf.bundle_sync_result`
 
-Returned by `register_bundle` and `refresh_bundle`.
+Returned by `register_bundle`, `register_bundle_content`, and `refresh_bundle`.
 
 | Column | Type | Meaning |
 | ------ | ---- | ------- |
@@ -1085,8 +1089,9 @@ Returned by `register_bundle` and `refresh_bundle`.
 
 ### `pgokf.concept_search_result`
 
-Returned by `concept_search`. Note the search key is `concept_id`, **not** `id`,
-and there is **no** `tags` column — join `pgokf.concepts` to recover it.
+Returned by `concept_search`, `find_similar`, `concept_search_semantic`, and
+`concept_search_hybrid`. Note the search key is `concept_id`, **not** `id`,
+and there is **no** `tags` column - join `pgokf.concepts` to recover it.
 
 | Column | Type | Meaning |
 | ------ | ---- | ------- |
@@ -1095,7 +1100,7 @@ and there is **no** `tags` column — join `pgokf.concepts` to recover it.
 | `path` | `text` | Bundle-relative source path. |
 | `title` | `text` | Concept title (may be `NULL`). |
 | `type` | `text` | OKF concept type (may be `NULL`). |
-| `rank` | `real` | `ts_rank_cd` score; comparable only within one query. |
+| `rank` | `real` | Relevance score: `ts_rank_cd` for lexical search, cosine similarity for `concept_search_semantic`, the fused RRF score for `concept_search_hybrid`; comparable only within one query. |
 | `headline` | `text` | `ts_headline` snippet (may be `NULL`). |
 
 ### `pgokf.search_facet`
@@ -1109,7 +1114,8 @@ Returned by `search_facets`. One faceted-count bucket.
 
 ### `pgokf.bundle_info`
 
-Returned by `list_bundles`, `bundle_info`, and `unregister_bundle`.
+Returned by `list_bundles`, `bundle_info`, `unregister_bundle`,
+`set_bundle_enabled`, `retire_bundle`, and `unretire_bundle`.
 
 | Column | Type | Meaning |
 | ------ | ---- | ------- |
@@ -1123,7 +1129,9 @@ Returned by `list_bundles`, `bundle_info`, and `unregister_bundle`.
 
 ### `pgokf.export_result`
 
-Returned by `export_parquet`. One row summarizing the snapshot just written.
+Returned by `export_parquet` and `export_sources`. One row summarizing the
+export just written. For `export_sources`, `concepts_rows` counts the files
+reconstructed and the other per-table counters are `0`.
 
 | Column | Type | Meaning |
 | ------ | ---- | ------- |
@@ -1259,11 +1267,15 @@ Returned by `stale_concepts`.
 
 ## Tables
 
-Readers hold `SELECT` on `pgokf.bundles`, `pgokf.concepts`,
-`pgokf.concept_metadata`, `pgokf.links`, and `pgokf.concept_provenance`. All
-writes go through the `SECURITY DEFINER` sync/admin functions — no role has
-direct DML. `pgokf_private.config` is reachable only through the config
-functions.
+Readers hold `SELECT` on all eleven public projection tables: `pgokf.bundles`,
+`pgokf.concepts`, `pgokf.concept_metadata`, `pgokf.links`,
+`pgokf.concept_provenance`, `pgokf.concept_verification`,
+`pgokf.concept_provenance_source`, `pgokf.concept_source`,
+`pgokf.concept_embedding`, `pgokf.bundle_log`, and `pgokf.concept_history`. All
+writes go through the `SECURITY DEFINER` sync/admin functions; no role has
+direct DML. The four administrator-only `pgokf_private` state tables (`config`,
+`sync_log`, `sync_log_change`, `access_log`) are reachable only through the
+config and `list_*` functions.
 
 ### `pgokf.bundles`
 
@@ -1272,36 +1284,36 @@ One registered OKF bundle root.
 | Column | Type | Notes |
 | ------ | ---- | ----- |
 | `id` | `bigint` | Primary key, `GENERATED ALWAYS AS IDENTITY`. |
-| `path` | `text` | `NOT NULL`, `UNIQUE` — the canonical filesystem path for a filesystem bundle, or the synthetic key `content:<name>` for a content bundle. |
-| `source_type` | `text` | `NOT NULL DEFAULT 'filesystem'`, `CHECK (source_type IN ('filesystem','content'))` — how bytes reach the catalog: `filesystem` (`register_bundle` / `refresh_bundle`) or `content` (`register_bundle_content`). |
+| `path` | `text` | `NOT NULL`, `UNIQUE` - the canonical filesystem path for a filesystem bundle, or the synthetic key `content:<name>` for a content bundle. |
+| `source_type` | `text` | `NOT NULL DEFAULT 'filesystem'`, `CHECK (source_type IN ('filesystem','content'))` - how bytes reach the catalog: `filesystem` (`register_bundle` / `refresh_bundle`) or `content` (`register_bundle_content`). |
 | `name` | `text` | Optional label. |
 | `okf_version` | `text` | The bundle's declared OKF version, read from the reserved bundle-root `index.md` `okf_version` frontmatter (e.g. `0.2`). `NULL` when the bundle has no root `index.md` or it declares no `okf_version`. |
 | `file_count` | `integer` | `NOT NULL DEFAULT 0`. |
 | `last_synced_at` | `timestamptz` | Last successful sync. |
 | `sync_hash` | `text` | Aggregate BLAKE3 digest over sorted `(path, file_hash)` pairs of the last sync. |
-| `options` | `jsonb` | `NOT NULL DEFAULT '{}'` — producer options from `register_bundle`. |
-| `enabled` | `boolean` | `NOT NULL DEFAULT true` — search skips disabled bundles. |
-| `retired_at` | `timestamptz` | `DEFAULT NULL` — the retirement (soft-delete) instant, set by `retire_bundle`. A bundle is *active* only when `enabled AND retired_at IS NULL`; a retired bundle is hidden from search, traversal, and the default `list_bundles` until `unretire_bundle` or hard-deleted by `purge_retired`. |
+| `options` | `jsonb` | `NOT NULL DEFAULT '{}'` - producer options from `register_bundle`. |
+| `enabled` | `boolean` | `NOT NULL DEFAULT true` - search skips disabled bundles. |
+| `retired_at` | `timestamptz` | `DEFAULT NULL` - the retirement (soft-delete) instant, set by `retire_bundle`. A bundle is *active* only when `enabled AND retired_at IS NULL`; a retired bundle is hidden from search, traversal, and the default `list_bundles` until `unretire_bundle` or hard-deleted by `purge_retired`. |
 
 ### `pgokf.concepts`
 
-One row per `(bundle_id, id)` — the projection of one OKF concept document.
+One row per `(bundle_id, id)` - the projection of one OKF concept document.
 
 | Column | Type | Notes |
 | ------ | ---- | ----- |
 | `bundle_id` | `bigint` | `NOT NULL`, FK to `pgokf.bundles(id)` `ON DELETE CASCADE`. |
 | `id` | `text` | Path-derived concept ID (bundle-relative path without `.md`). |
-| `path` | `text` | `NOT NULL` — bundle-relative source path. |
+| `path` | `text` | `NOT NULL` - bundle-relative source path. |
 | `type` | `text` | OKF concept type. |
 | `title` | `text` | Concept title. |
 | `description` | `text` | Optional short description. |
 | `tags` | `text[]` | Frontmatter tags in declaration order. |
 | `resource` | `text` | Frontmatter `resource`, serialized as JSON text. |
-| `body_text` | `text` | `NOT NULL DEFAULT ''` — Markdown body as compact plain text. |
-| `file_hash` | `text` | `NOT NULL` — BLAKE3 digest; the incremental-sync identity. |
+| `body_text` | `text` | `NOT NULL DEFAULT ''` - Markdown body as compact plain text. |
+| `file_hash` | `text` | `NOT NULL` - BLAKE3 digest; the incremental-sync identity. |
 | `modified_at` | `timestamptz` | Filesystem mtime, when reported. |
 | `body_tsv` | `tsvector` | Weighted search vector (title A, tags/type/description B, body D). |
-| `indexed_at` | `timestamptz` | `NOT NULL DEFAULT now()` — refreshed only when the concept changes. |
+| `indexed_at` | `timestamptz` | `NOT NULL DEFAULT now()` - refreshed only when the concept changes. |
 
 Keys: primary key `(bundle_id, id)`; unique `(bundle_id, path)`. Indexes:
 GIN on `tags`, GIN on `body_tsv`, btree on `type`, btree on `path`.
@@ -1315,8 +1327,8 @@ not recognized by the typed columns land here losslessly.
 | ------ | ---- | ----- |
 | `bundle_id` | `bigint` | `NOT NULL`, part of FK to `pgokf.concepts`. |
 | `concept_id` | `text` | `NOT NULL`, part of FK to `pgokf.concepts`. |
-| `key` | `text` | `NOT NULL` — frontmatter key. |
-| `value` | `jsonb` | `NOT NULL` — the key's value. |
+| `key` | `text` | `NOT NULL` - frontmatter key. |
+| `value` | `jsonb` | `NOT NULL` - the key's value. |
 
 Unique `(bundle_id, concept_id, key)`; FK `(bundle_id, concept_id)` to
 `pgokf.concepts(bundle_id, id)` `ON DELETE CASCADE`. GIN index on
@@ -1329,15 +1341,15 @@ Directed Markdown links extracted per concept, one row per outgoing link.
 | Column | Type | Notes |
 | ------ | ---- | ----- |
 | `bundle_id` | `bigint` | `NOT NULL`, part of FK to `pgokf.concepts`. |
-| `source_id` | `text` | `NOT NULL` — concept the link came from. |
+| `source_id` | `text` | `NOT NULL` - concept the link came from. |
 | `target_id` | `text` | Internal destination concept ID; `NULL` for external links. |
 | `link_text` | `text` | Plain-text label of the link. |
 | `target_path` | `text` | Normalized bundle-relative destination path (with `.md`) for internal links; `NULL` for external. |
-| `link_kind` | `text` | `NOT NULL` — `inline`, `reference`, `autolink`, `email`, or `image`. |
-| `resolved` | `boolean` | `NOT NULL DEFAULT false` — true only for an internal link whose target concept exists in the same bundle. |
-| `is_external` | `boolean` | `NOT NULL DEFAULT false` — true for scheme-qualified / protocol-relative / email destinations. |
-| `ordinal` | `integer` | `NOT NULL` — zero-based document-order position; attestation edges are numbered after the source's body links. |
-| `link_relation` | `text` | `NOT NULL DEFAULT 'reference'` — semantic relation, distinct from the Markdown `link_kind`: `reference` for an ordinary link; `attestation:computation` / `attestation:executor` / `attestation:attester` for an Attested Computation concept's type-specific reference edges. |
+| `link_kind` | `text` | `NOT NULL` - `inline`, `reference`, `autolink`, `email`, or `image`. |
+| `resolved` | `boolean` | `NOT NULL DEFAULT false` - true only for an internal link whose target concept exists in the same bundle. |
+| `is_external` | `boolean` | `NOT NULL DEFAULT false` - true for scheme-qualified / protocol-relative / email destinations. |
+| `ordinal` | `integer` | `NOT NULL` - zero-based document-order position; attestation edges are numbered after the source's body links. |
+| `link_relation` | `text` | `NOT NULL DEFAULT 'reference'` - semantic relation, distinct from the Markdown `link_kind`: `reference` for an ordinary link; `attestation:computation` / `attestation:executor` / `attestation:attester` for an Attested Computation concept's type-specific reference edges. |
 
 Primary key `(bundle_id, source_id, ordinal)`; FK `(bundle_id, source_id)` to
 `pgokf.concepts(bundle_id, id)` `ON DELETE CASCADE`. Index on
@@ -1349,18 +1361,18 @@ retained (OKF permits broken links). Rows with an `attestation:*`
 
 ### `pgokf.bundle_log`
 
-Projection of a bundle's reserved per-directory `log.md` **activity logs** — one
+Projection of a bundle's reserved per-directory `log.md` **activity logs** - one
 row per parsed log entry. Reserved `log.md` files are never concepts; this table
 is the only place they are projected. Read it through `pgokf.list_bundle_log`.
 
 | Column | Type | Notes |
 | ------ | ---- | ----- |
 | `bundle_id` | `bigint` | `NOT NULL`, FK to `pgokf.bundles(id)` `ON DELETE CASCADE`. |
-| `tenant_id` | `text` | `NOT NULL DEFAULT 'default'` — denormalized bundle tenant for the row-level-security predicate. |
-| `directory` | `text` | `NOT NULL` — bundle-relative directory of the source `log.md`; the empty string for a root-level log. Part of the PK. |
-| `ordinal` | `integer` | `NOT NULL` — zero-based in-file entry position. Part of the PK. |
+| `tenant_id` | `text` | `NOT NULL DEFAULT 'default'` - denormalized bundle tenant for the row-level-security predicate. |
+| `directory` | `text` | `NOT NULL` - bundle-relative directory of the source `log.md`; the empty string for a root-level log. Part of the PK. |
+| `ordinal` | `integer` | `NOT NULL` - zero-based in-file entry position. Part of the PK. |
 | `logged_at` | `timestamptz` | The entry's leading ISO 8601 timestamp (after any bullet/heading marker); `NULL` when the entry carries no parseable leading timestamp. |
-| `entry` | `text` | `NOT NULL` — the log entry text, stored losslessly as the trimmed source line. |
+| `entry` | `text` | `NOT NULL` - the log entry text, stored losslessly as the trimmed source line. |
 
 Primary key `(bundle_id, directory, ordinal)`; FK `bundle_id` to
 `pgokf.bundles(id)` `ON DELETE CASCADE`. Replaced wholesale on every sync so it
@@ -1377,14 +1389,14 @@ the `sources[]` materials live in the two child tables below.
 | ------ | ---- | ----- |
 | `bundle_id` | `bigint` | `NOT NULL`, part of FK to `pgokf.concepts`. |
 | `concept_id` | `text` | `NOT NULL`, part of FK to `pgokf.concepts`. |
-| `generated_by` | `text` | OKF `generated.by` (tolerates a bare `generated_by`) — the actor that produced the current content. `NULL` when absent. |
+| `generated_by` | `text` | OKF `generated.by` (tolerates a bare `generated_by`) - the actor that produced the current content. `NULL` when absent. |
 | `generated_at` | `timestamptz` | OKF `generated.at`, ISO 8601 (tolerates a bare `generated_at`). `NULL` when absent/unparseable (raw value kept in `details`). |
 | `status` | `text` | OKF lifecycle `status` (`draft`/`stable`/`deprecated`). `NULL` when absent; the spec default for an absent status is `stable`. |
-| `stale_after` | `timestamptz` | OKF `stale_after` — the absolute ISO 8601 instant after which content is stale. `NULL` when absent/unparseable. |
+| `stale_after` | `timestamptz` | OKF `stale_after` - the absolute ISO 8601 instant after which content is stale. `NULL` when absent/unparseable. |
 | `usage_window_from` | `timestamptz` | Top-level `usage_window.from` framing all source usage counts. `NULL` when absent/unparseable. |
 | `usage_window_to` | `timestamptz` | Top-level `usage_window.to`. `NULL` when absent/unparseable. |
 | `trust_tier` | `text` | **Derived**: `human-reviewed` if any `verified[]` actor is a `human:`, else `machine-confirmed` with ≥1 event, else `unverified`. |
-| `details` | `jsonb` | `NOT NULL DEFAULT '{}'` — lossless copy of the recognized provenance/trust/lifecycle keys (`generated`, `verified`, `sources`, `usage_window`, `stale_after`, `status`, and the `generated_by`/`generated_at` aliases). |
+| `details` | `jsonb` | `NOT NULL DEFAULT '{}'` - lossless copy of the recognized provenance/trust/lifecycle keys (`generated`, `verified`, `sources`, `usage_window`, `stale_after`, `status`, and the `generated_by`/`generated_at` aliases). |
 
 Primary key `(bundle_id, concept_id)`; FK to `pgokf.concepts` `ON DELETE
 CASCADE`. Index on `trust_tier`.
@@ -1397,7 +1409,7 @@ ORDER BY concept_id;
 
 ### `pgokf.concept_verification`
 
-The ordered OKF v0.2 `verified[]` event list — one row per verification event.
+The ordered OKF v0.2 `verified[]` event list - one row per verification event.
 `verified` is a list of `{by, at}` mappings; a single mapping is stored as one
 `ordinal = 0` row. Events with no actor are skipped (never stored as `NULL`).
 
@@ -1405,8 +1417,8 @@ The ordered OKF v0.2 `verified[]` event list — one row per verification event.
 | ------ | ---- | ----- |
 | `bundle_id` | `bigint` | `NOT NULL`, part of FK to `pgokf.concepts`. |
 | `concept_id` | `text` | `NOT NULL`, part of FK to `pgokf.concepts`. |
-| `ordinal` | `integer` | `NOT NULL` — zero-based position in the `verified[]` list. |
-| `verified_by` | `text` | `NOT NULL` — OKF `verified[].by`, the verifying actor (`<producer>/<version>`, `human:<id>`, or `process:<id>`). |
+| `ordinal` | `integer` | `NOT NULL` - zero-based position in the `verified[]` list. |
+| `verified_by` | `text` | `NOT NULL` - OKF `verified[].by`, the verifying actor (`<producer>/<version>`, `human:<id>`, or `process:<id>`). |
 | `verified_at` | `timestamptz` | OKF `verified[].at`, ISO 8601. `NULL` when absent/unparseable. |
 
 Primary key `(bundle_id, concept_id, ordinal)`; FK `(bundle_id, concept_id)` to
@@ -1420,7 +1432,7 @@ WHERE bundle_id = 1 ORDER BY concept_id, ordinal;
 
 ### `pgokf.concept_provenance_source`
 
-The OKF v0.2 `sources[]` provenance materials — one row per source entry, the
+The OKF v0.2 `sources[]` provenance materials - one row per source entry, the
 inputs the content was derived from. Distinct from `pgokf.concept_source`, which
 holds the concept's own raw source bytes. Non-object entries are skipped.
 
@@ -1428,12 +1440,12 @@ holds the concept's own raw source bytes. Non-object entries are skipped.
 | ------ | ---- | ----- |
 | `bundle_id` | `bigint` | `NOT NULL`, part of FK to `pgokf.concepts`. |
 | `concept_id` | `text` | `NOT NULL`, part of FK to `pgokf.concepts`. |
-| `ordinal` | `integer` | `NOT NULL` — zero-based position in the `sources[]` list. |
-| `source_id` | `text` | OKF `sources[].id` — optional producer-defined identifier. |
-| `resource` | `text` | OKF `sources[].resource` — the source URI. Spec-required per entry, stored leniently (`NULL` when absent) so a malformed source never aborts a sync. |
-| `title` | `text` | OKF `sources[].title` — optional human-readable title. |
-| `author` | `text` | OKF `sources[].author` — the actor credited with the source. |
-| `usage_count` | `bigint` | OKF `sources[].usage_count` — uses within the usage window. `NULL` when absent/non-numeric. |
+| `ordinal` | `integer` | `NOT NULL` - zero-based position in the `sources[]` list. |
+| `source_id` | `text` | OKF `sources[].id` - optional producer-defined identifier. |
+| `resource` | `text` | OKF `sources[].resource` - the source URI. Spec-required per entry, stored leniently (`NULL` when absent) so a malformed source never aborts a sync. |
+| `title` | `text` | OKF `sources[].title` - optional human-readable title. |
+| `author` | `text` | OKF `sources[].author` - the actor credited with the source. |
+| `usage_count` | `bigint` | OKF `sources[].usage_count` - uses within the usage window. `NULL` when absent/non-numeric. |
 | `last_modified` | `timestamptz` | OKF `sources[].last_modified`, ISO 8601. `NULL` when absent/unparseable. |
 | `usage_window_from` | `timestamptz` | Per-source `usage_window.from`, overriding the top-level window. `NULL` when absent. |
 | `usage_window_to` | `timestamptz` | Per-source `usage_window.to`. `NULL` when absent. |
@@ -1457,8 +1469,8 @@ self-contained tier); empty otherwise. Reader-`SELECT`able.
 | ------ | ---- | ----- |
 | `bundle_id` | `bigint` | `NOT NULL`, part of FK to `pgokf.concepts`. |
 | `concept_id` | `text` | `NOT NULL`, part of FK to `pgokf.concepts`. |
-| `raw_content` | `bytea` | `NOT NULL` — the exact, unmodified source-file bytes; hashes to `pgokf.concepts.file_hash` (BLAKE3). TOAST-compressed with `lz4` where the build supports it, otherwise `pglz`. |
-| `byte_size` | `integer` | `NOT NULL` — length of `raw_content`, so a reader can size a retrieval without detoasting. |
+| `raw_content` | `bytea` | `NOT NULL` - the exact, unmodified source-file bytes; hashes to `pgokf.concepts.file_hash` (BLAKE3). TOAST-compressed with `lz4` where the build supports it, otherwise `pglz`. |
+| `byte_size` | `integer` | `NOT NULL` - length of `raw_content`, so a reader can size a retrieval without detoasting. |
 
 Primary key `(bundle_id, concept_id)`; FK to `pgokf.concepts` `ON DELETE
 CASCADE`, so removing a concept or unregistering a bundle drops the stored source
@@ -1480,10 +1492,10 @@ otherwise. Reader-`SELECT`able (or read through `pgokf.concept_history` /
 | Column | Type | Notes |
 | ------ | ---- | ----- |
 | `bundle_id` | `bigint` | `NOT NULL`, part of FK to `pgokf.bundles`. |
-| `concept_id` | `text` | `NOT NULL` — path-derived OKF id; retained across the concept's deletion. |
-| `tenant_id` | `text` | `NOT NULL DEFAULT 'default'` — denormalized RLS discriminator. |
-| `version` | `bigint` | `NOT NULL` — per-concept monotonic version number. |
-| `valid_from` | `timestamptz` | `NOT NULL` — when this version became valid. |
+| `concept_id` | `text` | `NOT NULL` - path-derived OKF id; retained across the concept's deletion. |
+| `tenant_id` | `text` | `NOT NULL DEFAULT 'default'` - denormalized RLS discriminator. |
+| `version` | `bigint` | `NOT NULL` - per-concept monotonic version number. |
+| `valid_from` | `timestamptz` | `NOT NULL` - when this version became valid. |
 | `valid_to` | `timestamptz` | When it stopped; `NULL` for the current open version. |
 | `change_kind` | `text` | `NOT NULL`, one of `added` / `updated` / `removed`. |
 | `type` / `title` / `description` / `tags` / `resource` / `body_text` / `file_hash` | (various) | Snapshot of the concept core at this version; all `NULL` for a removal tombstone. |
@@ -1503,8 +1515,8 @@ FROM pgokf.concept_history WHERE bundle_id = 1 ORDER BY concept_id, version;
 ### `pgokf.concept_embedding`
 
 Opt-in per-concept embedding vectors, populated by `pgokf.set_concept_embedding`.
-Reader-`SELECT`able. The vector is stored as the builtin **`real[]`** — never a
-pgvector `vector` column — so `CREATE EXTENSION pgokf` succeeds without pgvector;
+Reader-`SELECT`able. The vector is stored as the builtin **`real[]`** - never a
+pgvector `vector` column - so `CREATE EXTENSION pgokf` succeeds without pgvector;
 it is cast to `vector(dim)` at query and index time only when pgvector is
 present.
 
@@ -1512,10 +1524,10 @@ present.
 | ------ | ---- | ----- |
 | `bundle_id` | `bigint` | `NOT NULL`, part of FK to `pgokf.concepts`. |
 | `concept_id` | `text` | `NOT NULL`, part of FK to `pgokf.concepts`. |
-| `embedding` | `real[]` | `NOT NULL` — the caller-computed vector; length must equal `embedding_dim` at ingest. |
+| `embedding` | `real[]` | `NOT NULL` - the caller-computed vector; length must equal `embedding_dim` at ingest. |
 | `dim` | `integer` | `NOT NULL`, constrained equal to `cardinality(embedding)`. |
 | `model` | `text` | Optional embedding-model/producer identifier for provenance. |
-| `updated_at` | `timestamptz` | `NOT NULL DEFAULT now()` — when the row was last written. |
+| `updated_at` | `timestamptz` | `NOT NULL DEFAULT now()` - when the row was last written. |
 
 Primary key `(bundle_id, concept_id)`; FK to `pgokf.concepts` `ON DELETE
 CASCADE`, so removing a concept or unregistering a bundle drops its embedding
@@ -1541,6 +1553,8 @@ Cluster-persistent policy: a single row, managed only through `set_config` /
 | `notify_channel` | `text` | `''` (empty disables) |
 | `okf_version_policy` | `text` | `'warn'` (`CHECK IN ('warn','reject')`) |
 | `embedding_dim` | `integer` | `1536` (`CHECK BETWEEN 1 AND 16000`) |
+| `track_history` | `boolean` | `false` (opt-in concept version history) |
+| `history_retention_days` | `integer` | `0` (`CHECK >= 0`; `0` = keep forever) |
 
 ### `pgokf_private.sync_log`
 
@@ -1560,21 +1574,62 @@ function.
 | `synced_at` | `timestamptz` | `NOT NULL DEFAULT now()`; the column retention prunes on. |
 | `added` / `updated` / `removed` / `unchanged` / `total` | `integer` | Per-bucket change counts (`NULL` for an `unregister`). |
 | `sync_hash` | `text` | Aggregate BLAKE3 digest of the synced snapshot (`NULL` for an `unregister`). |
+| `tenant_id` | `text` | `NOT NULL DEFAULT 'default'`, the denormalized tenant discriminator for the opt-in tenant filter. |
+
+### `pgokf_private.sync_log_change`
+
+Administrator-only per-concept change manifest: one row per concept a sync
+added, updated, or removed, a child of `pgokf_private.sync_log` (cascading on
+delete, so it shares the `sync_log_retention_days` retention window). No role
+has direct access; read it through the reader-granted `pgokf.list_sync_changes`
+function.
+
+| Column | Type | Notes |
+| ------ | ---- | ----- |
+| `sync_id` | `bigint` | `NOT NULL`, FK to `pgokf_private.sync_log(id)` `ON DELETE CASCADE`. |
+| `tenant_id` | `text` | `NOT NULL DEFAULT 'default'`, the denormalized tenant discriminator. |
+| `bundle_id` | `bigint` | Affected bundle. |
+| `concept_id` | `text` | The affected concept's path-derived id. |
+| `change_kind` | `text` | `CHECK IN ('added','updated','removed')`. |
+
+### `pgokf_private.access_log`
+
+Administrator-only exfiltration/access audit: one row per content-exporting
+operation (`export_parquet`, `export_sources`, `get_concept_source`), appended
+inside the operation's own transaction and pruned to the same
+`sync_log_retention_days` policy as the sync log. No role has direct access;
+read it through the admin-granted `pgokf.list_access_log` function.
+
+| Column | Type | Notes |
+| ------ | ---- | ----- |
+| `id` | `bigint` | `GENERATED ALWAYS AS IDENTITY`, primary key. |
+| `tenant_id` | `text` | `NOT NULL DEFAULT 'default'`, the denormalized tenant discriminator. |
+| `actor` | `text` | `NOT NULL DEFAULT session_user`. |
+| `at` | `timestamptz` | `NOT NULL DEFAULT now()`; the column retention prunes on. |
+| `op` | `text` | `CHECK IN ('export_parquet','export_sources','get_concept_source')`. |
+| `bundle_id` | `bigint` | Bundle whose content was read/exported. |
+| `concept_id` | `text` | The concept read (for `get_concept_source`); `NULL` for the whole-bundle exports. |
+| `detail` | `text` | Optional context (for the exports, the resolved destination directory). |
 
 ---
 
 ## Roles
 
+Three tiers, `pgokf_reader` < `pgokf_writer` < `pgokf_admin`, each granted the
+one below so a higher tier inherits everything a lower tier can do.
+
 | Role | Login | Grants |
 | ---- | ----- | ------ |
-| `pgokf_reader` | `NOLOGIN` | `USAGE` on schema `pgokf`; `SELECT` on the projection tables (including `concept_source`); `EXECUTE` on search/graph/list/`get_config`/`get_concept_source`. |
-| `pgokf_admin` | `NOLOGIN` | Everything `pgokf_reader` has (it is `GRANT`ed `pgokf_reader`), plus `USAGE` on `pgokf_private` and `EXECUTE` on `register_bundle`, `refresh_bundle`, `unregister_bundle`, `set_config`, `reset_config`, `export_parquet`, `export_sources`. |
+| `pgokf_reader` | `NOLOGIN` | `USAGE` on schema `pgokf`; `SELECT` on the projection tables (including `concept_source`, `concept_embedding`, `concept_history`, `bundle_log`); `EXECUTE` on the read surface: search (`concept_search`, `search_facets`, `find_similar`, `concept_search_semantic`, `concept_search_hybrid`, `search_index_status`), graph (`concept_neighbors`), history (`concept_history`, `concept_as_of`), the list/monitoring functions (`list_bundles`, `bundle_info`, `list_sync_log`, `list_sync_changes`, `list_bundle_log`, `catalog_stats`, `health`, `stale_concepts`, `duplicate_concepts`, `version`), plus `get_config` and `get_concept_source`. |
+| `pgokf_writer` | `NOLOGIN` | Everything `pgokf_reader` has (it is `GRANT`ed `pgokf_reader`), plus `EXECUTE` on the ingestion surface: `register_bundle`, `register_bundle_content`, `refresh_bundle`, `unregister_bundle`, `set_bundle_enabled`, `retire_bundle`, `unretire_bundle`, and `set_concept_embedding`. The intended account for an automated ingestion pipeline. |
+| `pgokf_admin` | `NOLOGIN` | Everything `pgokf_writer` has (it is `GRANT`ed `pgokf_writer`, and thus `pgokf_reader`), plus `USAGE` on `pgokf_private` and `EXECUTE` on configuration (`set_config`, `reset_config`), the file-writing exports (`export_parquet`, `export_sources`), the index rebuilds (`rebuild_search_index`, `rebuild_embedding_index`), lifecycle purge (`purge_retired`), the `pg_cron` scheduling (`schedule_refresh`, `unschedule_refresh`), and the sensitive access audit (`list_access_log`). |
 
-Both are cluster-wide roles created idempotently at extension install. Grant them
-to real login users:
+All three are cluster-wide roles created idempotently at extension install. Grant
+them to real login users:
 
 ```sql
 GRANT pgokf_reader TO analytics_ro;
+GRANT pgokf_writer TO ingestion_pipeline;
 GRANT pgokf_admin  TO catalog_ops;
 ```
 
@@ -1584,11 +1639,12 @@ See [security.md](security.md) for the authorization model.
 
 ## GUCs
 
-Five `pgokf.*` server settings. The four resource ceilings use the `SIGHUP`
-context — settable only in `postgresql.conf` plus a reload, **never** from a SQL
+Six `pgokf.*` server settings. The four resource ceilings use the `SIGHUP`
+context, settable only in `postgresql.conf` plus a reload, **never** from a SQL
 `SET`, so they stay trustworthy as hard safety limits. `log_level` uses `SUSET`,
-so a superuser can change it at runtime. Full detail in
-[configuration.md](configuration.md).
+so a superuser can change it at runtime, and `pgokf.tenant` uses `USERSET` (any
+session may set it) because it is a multi-tenant policy selector, not a ceiling.
+Full detail in [configuration.md](configuration.md).
 
 | GUC | Type | Default | Range | Context |
 | --- | ---- | ------- | ----- | ------- |
@@ -1596,7 +1652,8 @@ so a superuser can change it at runtime. Full detail in
 | `pgokf.max_bundle_files` | integer | `100000` | `1 .. 2147483647` | `SIGHUP` |
 | `pgokf.max_frontmatter_bytes` | integer | `262144` (256 KiB) | `1 .. 2147483647` | `SIGHUP` |
 | `pgokf.max_graph_hops` | integer | `5` | `1 .. 1000` | `SIGHUP` |
-| `pgokf.log_level` | string | `warning` | — | `SUSET` |
+| `pgokf.log_level` | string | `warning` | - | `SUSET` |
+| `pgokf.tenant` | string | `''` (empty = see all) | n/a | `USERSET` |
 
 ```sql
 SHOW pgokf.max_graph_hops;

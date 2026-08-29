@@ -2,8 +2,8 @@
 //! OKF format-version conformance.
 //!
 //! The accepted set of Open Knowledge Format versions is deliberately small and
-//! centralized here so every conformance decision — in the parser, the sync
-//! engine's `okf_version_policy` gate, and any future tooling — consults one
+//! centralized here so every conformance decision - in the parser, the sync
+//! engine's `okf_version_policy` gate, and any future tooling - consults one
 //! authority and can never drift. The catalog models OKF v0.2, so `0.2` (and
 //! its patch refinements `0.2.x`) is the only supported major.minor line.
 

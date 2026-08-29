@@ -2,7 +2,7 @@
 
 How pgokf is packaged and released for every supported channel. Supported
 PostgreSQL majors: **15, 16, 17, 18, 19** (19 is not GA as of 2026-08 and PGDG
-publishes no `postgresql-19` package yet — its build/CI legs are advisory until
+publishes no `postgresql-19` package yet - its build/CI legs are advisory until
 PGDG ships packages).
 
 Every format shares one build primitive, so there is exactly one place where
@@ -29,8 +29,8 @@ target/release/pgokf-pg18/
     ├── lib/postgresql/18/lib/pgokf.so                      # $(pg_config --pkglibdir)
     └── share/postgresql/18/extension/
         ├── pgokf.control
-        ├── pgokf--0.1.0.sql
-        └── pgokf--0.1.0--0.1.1.sql                          # $(pg_config --sharedir)/extension
+        ├── pgokf--0.1.13.sql
+        └── pgokf--0.1.12--0.1.13.sql                        # $(pg_config --sharedir)/extension
 ```
 
 On PGDG RPM systems the same command against `/usr/pgsql-18/bin/pg_config`
@@ -48,8 +48,8 @@ Pinned toolchain (keep in sync with `rust-toolchain.toml` and CI):
 
 ## Debian / Ubuntu (`.deb`)
 
-One package per major, named `postgresql-N-pgokf`, depending on `postgresql-N`
-— mirroring PGDG's own per-major extension packages.
+One package per major, named `postgresql-N-pgokf`, depending on `postgresql-N`,
+mirroring PGDG's own per-major extension packages.
 
 ```bash
 packaging/deb/build-deb.sh 18          # or 15 / 16 / 17 / 19
@@ -71,13 +71,13 @@ and calls `dpkg-deb --root-owner-group --build`. Output defaults to
 Inspect and install:
 
 ```bash
-dpkg-deb -I postgresql-18-pgokf_0.1.0-1_amd64.deb   # control metadata
-dpkg-deb -c postgresql-18-pgokf_0.1.0-1_amd64.deb   # payload file list
-sudo apt install ./postgresql-18-pgokf_0.1.0-1_amd64.deb
+dpkg-deb -I postgresql-18-pgokf_0.1.13-1_amd64.deb   # control metadata
+dpkg-deb -c postgresql-18-pgokf_0.1.13-1_amd64.deb   # payload file list
+sudo apt install ./postgresql-18-pgokf_0.1.13-1_amd64.deb
 ```
 
 Building the `.deb` for a major requires that major's `postgresql-server-dev-N`
-(for `pg_config`) — only the locally installed major can be built on a given
+(for `pg_config`) - only the locally installed major can be built on a given
 host.
 
 ---
@@ -97,16 +97,16 @@ mock -r rocky-9-x86_64 --define 'pgmajorversion 16' \
 
 `%build` installs the pinned `cargo-pgrx` into a build-local root and runs the
 build primitive; `%install` copies the staged tree into `%{buildroot}`.
-`Source0` is a `pgokf-0.1.0.tar.gz` of the repository at the release tag.
+`Source0` is a `pgokf-0.1.13.tar.gz` of the repository at the release tag.
 
 ---
 
 ## PGXN (`META.json`)
 
 [`META.json`](https://github.com/LogicOcean/pgokf/blob/main/META.json) is a PGXN meta-spec v1.0.0 distribution manifest
-(`name` `pgokf`, `version` `0.1.0`, `provides.pgokf`, `prereqs` PostgreSQL
+(`name` `pgokf`, `version` `0.1.13`, `provides.pgokf`, `prereqs` PostgreSQL
 ≥ 15, `resources`, `AGPL-3.0-only` core license). `provides.pgokf.file` points at the generated
-`crates/extension/sql/pgokf--0.1.0.sql`, which the release process emits into
+`crates/extension/sql/pgokf--0.1.13.sql`, which the release process emits into
 the tree before building the PGXN zip.
 
 Validate locally:
@@ -131,7 +131,7 @@ pgokf;` works out of the box (auto-created on first init). Build from the
 ```bash
 docker build -f packaging/docker/Dockerfile \
   --build-arg PG_MAJOR=18 \
-  -t ghcr.io/logicocean/pgokf:0.1.0-pg18 .
+  -t ghcr.io/logicocean/pgokf:0.1.13-pg18 .
 ```
 
 Add a `.dockerignore` excluding `target/` and `.git/` to keep the build
@@ -166,19 +166,19 @@ dependency at each release.
    `Cargo.toml` (`[workspace.package]`), `crates/extension/pgokf.control`
    (`default_version`), `META.json` (`version` and `provides.pgokf.version`),
    and `packaging/rpm/pgokf.spec` (`Version`).
-3. **Tag.** `git tag v0.1.0 && git push origin v0.1.0`. CI
+3. **Tag.** `git tag v0.1.13 && git push origin v0.1.13`. CI
    ([`.github/workflows/packages.yml`](https://github.com/LogicOcean/pgokf/blob/main/.github/workflows/packages.yml))
-   builds the `.deb`s, validates `META.json`, and builds the Docker images per
-   major, uploading them as workflow artifacts.
+   builds the `.deb`s (uploaded as workflow artifacts), validates `META.json`,
+   and builds the Docker images per major.
 4. **PGXN.** Emit the generated SQL into the tree
-   (`cd crates/extension && cargo pgrx schema pg18 > sql/pgokf--0.1.0.sql`),
+   (`cd crates/extension && cargo pgrx schema pg18 > sql/pgokf--0.1.13.sql`),
    build the distribution zip (repo contents + `META.json` + generated SQL),
    and upload it at <https://manager.pgxn.org/> under the `pgokf` distribution.
 5. **Docker.** Push each major's image to
-   `ghcr.io/logicocean/pgokf:0.1.0-pgN` and retag the default major as
+   `ghcr.io/logicocean/pgokf:0.1.13-pgN` and retag the default major as
    `latest`.
 6. **Homebrew.** In the tap repo, update `pgokf.rb` `url` + `sha256` for
-   `v0.1.0` and open the PR (`brew audit --new pgokf` locally first).
+   `v0.1.13` and open the PR (`brew audit --new pgokf` locally first).
 7. **Announce.** GitHub Release notes from the CHANGELOG entry.
 
 ## Build-output hygiene

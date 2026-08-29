@@ -10,14 +10,14 @@
 //! `CREATE EXTENSION pgokf` succeeds where `pg_cron` is absent, and every
 //! `cron.*` object is reached solely through dynamic SPI. When `pg_cron` is not
 //! installed, [`schedule_refresh`] raises a clear SQLSTATE `22023` naming the
-//! missing dependency — mirroring `concept_search_semantic`'s pgvector error,
-//! never a silent success — and [`unschedule_refresh`] is a clean no-op.
+//! missing dependency - mirroring `concept_search_semantic`'s pgvector error,
+//! never a silent success - and [`unschedule_refresh`] is a clean no-op.
 //!
 //! # Injection safety
 //!
 //! The scheduled command is a fixed `SELECT pgokf.refresh_bundle(<id>)`. The
 //! `<id>` is the `bigint` `bundle_id` the caller passed, formatted as an integer
-//! literal that this code controls — a validated `i64` can only render as digits,
+//! literal that this code controls - a validated `i64` can only render as digits,
 //! so no caller text ever enters the command. The cron schedule and the
 //! deterministic job name both bind as parameters to `cron.schedule` (never
 //! interpolated). Full scheduling requires `pg_cron` in
@@ -51,15 +51,15 @@ fn job_name(bundle_id: i64) -> String {
 }
 
 /// The fixed scheduled command for a bundle. The `bundle_id` is a validated
-/// `i64` formatted as an integer literal this code controls — never caller text.
+/// `i64` formatted as an integer literal this code controls - never caller text.
 fn refresh_command(bundle_id: i64) -> String {
     format!("SELECT pgokf.refresh_bundle({bundle_id})")
 }
 
 /// Report whether the `pg_cron` extension is installed in this database.
 ///
-/// Probed by `pg_extension` catalog membership — never by referencing a `cron.*`
-/// object — so it is safe to call before any SQL that would fail to resolve when
+/// Probed by `pg_extension` catalog membership - never by referencing a `cron.*`
+/// object - so it is safe to call before any SQL that would fail to resolve when
 /// `pg_cron` is absent.
 fn pg_cron_installed() -> Result<bool, CatalogError> {
     Spi::get_one::<bool>(
@@ -71,7 +71,7 @@ fn pg_cron_installed() -> Result<bool, CatalogError> {
 
 /// The clear `22023` raised when scheduling needs `pg_cron` but it is absent.
 /// Scheduling has no in-database fallback, so this is an error rather than a
-/// silent success — the same contract `concept_search_semantic` uses for
+/// silent success - the same contract `concept_search_semantic` uses for
 /// pgvector.
 fn missing_pg_cron_error() -> CatalogError {
     CatalogError::invalid_parameter(
@@ -159,7 +159,7 @@ fn unschedule_refresh_impl(bundle_id: i64) -> Result<bool, CatalogError> {
     }
 
     let name = job_name(bundle_id);
-    // Only unschedule a job that exists — cron.unschedule(name) raises if the job
+    // Only unschedule a job that exists - cron.unschedule(name) raises if the job
     // is absent, so a no-op removal stays a clean `false` rather than an error.
     let exists = Spi::get_one_with_args::<bool>(
         "SELECT pg_catalog.count(*) > 0 FROM cron.job WHERE jobname = $1",

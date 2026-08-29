@@ -7,7 +7,7 @@ catalog to AI agents as MCP tools.
 newline-delimited JSON-RPC 2.0 on stdin/stdout. It implements the MCP handshake
 (`initialize` → `serverInfo`/`capabilities`, then `tools/list` and `tools/call`)
 and backs each tool with a query against the shipped `pgokf` public functions.
-The JSON-RPC layer is **hand-rolled on `serde_json`** — no MCP SDK dependency,
+The JSON-RPC layer is **hand-rolled on `serde_json`** - no MCP SDK dependency,
 so it adds nothing new to the workspace's `cargo deny` surface.
 
 ## Tools
@@ -32,7 +32,7 @@ JSON array of rows exactly as the SQL function produced them.
 
 ### PostgreSQL transport (TLS)
 
-The database link is plaintext (`NoTls`) by default — fine for a local socket or
+The database link is plaintext (`NoTls`) by default - fine for a local socket or
 trusted network. To encrypt it, pass `--tls` (env `OKF_PG_TLS=true`) or put
 `sslmode=require` in the connection string; either negotiates a `rustls` TLS
 session that verifies the server certificate against the platform trust store.

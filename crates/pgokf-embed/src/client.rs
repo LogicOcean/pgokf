@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 /// A configured client for one OpenAI-compatible embeddings endpoint.
 ///
 /// Holds the resolved request URL, the model name, and an optional bearer
-/// token. The token lives only in this process's memory — it is never written
+/// token. The token lives only in this process's memory - it is never written
 /// to PostgreSQL or logged.
 pub struct EmbeddingsClient {
     http: Client,

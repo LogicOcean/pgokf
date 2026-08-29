@@ -7,13 +7,13 @@ body:
     attributes:
       value: |
         Thanks for reporting a bug. Please **do not** report security
-        vulnerabilities here — see [SECURITY.md](../blob/main/SECURITY.md) for
+        vulnerabilities here - see [SECURITY.md](../blob/main/SECURITY.md) for
         private disclosure.
   - type: textarea
     id: what-happened
     attributes:
       label: What happened?
-      description: A clear description of the bug — what you observed vs. what you expected.
+      description: A clear description of the bug - what you observed vs. what you expected.
       placeholder: |
         Observed: concept_search returned duplicate rows across pages.
         Expected: pages tile the result set with no duplicates.

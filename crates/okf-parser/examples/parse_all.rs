@@ -2,14 +2,14 @@
 //! Parse-all latency harness for the OKF format benchmark (YAML leg).
 //!
 //! Recursively walks a corpus directory and times parsing every `.md` file
-//! through [`okf_parser::parse_concept`] — the exact entry point the
+//! through [`okf_parser::parse_concept`] - the exact entry point the
 //! `PostgreSQL` sync engine drives per file. It reports the file count, the
 //! wall-clock elapsed for the read-plus-parse loop, derived throughput, and a
 //! peak resident-set figure read from `/proc/self/status` (`VmHWM`).
 //!
 //! The directory walk uses only [`std::fs`] recursion (no `walkdir`), and the
 //! bundle-relative path handed to the parser is the file's path with the
-//! corpus root stripped — matching how the sync layer keys concepts.
+//! corpus root stripped - matching how the sync layer keys concepts.
 //!
 //! Usage:
 //!

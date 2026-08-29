@@ -296,7 +296,7 @@ jobs:
           # not merely until the socket accepts connections. The postgres image
           # runs /docker-entrypoint-initdb.d (CREATE EXTENSION) during init, and a
           # slow container can leave a window where pg_isready is up but the init
-          # script has not finished — polling only pg_isready then querying once
+          # script has not finished - polling only pg_isready then querying once
           # races and flakes. Poll the real condition with an explicit timeout so
           # a slow leg fails loudly instead of reading an empty version.
           ready=""

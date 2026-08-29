@@ -35,12 +35,12 @@ no charges were accepted. Estimated 1,200 failed requests.
 ## Timeline
 
 <!-- Keep timestamps unambiguous (UTC). -->
-- **14:02 UTC** — Deploy of revision `a1b2c3` rolled out.
-- **14:05 UTC** — Error rate crossed alert threshold; on-call paged.
-- **14:11 UTC** — Incident declared (sev2).
-- **14:18 UTC** — Ran the [restart the payments API runbook](runbook.md).
-- **14:29 UTC** — Rolled back to last known-good; health checks recovered.
-- **14:32 UTC** — Traffic fully restored; incident resolved.
+- **14:02 UTC** - Deploy of revision `a1b2c3` rolled out.
+- **14:05 UTC** - Error rate crossed alert threshold; on-call paged.
+- **14:11 UTC** - Incident declared (sev2).
+- **14:18 UTC** - Ran the [restart the payments API runbook](runbook.md).
+- **14:29 UTC** - Rolled back to last known-good; health checks recovered.
+- **14:32 UTC** - Traffic fully restored; incident resolved.
 
 ## Root cause
 

@@ -253,7 +253,7 @@ fn public_function_surface_count_is_locked() {
     assert_eq!(
         count, CATALOG_PG_EXTERN_COUNT,
         "the number of #[pg_extern] functions under src/catalog changed \
-         (found {count}, expected {CATALOG_PG_EXTERN_COUNT}); the public API surface is stable — \
+         (found {count}, expected {CATALOG_PG_EXTERN_COUNT}); the public API surface is stable - \
          update PUBLIC_FUNCTIONS and add a COMMENT ON FUNCTION before changing it",
     );
 }

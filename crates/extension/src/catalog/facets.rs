@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Faceted result counts over the search set: `pgokf.search_facets`.
 //!
-//! A search UI often needs the *breakdown* of a result set, not the rows — "42
-//! runbooks, 15 wikis", or the counts per bundle, status, trust tier, or tag —
+//! A search UI often needs the *breakdown* of a result set, not the rows - "42
+//! runbooks, 15 wikis", or the counts per bundle, status, trust tier, or tag -
 //! so it can render filter chips before the user drills in. `search_facets`
 //! answers exactly that: it counts the **same matching set** `pgokf.concept_search`
 //! would (the native full-text match plus the identical structured filters),
@@ -10,8 +10,8 @@
 //!
 //! # The facet allow-list (never interpolated)
 //!
-//! The `facet` argument selects the grouping dimension from a fixed allow-list —
-//! `type`, `bundle`, `status`, `trust_tier`, `tag` — validated against
+//! The `facet` argument selects the grouping dimension from a fixed allow-list -
+//! `type`, `bundle`, `status`, `trust_tier`, `tag` - validated against
 //! [`Facet::parse`] (SQLSTATE `22023` otherwise). The facet is **dispatched on**,
 //! never interpolated into SQL: each variant maps to one of a small set of
 //! compile-time-constant queries whose grouping column is fixed in source, so no
@@ -38,8 +38,8 @@ use crate::security;
 /// Qualified SQL name of the facet-count composite type.
 const SEARCH_FACET_TYPE: &str = "pgokf.search_facet";
 
-/// One facet bucket — a distinct facet value and how many matching concepts
-/// carry it — prior to being packed into the `pgokf.search_facet` composite.
+/// One facet bucket - a distinct facet value and how many matching concepts
+/// carry it - prior to being packed into the `pgokf.search_facet` composite.
 struct FacetCount {
     facet_value: String,
     count: i64,
@@ -47,8 +47,8 @@ struct FacetCount {
 
 /// The grouping dimension of a faceted count, drawn from a fixed allow-list.
 ///
-/// Each variant owns the *constant* SQL fragments its query needs — the grouped
-/// value expression and any extra `FROM` join — so the caller-supplied facet name
+/// Each variant owns the *constant* SQL fragments its query needs - the grouped
+/// value expression and any extra `FROM` join - so the caller-supplied facet name
 /// never becomes SQL text; it only selects which pre-written fragment runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Facet {
@@ -85,7 +85,7 @@ impl Facet {
     }
 
     /// The fixed SQL expression this facet groups and counts by. A compile-time
-    /// constant per variant — never caller input.
+    /// constant per variant - never caller input.
     const fn value_expr(self) -> &'static str {
         match self {
             Self::Type => "c.type",
@@ -96,7 +96,7 @@ impl Facet {
         }
     }
 
-    /// The extra `FROM` fragment this facet needs. Only `tag` adds one — a
+    /// The extra `FROM` fragment this facet needs. Only `tag` adds one - a
     /// `LATERAL unnest` that expands a concept's `tags` array so each tag is
     /// counted separately.
     const fn extra_from(self) -> &'static str {
@@ -109,8 +109,8 @@ impl Facet {
 
 /// Build the faceted-count query for `facet`.
 ///
-/// The query mirrors the native `concept_search` matching set — the weighted
-/// `body_tsv` FTS match plus the four structured filters — then groups by the
+/// The query mirrors the native `concept_search` matching set - the weighted
+/// `body_tsv` FTS match plus the four structured filters - then groups by the
 /// facet's fixed value expression. Only the two constant fragments
 /// ([`Facet::value_expr`], [`Facet::extra_from`]) vary by facet, both chosen from
 /// source, so no caller string is interpolated. The query text (`$1`), regconfig
@@ -237,9 +237,9 @@ COMMENT ON TYPE pgokf.search_facet IS
     /// Count the `concept_search` matching set grouped by one facet.
     ///
     /// Requires membership in `pgokf_reader` (or `pgokf_admin`). Counts exactly
-    /// the concepts `pgokf.concept_search` would match — the native full-text
+    /// the concepts `pgokf.concept_search` would match - the native full-text
     /// match of `query` plus the same optional structured filters
-    /// (`concept_type`, `tags` ALL-of containment, `status`, `trust_tier`) — and
+    /// (`concept_type`, `tags` ALL-of containment, `status`, `trust_tier`) - and
     /// groups them by `facet`, one of `type`, `bundle`, `status`, `trust_tier`,
     /// or `tag` (any other value raises SQLSTATE `22023`). The `tag` facet counts
     /// a concept once per tag it carries. Buckets return ordered by descending

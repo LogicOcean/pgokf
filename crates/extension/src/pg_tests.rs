@@ -7,14 +7,14 @@
 //! `cargo pgrx test` starts and into which it installs the freshly built
 //! extension. They register a fixture bundle written to disk at test time and
 //! assert the end-to-end SQL behavior: search, listing, provenance, graph
-//! traversal, authorization, and — the runtime counterpart of the source-level
-//! guardrails in `tests/api_stability.rs` — that every catalog object in the
+//! traversal, authorization, and - the runtime counterpart of the source-level
+//! guardrails in `tests/api_stability.rs` - that every catalog object in the
 //! live database carries a `COMMENT`/`obj_description`. Without this suite
 //! `cargo pgrx test` would install nothing and run zero SQL, so a broken
 //! generated SQL block or a reordered projection would still pass CI green.
 //!
 //! Every `#[pg_test]` runs in its own transaction that the harness rolls back,
-//! so the fixtures each test builds — bundles, roles, temp functions — never
+//! so the fixtures each test builds - bundles, roles, temp functions - never
 //! leak into another test. Assertions deliberately target stable, happy-path
 //! behavior and never the edge cases other work streams are actively changing.
 
@@ -557,7 +557,7 @@ The beta concept is the companion definition referenced by alpha.\n";
     fn export_parquet_writes_every_table_including_provenance_timestamps() {
         // Arrange: register the OKF v0.2 fixture. Its provenance carries
         // timestamptz columns (generated_at, stale_after, usage_window_*) that
-        // export as epoch microseconds — a live path with no in-DB coverage
+        // export as epoch microseconds - a live path with no in-DB coverage
         // until now, where a missing epoch cast silently broke export_parquet.
         let fixture = RichFixture::create();
         let bundle_id = register_rich(&fixture);
@@ -645,7 +645,7 @@ The beta concept is the companion definition referenced by alpha.\n";
 
     #[pg_test]
     fn store_source_off_stores_no_source_rows() {
-        // Arrange: the default policy (store_source disabled) — register without
+        // Arrange: the default policy (store_source disabled) - register without
         // enabling it.
         let bundle = FixtureBundle::create();
         let bundle_id = register_fixture(&bundle);
@@ -658,7 +658,7 @@ The beta concept is the companion definition referenced by alpha.\n";
         .expect("concept_source count executes")
         .expect("count is not NULL");
 
-        // Assert: default behavior is unchanged — no source bytes are stored.
+        // Assert: default behavior is unchanged - no source bytes are stored.
         assert_eq!(rows, 0, "the default policy stores no concept_source rows");
     }
 
@@ -865,7 +865,7 @@ The beta concept is the companion definition referenced by alpha.\n";
     /// classifies it as `unchanged` (its content hash is stable). It links to
     /// `/gamma.md`, which does not exist at register time, so its edge starts
     /// unresolved; adding `gamma.md` on refresh must flip that edge to resolved
-    /// *even though keep itself is unchanged* — the guarded re-resolution pass.
+    /// *even though keep itself is unchanged* - the guarded re-resolution pass.
     const KEEP_CONCEPT: &str = "---\n\
 type: Reference\n\
 title: Keep Concept\n\
@@ -936,8 +936,8 @@ The gamma concept is introduced during the refresh cycle.\n";
             "keep's edge to the absent gamma is unresolved"
         );
 
-        // Act: mutate the on-disk bundle — edit one file (alpha), add one file
-        // (gamma), delete one file (beta) — then re-synchronize. keep.md is left
+        // Act: mutate the on-disk bundle - edit one file (alpha), add one file
+        // (gamma), delete one file (beta) - then re-synchronize. keep.md is left
         // byte-identical so it must classify as unchanged.
         fs::write(bundle.root.join("alpha.md"), ALPHA_EDITED).expect("alpha edit is writable");
         fs::write(bundle.root.join("gamma.md"), GAMMA_CONCEPT).expect("gamma add is writable");
@@ -975,7 +975,7 @@ The gamma concept is introduced during the refresh cycle.\n";
         assert_eq!(counts.2, 1, "beta is the single removed file");
         assert_eq!(counts.3, 1, "keep is the single unchanged file");
 
-        // Assert: the re-projection re-indexed the edited body — the new term is
+        // Assert: the re-projection re-indexed the edited body - the new term is
         // searchable and the stale term is gone.
         let post_alpha =
             Spi::get_one::<String>("SELECT concept_id FROM pgokf.concept_search('quokka') LIMIT 1")
@@ -1007,7 +1007,7 @@ The gamma concept is introduced during the refresh cycle.\n";
         .expect("count is not NULL");
         assert_eq!(beta_rows, 0, "the removed beta concept row is deleted");
 
-        // Assert: the guarded re-resolution ran — keep was classified unchanged
+        // Assert: the guarded re-resolution ran - keep was classified unchanged
         // (so project() never re-touched its row), yet its edge to the
         // newly-added gamma flipped from unresolved to resolved by the bundle-
         // wide re-resolution pass over the finalized concept set.
@@ -1090,7 +1090,7 @@ The gamma concept is introduced during the refresh cycle.\n";
     #[pg_test]
     fn register_bundle_exceeding_max_file_bytes_is_rejected() {
         // Arrange: the resource-ceiling GUCs (pgokf.max_file_bytes,
-        // pgokf.max_bundle_files) are PGC_SIGHUP — they cannot be changed with
+        // pgokf.max_bundle_files) are PGC_SIGHUP - they cannot be changed with
         // SET inside a session, so this exercises the *shipped default* ceiling
         // (4 MiB per file) by registering a bundle with one oversized file. A
         // bundle whose file exceeds the ceiling must abort discovery.
@@ -2094,7 +2094,7 @@ An added concept for the resync diff.\n";
             .expect("the probe reports a SQLSTATE");
 
         // Assert: semantic search names the missing dependency (22023), never a
-        // silent empty result — it has no lexical fallback.
+        // silent empty result - it has no lexical fallback.
         assert_eq!(
             sqlstate, "22023",
             "concept_search_semantic must raise 22023 when pgvector is absent",
@@ -2144,7 +2144,7 @@ An added concept for the resync diff.\n";
         let bundle = FixtureBundle::create();
         let bundle_id = register_fixture(&bundle);
 
-        // alpha points along axis 1, beta along axis 2 — orthogonal unit vectors.
+        // alpha points along axis 1, beta along axis 2 - orthogonal unit vectors.
         Spi::run_with_args(
             "SELECT pgokf.set_concept_embedding($1, 'alpha', ARRAY[1,0,0,0]::real[])",
             &[bundle_id.into()],
@@ -2332,7 +2332,7 @@ An added concept for the resync diff.\n";
         .expect("bundle tenant is not NULL");
         assert_eq!(bundle_tenant, "acme", "the bundle row is stamped acme");
 
-        // Assert: every child row inherits the bundle's tenant — no child row in
+        // Assert: every child row inherits the bundle's tenant - no child row in
         // any projection table carries a tenant other than acme.
         for table in [
             "pgokf.concepts",
@@ -2391,7 +2391,7 @@ An added concept for the resync diff.\n";
 
     #[pg_test]
     fn a_no_tenant_write_stamps_the_default_tenant_backward_compatible() {
-        // Arrange: the default session (no pgokf.tenant set) — every pre-0.1.7
+        // Arrange: the default session (no pgokf.tenant set) - every pre-0.1.7
         // install and session behaves this way.
         let bundle = FixtureBundle::create();
         let bundle_id = register_fixture(&bundle);
@@ -2547,7 +2547,7 @@ An added concept for the resync diff.\n";
 
         // Act / Assert: as acme, the reader sees exactly acme's one bundle, its two
         // concepts, its one listed bundle, its single peregrine hit, and its one
-        // audit row — never globex's.
+        // audit row - never globex's.
         Spi::run("SET pgokf.tenant = 'acme'").expect("pgokf.tenant is settable");
         assert_eq!(
             iso_reader_counts(),
@@ -2563,7 +2563,7 @@ An added concept for the resync diff.\n";
             "a globex reader sees only globex's rows",
         );
 
-        // Unset (the backward-compatible default): the reader sees BOTH tenants —
+        // Unset (the backward-compatible default): the reader sees BOTH tenants -
         // RLS with no pgokf.tenant is a no-op, so behavior is unchanged.
         Spi::run("SET pgokf.tenant = ''").expect("pgokf.tenant is resettable");
         assert_eq!(
@@ -2602,7 +2602,7 @@ An added concept for the resync diff.\n";
         .expect("neighbor reader probe is creatable");
 
         // Act / Assert: scoped to acme, alpha reaches exactly one neighbor (beta)
-        // in acme's graph — globex's identical graph is invisible and does not make
+        // in acme's graph - globex's identical graph is invisible and does not make
         // the seed ambiguous.
         Spi::run("SET pgokf.tenant = 'acme'").expect("pgokf.tenant is settable");
         let acme_neighbors = Spi::get_one::<i64>("SELECT pg_temp.nbr_reader_count()")
@@ -2687,7 +2687,7 @@ An added concept for the resync diff.\n";
             .to_owned();
 
         // A probe that dispatches one bundle-addressed mutator/export in the
-        // caller's session — inheriting its pgokf.tenant — and reports 'ok' or the
+        // caller's session - inheriting its pgokf.tenant - and reports 'ok' or the
         // raised SQLSTATE. It runs as this (superuser) test session, so a rejection
         // proves the guard is EXPLICIT logic, not RLS (which a superuser bypasses).
         Spi::run(
@@ -2737,8 +2737,8 @@ An added concept for the resync diff.\n";
         };
 
         // Act / Assert: as acme, every bundle-addressed op against GLOBEX's bundle
-        // is rejected as an unknown bundle (22023) — indistinguishable from a
-        // nonexistent id — before any lock or filesystem side effect.
+        // is rejected as an unknown bundle (22023) - indistinguishable from a
+        // nonexistent id - before any lock or filesystem side effect.
         Spi::run("SET pgokf.tenant = 'acme'").expect("pgokf.tenant is settable");
         for op in [
             "refresh",
@@ -2792,7 +2792,7 @@ An added concept for the resync diff.\n";
         );
 
         // Act / Assert: an UNSET session is cross-tenant by design (backward
-        // compatible) — it operates on globex's bundle exactly as before the guard.
+        // compatible) - it operates on globex's bundle exactly as before the guard.
         Spi::run("SET pgokf.tenant = ''").expect("pgokf.tenant is resettable");
         for op in [
             "refresh",
@@ -3171,7 +3171,7 @@ An added concept for the resync diff.\n";
 
     /// Register a content bundle of `count` concepts that all match the term
     /// `paginationterm`, alternating the term frequency so consecutive concepts
-    /// tie on rank — exercising the (bundle_id, concept_id) tiebreak. Returns the
+    /// tie on rank - exercising the (bundle_id, concept_id) tiebreak. Returns the
     /// bundle id.
     fn register_pagination_bundle(count: usize) -> i64 {
         let mut paths = Vec::with_capacity(count);
@@ -3268,8 +3268,8 @@ An added concept for the resync diff.\n";
             cursor = next_cursor;
         }
 
-        // Assert: the paged concept ids tile the full result exactly — same order,
-        // no duplicate, no skip — even across tied ranks.
+        // Assert: the paged concept ids tile the full result exactly - same order,
+        // no duplicate, no skip - even across tied ranks.
         assert_eq!(
             paged, full,
             "keyset pages must reproduce the full ordered result with no dup/skip",
@@ -3557,7 +3557,7 @@ attester:\n  resource: /attester.md\n\
 The computation, executor, and attester are declared only in frontmatter.\n";
 
     /// A NON-attested concept carrying the identical reference-shaped
-    /// frontmatter keys and body — only its `type` differs. It must project no
+    /// frontmatter keys and body - only its `type` differs. It must project no
     /// attestation edges, so it reaches none of the targets.
     const ATTESTED_PLAIN: &str = "---\n\
 type: Reference\n\
@@ -3621,7 +3621,7 @@ The same reference keys, but this is not an Attested Computation.\n";
         );
 
         // Assert: the non-attested peer with identical frontmatter reaches NONE
-        // of them — the edges exist only for the Attested Computation type (the
+        // of them - the edges exist only for the Attested Computation type (the
         // before/after contrast: previously the attested concept could not reach
         // executor either).
         let plain_reached = Spi::get_one_with_args::<i64>(
@@ -3681,7 +3681,7 @@ The same reference keys, but this is not an Attested Computation.\n";
         "---\ntype: Reference\ntitle: Nested\n---\n\nA nested concept.\n";
 
     /// A root-level activity log: a heading (no timestamp), two ISO-8601-dated
-    /// bullets, and a freeform note (no timestamp) — four entries.
+    /// bullets, and a freeform note (no timestamp) - four entries.
     const ROOT_LOG: &str = "# Activity\n\
 - 2026-07-01T12:00:00Z Registered the bundle\n\
 - 2026-07-02T09:30:00Z Refreshed after an edit\n\
@@ -3715,7 +3715,7 @@ Freeform note without a timestamp\n";
         // concepts.
         let (bundle_id, added) = register_log_fixture("logbook", ROOT_LOG);
 
-        // Assert: the two log.md files are NOT concepts — only alpha and
+        // Assert: the two log.md files are NOT concepts - only alpha and
         // nested/beta register.
         assert_eq!(
             added, 2,
@@ -3833,7 +3833,7 @@ Freeform note without a timestamp\n";
         let (resynced_id, _added) = register_log_fixture("logbook-refresh", ROOT_LOG_V2);
         assert_eq!(resynced_id, bundle_id, "the resync targets the same bundle");
 
-        // Assert: the root log now reflects the edit — the projection tracks the
+        // Assert: the root log now reflects the edit - the projection tracks the
         // file (old entries gone, the new one present); nested is untouched.
         let after = Spi::get_one_with_args::<i64>(
             "SELECT count(*) FROM pgokf.list_bundle_log($1, '')",
@@ -4010,7 +4010,7 @@ The anchor concept never changes across the runbook's revisions.\n";
     #[pg_test]
     fn track_history_off_records_no_history() {
         // Arrange: the DEFAULT policy (track_history off). Register, then edit and
-        // refresh — the exact flow that would record history if it were on.
+        // refresh - the exact flow that would record history if it were on.
         let bundle = create_history_bundle();
         let bundle_id = Spi::get_one_with_args::<i64>(
             "SELECT bundle_id FROM pgokf.register_bundle($1) AS r",
@@ -4021,7 +4021,7 @@ The anchor concept never changes across the runbook's revisions.\n";
         fs::write(bundle.root.join("runbook.md"), RUNBOOK_V2).expect("runbook v2 writable");
         refresh(bundle_id);
 
-        // Assert: with history off, not a single concept_history row is written —
+        // Assert: with history off, not a single concept_history row is written -
         // zero extra storage, behavior unchanged.
         let rows = Spi::get_one_with_args::<i64>(
             "SELECT count(*) FROM pgokf.concept_history WHERE bundle_id = $1",
@@ -4147,7 +4147,7 @@ The anchor concept never changes across the runbook's revisions.\n";
             "each version's valid_to abuts the next version's valid_from"
         );
 
-        // Assert: an UNCHANGED file records no extra history — the anchor stays at
+        // Assert: an UNCHANGED file records no extra history - the anchor stays at
         // a single open version 1 across all the runbook refreshes.
         let anchor_versions = Spi::get_one_with_args::<i64>(
             "SELECT count(*) FROM pgokf.concept_history
@@ -4380,7 +4380,7 @@ The anchor concept never changes across the runbook's revisions.\n";
         fs::write(bundle.root.join("runbook.md"), RUNBOOK_V2).expect("runbook v2 writable");
         refresh(bundle_id);
 
-        // A non-superuser reader (so row-level security is enforced — a superuser
+        // A non-superuser reader (so row-level security is enforced - a superuser
         // bypasses it) and a probe reporting how many versions it sees for the
         // session's tenant through the invoker-rights reader function.
         Spi::run("CREATE ROLE pgokf_history_reader").expect("reader role is creatable");
@@ -4451,7 +4451,7 @@ The anchor concept never changes across the runbook's revisions.\n";
         .expect("embedding probe is creatable");
 
         // Act / Assert: a NaN element is rejected with invalid_parameter (22023)
-        // before any row is written — pgvector would otherwise reject the stored
+        // before any row is written - pgvector would otherwise reject the stored
         // real[] at every query/index cast and break search catalog-wide.
         let nan = Spi::get_one_with_args::<String>(
             "SELECT pg_temp.embed_sqlstate($1, '{0.1,0.2,NaN,0.4}'::real[])",
@@ -4730,7 +4730,7 @@ The anchor concept never changes across the runbook's revisions.\n";
 
     #[pg_test]
     fn concept_neighbors_on_a_dense_complete_graph_is_fast_and_correct() {
-        // Arrange: a complete directed graph K30 — 30 concepts, each linking to
+        // Arrange: a complete directed graph K30 - 30 concepts, each linking to
         // all 29 others. The old recursive CTE enumerated every simple path
         // (≈30^5 walk rows at 5 hops) and timed out; the O(V+E) BFS answers
         // instantly with the 29 direct neighbors.
@@ -4782,7 +4782,7 @@ The anchor concept never changes across the runbook's revisions.\n";
 
     #[pg_test]
     fn concept_neighbors_null_bundle_ignores_disabled_duplicates() {
-        // Arrange: the concept id 'a' exists in two bundles — one active, one
+        // Arrange: the concept id 'a' exists in two bundles - one active, one
         // disabled. Without an explicit bundle_id, disambiguation must count only
         // the ACTIVE bundle (LOW-a): counting the disabled duplicate would raise a
         // spurious 22023 that blocks the one answerable bundle.
@@ -4809,7 +4809,7 @@ The anchor concept never changes across the runbook's revisions.\n";
         .expect("the duplicate bundle is disabled");
 
         // Act / Assert: a NULL-bundle traversal from 'a' resolves to the active
-        // bundle and returns its neighbor b — no spurious ambiguity error (which,
+        // bundle and returns its neighbor b - no spurious ambiguity error (which,
         // before the fix, the disabled duplicate would have triggered).
         let neighbor = Spi::get_one::<String>(
             "SELECT neighbor_id FROM pgokf.concept_neighbors('a')
@@ -4834,7 +4834,7 @@ The anchor concept never changes across the runbook's revisions.\n";
     // HIGH-3: purge_retired must respect the eligibility predicate. The true
     // snapshot/unretire TOCTOU race requires two concurrent committed
     // transactions and is proven in the live scratch-cluster run; this
-    // deterministic test locks the observable contract — a bundle restored by
+    // deterministic test locks the observable contract - a bundle restored by
     // unretire_bundle is never purged and keeps all of its data.
 
     #[pg_test]
@@ -4856,7 +4856,7 @@ The anchor concept never changes across the runbook's revisions.\n";
             )
             .expect("retired_at is backdated");
         }
-        // Restore the bundle we intend to keep — the operation the race would
+        // Restore the bundle we intend to keep - the operation the race would
         // otherwise lose.
         Spi::run_with_args("SELECT pgokf.unretire_bundle($1)", &[keep_id.into()])
             .expect("unretire_bundle executes");

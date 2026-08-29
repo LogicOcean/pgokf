@@ -4,8 +4,8 @@
 //! Concepts are stored with a BLAKE3 `file_hash` of their source bytes
 //! ([`crate::catalog::schema`]), the same identity the incremental sync uses.
 //! Grouping concepts by that hash surfaces byte-identical content wherever it
-//! appears — most usefully the *same* runbook or reference copied across
-//! several bundles — so an operator can find and de-duplicate it.
+//! appears - most usefully the *same* runbook or reference copied across
+//! several bundles - so an operator can find and de-duplicate it.
 //!
 //! # Security model
 //!
@@ -62,7 +62,7 @@ fn validate_min_group(min_group: i32) -> Result<i64, CatalogError> {
 
 /// Group concepts by `file_hash`, keeping groups of at least `min_group`.
 ///
-/// When `bundle_id` is set, only groups that *touch* that bundle are returned —
+/// When `bundle_id` is set, only groups that *touch* that bundle are returned -
 /// but each such group still lists every occurrence across all bundles, so a
 /// concept copied out of the named bundle into others is fully visible.
 fn duplicate_concepts_impl(
@@ -163,7 +163,7 @@ COMMENT ON TYPE pgokf.duplicate_group IS
     /// members (default 2), so an operator can find the same runbook or
     /// reference copied across bundles. Each group lists every occurrence
     /// (`bundle_ids` / `concept_ids`). When `bundle_id` is given, only groups
-    /// that touch that bundle are returned — but they still list occurrences in
+    /// that touch that bundle are returned - but they still list occurrences in
     /// every bundle. `min_group` must be at least 1 (SQLSTATE `22023`
     /// otherwise).
     #[pg_extern(stable, parallel_safe, requires = ["duplicate_group_type"])]

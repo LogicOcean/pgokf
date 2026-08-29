@@ -5,12 +5,12 @@
 //! and the per-call dispatch to a ranked-search **backend**. The two backends
 //! live behind the [`crate::catalog::search_backend`] Strategy seam:
 //!
-//! - **native** (the default) — `PostgreSQL` FTS only, so every supported
+//! - **native** (the default) - `PostgreSQL` FTS only, so every supported
 //!   server works without additional extensions. Matching uses
 //!   `websearch_to_tsquery` over the weighted `body_tsv` column (title `A`,
 //!   tags/type/description `B`, body `D`), ranking uses `ts_rank_cd`, and each
 //!   hit carries a `ts_headline` snippet.
-//! - **bm25** (optional) — Block-Max WAND top-k over a `ParadeDB` `pg_search`
+//! - **bm25** (optional) - Block-Max WAND top-k over a `ParadeDB` `pg_search`
 //!   index, selected by the durable `search_backend` configuration key and
 //!   reached only through runtime SPI.
 //!
@@ -182,8 +182,8 @@ pub(crate) fn run_ranked_search(
 ///
 /// The caller copies the `rank`, `bundle_id`, and `concept_id` of the previous
 /// page's last row into a JSON object; this reads them back and binds them as
-/// typed parameters (never interpolated). A present-but-malformed cursor — not an
-/// object, or missing/ill-typed a field — is rejected with SQLSTATE `22023`
+/// typed parameters (never interpolated). A present-but-malformed cursor - not an
+/// object, or missing/ill-typed a field - is rejected with SQLSTATE `22023`
 /// rather than silently ignored, so a corrupt cursor never quietly restarts
 /// pagination from the first page.
 // The rank round-trips real -> JSON number -> f64 here; narrowing back to the
@@ -264,8 +264,8 @@ mod pgokf {
     /// OKF lifecycle status and derived trust tier from `concept_provenance`.
     ///
     /// `after_cursor` is the optional **keyset pagination** cursor (default
-    /// `NULL` = first page). Results have a stable total order — `rank DESC`,
-    /// then `bundle_id ASC`, then `concept_id ASC` — so a caller copies the
+    /// `NULL` = first page). Results have a stable total order - `rank DESC`,
+    /// then `bundle_id ASC`, then `concept_id ASC` - so a caller copies the
     /// `rank`, `bundle_id`, and `concept_id` of a page's last row into a JSON
     /// object `{"rank":..,"bundle_id":..,"concept_id":..}` and passes it back to
     /// fetch the next page, which continues strictly after that position with no

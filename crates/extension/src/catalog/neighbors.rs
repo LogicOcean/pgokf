@@ -8,19 +8,19 @@
 //! engine:
 //!
 //! - `pgokf.concept_neighbors(concept_id, max_hops, bundle_id)` returns
-//!   `SETOF pgokf.concept_neighbor` — the reachable concepts, the shortest
+//!   `SETOF pgokf.concept_neighbor` - the reachable concepts, the shortest
 //!   hop count to each, and the path taken;
 //! - traversal is a cycle-safe, set-based **breadth-first search** over
 //!   `pgokf.links` (one level-expansion query per hop), bundle-scoped and
 //!   depth-limited by [`crate::guc::max_graph_hops`] (a hard ceiling that
 //!   `max_hops` is capped to); `max_hops < 1` is rejected with SQLSTATE
 //!   `22023`. It records the first (minimum-hop) visit of each neighbor and
-//!   never re-expands a visited node, so total work is `O(V + E)` — it replaced
+//!   never re-expands a visited node, so total work is `O(V + E)` - it replaced
 //!   a recursive CTE that enumerated every simple path (≈`O(N^hops)`) and let a
 //!   dense bundle spin a reader backend for a tiny answer;
 //! - only resolved internal edges (`resolved AND NOT is_external`) become
 //!   traversal edges; external and unresolved rows never do;
-//! - only edges in an **active** bundle are traversed — active meaning
+//! - only edges in an **active** bundle are traversed - active meaning
 //!   `enabled AND retired_at IS NULL` (both the seed and the recursive step join
 //!   `pgokf.bundles ... AND b.enabled AND b.retired_at IS NULL`), matching
 //!   [`crate::catalog::search`]; a disabled *or retired* bundle's concepts are
@@ -88,7 +88,7 @@ struct NeighborHit {
 /// query's only cycle guard was "target not on the current path", so it
 /// enumerated **every simple path** from the seed (≈`O(N^hops)`); on a dense
 /// bundle a single `concept_neighbors(seed, 5)` could spin the backend on
-/// millions of walk rows for a tiny answer — an algorithmic-complexity `DoS`.
+/// millions of walk rows for a tiny answer - an algorithmic-complexity `DoS`.
 /// [`breadth_first_neighbors`] instead drives one of these queries per hop level
 /// over the *whole* frontier, visiting each node and edge at most once
 /// (`O(V + E)`).
@@ -126,7 +126,7 @@ struct VisitRecord {
 /// Expands one hop level at a time from the current frontier, recording the
 /// **first** (minimum-hop) visit of each neighbor and never re-expanding a node
 /// once it is visited. Each node is therefore expanded at most once and each
-/// edge examined at most once, bounding total work to `O(V + E)` — in place of
+/// edge examined at most once, bounding total work to `O(V + E)` - in place of
 /// the former recursive CTE that enumerated every simple path (≈`O(N^hops)`).
 /// The result is identical to that query's for a normal graph: the set of
 /// reachable neighbors, each with its shortest hop distance and a shortest path.
@@ -171,8 +171,8 @@ where
             if visited.contains_key(&target) {
                 continue;
             }
-            // `source` is always already visited — it is a frontier member, and
-            // every frontier member was recorded when it was discovered — so its
+            // `source` is always already visited - it is a frontier member, and
+            // every frontier member was recorded when it was discovered - so its
             // shortest path is available to extend by one edge.
             let mut path = visited
                 .get(&source)
@@ -201,11 +201,11 @@ where
 /// Resolve which bundle a traversal should be scoped to.
 ///
 /// An explicit `bundle_id` is used verbatim. Otherwise the concept ID is
-/// looked up across **active** bundles only — `enabled AND retired_at IS NULL`,
+/// looked up across **active** bundles only - `enabled AND retired_at IS NULL`,
 /// mirroring the traversal's own edge filter: a single match is scoped to it,
 /// no match yields `None` (an empty traversal), and multiple matches are
 /// rejected with SQLSTATE `22023` so the caller disambiguates. Filtering to
-/// active bundles here is essential — counting a disabled or retired duplicate
+/// active bundles here is essential - counting a disabled or retired duplicate
 /// of the concept would raise a spurious `22023` that blocks a traversal the
 /// only *active* bundle could answer unambiguously.
 fn resolve_bundle_scope(
@@ -315,7 +315,7 @@ fn expand_frontier(
 ///
 /// A neighbor absent from the returned map is one whose concept no longer exists
 /// in the bundle; the caller drops it, giving the same inner-join semantics the
-/// former traversal's `JOIN pgokf.concepts` had — defense in depth alongside the
+/// former traversal's `JOIN pgokf.concepts` had - defense in depth alongside the
 /// bundle-wide re-resolution that already clears `resolved` on edges to deleted
 /// targets ([`crate::catalog::links::reresolve_bundle`]).
 fn fetch_neighbor_titles(

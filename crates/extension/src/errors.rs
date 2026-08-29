@@ -50,7 +50,7 @@ impl ErrorKind {
 ///
 /// `bundle_path` identifies the offending bundle-relative object for
 /// file-scoped errors (IO/parse failures). It is empty for errors that carry
-/// no file context — validation, configuration, and limit checks — in which
+/// no file context - validation, configuration, and limit checks - in which
 /// case no path context is appended when the error is rendered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogError {

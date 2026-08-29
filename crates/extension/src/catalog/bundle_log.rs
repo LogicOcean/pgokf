@@ -7,8 +7,8 @@
 //! (which may carry the bundle `okf_version`) and `log.md`, a per-directory
 //! **activity log**. Discovery has always skipped both. This module projects
 //! the second: during a sync the engine reads every `log.md` in the snapshot
-//! through the existing [`crate::catalog::sync::ByteSource`] — without ever
-//! staging it as a concept — parses it defensively into ordered entries, and
+//! through the existing [`crate::catalog::sync::ByteSource`] - without ever
+//! staging it as a concept - parses it defensively into ordered entries, and
 //! writes them into `pgokf.bundle_log`, keyed by the containing directory and a
 //! zero-based ordinal. `index.md` is unchanged; only `log.md` is now projected.
 //!
@@ -17,7 +17,7 @@
 //! A `log.md` is Markdown, so it is parsed line by line (the lossless unit an
 //! activity log is written in): each non-blank line becomes one entry whose
 //! text is the trimmed line stored verbatim, and a leading ISO 8601 timestamp
-//! — after any Markdown list bullet or heading marker — is lifted into
+//! (after any Markdown list bullet or heading marker) is lifted into
 //! `logged_at` when present (else `NULL`). Parsing never fails, so a malformed
 //! or non-UTF-8 `log.md` degrades to whatever entries it can yield and can
 //! never abort the sync.
@@ -134,13 +134,13 @@ fn timestamp_candidate(entry: &str) -> &str {
 /// (`2026-08-01T09:30:00Z rest…`) or a space-separated date and time
 /// (`2026-08-01 09:30 rest…`). Passing only the first whitespace token to
 /// [`parse_iso8601_epoch`] would silently truncate the latter to its date and
-/// project **midnight** — wrong data, not `NULL`. So the first two tokens are
+/// project **midnight** - wrong data, not `NULL`. So the first two tokens are
 /// joined and preferred, falling back to the first token alone. That first
 /// fallback covers both a date-only lead (`2026-08-01 did X` → the date at
 /// midnight, as before) and a self-contained single-token instant carrying
 /// trailing prose (whose two-token join would fold the following word into the
 /// zone/time and fail to parse). A candidate with no parseable leading
-/// timestamp — the common case for prose entries — yields `None`.
+/// timestamp - the common case for prose entries - yields `None`.
 fn leading_timestamp(candidate: &str) -> Option<f64> {
     let mut tokens = candidate.split_whitespace();
     let first = tokens.next()?;
@@ -157,8 +157,8 @@ fn leading_timestamp(candidate: &str) -> Option<f64> {
 /// The bytes are decoded lossily (so a non-UTF-8 log still yields entries), then
 /// split into lines. Every non-blank line becomes one entry: its text is the
 /// trimmed line stored verbatim (lossless), and its `logged_at` is the leading
-/// ISO 8601 timestamp — after any Markdown bullet/heading marker, and honoring
-/// the space-separated `YYYY-MM-DD HH:MM[:SS]` form via [`leading_timestamp`] —
+/// ISO 8601 timestamp - after any Markdown bullet/heading marker, and honoring
+/// the space-separated `YYYY-MM-DD HH:MM[:SS]` form via [`leading_timestamp`] -
 /// parsed with [`parse_iso8601_epoch`], or `None` when there is no parseable
 /// timestamp. Blank lines are skipped and do not consume an ordinal. This never
 /// fails.
@@ -263,8 +263,8 @@ fn insert_bundle_logs(bundle_id: i64, columns: &LogColumns) -> Result<(), Catalo
 /// Project a bundle's reserved-`log.md` activity logs into `pgokf.bundle_log`.
 ///
 /// Invoked inside the sync transaction. The bundle's existing log rows are
-/// cleared and the current `log.md` entries — one `(directory, entries)` pair
-/// per discovered log file — are re-inserted, so the projection tracks the
+/// cleared and the current `log.md` entries - one `(directory, entries)` pair
+/// per discovered log file - are re-inserted, so the projection tracks the
 /// files: an edited log updates, a removed log drops, and a bundle with no
 /// `log.md` ends with no rows. Both phases are set-based and chunked at
 /// [`BATCH_SIZE`].
@@ -527,7 +527,7 @@ mod tests {
     #[test]
     fn parse_log_reads_a_date_only_lead_as_midnight() {
         // Arrange: a leading date followed only by prose (no time). This still
-        // resolves to the date's midnight — the two-token join fails to parse and
+        // resolves to the date's midnight - the two-token join fails to parse and
         // falls back to the date token alone.
         let log = b"2026-08-01 shipped the release\n";
 

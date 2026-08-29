@@ -159,15 +159,15 @@ COMMENT ON FUNCTION pgokf.purge_retired(interval) IS
 COMMENT ON FUNCTION pgokf.list_bundles() IS
     'List every active (non-retired) registered bundle as pgokf.bundle_info, ordered by id. Reader-level. Retired bundles are excluded (reachable by id via bundle_info, and visible with their retired_at in catalog_stats); disabled-but-not-retired bundles are still listed.';
 
--- catalog_stat gains a retired_at attribute so retired bundles — hidden from
--- list_bundles — remain visible in catalog_stats. The catalog_stats function
+-- catalog_stat gains a retired_at attribute so retired bundles - hidden from
+-- list_bundles - remain visible in catalog_stats. The catalog_stats function
 -- itself is unchanged (it resolves the composite by name), so only the type is
 -- altered. This is a documented strict superset: existing rows gain a NULL
 -- retired_at, matching a fresh 0.1.8 catalog_stat.
 ALTER TYPE pgokf.catalog_stat ADD ATTRIBUTE retired_at timestamptz;
 
 COMMENT ON TYPE pgokf.catalog_stat IS
-    'Per-bundle operational statistics from pgokf.catalog_stats: identity and state, indexed-concept / link / resolved-link counts, sync recency (last_synced_at, sync_age), a 24-hour staleness flag, and retired_at (the soft-delete/retirement instant, NULL when active) so retired bundles — hidden from list_bundles — remain visible here.';
+    'Per-bundle operational statistics from pgokf.catalog_stats: identity and state, indexed-concept / link / resolved-link counts, sync recency (last_synced_at, sync_age), a 24-hour staleness flag, and retired_at (the soft-delete/retirement instant, NULL when active) so retired bundles - hidden from list_bundles - remain visible here.';
 
 -- ===========================================================================
 -- F3: the exfiltration / access audit (pgokf_private.access_log).
@@ -202,7 +202,7 @@ CREATE POLICY access_log_tenant_isolation ON pgokf_private.access_log
 REVOKE ALL ON pgokf_private.access_log FROM PUBLIC;
 
 COMMENT ON TABLE pgokf_private.access_log IS
-    'Append-only exfiltration/access audit: one row per content-exporting operation (export_parquet, export_sources, get_concept_source) — who read or exported what, and when. Written inside the operation''s own transaction under owner rights, then pruned to the sync_log_retention_days policy. Administrator-only; read through the admin-granted pgokf.list_access_log function.';
+    'Append-only exfiltration/access audit: one row per content-exporting operation (export_parquet, export_sources, get_concept_source) - who read or exported what, and when. Written inside the operation''s own transaction under owner rights, then pruned to the sync_log_retention_days policy. Administrator-only; read through the admin-granted pgokf.list_access_log function.';
 COMMENT ON COLUMN pgokf_private.access_log.id IS
     'Surrogate primary key (GENERATED ALWAYS AS IDENTITY); monotonic append order of the access trail.';
 COMMENT ON COLUMN pgokf_private.access_log.tenant_id IS

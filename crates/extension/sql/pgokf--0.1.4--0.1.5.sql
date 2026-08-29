@@ -3,9 +3,9 @@
 -- This upgrade carries the COMPLETE delta from a fresh 0.1.4 install up to a
 -- fresh 0.1.5 install, so that `ALTER EXTENSION pgokf UPDATE TO '0.1.5'` yields
 -- a catalog functionally identical to `CREATE EXTENSION pgokf` at 0.1.5. It is
--- one additive feature batch — an audit/sync log, a bundle enable/disable
+-- one additive feature batch - an audit/sync log, a bundle enable/disable
 -- lifecycle, opt-in change notification, an observability surface, and OKF
--- version-conformance policy — so every statement is additive and
+-- version-conformance policy - so every statement is additive and
 -- non-destructive: nothing is dropped or truncated, and existing rows keep
 -- their values (the two new config columns backfill the singleton row from
 -- their defaults). The whole file runs in a single transaction.

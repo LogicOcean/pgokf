@@ -3,7 +3,7 @@
 //!
 //! The four resource ceilings are registered with the `Sighup` context: they
 //! can only be set in `postgresql.conf` (applied at server start or on a
-//! configuration reload), and no session — not even a superuser's `SET` —
+//! configuration reload), and no session - not even a superuser's `SET` -
 //! can raise them, which keeps them trustworthy as hard safety limits. The
 //! `Postmaster` context would be stricter still, but `PostgreSQL` refuses to
 //! define custom `PGC_POSTMASTER` variables after startup ("cannot create
@@ -43,8 +43,8 @@ static LOG_LEVEL: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(Some(c"warning"));
 
 /// The per-session multi-tenant context. An empty string (the default) means the
-/// session declares no tenant and therefore sees every row — exactly the
-/// pre-multi-tenancy behavior — while a non-empty value scopes the session to
+/// session declares no tenant and therefore sees every row - exactly the
+/// pre-multi-tenancy behavior - while a non-empty value scopes the session to
 /// that tenant through the row-level-security policies on the projection tables.
 static TENANT: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(Some(c""));
 

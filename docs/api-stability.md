@@ -26,7 +26,7 @@ the database. Complete comment coverage is a release gate (see
 | Function | Role required | Purpose |
 | -------- | ------------- | ------- |
 | `pgokf.register_bundle(text, text, jsonb)` | `pgokf_writer` | Register and sync an OKF bundle root from a filesystem path |
-| `pgokf.register_bundle_content(text, text[], bytea[], jsonb)` | `pgokf_writer` | Register or resync a bundle from in-memory `(path, bytes)` content — the mountless object-store ingestion path (no filesystem, no network I/O in the extension) |
+| `pgokf.register_bundle_content(text, text[], bytea[], jsonb)` | `pgokf_writer` | Register or resync a bundle from in-memory `(path, bytes)` content - the mountless object-store ingestion path (no filesystem, no network I/O in the extension) |
 | `pgokf.refresh_bundle(bigint)` | `pgokf_writer` | Incrementally re-sync a filesystem-sourced bundle (content bundles are re-synced via `register_bundle_content`) |
 | `pgokf.unregister_bundle(bigint)` | `pgokf_writer` | Remove a bundle (rows cascade) |
 | `pgokf.set_bundle_enabled(bigint, boolean)` | `pgokf_writer` | Enable/disable a bundle (hides it from search and graph without deleting rows; reversible) |
@@ -95,7 +95,7 @@ Public, `SELECT`-able by `pgokf_reader`: `pgokf.bundles`, `pgokf.concepts`,
 These are a **read projection**. Callers may `SELECT` from them and depend on
 existing column names and types; the columns listed in
 [docs/sql-api.md](sql-api.md) are the contract. Direct `INSERT`/`UPDATE`/
-`DELETE` is not part of the API — mutation goes exclusively through the
+`DELETE` is not part of the API - mutation goes exclusively through the
 `SECURITY DEFINER` sync functions, and the tables carry no write grant to
 `pgokf_reader`. New columns *may* be added to these projection tables in a
 compatible release; code that pins to named columns (never `SELECT *` into a
@@ -103,8 +103,8 @@ fixed row type) is forward-compatible.
 
 `pgokf_private.config`, `pgokf_private.sync_log`, `pgokf_private.sync_log_change`,
 and `pgokf_private.access_log` are listed here only because they are catalog
-tables the documentation gate covers (the nine public tables plus these four
-private ones). They are **internal state, not API** — read the
+tables the documentation gate covers (the eleven public tables plus these four
+private ones). They are **internal state, not API** - read the
 sync history through `pgokf.list_sync_log` and configuration through
 `pgokf.get_config`; see [The private surface](#the-private-surface-not-api).
 
@@ -118,10 +118,12 @@ configuration and run the file-writing exports. Each tier inherits the one
 below (`pgokf_admin` → `pgokf_writer` → `pgokf_reader`). These are cluster-wide
 roles and survive `DROP EXTENSION`.
 
-### GUC names (5)
+### GUC names (6)
 
 `pgokf.max_file_bytes`, `pgokf.max_bundle_files`, `pgokf.max_frontmatter_bytes`,
-`pgokf.max_graph_hops`, `pgokf.log_level`. The **names** and their meaning are
+`pgokf.max_graph_hops`, `pgokf.log_level`, and `pgokf.tenant` (the `USERSET`
+multi-tenant policy selector; empty by default, which preserves the
+pre-multi-tenancy see-all behavior). The **names** and their meaning are
 stable; default values are tuning knobs and may be adjusted in a minor release
 when a change is safe and documented.
 
@@ -130,15 +132,15 @@ when a change is safe and documented.
 `pgokf` follows [Semantic Versioning 2.0.0](https://semver.org). Given
 `MAJOR.MINOR.PATCH`, and treating the stable surface above as the contract:
 
-- **MAJOR** — a breaking change to the stable surface: removing or renaming a
+- **MAJOR** - a breaking change to the stable surface: removing or renaming a
   function/type/table/role/GUC, changing a function's argument types or order,
   removing a default that callers relied on, changing a result-type column set,
   narrowing a privilege in a way that breaks existing callers, or changing
   documented behavior in an incompatible way.
-- **MINOR** — backward-compatible additions: a new function, a new composite
+- **MINOR** - backward-compatible additions: a new function, a new composite
   type, a new projection column, a new GUC, a new optional trailing argument
   with a default, or new forward-compatible behavior.
-- **PATCH** — backward-compatible fixes: bug fixes, performance improvements,
+- **PATCH** - backward-compatible fixes: bug fixes, performance improvements,
   documentation, and internal refactors that leave the stable surface
   unchanged.
 
@@ -151,7 +153,7 @@ change in the changelog, but until a `1.0.0` tag is cut a `0.MINOR` bump *may*
 carry a breaking change when it is called out explicitly in the changelog under
 a `Changed` or `Removed` heading. Reaching `1.0.0` is the point at which the
 MAJOR/MINOR/PATCH rules above become binding guarantees, and it is a deliberate
-human release decision — not an automated version bump.
+human release decision - not an automated version bump.
 
 ## Deprecation process
 
@@ -167,8 +169,8 @@ Nothing on the stable surface is removed abruptly. The process is:
    `Removed` in the changelog, with the migration path repeated there.
 
 Extension upgrade scripts (`pgokf--<from>--<to>.sql`) carry any data migration
-a deprecation requires and must remain forward-compatible — see the
-[upgrade mechanism](release-checklist.md) — so
+a deprecation requires and must remain forward-compatible - see the
+[upgrade mechanism](release-checklist.md) - so
 `ALTER EXTENSION pgokf UPDATE` never loses catalog data.
 
 ## The private surface (NOT API)
@@ -195,11 +197,11 @@ disappear in any release, and callers must not depend on them:
 
 Every public object must carry a `COMMENT ON`. This is enforced two ways:
 
-- **At build time** — `crates/extension/tests/api_stability.rs` reads the
+- **At build time** - `crates/extension/tests/api_stability.rs` reads the
   extension SQL source and fails `cargo test` if any enumerated function, type,
   table, or role lacks a `COMMENT ON`, and if the count of public functions
   drifts from the locked surface.
-- **At release time** — the [release checklist](release-checklist.md) runs an
+- **At release time** - the [release checklist](release-checklist.md) runs an
   `obj_description` / `shobj_description` coverage query against a freshly
   installed extension and blocks the release if any public object is
   uncommented.

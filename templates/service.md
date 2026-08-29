@@ -23,7 +23,7 @@ verified:
   - by: human:platform-lead
     at: 2026-07-16T09:00:00Z
 stale_after: 2027-01-15T00:00:00Z
-# sources: the PROVENANCE materials this concept was derived from — one entry
+# sources: the PROVENANCE materials this concept was derived from - one entry
 # per input (-> one pgokf.concept_provenance_source row each). `resource` is
 # the only per-entry required field; id/title/author/usage_count/last_modified
 # are optional.

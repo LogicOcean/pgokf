@@ -3,9 +3,9 @@
 -- This upgrade carries the COMPLETE delta from a fresh 0.1.5 install up to a
 -- fresh 0.1.6 install, so that `ALTER EXTENSION pgokf UPDATE TO '0.1.6'` yields a
 -- catalog functionally identical to `CREATE EXTENSION pgokf` at 0.1.6. It is one
--- additive search-enhancement batch — structured filters on concept_search, a
+-- additive search-enhancement batch - structured filters on concept_search, a
 -- content more-like-this (find_similar), and an optional pgvector semantic /
--- hybrid surface — so every statement is additive and non-destructive with the
+-- hybrid surface - so every statement is additive and non-destructive with the
 -- single, carefully-justified exception in Step 3 (see there): nothing is
 -- truncated, no row is deleted, and existing data keeps its values (the new
 -- embedding_dim config column backfills the singleton row from its default). The
@@ -69,7 +69,7 @@ CREATE TABLE pgokf.concept_embedding (
 );
 
 COMMENT ON TABLE pgokf.concept_embedding IS
-    'Opt-in per-concept embedding vectors, streamed in by a companion embedder via pgokf.set_concept_embedding (the extension never computes embeddings or performs network I/O). The vector is stored as the builtin real[] — NOT a pgvector ''vector'' column — so CREATE EXTENSION pgokf succeeds without pgvector installed; it is cast to vector(dim) at query time and in the HNSW index only when pgvector is present. Rows cascade from pgokf.concepts, so removing a concept or unregistering a bundle drops its embedding automatically.';
+    'Opt-in per-concept embedding vectors, streamed in by a companion embedder via pgokf.set_concept_embedding (the extension never computes embeddings or performs network I/O). The vector is stored as the builtin real[] - NOT a pgvector ''vector'' column - so CREATE EXTENSION pgokf succeeds without pgvector installed; it is cast to vector(dim) at query time and in the HNSW index only when pgvector is present. Rows cascade from pgokf.concepts, so removing a concept or unregistering a bundle drops its embedding automatically.';
 COMMENT ON COLUMN pgokf.concept_embedding.embedding IS
     'The caller-computed embedding as real[]. Its length must equal the durable embedding_dim configuration key at ingest time (enforced by pgokf.set_concept_embedding); dim records that length redundantly for a size-only read.';
 COMMENT ON COLUMN pgokf.concept_embedding.dim IS
@@ -93,7 +93,7 @@ GRANT SELECT ON pgokf.concept_embedding TO pgokf_reader;
 -- install.
 --
 -- Therefore, to make an UPGRADED catalog byte-identical to a FRESH 0.1.6 install
--- — the release invariant this whole file exists to uphold — the superseded
+-- - the release invariant this whole file exists to uphold - the superseded
 -- 0.1.5 three-argument overload MUST be removed here. Leaving it would (a) make
 -- pg_proc carry two concept_search overloads where a fresh install carries one,
 -- and (b) make an unqualified call such as concept_search('q') ambiguous between
@@ -102,7 +102,7 @@ GRANT SELECT ON pgokf.concept_embedding TO pgokf_reader;
 -- is touched; and it is replaced in the same transaction by a STRICT SUPERSET
 -- that resolves every historical one-, two-, and three-argument call through its
 -- defaults. This is the single, deliberate exception to the file's otherwise
--- purely-additive rule, and it is required for correctness — verified by
+-- purely-additive rule, and it is required for correctness - verified by
 -- comparing the concept_search overload set of an upgraded vs. a fresh catalog.
 DROP FUNCTION IF EXISTS pgokf.concept_search(text, bigint, integer);
 

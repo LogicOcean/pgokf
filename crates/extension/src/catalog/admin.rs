@@ -13,7 +13,7 @@
 //!   created in its own `bundle_info_type` SQL block ordered after
 //!   `catalog_tables`. The core deliberately does not create it because
 //!   neither sync nor search needs it;
-//! - `pgokf.unregister_bundle(bundle_id)` — writer-tier
+//! - `pgokf.unregister_bundle(bundle_id)` - writer-tier
 //!   ([`crate::security::Operation::Ingest`]). It serializes on the bundle
 //!   advisory lock ([`crate::catalog::sync::advisory_lock_key`]) keyed on the
 //!   **stored** canonical path, deletes the `pgokf.bundles` row (concepts,
@@ -23,7 +23,7 @@
 //!   because write access to the base tables stays with the extension owner;
 //!   `EXECUTE` is revoked from `PUBLIC` and granted to `pgokf_writer` (which
 //!   `pgokf_admin` inherits);
-//! - `pgokf.list_bundles()` / `pgokf.bundle_info(bundle_id)` — reader-level
+//! - `pgokf.list_bundles()` / `pgokf.bundle_info(bundle_id)` - reader-level
 //!   ([`crate::security::Operation::Search`]), `STABLE` projections over
 //!   `pgokf.bundles`. Like [`crate::catalog::search`], they run with invoker
 //!   rights over the `SELECT` grant `pgokf_reader` already holds; `EXECUTE`
@@ -118,7 +118,7 @@ fn read_bundle_info(row: &SpiHeapTupleData<'_>) -> Result<BundleInfo, CatalogErr
 /// # Errors
 ///
 /// Returns an [`crate::errors::ErrorKind::Internal`] error when the composite
-/// type cannot be resolved or an attribute cannot be set — both indicate a
+/// type cannot be resolved or an attribute cannot be set - both indicate a
 /// corrupted installation, since `bundle_info_type` defines the type.
 fn bundle_info_tuple(
     info: BundleInfo,
@@ -247,7 +247,7 @@ fn unregister_bundle_impl(bundle_id: i64) -> Result<BundleInfo, CatalogError> {
 
     // Audit trail: record the unregister in the same transaction as the delete,
     // so a logged row always means the bundle was actually removed. The counts
-    // and sync_hash are NULL — an unregister has no diff. sync_log.bundle_id is
+    // and sync_hash are NULL - an unregister has no diff. sync_log.bundle_id is
     // intentionally FK-free, so the row survives the bundle row's deletion.
     let retention_days = crate::catalog::config::sync_log_retention_days()?;
     crate::catalog::audit::record(
@@ -401,7 +401,7 @@ fn select_purgeable_bundles(older_than: Interval) -> Result<Vec<(i64, String)>, 
 /// and this delete: the candidate list is taken without the per-bundle advisory
 /// lock, so a concurrent `unretire_bundle` (which takes that same lock) can
 /// commit in between and restore a bundle. Because the re-check runs under the
-/// now-held lock — after that `unretire` has committed and released it — a
+/// now-held lock - after that `unretire` has committed and released it - a
 /// bundle that is no longer retired (or was re-retired inside the window) simply
 /// fails the `WHERE` and is skipped, never hard-deleted. `older_than` is bound
 /// as a parameter; the same transaction-stable `now()` the snapshot used is
@@ -430,8 +430,8 @@ fn delete_bundle_row_if_eligible(
 /// returning the count purged.
 ///
 /// Each purged bundle is serialized on its own advisory lock and deleted exactly
-/// like `unregister_bundle` — the `pgokf.concepts` cascade removes concepts,
-/// metadata, and every feature projection — and an `unregister` audit row is
+/// like `unregister_bundle` - the `pgokf.concepts` cascade removes concepts,
+/// metadata, and every feature projection - and an `unregister` audit row is
 /// written per purged bundle (its counts and hash `NULL`, like a real
 /// unregister). Only bundles whose `retired_at` predates `now() - older_than` are
 /// eligible, so an in-window retired bundle stays recoverable; `unregister_bundle`
@@ -559,7 +559,7 @@ COMMENT ON TYPE pgokf.bundle_info IS
     /// Requires membership in `pgokf_writer` (an admin qualifies by
     /// inheritance). Sets `retired_at = now()`, which excludes the bundle from
     /// `concept_search`, `concept_neighbors`, and the default `list_bundles`
-    /// without deleting any rows — a reversible undo window for the hard
+    /// without deleting any rows - a reversible undo window for the hard
     /// unregister cascade. Idempotent: re-retiring keeps the original
     /// `retired_at`. Does not alter the independent `enabled` flag. Serializes on
     /// the bundle advisory lock. Raises SQLSTATE `22023` when `bundle_id` is
@@ -588,8 +588,8 @@ COMMENT ON TYPE pgokf.bundle_info IS
     ///
     /// Requires membership in `pgokf_admin`. Each eligible bundle (its
     /// `retired_at` older than `now() - older_than`) is deleted like
-    /// `unregister_bundle` — concepts, metadata, and every feature projection
-    /// cascade — and an `unregister` audit row is written per purged bundle. A
+    /// `unregister_bundle` - concepts, metadata, and every feature projection
+    /// cascade - and an `unregister` audit row is written per purged bundle. A
     /// retired bundle still inside the window is left recoverable via
     /// `unretire_bundle`.
     #[pg_extern(requires = ["bundle_info_type"])]

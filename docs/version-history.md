@@ -1,7 +1,7 @@
 # Version History
 
 `pgokf` can keep an **append-only version history** of every concept and answer
-point-in-time questions against it — *"what did this runbook say last Tuesday?"*.
+point-in-time questions against it - *"what did this runbook say last Tuesday?"*.
 The feature is **opt-in and off by default**, so an existing install (and any
 bundle synced with history disabled) behaves exactly as before with **zero extra
 storage**.
@@ -19,9 +19,10 @@ SELECT pgokf.set_config('track_history', 'true'::jsonb);
 SELECT pgokf.set_config('track_history', 'false'::jsonb);
 ```
 
-While `track_history` is off, no `pgokf.concept_history` row is ever written, the
-reader functions return no rows, and sync behaves byte-for-byte as it did before
-the feature existed. Enabling it is a **storage/retention tradeoff** — see
+While `track_history` is off, no `pgokf.concept_history` row is ever written and
+sync behaves byte-for-byte as it did before the feature existed; on an install
+where it has never been enabled, the reader functions therefore return no rows.
+Enabling it is a **storage/retention tradeoff**; see
 [Retention](#retention).
 
 ## The temporal model (SCD Type-2)
@@ -44,7 +45,7 @@ a single captured instant:
 | **removes** a concept | closes the open version (`valid_to = now`) and appends a **zero-width removal tombstone** (`valid_from = valid_to = now`), `change_kind = 'removed'`. |
 
 Because the sync engine re-parses only content-changed files, an `updated` row
-always corresponds to a real change — an unchanged file records nothing. A
+always corresponds to a real change - an unchanged file records nothing. A
 removal tombstone carries a `NULL` core snapshot: the last real content stays in
 the closed prior version, and the tombstone is purely the deletion marker.
 
@@ -68,7 +69,7 @@ FROM pgokf.concept_history(1, 'runbooks/database-failover');
 ```
 
 `pgokf.concept_as_of(bundle_id, concept_id, as_of)` returns the single version
-valid at an instant — the point-in-time answer:
+valid at an instant - the point-in-time answer:
 
 ```sql
 SELECT version, title, description
@@ -78,12 +79,12 @@ FROM pgokf.concept_as_of(1, 'runbooks/database-failover',
 
 `concept_as_of` covers `as_of` when `valid_from <= as_of AND (valid_to IS NULL OR
 as_of < valid_to)`. Because a removal tombstone is zero-width, an as-of at or
-after the removal — and any instant before the concept first existed — returns
+after the removal - and any instant before the concept first existed - returns
 **zero rows**.
 
 Both functions are reader-level (`pgokf_reader`), `STABLE`, and run with invoker
 rights, so a session's own `pgokf.tenant` [row-level
-security](multi-tenancy.md) applies — a scoped session sees only its own history.
+security](multi-tenancy.md) applies - a scoped session sees only its own history.
 
 ## Retention
 
@@ -102,12 +103,12 @@ SELECT pgokf.set_config('history_retention_days', '0'::jsonb);   -- keep forever
 ## Storage notes
 
 - History lives in **`pgokf.concept_history`**, cascading from `pgokf.bundles`
-  (not `pgokf.concepts`) — a removed concept keeps its history until the bundle is
+  (not `pgokf.concepts`) - a removed concept keeps its history until the bundle is
   unregistered.
 - Each version snapshots the concept core (`type`, `title`, `description`, `tags`,
   `resource`, `body_text`, `file_hash`). Enable history only where the audit trail
   is worth the storage, and use `history_retention_days` to cap it.
 
-See [Configuration](configuration.md#version-history--track_history--history_retention_days)
+See [Configuration](configuration.md#version-history-track_history-history_retention_days)
 for the keys and [SQL API](sql-api.md#version-history-opt-in) for the full
 function and table reference.

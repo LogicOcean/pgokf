@@ -9,7 +9,7 @@
 //! - **Small self-contained tier** (`store_source = true`): the sync engine
 //!   retains the source bytes it already read to parse each concept and this
 //!   seam persists them into `pgokf.concept_source`, so the *original* files
-//!   live inside Postgres. Such an install needs no external object store — the
+//!   live inside Postgres. Such an install needs no external object store - the
 //!   catalog is the source of truth and the bundle can be reconstructed on disk
 //!   byte-for-byte with [`export_sources`].
 //! - **Enterprise data-lake tier** (`store_source = false`, the default): the
@@ -20,7 +20,7 @@
 //!
 //! # Seam contract
 //!
-//! Everything lives in **this file only** — the sync engine already calls
+//! Everything lives in **this file only** - the sync engine already calls
 //! [`project`] inside the advisory-locked atomic transaction (after the concept
 //! rows are written), and must not be edited. Removals need no per-source seam:
 //! the `(bundle_id, concept_id)` foreign key cascades from `pgokf.concepts`
@@ -215,8 +215,8 @@ fn concept_exists(bundle_id: i64, concept_id: &str) -> Result<bool, CatalogError
 /// Read the stored source bytes for one concept, distinguishing an absent
 /// concept from a concept whose source was never stored.
 ///
-/// `get_concept_source` runs `SECURITY DEFINER` — it must append to the
-/// administrator-only `pgokf_private.access_log` — so it bypasses row-level
+/// `get_concept_source` runs `SECURITY DEFINER` - it must append to the
+/// administrator-only `pgokf_private.access_log` - so it bypasses row-level
 /// security and applies the same opt-in tenant filter explicitly to the source
 /// read and the concept-existence probe. Every successful read appends one
 /// `get_concept_source` exfiltration-audit row.
@@ -376,7 +376,7 @@ fn read_source_batch(bundle_id: i64, after: Option<&str>) -> Result<Vec<SourceRo
 /// at the target refuses the write rather than redirecting it. Verification
 /// runs on the exact buffer that is written (`write_all` writes it byte for
 /// byte), so a mismatch means the stored bytes disagree with the concept's
-/// recorded hash — a corruption the caller must not silently reconstruct.
+/// recorded hash - a corruption the caller must not silently reconstruct.
 fn reconstruct_file(dir: &Path, row: &SourceRow) -> Result<u64, CatalogError> {
     ensure_bundle_relative(&row.path)?;
 
@@ -405,7 +405,7 @@ fn reconstruct_file(dir: &Path, row: &SourceRow) -> Result<u64, CatalogError> {
         })?;
         // `create_dir_all` follows a pre-existing directory symlink on any
         // intermediate component, and the `O_NOFOLLOW` open below only guards
-        // the final path component — so a planted symlink at e.g. `dir/nested`
+        // the final path component - so a planted symlink at e.g. `dir/nested`
         // could otherwise redirect the write outside the validated destination.
         // Re-resolve the materialized parent with symlink-escape-safe
         // containment against `dir` and refuse if it escapes.
@@ -546,7 +546,7 @@ mod pgokf {
     ///
     /// Reader-level: available to `pgokf_reader` and `pgokf_admin`. Returns the
     /// exact bytes stored when the bundle was synced with `store_source`
-    /// enabled — the same disclosure level as the concept's `body_text`, and
+    /// enabled - the same disclosure level as the concept's `body_text`, and
     /// delivered to the client with no filesystem write. Raises SQLSTATE
     /// `22023` when the concept exists but no source was stored (the bundle was
     /// synced with `store_source` disabled) or when no such concept exists.

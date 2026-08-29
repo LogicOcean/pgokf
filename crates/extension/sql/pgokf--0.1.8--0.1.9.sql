@@ -7,7 +7,7 @@
 --
 -- 0.1.9 is one additive search/scheduling feature batch:
 --   F1 keyset / cursor pagination on concept_search (a new optional trailing
---      after_cursor jsonb argument; the ranked total order is now stable —
+--      after_cursor jsonb argument; the ranked total order is now stable -
 --      rank DESC, bundle_id ASC, concept_id ASC);
 --   F2 faceted result counts (pgokf.search_facet composite, pgokf.search_facets);
 --   F3 search-index health / coverage (pgokf.search_index_status);
@@ -39,7 +39,7 @@
 -- new one on a fresh install.
 --
 -- Therefore, to make an UPGRADED catalog byte-identical to a FRESH 0.1.9 install
--- — the release invariant this whole file upholds — the superseded 0.1.8
+-- - the release invariant this whole file upholds - the superseded 0.1.8
 -- seven-argument overload MUST be removed here. Leaving it would (a) make pg_proc
 -- carry two concept_search overloads where a fresh install carries one, and
 -- (b) make a call such as concept_search('q', NULL, 20, NULL, NULL, NULL, NULL)
@@ -50,7 +50,7 @@
 -- seven-argument call through its defaults (after_cursor defaults to NULL = the
 -- first page, the pre-0.1.9 behavior). This is the single, deliberate exception
 -- to the file's otherwise purely-additive rule, and it is required for
--- correctness — verified by comparing the concept_search overload set of an
+-- correctness - verified by comparing the concept_search overload set of an
 -- upgraded vs. a fresh catalog. It mirrors the 0.1.5->0.1.6 overload replacement.
 DROP FUNCTION IF EXISTS pgokf.concept_search(text, bigint, integer, text, text[], text, text);
 

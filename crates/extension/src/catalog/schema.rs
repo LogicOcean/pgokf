@@ -92,11 +92,11 @@ CREATE INDEX concepts_tenant_id_idx ON pgokf.concepts (tenant_id);
 
 -- Multi-tenant isolation. Every projection table carries a denormalized
 -- tenant_id and enables row-level security with the identical opt-in-by-usage
--- predicate: a session that has NOT set pgokf.tenant (NULL or empty — every
+-- predicate: a session that has NOT set pgokf.tenant (NULL or empty - every
 -- pre-multi-tenancy install) sees ALL rows unchanged, while a session that HAS
 -- set it sees only that tenant's rows. RLS is NOT forced, so the SECURITY DEFINER
 -- write/admin functions (which run as the table owner) bypass it and may stamp
--- and read across tenants — correct because each operates strictly within one
+-- and read across tenants - correct because each operates strictly within one
 -- single-tenant bundle. The matching WITH CHECK constrains any future
 -- invoker-side write to the active tenant.
 ALTER TABLE pgokf.bundles ENABLE ROW LEVEL SECURITY;
@@ -167,7 +167,7 @@ COMMENT ON COLUMN pgokf.bundles.sync_hash IS
 COMMENT ON COLUMN pgokf.bundles.retired_at IS
     'When the bundle was retired (soft-deleted) via pgokf.retire_bundle, or NULL when active. A bundle is ''active'' only when enabled AND retired_at IS NULL: a retired bundle is excluded from concept_search, concept_neighbors, and the default list_bundles listing without deleting any rows, so pgokf.unretire_bundle fully restores it. Retirement is an undo window for the hard unregister cascade; pgokf.purge_retired hard-deletes bundles retired longer than a chosen interval. Set once and preserved across re-retirement (the original instant governs the purge window).';
 COMMENT ON COLUMN pgokf.bundles.source_type IS
-    'How the bundle bytes reach the catalog: ''filesystem'' (registered from a canonical on-disk root via pgokf.register_bundle and refreshed from disk via pgokf.refresh_bundle) or ''content'' (streamed in memory via pgokf.register_bundle_content — a mountless object-store companion or any client — where path is the synthetic key ''content:''||name and refresh_bundle is rejected).';
+    'How the bundle bytes reach the catalog: ''filesystem'' (registered from a canonical on-disk root via pgokf.register_bundle and refreshed from disk via pgokf.refresh_bundle) or ''content'' (streamed in memory via pgokf.register_bundle_content - a mountless object-store companion or any client - where path is the synthetic key ''content:''||name and refresh_bundle is rejected).';
 COMMENT ON COLUMN pgokf.bundles.tenant_id IS
     'Multi-tenant owner of this bundle, stamped at registration from pgokf.tenant (effective_tenant(); ''default'' for a session that set no tenant). A bundle is single-tenant and its tenant never changes on refresh/unregister/enable; combined with path it forms the per-tenant registration key UNIQUE (tenant_id, path), so two tenants may register the same filesystem or content:<name> path. The row-level-security policy shows it only to a matching or unset pgokf.tenant.';
 COMMENT ON COLUMN pgokf.concepts.tenant_id IS
@@ -182,7 +182,7 @@ GRANT SELECT ON pgokf.bundles, pgokf.concepts, pgokf.concept_metadata TO pgokf_r
 );
 
 // The multi-tenant write helper. `effective_tenant()` resolves the tenant a
-// write is stamped with from the per-session `pgokf.tenant` GUC — an unset or
+// write is stamped with from the per-session `pgokf.tenant` GUC - an unset or
 // empty value maps to the literal 'default', matching the column default and the
 // pre-multi-tenancy behavior. It lives in the administrator-only `pgokf_private`
 // schema so it never widens the public `pgokf` API surface, and is called only

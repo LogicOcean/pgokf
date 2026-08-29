@@ -10,7 +10,7 @@
 --      columns (generated_at, status, stale_after, usage_window_from/to, and the
 --      derived trust_tier) alongside the retained generated_by and details;
 --   2. adds pgokf.concept_verification (the OKF verified[] event list);
---   3. adds pgokf.concept_provenance_source (the OKF sources[] materials —
+--   3. adds pgokf.concept_provenance_source (the OKF sources[] materials -
 --      distinct from pgokf.concept_source, which holds raw concept bytes);
 --   4. begins populating pgokf.bundles.okf_version from a bundle-root index.md.
 --
@@ -107,7 +107,7 @@ CREATE TABLE IF NOT EXISTS pgokf.concept_provenance_source (
 );
 
 COMMENT ON TABLE pgokf.concept_provenance_source IS
-    'One row per OKF v0.2 sources[] provenance material for a concept — the inputs the content was derived from. Distinct from pgokf.concept_source, which holds the concept''s own raw source bytes. Cascades from pgokf.concepts.';
+    'One row per OKF v0.2 sources[] provenance material for a concept - the inputs the content was derived from. Distinct from pgokf.concept_source, which holds the concept''s own raw source bytes. Cascades from pgokf.concepts.';
 COMMENT ON COLUMN pgokf.concept_provenance_source.ordinal IS
     'Zero-based position of the entry in the concept''s sources[] list; forms the primary key with (bundle_id, concept_id).';
 COMMENT ON COLUMN pgokf.concept_provenance_source.source_id IS

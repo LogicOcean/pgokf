@@ -3,18 +3,18 @@
 //!
 //! Every reader-level projection in this crate reshapes an SPI result row into
 //! a typed struct, reading one nullable or `NOT NULL` column at a time. Each
-//! such read is the same two-step shape — `row.get::<T>(ordinal)` maps a read
+//! such read is the same two-step shape - `row.get::<T>(ordinal)` maps a read
 //! failure to an internal error, and a `NOT NULL` column additionally rejects a
-//! surprise SQL `NULL` — and repeating it inline per column is what pushes the
+//! surprise SQL `NULL` - and repeating it inline per column is what pushes the
 //! row readers ([`crate::catalog::stats`], [`crate::catalog::audit`],
 //! [`crate::catalog::admin`], [`crate::catalog::neighbors`],
 //! [`crate::catalog::source`], [`crate::catalog::export`], and the config sync
 //! defaults) into high branch counts.
 //!
 //! This module is the single, tested home for that pattern. [`column`] and
-//! [`required_column`] are the primitives — they take the exact diagnostic
+//! [`required_column`] are the primitives - they take the exact diagnostic
 //! strings a caller wants, so every existing error message is preserved
-//! verbatim — and [`RowReader`] is a thin convenience over them for the common
+//! verbatim - and [`RowReader`] is a thin convenience over them for the common
 //! case where a whole struct shares one read context and one composite-type
 //! name.
 
@@ -29,7 +29,7 @@ use crate::errors::CatalogError;
 ///
 /// A read failure becomes an internal [`CatalogError`] whose message is
 /// `"{read_context}: {error}"`, matching the per-reader `spi_error` helpers this
-/// replaces. A SQL `NULL` is returned as `None` — use [`required_column`] for a
+/// replaces. A SQL `NULL` is returned as `None` - use [`required_column`] for a
 /// `NOT NULL` column that must reject one.
 ///
 /// # Errors

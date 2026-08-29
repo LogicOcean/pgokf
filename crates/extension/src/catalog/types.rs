@@ -24,8 +24,8 @@ pub const CONCEPT_SEARCH_RESULT_TYPE: &str = "pgokf.concept_search_result";
 /// One parsed concept staged for (or just written to) the catalog, as handed
 /// to the projection seam.
 ///
-/// Feature modules receive the complete [`ParsedConcept`] — including its
-/// extracted [`okf_parser::Link`]s and producer `metadata` — together with
+/// Feature modules receive the complete [`ParsedConcept`] - including its
+/// extracted [`okf_parser::Link`]s and producer `metadata` - together with
 /// the content identity the sync engine recorded, so they can project their
 /// own tables without re-reading or re-parsing bundle files.
 #[derive(Debug, Clone, PartialEq)]
@@ -45,7 +45,7 @@ pub struct StagedConcept {
     ///
     /// The bytes are the exact buffer the sync engine already read from disk to
     /// parse the concept, so enabling `store_source` adds no extra filesystem
-    /// I/O — only the retention of a buffer that would otherwise be dropped.
+    /// I/O - only the retention of a buffer that would otherwise be dropped.
     pub raw_content: Option<Vec<u8>>,
 }
 
@@ -91,7 +91,7 @@ fn composite_error(type_name: &str, error: impl std::fmt::Display) -> CatalogErr
 /// # Errors
 ///
 /// Returns an [`crate::errors::ErrorKind::Internal`] error when the composite
-/// type cannot be resolved or an attribute cannot be set — both indicate a
+/// type cannot be resolved or an attribute cannot be set - both indicate a
 /// corrupted installation, since `catalog_tables` defines the type.
 pub fn bundle_sync_result(
     bundle_id: i64,

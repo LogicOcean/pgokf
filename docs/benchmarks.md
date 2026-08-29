@@ -3,13 +3,16 @@
 This document reports **real, measured** numbers for three ways of holding an
 Open Knowledge Format (OKF) catalog on one host:
 
-- **YAML** — the raw Markdown-with-frontmatter bundle on disk, parsed on demand
+- **YAML** - the raw Markdown-with-frontmatter bundle on disk, parsed on demand
   through `okf_parser::parse_concept` (the same entry point the extension uses).
-- **PostgreSQL** — the `pgokf` extension catalog: `concepts`, `links`,
+- **PostgreSQL** - the `pgokf` extension catalog: `concepts`, `links`,
   `concept_metadata`, and `concept_provenance` with their btree/GIN indexes and
-  the weighted `body_tsv` full-text column.
-- **Parquet** — the columnar snapshot produced by `pgokf.export_parquet`
-  (zstd-compressed, one file per catalog table).
+  the weighted `body_tsv` full-text column. The search leg measures the
+  **default native FTS backend**; the optional BM25 (`pg_search`) and pgvector
+  semantic/hybrid backends are not exercised here.
+- **Parquet** - the columnar snapshot produced by `pgokf.export_parquet`
+  (zstd-compressed, one file per exported projection table: `concepts`,
+  `links`, `concept_metadata`, `concept_provenance`).
 
 Every number below was produced by `scripts/bench/run_bench.sh` on the host
 named in the results. Nothing here is estimated. Where a leg could not be
@@ -33,7 +36,7 @@ Captured by the harness at run time:
 Reader availability: `pyarrow` and `duckdb` are **not installed** on this host
 (neither the Python modules nor a `duckdb` CLI). The Parquet read leg therefore
 uses a tiny throwaway Rust reader built against the same `parquet`/`arrow`
-59.2.0 crates the extension depends on — not an estimate, a real decode of the
+59.2.0 crates the extension depends on - not an estimate, a real decode of the
 exported file. See "Parquet read leg" below.
 
 ## Dataset
@@ -119,7 +122,7 @@ Single coherent run on the host above:
 
 ```
 ========================================================================
- OKF catalog format benchmark — REAL measured results
+ OKF catalog format benchmark - REAL measured results
 ========================================================================
  host        : 72 cores, 251Gi RAM
  postgres    : PostgreSQL 18.6 (Ubuntu 18.6-1.pgdg24.04+2)
@@ -174,8 +177,8 @@ Parquet file breakdown:
 
 The PG catalog is the largest because it carries what makes it queryable: the
 weighted `tsvector` search column, the GIN index over it, the GIN index over
-`tags`, and btree indexes on `type`/`path`. Parquet drops all of that — it is a
-columnar *data* snapshot, not a query engine — which is why zstd shrinks it to
+`tags`, and btree indexes on `type`/`path`. Parquet drops all of that - it is a
+columnar *data* snapshot, not a query engine - which is why zstd shrinks it to
 ~16% of the raw YAML and ~7% of the PG catalog.
 
 ### Operations
@@ -184,9 +187,9 @@ columnar *data* snapshot, not a query engine — which is why zstd shrinks it to
 | --- | ---: | ---: | ---: |
 | Build / load the store | 611 ms (parse only) | 20,849 ms (parse + tsvector + indexes) | 439 ms (export from PG) |
 | Filter by type (1,500/12,000) | ~611 ms† | **2.77 ms** (btree) | 55.9 ms (full decode + scan) |
-| Filter by tag (4,000/12,000) | ~611 ms† | 14.6 ms (GIN) | — |
+| Filter by tag (4,000/12,000) | ~611 ms† | 14.6 ms (GIN) | - |
 | Full-text search | not available‡ | 343 ms (rank + snippet, top 500) | not available‡ |
-| Graph traversal (3 hops) | not available‡ | 5.35 ms (recursive CTE) | — |
+| Graph traversal (3 hops) | not available‡ | 5.35 ms (recursive CTE) | - |
 
 † YAML has no index: answering *any* single filter means parsing the whole
 bundle first, i.e. the ~611 ms parse-all cost, before you can filter at all.
@@ -205,7 +208,7 @@ the same `parquet`/`arrow` 59.2.0 crates the extension already uses, opens
 - rows scanned: 12,000; rows matched: 1,500 (matches the PG btree count);
 - elapsed: **55.90 ms**; reader peak RSS: 17.5 MiB.
 
-Because the export is not clustered by `type`, there is no row-group skipping —
+Because the export is not clustered by `type`, there is no row-group skipping -
 this is a full-file decompress-and-scan, which is the honest cost of an ad-hoc
 filter over a columnar snapshot with no secondary index.
 
@@ -215,7 +218,7 @@ filter over a columnar snapshot with no secondary index.
   smaller than the raw YAML and ~15× smaller than the PG catalog, and a filtered
   full-file scan (55.9 ms) is ~11× faster than re-parsing the YAML bundle
   (611 ms) with no database process at all. It is the right format for archival
-  snapshots, data interchange, and column-oriented analytics — but it has no
+  snapshots, data interchange, and column-oriented analytics - but it has no
   indexes, no full-text search, and no graph traversal.
 
 - **PostgreSQL wins decisively for repeated, selective, and relational
@@ -226,11 +229,11 @@ filter over a columnar snapshot with no secondary index.
   Parquet without reimplementing an index. The cost is disk (68 MB, 2.4× the
   source) and that up-front load. The FTS figure is heavier than the raw filters
   because `concept_search` also computes `ts_rank_cd` **and** a `ts_headline`
-  snippet over title+description+body for the top 500 hits — snippet generation,
+  snippet over title+description+body for the top 500 hits - snippet generation,
   not the index probe, dominates that number.
 
 - **YAML wins as the source of truth.** It is human-editable, diffable,
-  reviewable, and needs no engine — and `okf_parser` chews through all 12,000
+  reviewable, and needs no engine - and `okf_parser` chews through all 12,000
   files in ~0.6 s at ~4.8 MiB peak RSS with zero errors. But it is write-optimized
   for humans, not read-optimized for queries: every question requires a full
   re-parse, and it offers no search or graph primitives. It is the input the

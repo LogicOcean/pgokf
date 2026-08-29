@@ -352,7 +352,7 @@ fn empty_inline_link_destination_produces_no_edge() {
 #[test]
 fn fragment_only_link_self_references_but_named_target_does_not() {
     // Regression (F12): a fragment-only `[label](#frag)` resolves to the source
-    // concept, while `[label](other.md)` resolves to a sibling — neither path
+    // concept, while `[label](other.md)` resolves to a sibling - neither path
     // should collapse the other's behavior.
     let source = b"---\ntype: Note\ntitle: Links\n---\n[here](#frag) and [there](other.md)";
 

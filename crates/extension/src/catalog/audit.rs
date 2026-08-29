@@ -12,7 +12,7 @@
 //!   aggregate `sync_hash` of the synced snapshot;
 //! - one `unregister` row is written by
 //!   [`crate::catalog::admin`] when a bundle is removed, capturing the bundle's
-//!   path (the counts and hash are `NULL` — an unregister has no diff).
+//!   path (the counts and hash are `NULL` - an unregister has no diff).
 //!
 //! # v1 transactional semantics
 //!
@@ -21,7 +21,7 @@
 //! with the operation: **a logged row always means the operation committed**,
 //! and a sync that fails and rolls back leaves no row behind. There is
 //! deliberately no autonomous-transaction "attempted but failed" logging in
-//! this version — the log is a durable record of what happened, not of what was
+//! this version - the log is a durable record of what happened, not of what was
 //! tried.
 //!
 //! # Retention
@@ -468,7 +468,7 @@ fn list_sync_changes_impl(
 ) -> Result<Vec<SyncChangeEntry>, CatalogError> {
     // list_sync_changes is SECURITY DEFINER and so bypasses row-level security;
     // it therefore applies the same opt-in tenant filter explicitly, exactly as
-    // list_sync_log does — a session that set pgokf.tenant sees only its own
+    // list_sync_log does - a session that set pgokf.tenant sees only its own
     // change rows while an unset session sees every row (backward compatible).
     // Ordered by change_kind then concept_id for a stable listing.
     const QUERY: &str = "

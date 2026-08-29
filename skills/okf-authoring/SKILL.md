@@ -1,6 +1,6 @@
 ---
 name: okf-authoring
-description: Use when writing or editing Open Knowledge Format (OKF) concept .md files that must register cleanly into the pgokf catalog — getting the YAML frontmatter contract right (type/title/description/tags/resource + provenance keys), understanding the path-derived concept ID, building the link graph with Markdown links, and avoiding reserved filenames.
+description: Use when writing or editing Open Knowledge Format (OKF) concept .md files that must register cleanly into the pgokf catalog - getting the YAML frontmatter contract right (type/title/description/tags/resource + provenance keys), understanding the path-derived concept ID, building the link graph with Markdown links, and avoiding reserved filenames.
 ---
 
 # Authoring OKF concepts
@@ -34,7 +34,7 @@ Rules the parser enforces:
   UTF-8 BOM is tolerated). A missing opening delimiter is an error.
 - The frontmatter block ends at the **first** line whose entire content is `---`.
   Because the split is line-based, never put a bare `---` on its own line inside
-  a multiline quoted value — it closes the block early. Use a single line or a
+  a multiline quoted value - it closes the block early. Use a single line or a
   block scalar (`|` / `>`) instead.
 - The body is everything after the closing `---`.
 
@@ -50,7 +50,7 @@ Modeled fields (typed columns in `pgokf.concepts`):
 | `tags` | no | list of strings | Declaration order preserved; queryable as `text[]`. |
 | `resource` | no | any YAML | A URL or structured value; stored as JSON text. |
 
-`type` and `title` are the only required keys — omitting either makes the file
+`type` and `title` are the only required keys - omitting either makes the file
 unparseable, and because sync is strict, one bad file aborts the whole bundle
 registration (`22023`). Any **other** key you add is preserved verbatim as
 metadata (see below); nothing is silently dropped.
@@ -77,7 +77,7 @@ normalized bundle-relative path with the `.md` suffix removed.
 | `runbooks/database-failover.md` | `runbooks/database-failover` |
 | `index-of-terms.md` | `index-of-terms` |
 
-You **may** put an `id:` in frontmatter, but it never becomes the catalog key —
+You **may** put an `id:` in frontmatter, but it never becomes the catalog key -
 it is captured as `declared_id` for diagnostics only (e.g. duplicate-id reports).
 The path always wins. To control a concept's ID, name and place its file
 deliberately. Keep paths relative and traversal-free (no leading `/`, no `..`);
@@ -85,19 +85,25 @@ files must have a `.md` extension.
 
 ## Reserved filenames
 
-`index.md` and `log.md` are reserved at **every** directory level — they carry
-bundle/directory bookkeeping and are **not** concepts. The catalog skips them
-during discovery and rejects them if parsed directly. Do not author concept
+`index.md` and `log.md` are reserved at **every** directory level - they carry
+bundle/directory bookkeeping and are **not** concepts. The catalog never turns
+them into concept rows (it reads them only for their reserved bookkeeping, see
+below) and rejects them if parsed directly. Do not author concept
 content in a file named `index.md` or `log.md`; name it something else (e.g.
-`overview.md`). Note `reindex.md` or `catalog.md` are fine — only the exact
+`overview.md`). Note `reindex.md` or `catalog.md` are fine - only the exact
 names `index.md`/`log.md` are reserved.
 
 The **bundle-root `index.md`** may carry ONLY an optional `okf_version` in its
 frontmatter; the catalog reads it and stores it on `pgokf.bundles.okf_version`
 for that bundle. Both `okf_version: "0.2"` and unquoted `okf_version: 0.2` are
-accepted; an absent or malformed value simply leaves the column `NULL`. `log.md`
-is the chronological bundle/directory history. Everything else in a reserved
-file is ignored by the parser. The current format is **OKF v0.2**.
+accepted; an absent or malformed value simply leaves the column `NULL`. A
+declared but unsupported version (the build supports 0.2 / 0.2.x) is warned
+about and indexed anyway by default, or rejected with `22023` when the catalog's
+`okf_version_policy` config key is set to `reject`. `log.md` is the
+chronological bundle/directory history: each non-blank line becomes one
+`pgokf.bundle_log` entry (a leading ISO 8601 timestamp is lifted into
+`logged_at`), readable via `pgokf.list_bundle_log`. Everything else in a
+reserved file is ignored by the parser. The current format is **OKF v0.2**.
 
 ## Building the link graph
 
@@ -129,12 +135,20 @@ Resolution rules:
 To make two concepts graph-adjacent, link one to the other by its **relative
 `.md` path**, and ensure both files are inside the same registered bundle.
 
+One frontmatter family also produces edges: on a concept whose `type` is
+`Attested Computation`, the `computation` / `executor` / `attester` reference
+fields (a bare resource path, or a `{resource: ...}` mapping) resolve like body
+links into typed `pgokf.links` edges (`link_relation` =
+`attestation:computation` / `attestation:executor` / `attestation:attester`),
+so `concept_neighbors` can reach those concepts even when the body never links
+them. No other type gets frontmatter-derived edges.
+
 ## Provenance, trust, and lifecycle metadata (OKF v0.2)
 
 Any frontmatter key beyond the five modeled fields is retained losslessly in
 `pgokf.concept_metadata` (one row per key, as `jsonb`). The OKF v0.2
 PROVENANCE, TRUST, and LIFECYCLE families are **additionally** projected into
-three typed tables. Use the real field shapes below — not a `generated_by`
+three typed tables. Use the real field shapes below - not a `generated_by`
 scalar, a `verified` bool, `verification_method`, or `freshness`, none of which
 are OKF fields.
 
@@ -144,16 +158,16 @@ agent (e.g. `reference_agent/gemini-2.5-pro`), `human:<id>` for a person, or
 
 | Family | Frontmatter | Projects into |
 | ------ | ----------- | ------------- |
-| TRUST — origin | `generated: { by: <actor>, at: <ISO 8601> }` | `concept_provenance.generated_by` / `generated_at` |
-| TRUST — verification | `verified: [ { by: <actor>, at: <ISO 8601> }, … ]` (a LIST of events; a single mapping counts as one) | one `concept_verification` row per event; the derived `concept_provenance.trust_tier` |
+| TRUST - origin | `generated: { by: <actor>, at: <ISO 8601> }` | `concept_provenance.generated_by` / `generated_at` |
+| TRUST - verification | `verified: [ { by: <actor>, at: <ISO 8601> }, … ]` (a LIST of events; a single mapping counts as one) | one `concept_verification` row per event; the derived `concept_provenance.trust_tier` |
 | LIFECYCLE | `status: draft \| stable \| deprecated` (default `stable`); `stale_after: <ISO 8601>` | `concept_provenance.status` / `stale_after` |
-| PROVENANCE — usage | top-level `usage_window: { from, to }` | `concept_provenance.usage_window_from` / `usage_window_to` |
-| PROVENANCE — sources | `sources: [ { resource, id, title, author, usage_count, last_modified, usage_window } ]` (`resource` is the only per-entry required key) | one `concept_provenance_source` row per entry |
+| PROVENANCE - usage | top-level `usage_window: { from, to }` | `concept_provenance.usage_window_from` / `usage_window_to` |
+| PROVENANCE - sources | `sources: [ { resource, id, title, author, usage_count, last_modified, usage_window } ]` (`resource` is the only per-entry required key) | one `concept_provenance_source` row per entry |
 
 `trust_tier` is **derived** from the verification events: `human-reviewed` as
 soon as any `verified[].by` is a `human:` actor, else `machine-confirmed` with
 at least one event, else `unverified`. Omit the `verified` block entirely for an
-unverified draft — never write a bare `verified: true`. Every recognized key is
+unverified draft - never write a bare `verified: true`. Every recognized key is
 also kept verbatim in the `concept_provenance.details` jsonb. A concept carrying
 none of these keys gets no provenance row at all (the projection is sparse).
 
@@ -196,7 +210,7 @@ This projects `generated_by = catalog-agent/1.0`, `generated_at =
 2026-07-01T12:00:00Z`, `status = stable`, `stale_after = 2027-01-01T00:00:00Z`,
 a `usage_window`, and `trust_tier = human-reviewed` (a `human:` actor verified
 it) into `concept_provenance`; two `concept_verification` rows; and one
-`concept_provenance_source` row — with the full structures preserved in
+`concept_provenance_source` row - with the full structures preserved in
 `details`. Malformed values (an unparseable timestamp, a wrong-typed field)
 degrade to `NULL` and never abort the sync.
 
@@ -204,9 +218,10 @@ degrade to `NULL` and never abort the sync.
 
 `type` is free-form and required; consumers tolerate unknown types. The **only**
 spec-defined type with type-specific fields is **`Attested Computation`**
-(`runtime` required, plus `parameters`, `computation`, `executor`, `attester`).
-Every other type — `runbook`, `service`, `wiki`/`article`, `incident`, `skill`,
-… — is producer-defined with no OKF-prescribed fields: a "skill" is just
+(`runtime` required, plus `parameters`, `computation`, `executor`, `attester`;
+the last three become typed graph edges, see "Building the link graph").
+Every other type - `runbook`, `service`, `wiki`/`article`, `incident`, `skill`,
+… - is producer-defined with no OKF-prescribed fields: a "skill" is just
 `type: skill` plus the recommended/provenance fields and any producer
 extensions. Those extension keys are preserved in `concept_metadata`, never
 mandated by OKF.

@@ -44,7 +44,7 @@ table (the `version_comment` finalize block is the last entity emitted).
 ## 4. Per-major live smoke (repeat for PGVER = 15, 16, 17, 18, 19)
 
 Install into the target major, then create a scratch cluster whose socket path
-stays short (the UNIX socket path limit is 107 bytes — keep it under a directory
+stays short (the UNIX socket path limit is 107 bytes - keep it under a directory
 like `/tmp/…`, never a deep project path):
 
 ```bash
@@ -82,15 +82,15 @@ FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE n.nspname IN ('pgokf', 'pgokf_private') AND c.relkind = 'r'
   AND obj_description(c.oid, 'pg_class') IS NULL;
 
--- Both API roles must be commented (expect two 't' rows):
+-- All three API roles must be commented (expect three 't' rows):
 SELECT r.rolname, shobj_description(r.oid, 'pg_authid') IS NOT NULL AS has_comment
 FROM pg_roles r WHERE r.rolname LIKE 'pgokf_%' ORDER BY 1;
 ```
 
 Each of the first three queries must return **no rows**. As a positive check,
-this confirms full coverage (expect `14/14`, `5/5`, `9/9` — 14 functions, 5
-composite types, and 9 catalog tables = the 8 public `pgokf` tables plus
-`pgokf_private.config`):
+this confirms full coverage (expect `39/39`, `14/14`, `15/15`: 39 functions, 14
+composite types, and 15 catalog tables = the 11 public `pgokf` tables plus the 4
+`pgokf_private` tables `config` / `sync_log` / `sync_log_change` / `access_log`):
 
 ```sql
 SELECT 'functions',  count(*) FILTER (WHERE obj_description(p.oid,'pg_proc')  IS NOT NULL)||'/'||count(*)
@@ -118,17 +118,18 @@ The extension ships forward-compatible upgrade scripts named
 `sql/pgokf--<from>--<to>.sql`. `cargo pgrx install` writes the full install
 script as `pgokf--<crate-version>.sql` and copies every upgrade script
 alongside it, so the update path is available without any manual step. The
-shipped chain is `0.1.0 → 0.1.1 → 0.1.2 → 0.1.3`.
+shipped chain runs one script per step from `0.1.0 → 0.1.1` through
+`0.1.12 → 0.1.13` (the current `default_version`).
 
-> **0.1.3 is a breaking pre-release re-model.** The `pgokf.concept_provenance`
+> **0.1.3 was a breaking pre-release re-model.** The `pgokf.concept_provenance`
 > shape changed to conform to OKF v0.2 (see [CHANGELOG.md](https://github.com/LogicOcean/pgokf/blob/main/CHANGELOG.md)).
 > Because the extension is still pre-release with no tagged release and no
 > external installs, `0.1.2 → 0.1.3` is **not** a no-data-loss in-place upgrade:
 > re-`CREATE EXTENSION` and re-register bundles (the on-disk bundle is the
 > source of truth, so the projection rebuilds fully from a sync). The
-> no-data-loss upgrade guarantee below applies to the additive `0.1.0 → 0.1.1`
-> and `0.1.1 → 0.1.2` links, and becomes a binding cross-version guarantee once
-> `1.0.0` is cut.
+> no-data-loss upgrade guarantee below applies to every other link in the chain
+> (the additive steps `0.1.0 → 0.1.1`, `0.1.1 → 0.1.2`, and `0.1.3` onward), and
+> becomes a binding cross-version guarantee once `1.0.0` is cut.
 
 Verify an upgrade preserves a populated catalog byte-for-byte:
 

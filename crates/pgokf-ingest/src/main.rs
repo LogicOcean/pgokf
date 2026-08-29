@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! `pgokf-ingest` — the mountless OKF ingestion companion.
+//! `pgokf-ingest` - the mountless OKF ingestion companion.
 //!
 //! This standalone binary is the network-facing half of the mountless
 //! deployment topology. The `pgokf` PostgreSQL extension never performs network
@@ -10,8 +10,8 @@
 //! `pgokf.register_bundle_content(name, paths[], contents[])` as a
 //! `pgokf_writer`-capable role.
 //!
-//! Object-store credentials live here — in the companion's environment, CLI, or
-//! an attached IAM instance profile — and never touch PostgreSQL. The server
+//! Object-store credentials live here - in the companion's environment, CLI, or
+//! an attached IAM instance profile - and never touch PostgreSQL. The server
 //! only ever receives the bytes this process hands it, and diffs them against
 //! the bundle's stored projection, so re-running the companion is an
 //! incremental resync (changed concepts upserted, removed ones deleted).
@@ -279,7 +279,7 @@ fn hash_objects(objects: &[BundleObject]) -> [u8; blake3::OUT_LEN] {
 /// profile / IAM role) with CLI overrides layered on top.
 fn build_object_store(cli: &Cli) -> Result<impl ObjectStore> {
     // `from_env` seeds credentials from the standard AWS_* variables and, when
-    // none are set, from an EC2/ECS instance profile or assumed IAM role — so a
+    // none are set, from an EC2/ECS instance profile or assumed IAM role - so a
     // production companion needs no static keys at all.
     let mut builder = AmazonS3Builder::from_env()
         .with_bucket_name(&cli.bucket)
@@ -389,7 +389,7 @@ async fn download_object<S: ObjectStore>(
 /// slash (built in [`collect_bundle`]), so stripping it turns
 /// `handbook/topics/a.md` into the bundle-relative `topics/a.md`. `None` (a
 /// whole-bucket listing) keeps the key verbatim. An object whose key does not
-/// start with the prefix — which the prefixed listing should never surface — is
+/// start with the prefix - which the prefixed listing should never surface - is
 /// returned whole rather than mangled.
 fn relative_path(full: &str, strip: Option<&str>) -> String {
     match strip {

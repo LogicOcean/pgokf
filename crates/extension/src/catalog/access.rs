@@ -4,16 +4,16 @@
 //!
 //! # What this records
 //!
-//! The catalog's *exfiltration surface* — the operations that move concept
-//! content out of the database — each append exactly one row to the
+//! The catalog's *exfiltration surface* - the operations that move concept
+//! content out of the database - each append exactly one row to the
 //! administrator-only `pgokf_private.access_log`:
 //!
-//! - [`crate::catalog::export::export_parquet`] (`export_parquet`) — the
+//! - [`crate::catalog::export::export_parquet`] (`export_parquet`) - the
 //!   Parquet snapshot of a bundle's catalog tables written to a server
 //!   directory;
-//! - [`crate::catalog::source::export_sources`] (`export_sources`) — the
+//! - [`crate::catalog::source::export_sources`] (`export_sources`) - the
 //!   verbatim source files of a bundle reconstructed on disk;
-//! - [`crate::catalog::source::get_concept_source`] (`get_concept_source`) —
+//! - [`crate::catalog::source::get_concept_source`] (`get_concept_source`) -
 //!   the single-concept verbatim source-byte read delivered to the client.
 //!
 //! Each row is stamped with `pgokf_private.effective_tenant()` so a tenant's
@@ -31,7 +31,7 @@
 //! # Security model
 //!
 //! Because the append target lives in the administrator-only `pgokf_private`
-//! schema, [`record`] must run under owner rights — every caller is therefore a
+//! schema, [`record`] must run under owner rights - every caller is therefore a
 //! `SECURITY DEFINER` function (the two exports already were; `get_concept_source`
 //! is `SECURITY DEFINER` for exactly this reason, applying the tenant predicate
 //! explicitly). The reader surface, [`list_access_log`](pgokf::list_access_log),
@@ -85,7 +85,7 @@ CREATE POLICY access_log_tenant_isolation ON pgokf_private.access_log
 REVOKE ALL ON pgokf_private.access_log FROM PUBLIC;
 
 COMMENT ON TABLE pgokf_private.access_log IS
-    'Append-only exfiltration/access audit: one row per content-exporting operation (export_parquet, export_sources, get_concept_source) — who read or exported what, and when. Written inside the operation''s own transaction under owner rights, then pruned to the sync_log_retention_days policy. Administrator-only; read through the admin-granted pgokf.list_access_log function.';
+    'Append-only exfiltration/access audit: one row per content-exporting operation (export_parquet, export_sources, get_concept_source) - who read or exported what, and when. Written inside the operation''s own transaction under owner rights, then pruned to the sync_log_retention_days policy. Administrator-only; read through the admin-granted pgokf.list_access_log function.';
 COMMENT ON COLUMN pgokf_private.access_log.id IS
     'Surrogate primary key (GENERATED ALWAYS AS IDENTITY); monotonic append order of the access trail.';
 COMMENT ON COLUMN pgokf_private.access_log.tenant_id IS

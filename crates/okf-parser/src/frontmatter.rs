@@ -41,7 +41,7 @@ pub struct Frontmatter {
 ///
 /// The block is delimited by the first line whose entire content is `---`.
 /// This line-based split intentionally avoids a YAML re-implementation, so a
-/// bare `---` on its own line is always treated as the closing delimiter —
+/// bare `---` on its own line is always treated as the closing delimiter -
 /// even when it appears inside a multiline quoted scalar. In that (rare) case
 /// the YAML block is cut short and `serde_yaml` reports an unterminated
 /// scalar, surfaced here as [`Error::InvalidFrontmatter`] whose message points
@@ -147,9 +147,9 @@ struct IndexFrontmatter {
 ///
 /// Per OKF v0.2, `index.md` is a reserved file (never a concept) whose
 /// frontmatter may carry only an optional `okf_version`. This reader is fully
-/// defensive: any failure — non-UTF-8 bytes, a missing or unterminated
+/// defensive: any failure - non-UTF-8 bytes, a missing or unterminated
 /// frontmatter block, an oversized block, invalid YAML, or an absent /
-/// non-scalar `okf_version` — yields `None` rather than an error, so a
+/// non-scalar `okf_version` - yields `None` rather than an error, so a
 /// malformed `index.md` can never abort a bundle sync. A scalar `okf_version`
 /// (string or number) is returned trimmed; an empty string yields `None`.
 ///

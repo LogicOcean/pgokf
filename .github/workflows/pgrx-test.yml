@@ -60,7 +60,7 @@ jobs:
           fi
           # A required leg must install cleanly; an advisory leg may be only
           # partially published (apt metadata present but the dev packages not
-          # yet installable, as with PostgreSQL 19 pre-GA) — skip it gracefully
+          # yet installable, as with PostgreSQL 19 pre-GA) - skip it gracefully
           # rather than showing a spurious red, matching the guard above.
           if ! sudo apt-get install -y \
             postgresql-${{ matrix.pg }} \

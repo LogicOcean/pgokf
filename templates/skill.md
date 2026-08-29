@@ -1,5 +1,5 @@
 ---
-# type: an OKF skill / competency concept — a documented capability.
+# type: an OKF skill / competency concept - a documented capability.
 type: skill
 # title: required.
 title: Operate the payments platform
@@ -14,11 +14,11 @@ tags:
 # IMPORTANT: OKF does NOT define a "skill" type or any skill-specific fields.
 # `type: skill` is just a producer-chosen type string (OKF consumers tolerate
 # unknown types), and every key below (owner, proficiency_levels,
-# required_for_role, review_cadence_days) is a PRODUCER EXTENSION — not an
+# required_for_role, review_cadence_days) is a PRODUCER EXTENSION - not an
 # OKF-mandated field. Any key that is NOT a modeled field
 # (type/title/description/tags/resource) and NOT an OKF v0.2 provenance/trust/
-# lifecycle key becomes a row in pgokf.concept_metadata, stored as compact
-# JSON text. This is how you attach domain-specific data.
+# lifecycle key becomes a row in pgokf.concept_metadata, stored as jsonb.
+# This is how you attach domain-specific data.
 owner: team-payments
 proficiency_levels:            # <!-- a structured value survives as JSON metadata -->
   - novice

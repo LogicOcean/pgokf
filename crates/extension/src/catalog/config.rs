@@ -21,7 +21,7 @@
 //! `pgokf.set_config(key, value)` and `pgokf.reset_config(key)` are the
 //! admin-only mutators. The setter is intentionally `jsonb`-in rather than a
 //! family of typed overloads: a single polymorphic entry point keeps the SQL
-//! surface small while still letting each key carry its natural shape — a
+//! surface small while still letting each key carry its natural shape - a
 //! `jsonb` array of strings for `allowed_roots`/`default_exclude`, a boolean
 //! for `default_strict`/`store_source`, an integer for
 //! `sync_log_retention_days`, and a string for `default_text_search_config`,
@@ -260,7 +260,7 @@ fn validate_search_backend(name: &str) -> Result<(), CatalogError> {
 /// Validate `notify_channel`: either empty (the disabled default) or a safe
 /// `LISTEN`/`NOTIFY` channel identifier.
 ///
-/// A non-empty value must be a conservative SQL identifier — a leading letter
+/// A non-empty value must be a conservative SQL identifier - a leading letter
 /// or underscore followed by letters, digits, or underscores, no longer than
 /// [`MAX_NOTIFY_CHANNEL_LEN`] bytes. The value is always bound as a parameter to
 /// `pg_notify` (never interpolated), so this validation is defense in depth
@@ -477,7 +477,7 @@ fn coerce(key: ConfigKey, value: pgrx::JsonB) -> Result<ConfigValue, CatalogErro
 /// visibility on the effective `search_path`. Unquoted identifiers fold to
 /// lower case, which the comparison replicates. A missing configuration
 /// returns cleanly as an invalid parameter (`22023`) rather than escaping as a
-/// raw catalog-cast error via `longjmp` — the earlier `to_regconfig` approach
+/// raw catalog-cast error via `longjmp` - the earlier `to_regconfig` approach
 /// referenced a function `PostgreSQL` does not provide.
 fn ensure_text_search_config_exists(name: &str) -> Result<(), CatalogError> {
     const EXISTS_QUERY: &str = "\

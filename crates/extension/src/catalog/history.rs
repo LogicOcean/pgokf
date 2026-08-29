@@ -29,7 +29,7 @@
 //! - **removed** concept: close the current open version (`valid_to = now()`)
 //!   and insert a zero-width tombstone `version = prev + 1`,
 //!   `valid_from = valid_to = now()`, `change_kind = 'removed'` with a NULL core
-//!   snapshot — the last real content stays in the closed prior version, and an
+//!   snapshot - the last real content stays in the closed prior version, and an
 //!   as-of query at or after the removal instant returns no row.
 //!
 //! Because every statement of one sync binds a single captured instant
@@ -65,7 +65,7 @@
 //! timeline newest-first, and [`concept_as_of`](pgokf::concept_as_of) returns the
 //! single version valid at an instant. Both are reader-level, `STABLE`, and run
 //! with invoker rights over the public projection table, so the caller's own
-//! opt-in tenant row-level security applies — matching `pgokf.concept_neighbors`
+//! opt-in tenant row-level security applies - matching `pgokf.concept_neighbors`
 //! and `pgokf.list_bundle_log`.
 
 use std::collections::BTreeMap;
@@ -177,7 +177,7 @@ fn spi_error(context: &str, error: &pgrx::spi::Error) -> CatalogError {
 /// `now()` (the transaction timestamp): a sync is normally its own transaction, so
 /// this equals the sync time either way, but capturing one clock reading and
 /// reusing it keeps a version chain's intervals contiguous *within* the sync while
-/// still letting successive syncs advance — including several syncs that happen to
+/// still letting successive syncs advance - including several syncs that happen to
 /// share one transaction. All of a sync's rows therefore carry the same
 /// `valid_from`/closing `valid_to`, so the closed interval abuts the new one
 /// exactly.
@@ -262,7 +262,7 @@ fn record_staged_versions(
         let columns = batch::marshal_concepts(chunk);
         // change_kind aligns with marshal_concepts' row order (both iterate the
         // chunk in order): a concept whose path was stored before this sync is an
-        // update, otherwise an add — the same rule the sync's change manifest uses.
+        // update, otherwise an add - the same rule the sync's change manifest uses.
         let change_kinds: Vec<String> = chunk
             .iter()
             .map(|entry| {
@@ -611,8 +611,8 @@ COMMENT ON TYPE pgokf.concept_version IS
     /// Requires membership in `pgokf_reader` (or `pgokf_admin`). Returns the one
     /// `pgokf.concept_version` whose validity interval `[valid_from, valid_to)`
     /// covers `as_of` (`valid_from <= as_of AND (valid_to IS NULL OR as_of <
-    /// valid_to)`), or zero rows when the concept did not exist — or had been
-    /// removed — at that instant. The point-in-time "what did this concept say
+    /// valid_to)`), or zero rows when the concept did not exist - or had been
+    /// removed - at that instant. The point-in-time "what did this concept say
     /// then?" answer.
     #[pg_extern(stable, parallel_safe, requires = ["concept_version_type"])]
     fn concept_as_of(

@@ -10,7 +10,7 @@
 //! 1. serialize on a bundle-scoped advisory lock ([`advisory_lock_key`]);
 //! 2. load the stored `path -> file_hash` projection for the bundle;
 //! 3. take the current `{path, blake3_hash}` snapshot from the [`ByteSource`]
-//!    (the filesystem source uses [`okf_sync::discover`] — symlink-escape safe,
+//!    (the filesystem source uses [`okf_sync::discover`] - symlink-escape safe,
 //!    size/count limited from the `pgokf.*` GUCs; the content source hashes the
 //!    caller-supplied bytes in memory);
 //! 4. classify changes against the stored hashes ([`classify_changes`]) so
@@ -18,13 +18,13 @@
 //! 5. parse only added/updated files with [`okf_parser::parse_concept`];
 //! 6. delete removed rows, upsert changed rows (recomputing the weighted
 //!    `body_tsv`), and replace `concept_metadata` for touched concepts;
-//! 7. run the ordered projection seam — [`crate::catalog::links::project`],
+//! 7. run the ordered projection seam - [`crate::catalog::links::project`],
 //!    then a bundle-wide link re-resolution
 //!    ([`crate::catalog::links::reresolve_bundle`]) so inbound edges of
 //!    *unchanged* concepts reflect targets added or removed during this sync,
 //!    then [`crate::catalog::provenance::project`], then
 //!    [`crate::catalog::source::project`] (opt-in verbatim source-byte
-//!    storage, a no-op under the default `store_source`-off policy) — with the
+//!    storage, a no-op under the default `store_source`-off policy) - with the
 //!    staged concepts;
 //! 8. update the bundle row (file count, `last_synced_at`, aggregate
 //!    `sync_hash`) last.
@@ -47,8 +47,8 @@
 //! inside one of them (symlink-escape-safe containment via
 //! [`crate::security::canonicalize_contained_path`]); a path that escapes every
 //! configured root is rejected with SQLSTATE `22023`. When no roots are
-//! configured the interim policy applies — any absolute, canonical,
-//! traversal-free path is accepted — and in both cases registration remains
+//! configured the interim policy applies - any absolute, canonical,
+//! traversal-free path is accepted - and in both cases registration remains
 //! restricted to the ingest tier `pgokf_writer` (which `pgokf_admin`
 //! inherits).
 
@@ -105,7 +105,7 @@ impl SyncOp {
 ///
 /// `PostgreSQL` caps a `tsvector` at `MAXSTRPOS` (`2^20 - 1` = `1_048_575`
 /// bytes) and raises SQLSTATE `54000` ("string is too long for tsvector") when
-/// a document exceeds it — reachable for a body with hundreds of thousands of
+/// a document exceeds it - reachable for a body with hundreds of thousands of
 /// distinct tokens even while it stays within `pgokf.max_file_bytes`. Left
 /// unbounded, one such file would abort the whole sync and the bundle could
 /// never register.
@@ -114,13 +114,13 @@ impl SyncOp {
 /// position data; in the worst case (single-character, four-byte lexemes each
 /// separated by one byte) that total is bounded by `4 × (input characters)`.
 /// Crucially the check applies to the **concatenated** vector, so bounding only
-/// the body is insufficient — the unbounded `A`/`B` operands push the combined
+/// the body is insufficient - the unbounded `A`/`B` operands push the combined
 /// vector over the limit. Bounding all three so their combined worst case stays
 /// under `MAXSTRPOS` makes `54000` structurally impossible:
 /// `4 × (TITLE + META + BODY) = 4 × 220_000 = 880_000 < 1_048_575` (≈ 16 %
 /// headroom). Normal concepts are far smaller than these bounds, so full-text
 /// quality is unaffected; only pathologically large inputs have their
-/// *indexing* text truncated — every column is still stored and returned in
+/// *indexing* text truncated - every column is still stored and returned in
 /// full.
 const TITLE_TSV_CHAR_LIMIT: i32 = 4_000;
 const META_TSV_CHAR_LIMIT: i32 = 16_000;
@@ -233,7 +233,7 @@ fn spi_error(context: &str, error: &pgrx::spi::Error) -> CatalogError {
 ///
 /// Enforces [`security::validate_path_syntax`] (absolute path, no NUL bytes,
 /// no `..` components) and then canonicalizes, so the value stored on
-/// `pgokf.bundles.path` — and used for advisory-lock keying — is always the
+/// `pgokf.bundles.path` - and used for advisory-lock keying - is always the
 /// resolved filesystem path. Allowed-roots containment is enforced separately
 /// by [`crate::catalog::config::enforce_allowed_roots`]; see the module docs.
 fn resolve_bundle_root(path: &str) -> Result<PathBuf, CatalogError> {
@@ -496,8 +496,8 @@ struct StagingOutcome {
 /// [`crate::catalog::provenance::project`]) consumes the complete slice after
 /// the concept rows are written, and the links pass resolves internal edges
 /// against the whole staged set. Peak memory is bounded by the same limits that
-/// bound the scan — `pgokf.max_bundle_files` caps the number of parsed
-/// concepts and `pgokf.max_file_bytes` caps each source file — while the SQL
+/// bound the scan - `pgokf.max_bundle_files` caps the number of parsed
+/// concepts and `pgokf.max_file_bytes` caps each source file - while the SQL
 /// writes themselves are chunked ([`upsert_concepts`],
 /// [`replace_concept_metadata`]) so no single statement is unbounded.
 fn stage_changed_concepts<S: ByteSource>(
@@ -535,7 +535,7 @@ fn stage_changed_concepts<S: ByteSource>(
         // Retain the already-read source buffer only under the small-install
         // `store_source` tier; otherwise drop it so default behavior is
         // byte-for-byte unchanged and no source bytes are held or persisted.
-        // The buffer is moved rather than cloned — after `parse_concept`
+        // The buffer is moved rather than cloned - after `parse_concept`
         // returns the borrow is released, so no extra allocation or I/O occurs.
         let raw_content = if store_source { Some(bytes) } else { None };
         staged.push(StagedConcept {
@@ -660,7 +660,7 @@ fn delete_removed_concepts(bundle_id: i64, removed_paths: &[String]) -> Result<(
 /// concepts never reach this statement, which preserves their `indexed_at`.
 ///
 /// The batch relies on each `(bundle_id, id)` conflict key being unique within
-/// a chunk — guaranteed because concept IDs are derived from the bundle-unique
+/// a chunk - guaranteed because concept IDs are derived from the bundle-unique
 /// source path (`concepts_bundle_path_key`), so `ON CONFLICT DO UPDATE` never
 /// sees a row twice in one statement.
 fn upsert_concepts(
@@ -678,7 +678,7 @@ fn upsert_concepts(
     // `$14` is the configured text-search regconfig (bound as text and cast in
     // SQL so no identifier is interpolated). All three weighted inputs (title,
     // metadata, body) are bounded with `left(...)` so their concatenated
-    // `tsvector` cannot exceed the `MAXSTRPOS` limit and abort the sync — see
+    // `tsvector` cannot exceed the `MAXSTRPOS` limit and abort the sync - see
     // the `*_TSV_CHAR_LIMIT` constants.
     let upsert = format!(
         "
@@ -765,8 +765,8 @@ fn upsert_concepts(
 /// chunks of concept IDs, so a concept that now has no metadata still loses its
 /// stale rows), then the flattened `(concept_id, key, value)` triples are
 /// re-inserted with array-unnest bulk `INSERT`s, also chunked. Each value binds
-/// as its compact JSON text and is cast back to `jsonb` in SQL — the same
-/// serialization `pgrx::JsonB` performs — so the stored value is byte-identical
+/// as its compact JSON text and is cast back to `jsonb` in SQL - the same
+/// serialization `pgrx::JsonB` performs - so the stored value is byte-identical
 /// to the row-by-row binding.
 fn replace_concept_metadata(bundle_id: i64, staged: &[StagedConcept]) -> Result<(), CatalogError> {
     const INSERT: &str = "
@@ -810,7 +810,7 @@ fn replace_concept_metadata(bundle_id: i64, staged: &[StagedConcept]) -> Result<
 ///
 /// The bundle-root `index.md` is a reserved OKF file (never a concept); its
 /// frontmatter may carry an optional `okf_version`. This read is fully
-/// defensive — an absent, oversized, unreadable, or malformed `index.md`, or an
+/// defensive - an absent, oversized, unreadable, or malformed `index.md`, or an
 /// absent/invalid `okf_version`, yields `None`, so it can never abort a sync.
 /// Only the bundle-root `index.md` is consulted; nested `index.md` files carry
 /// per-directory bookkeeping and never set the bundle version.
@@ -848,7 +848,7 @@ fn update_bundle_row(
 ///
 /// An absent version (`None`) is always accepted unchanged. A *declared* but
 /// unsupported version is either warned about and indexed anyway (`warn`, the
-/// default — the value is still stored on `pgokf.bundles.okf_version`) or
+/// default - the value is still stored on `pgokf.bundles.okf_version`) or
 /// rejected with SQLSTATE `22023`, aborting the sync (`reject`). A declared,
 /// supported version passes silently.
 fn apply_okf_version_policy(
@@ -913,7 +913,7 @@ fn emit_change_notification(
 /// Feature modules observe the finalized concept set here, in a fixed order:
 /// the link-graph projection, then the bundle-wide link re-resolution (so the
 /// inbound edges of *unchanged* concepts reflect targets added or removed during
-/// this sync — only staged sources are re-projected, so their peers must be
+/// this sync - only staged sources are re-projected, so their peers must be
 /// re-evaluated against the post-upsert/delete concept set), then the provenance
 /// projection, then the opt-in source-byte storage. The source-byte pass writes
 /// nothing under the default `store_source`-off policy (every staged concept
@@ -933,8 +933,8 @@ fn run_projection_seam(bundle_id: i64, staged: &[StagedConcept]) -> Result<(), C
 /// Reserved OKF files are never concepts, so a `log.md` never reaches the
 /// staged set the projection seam consumes; this pass reconciles them
 /// separately. It scans the whole current snapshot (which includes reserved
-/// files), reads each `log.md` through the [`ByteSource`] — the same seam the
-/// concept bytes come from — parses it into ordered entries, and hands the
+/// files), reads each `log.md` through the [`ByteSource`] - the same seam the
+/// concept bytes come from - parses it into ordered entries, and hands the
 /// per-directory entries to [`crate::catalog::bundle_log::project`], which
 /// replaces the bundle's log rows wholesale so the projection tracks the files
 /// (added, edited, and removed logs alike). It runs inside the sync transaction
@@ -1016,7 +1016,7 @@ pub(crate) fn run_bundle_sync<S: ByteSource>(
     project_bundle_logs(bundle_id, source, &current)?;
 
     // Opt-in SCD-2 version history. Recorded from the same delta, inside this
-    // transaction, ONLY when the durable track_history key is on — so with it
+    // transaction, ONLY when the durable track_history key is on - so with it
     // off (the default) nothing is written and behavior/storage are unchanged.
     // Runs after the concept upsert/delete so the version chain reflects the
     // committed state, and prunes closed versions to history_retention_days.
@@ -1034,7 +1034,7 @@ pub(crate) fn run_bundle_sync<S: ByteSource>(
     update_bundle_row(bundle_id, &sync_hash, okf_version.as_deref())?;
 
     // Audit trail: append exactly one row for this operation and prune history
-    // to the retention policy — the mechanism that activates
+    // to the retention policy - the mechanism that activates
     // sync_log_retention_days. Commits atomically with the sync.
     let sync_id = crate::catalog::audit::record(
         bundle_id,
@@ -1161,7 +1161,7 @@ fn refresh_bundle_impl(bundle_id: i64) -> Result<(String, SyncReport), CatalogEr
     security::authorize_current_user(security::Operation::Ingest, Path::new(""))?;
     // Write-side tenant confinement: when pgokf.tenant is set, a bundle owned by
     // another tenant (or absent) is rejected as an unknown bundle before any
-    // lookup, lock, or filesystem access — mirroring the read-side RLS policy.
+    // lookup, lock, or filesystem access - mirroring the read-side RLS policy.
     security::enforce_bundle_tenant(bundle_id)?;
     let (stored_path, source_type) = lookup_bundle_path_and_type(bundle_id)?.ok_or_else(|| {
         CatalogError::invalid_parameter(
@@ -1212,7 +1212,7 @@ mod pgokf {
     /// Requires membership in `pgokf_writer` (an admin qualifies by
     /// inheritance). The path must be absolute, traversal-free, and
     /// canonicalizable; the canonical path is stored and must not already be
-    /// registered (SQLSTATE `23505` otherwise — use `pgokf.refresh_bundle` to
+    /// registered (SQLSTATE `23505` otherwise - use `pgokf.refresh_bundle` to
     /// re-synchronize).
     #[pg_extern(requires = ["catalog_tables"])]
     fn register_bundle(
@@ -1424,7 +1424,7 @@ mod tests {
         // Arrange: Postgres caps a tsvector (pool + position data) at MAXSTRPOS
         // bytes. The limit applies to the CONCATENATED A||B||D vector, and in the
         // worst case (single four-byte lexemes) the size is bounded by four times
-        // the total input characters — so all three bounds must sum safely under
+        // the total input characters - so all three bounds must sum safely under
         // the limit, not each individually.
         const MAX_TSVECTOR_STRPOS_BYTES: i64 = (1 << 20) - 1; // 1_048_575
         const MAX_UTF8_BYTES_PER_CHAR: i64 = 4;

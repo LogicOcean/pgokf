@@ -1,7 +1,7 @@
 <!--
 Thanks for contributing to pgokf! Please fill this in and check the boxes.
 By opening this PR you agree to the project's Contributor License Agreement
-(see CONTRIBUTING.md) — required because pgokf is dual-licensed (AGPL + commercial).
+(see CONTRIBUTING.md) - required because pgokf is dual-licensed (AGPL + commercial).
 -->
 
 ## Summary
@@ -14,7 +14,7 @@ Closes #
 
 - [ ] Bug fix (non-breaking)
 - [ ] New feature (non-breaking)
-- [ ] Breaking change (surface / behavior — called out in the CHANGELOG)
+- [ ] Breaking change (surface / behavior - called out in the CHANGELOG)
 - [ ] Docs / tooling / CI only
 
 ## Checklist

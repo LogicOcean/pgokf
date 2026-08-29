@@ -14,7 +14,7 @@ tags:
 # --- OKF v0.2 provenance / trust / lifecycle (-> pgokf.concept_provenance) ---
 # A draft: status draft and NO verified[] events yet, so the derived
 # trust_tier is `unverified`. Omit the verified block entirely until a real
-# verification event happens — never record verification as a bare bool.
+# verification event happens - never record verification as a bare bool.
 status: draft
 generated:
   by: platform-docs-agent/1.0
@@ -37,10 +37,10 @@ asynchronously. The public entry point is the [payments API service](service.md)
 
 <!-- Each internal link becomes a link-graph edge you can traverse with     -->
 <!-- pgokf.concept_neighbors().                                             -->
-- **API layer** — request validation and idempotency. See the
+- **API layer** - request validation and idempotency. See the
   [payments API service](service.md).
-- **Ledger** — the durable record of every transaction.
-- **Settlement worker** — batches and settles recorded charges.
+- **Ledger** - the durable record of every transaction.
+- **Settlement worker** - batches and settles recorded charges.
 
 ## Operating the system
 

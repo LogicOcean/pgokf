@@ -9,16 +9,16 @@
 -- The behavior is: a denormalized `tenant_id` on every projection table, a
 -- per-session `pgokf.tenant` GUC (registered by the 0.1.7 shared library at
 -- load), and a row-level-security policy on each table whose predicate is a
--- no-op for any session that has NOT set `pgokf.tenant` — so an upgraded install,
+-- no-op for any session that has NOT set `pgokf.tenant` - so an upgraded install,
 -- and every existing session, sees ALL rows and behaves EXACTLY as under 0.1.6.
 -- A session that DOES set `pgokf.tenant` sees only that tenant's rows.
 --
 -- All of it is additive and non-destructive with the single, carefully-justified
 -- exception in Step 2 (the bundles UNIQUE key swap; see there): every existing
 -- row backfills to the tenant 'default', nothing is truncated, and no row is
--- deleted. Behavior that lives entirely in the shared library — stamping writes
+-- deleted. Behavior that lives entirely in the shared library - stamping writes
 -- from `effective_tenant()`, tenant-scoping the SECURITY DEFINER readers
--- (`list_sync_log`, `health`), and registering the `pgokf.tenant` GUC — needs no
+-- (`list_sync_log`, `health`), and registering the `pgokf.tenant` GUC - needs no
 -- SQL here; this script only creates the SQL objects those code paths read and
 -- write (the `tenant_id` columns, the `effective_tenant()` helper, the policies).
 
@@ -85,7 +85,7 @@ CREATE INDEX IF NOT EXISTS concepts_tenant_id_idx ON pgokf.concepts (tenant_id);
 -- The old single-column key must be REPLACED, not merely supplemented: leaving it
 -- would forbid a second tenant from registering a path the first already holds,
 -- defeating the feature. This is the one deliberate exception to the file's
--- otherwise purely-additive rule, and it is NOT data-destructive — a UNIQUE
+-- otherwise purely-additive rule, and it is NOT data-destructive - a UNIQUE
 -- CONSTRAINT is metadata, not data; no row is touched; and the replacement
 -- UNIQUE (tenant_id, path) is a STRICT SUPERSET, satisfied by every existing row
 -- (all backfilled to tenant_id = 'default', where (tenant_id, path) is unique
@@ -133,7 +133,7 @@ COMMENT ON FUNCTION pgokf_private.effective_tenant() IS
 -- behavior for every existing install and session), and a session that HAS set it
 -- matches only its tenant's rows. RLS is enabled but NOT forced, so the SECURITY
 -- DEFINER write/admin functions (running as the table owner) bypass it and may
--- stamp and read across tenants — correct because each operates strictly within
+-- stamp and read across tenants - correct because each operates strictly within
 -- one single-tenant bundle. The matching WITH CHECK constrains any future
 -- invoker-side write to the active tenant. sync_log is deliberately excluded: it
 -- stays administrator-only with no RLS, and pgokf.list_sync_log applies the same

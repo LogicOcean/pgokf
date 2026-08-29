@@ -47,7 +47,7 @@ jobs:
         # docs/changelog.md (referenced by the nav) just before the build. The
         # changelog lives at the repo root, so its root-relative "docs/…" links
         # must be rebased to be docs_dir-relative once the file is relocated
-        # into docs/ — otherwise `--strict` rejects them as broken links.
+        # into docs/ - otherwise `--strict` rejects them as broken links.
         run: |
           sed -E 's#\]\((\./)?docs/#](#g' CHANGELOG.md > docs/changelog.md
 

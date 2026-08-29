@@ -19,8 +19,8 @@ driver, …).
    `pgokf.register_bundle_content(name, paths[], contents[])` with the collected
    `(path, bytes)`.
 
-**The extension never performs network I/O.** All object-store access — and all
-object-store credentials — live in this companion. PostgreSQL only ever receives
+**The extension never performs network I/O.** All object-store access - and all
+object-store credentials - live in this companion. PostgreSQL only ever receives
 the bytes the companion hands it. Server-side, `register_bundle_content` diffs
 the supplied content against the bundle's stored projection, so re-running the
 companion is an incremental resync: changed concepts are upserted, and concepts
@@ -37,7 +37,7 @@ Credentials **never** touch PostgreSQL and are **never** hard-coded.
   automatically by `object_store`'s `from_env`), or overridden on the command
   line for ad-hoc runs.
 - **PostgreSQL:** supplied through the connection string (`--database-url` /
-  `OKF_PG_URL`), which authenticates as the ingest account — a login role that
+  `OKF_PG_URL`), which authenticates as the ingest account - a login role that
   is a member of `pgokf_writer` (the tier `register_bundle_content` requires).
   It carries no object-store credentials.
 
@@ -67,13 +67,15 @@ Every flag has an environment-variable equivalent:
 | `--database-url` | `OKF_PG_URL` | PostgreSQL connection string for a `pgokf_writer` role (required) |
 | `--bundle-name` | `OKF_BUNDLE_NAME` | Bundle name; keyed as `content:<name>` (required) |
 | `--concurrency` | `OKF_DOWNLOAD_CONCURRENCY` | Max concurrent object downloads (default 8) |
+| `--watch` | `OKF_WATCH` | Run as a daemon: re-list every `--interval` seconds and re-ingest on change (default off) |
+| `--interval` | `OKF_WATCH_INTERVAL` | Poll interval in seconds between watch passes, minimum 1 (default 60) |
 | `--tls` | `OKF_PG_TLS` | Require a TLS-encrypted link to PostgreSQL (default off) |
 
 ### PostgreSQL transport (TLS)
 
 The link to PostgreSQL is plaintext (`NoTls`) by default, which suits a local
 socket or a trusted private network. To encrypt it, either pass `--tls` (env
-`OKF_PG_TLS=true`) or put `sslmode=require` in the connection string — either one
+`OKF_PG_TLS=true`) or put `sslmode=require` in the connection string - either one
 negotiates a `rustls` TLS session and verifies the server certificate against the
 platform trust store:
 
@@ -99,10 +101,14 @@ pgokf-ingest: registered content bundle 'handbook' (bundle_id=1, source_type=con
 
 Deliberately minimal but real:
 
-- **One-shot sync.** No daemon loop or metrics. A `--watch` mode is a natural
-  future addition.
+- **One-shot by default, daemon on request.** Without `--watch` the companion
+  performs a single sync and exits. With `--watch` it re-lists the object store
+  every `--interval` seconds (default 60), re-ingests only when the collected
+  content changed (unchanged passes skip the server round-trip), retries a
+  failed pass on the next interval, and stops cleanly on Ctrl-C. No metrics
+  endpoint.
 - **Whole-bundle call.** The current object set is sent in a single
-  `register_bundle_content` call. This is required for correctness — the server
+  `register_bundle_content` call. This is required for correctness - the server
   computes removals by comparing the supplied set to the stored one, so a
   partial (chunked) call would wrongly delete everything absent from the chunk.
   Downloads are streamed with bounded concurrency; a future large-corpus mode

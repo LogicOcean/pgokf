@@ -5,8 +5,8 @@
 //!
 //! A single admin-only entry point, `pgokf.export_parquet(bundle_id,
 //! dest_dir)`, that writes one Apache Parquet file per catalog table for the
-//! requested bundle — `concepts.parquet`, `concept_metadata.parquet`,
-//! `links.parquet`, and `concept_provenance.parquet` — into a validated
+//! requested bundle - `concepts.parquet`, `concept_metadata.parquet`,
+//! `links.parquet`, and `concept_provenance.parquet` - into a validated
 //! server-side directory, and returns a `pgokf.export_result` composite with
 //! the per-file row counts and the total bytes written. Everything lives in
 //! **this file only**; the sync engine and the base schema are untouched.
@@ -27,7 +27,7 @@
 //!   ([`crate::security::canonicalize_contained_path`], which resolves
 //!   symlinks on both sides). **Residual risk:** when no roots are configured,
 //!   the interim policy accepts *any* absolute, canonical, traversal-free,
-//!   writable directory on the server filesystem — which is precisely why the
+//!   writable directory on the server filesystem - which is precisely why the
 //!   function is gated to `pgokf_admin`. Operators who want a hard boundary
 //!   should configure `allowed_roots`;
 //! - the directory must already exist and be writable; the function never
@@ -152,7 +152,7 @@ fn arrow_data_type(pg_type: PgType) -> DataType {
 /// One exported column: its Arrow field name, `PostgreSQL` type, nullability,
 /// and the SQL expression that produces the value (aliased to `name`).
 ///
-/// `select_expr` is a fixed, code-owned fragment — never caller input — so it
+/// `select_expr` is a fixed, code-owned fragment - never caller input - so it
 /// carries expressions such as the `jsonb`-to-text cast or the timestamp
 /// microsecond conversion without any injection surface.
 struct ColumnSpec {
@@ -720,7 +720,7 @@ const ELOOP: i32 = 40;
 /// canonical directory does not stop an attacker who can place files inside it
 /// from planting a symlink at the exact output file name (for example
 /// `concepts.parquet` → `postgresql.auto.conf`). A plain [`File::create`]
-/// follows that link and redirects the write — and its `O_TRUNC` — onto an
+/// follows that link and redirects the write - and its `O_TRUNC` - onto an
 /// arbitrary file the server process can write. Opening with [`O_NOFOLLOW`]
 /// closes that hole: a symlinked target is refused with `ELOOP`, reported as
 /// SQLSTATE `22023`, and nothing is written or truncated through it. A missing

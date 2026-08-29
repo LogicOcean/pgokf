@@ -29,11 +29,11 @@ few business days and to coordinate a fix and disclosure timeline with you.
 ## Scope and threat model
 
 pgokf runs inside PostgreSQL and treats a **filesystem path** and **bundle
-content** as privileged, untrusted input. The security model — role tiers,
+content** as privileged, untrusted input. The security model - role tiers,
 `SECURITY DEFINER` hardening, path-traversal/symlink defenses, resource
 ceilings, and the multi-tenancy trust model (including the important caveat that
 the `pgokf.tenant` GUC is a scoping selector, **not** a hard boundary against a
-tenant who can run arbitrary SQL) — is documented in
+tenant who can run arbitrary SQL) - is documented in
 [`docs/security.md`](docs/security.md) and
 [`docs/multi-tenancy.md`](docs/multi-tenancy.md). Read those before deploying in
 a multi-tenant or untrusted-input setting.

@@ -4,7 +4,7 @@
 //! # What it does
 //!
 //! Given a seed concept, `find_similar` finds the other concepts whose *body
-//! content* is most similar — distinct from [`crate::catalog::neighbors`], which
+//! content* is most similar - distinct from [`crate::catalog::neighbors`], which
 //! walks the authored link graph. It is a lexical more-like-this: it reads the
 //! seed's already-built `body_tsv`, takes its most salient lexemes (the highest
 //! term frequencies), assembles them into an `OR` query, and runs that query
@@ -18,19 +18,19 @@
 //! [`crate::catalog::search::run_ranked_search`], the query honors the durable
 //! `search_backend` configuration exactly like `concept_search`:
 //!
-//! - **native** — the seed's salient terms are matched with
+//! - **native** - the seed's salient terms are matched with
 //!   `websearch_to_tsquery` / `ts_rank_cd` over `body_tsv`.
-//! - **bm25** — the same salient terms run through the `ParadeDB` `pg_search`
+//! - **bm25** - the same salient terms run through the `ParadeDB` `pg_search`
 //!   `bm25` index (Block-Max WAND top-k) when it is present; this realizes a
 //!   BM25 more-like-this over the seed's salient content, and falls back to the
-//!   native path (with a warning) when `pg_search` or its index is absent — the
+//!   native path (with a warning) when `pg_search` or its index is absent - the
 //!   fallback already lives in [`crate::catalog::search_backend::Bm25Backend`].
 //!
 //! # Identity
 //!
-//! The seed is identified by its **text** `concept_id` — the path-derived OKF
+//! The seed is identified by its **text** `concept_id` - the path-derived OKF
 //! id used everywhere else in the surface (`concept_search_result.concept_id`,
-//! `concept_neighbors`) — not a surrogate integer, because `pgokf.concepts.id`
+//! `concept_neighbors`) - not a surrogate integer, because `pgokf.concepts.id`
 //! is `text`. Like `concept_neighbors`, an ambiguous id present in more than one
 //! bundle requires `bundle_id` to disambiguate (SQLSTATE `22023`).
 //!
@@ -68,7 +68,7 @@ fn spi_error(context: &'static str) -> impl Fn(pgrx::spi::Error) -> CatalogError
 /// An explicit `bundle_id` is used verbatim. Otherwise the concept id is looked
 /// up across bundles: a single match scopes to it, no match yields `None` (an
 /// empty result), and multiple matches are rejected with SQLSTATE `22023` so the
-/// caller disambiguates — the same contract as `concept_neighbors`.
+/// caller disambiguates - the same contract as `concept_neighbors`.
 fn resolve_seed_bundle(
     concept_id: &str,
     bundle_id: Option<i64>,

@@ -4,12 +4,12 @@
 //! # Why this exists
 //!
 //! The filesystem ingestion path ([`crate::catalog::sync`]) requires the OKF
-//! bundle to be *readable from the `PostgreSQL` backend's filesystem* — a POSIX
+//! bundle to be *readable from the `PostgreSQL` backend's filesystem* - a POSIX
 //! mount over the object store / data lake. This module adds the **mountless**
 //! alternative: a standalone companion process (see the `pgokf-ingest` crate)
 //! reads an S3-compatible store over the network, then streams the collected
 //! `(path, bytes)` into `PostgreSQL` through this function. The extension itself
-//! never performs any network I/O — the companion holds the object-store
+//! never performs any network I/O - the companion holds the object-store
 //! credentials, and `PostgreSQL` only ever sees bytes it was handed.
 //!
 //! # Shared pipeline, in-memory source
@@ -19,9 +19,9 @@
 //! this function validates and wraps the caller-supplied arrays in a
 //! [`crate::catalog::sync::ContentSource`] and calls
 //! [`crate::catalog::sync::run_bundle_sync`]. A content bundle is therefore
-//! diffed against its stored projection exactly like a filesystem bundle — a
+//! diffed against its stored projection exactly like a filesystem bundle - a
 //! second call with changed content upserts the changed concepts and deletes the
-//! ones no longer present — so `register_bundle_content` is a create-or-resync.
+//! ones no longer present - so `register_bundle_content` is a create-or-resync.
 //!
 //! # Identity and hardening
 //!
@@ -57,7 +57,7 @@ fn spi_error(context: &str, error: &pgrx::spi::Error) -> CatalogError {
 /// Mirrors the traversal defenses applied to on-disk paths: no absolute path,
 /// no `..` traversal, no `\0`, and non-empty. Reserved OKF files (`index.md` /
 /// `log.md`) are *allowed through* here exactly as the filesystem scan surfaces
-/// them — the shared pipeline skips them as concepts, and a root `index.md`
+/// them - the shared pipeline skips them as concepts, and a root `index.md`
 /// still contributes the bundle `okf_version`. Raises SQLSTATE `22023`.
 fn validate_content_path(path: &str) -> Result<(), CatalogError> {
     if path.is_empty() {
@@ -294,7 +294,7 @@ mod tests {
     #[test]
     fn validate_content_path_accepts_nested_and_reserved_paths() {
         // Arrange / Act / Assert: ordinary and reserved bundle-relative paths
-        // pass — a root index.md is allowed through so it can set okf_version.
+        // pass - a root index.md is allowed through so it can set okf_version.
         assert!(validate_content_path("alpha.md").is_ok());
         assert!(validate_content_path("nested/beta.md").is_ok());
         assert!(validate_content_path("index.md").is_ok());

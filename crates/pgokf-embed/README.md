@@ -2,8 +2,8 @@
 
 The reference **embedding-generation companion** for [`pgokf`](../extension).
 
-`pgokf` ships semantic search — `pgokf.concept_search_semantic(real[])`,
-`pgokf.concept_search_hybrid(...)`, and the `pgokf.concept_embedding` store — but
+`pgokf` ships semantic search - `pgokf.concept_search_semantic(real[])`,
+`pgokf.concept_search_hybrid(...)`, and the `pgokf.concept_embedding` store - but
 it deliberately **never computes an embedding and never performs network I/O**.
 Vectors are streamed in from outside through
 `pgokf.set_concept_embedding(bundle_id, concept_id, embedding)`. `pgokf-embed` is
@@ -14,7 +14,7 @@ It is a small, standalone async binary that:
 1. connects to PostgreSQL as a `pgokf_writer`-capable role;
 2. finds every concept in `pgokf.concepts` that has **no** matching
    `pgokf.concept_embedding` row (optionally scoped to one `--bundle`);
-3. builds a bounded input text per concept — `title + description + body_text`,
+3. builds a bounded input text per concept - `title + description + body_text`,
    truncated to `--max-chars` on a UTF-8 boundary;
 4. calls a configurable **OpenAI-compatible** embeddings endpoint
    (`POST {endpoint}/v1/embeddings` with `{"model": ..., "input": [...]}`,
@@ -25,7 +25,7 @@ It is a small, standalone async binary that:
 
 The embeddings endpoint URL, model name, and API key are supplied on the CLI or
 through the environment, and are **never hard-coded and never written to
-PostgreSQL**. The database itself never learns the endpoint or the key — it only
+PostgreSQL**. The database itself never learns the endpoint or the key - it only
 ever receives finished vectors through `pgokf.set_concept_embedding`. The
 PostgreSQL connection string authenticates a login role that is a member of
 `pgokf_writer` (the tier the setter requires); reading `embedding_dim` and the
@@ -36,10 +36,10 @@ concept projections additionally needs `pgokf_reader`.
 The `/v1/embeddings` protocol is shared by OpenAI and by every drop-in
 compatible server, so the same binary works against:
 
-- **OpenAI** — `--endpoint https://api.openai.com --model text-embedding-3-small
+- **OpenAI** - `--endpoint https://api.openai.com --model text-embedding-3-small
   --api-key sk-...`;
 - a **local** [`text-embeddings-inference`](https://github.com/huggingface/text-embeddings-inference)
-  or [`llama.cpp`](https://github.com/ggml-org/llama.cpp) server —
+  or [`llama.cpp`](https://github.com/ggml-org/llama.cpp) server -
   `--endpoint http://127.0.0.1:8080 --model <model>` (no key needed);
 - a **mock** server that returns a deterministic vector per input, used in the
   end-to-end test below.
@@ -79,7 +79,7 @@ Every flag has an environment-variable equivalent:
 
 ### PostgreSQL transport (TLS)
 
-The database link is plaintext (`NoTls`) by default — fine for a local socket or
+The database link is plaintext (`NoTls`) by default - fine for a local socket or
 trusted network. To encrypt it, pass `--tls` (env `OKF_PG_TLS=true`) or put
 `sslmode=require` in the connection string; either negotiates a `rustls` TLS
 session that verifies the server certificate against the platform trust store.

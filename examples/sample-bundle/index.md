@@ -6,9 +6,9 @@ whole and is intentionally **not** ingested as a concept: `pgokf` skips
 
 The concepts in this bundle model a tiny operations knowledge base:
 
-- `services/postgresql` — the PostgreSQL service reference
-- `runbooks/database-failover` — a failover runbook (carries provenance)
-- `runbooks/appendix` — supporting reference material
-- `dashboards/health` — a service-health dashboard
+- `services/postgresql` - the PostgreSQL service reference
+- `runbooks/database-failover` - a failover runbook (carries provenance)
+- `runbooks/appendix` - supporting reference material
+- `dashboards/health` - a service-health dashboard
 
 Register it with `SELECT * FROM pgokf.register_bundle('/abs/path/to/examples/sample-bundle');`

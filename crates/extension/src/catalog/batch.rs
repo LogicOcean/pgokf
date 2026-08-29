@@ -18,7 +18,7 @@
 //! each row carries an inclusive 1-based `[lo, hi]` slice window
 //! ([`ConceptColumns::tag_los`] / [`ConceptColumns::tag_his`]) into it. The SQL
 //! side rebuilds each row's `text[]` with a native array slice, preserving
-//! element order and yielding an empty array — never SQL `NULL` — for a row
+//! element order and yielding an empty array - never SQL `NULL` - for a row
 //! with no tags (its window is empty, `hi < lo`), exactly as the row-by-row
 //! binding did.
 //!
@@ -27,7 +27,7 @@
 //! is produced by the same `serde_json` serialization `pgrx::JsonB` performs
 //! before `jsonb_in`, so the stored `jsonb` is byte-identical to the row-by-row
 //! binding while this module avoids naming `serde_json` (a dependency the crate
-//! deliberately does not declare — the JSON types reach it only through
+//! deliberately does not declare - the JSON types reach it only through
 //! `okf_parser` and `pgrx::JsonB`).
 
 use std::path::Path;
@@ -144,7 +144,7 @@ pub struct MetadataColumns {
 /// `store_source` policy is on) contribute a row; a concept whose
 /// `raw_content` is `None` is skipped entirely, so under the default policy
 /// this marshaller yields empty arrays and no rows are written. `contents`
-/// binds as `bytea[]` — every element is itself a `bytea` — preserving the
+/// binds as `bytea[]` - every element is itself a `bytea` - preserving the
 /// source bytes exactly, and `sizes` carries each payload's byte length for the
 /// `byte_size` column so a reader can size a retrieval without detoasting the
 /// content.
@@ -279,7 +279,7 @@ pub fn flatten_metadata(staged: &[StagedConcept]) -> MetadataColumns {
 /// Every row carries the source concept's ID, so one array-unnest `INSERT`
 /// replaces the row-by-row loop that ran one statement per link. The per-link
 /// `resolved` flag is *not* marshalled: it is derived set-based in SQL from
-/// `target_id`, `is_external`, and an `EXISTS` against `pgokf.concepts` —
+/// `target_id`, `is_external`, and an `EXISTS` against `pgokf.concepts` -
 /// byte-identical to the correlated-`EXISTS` expression the row-by-row
 /// `INSERT` evaluated. The result is returned whole and chunked by the caller
 /// at [`BATCH_SIZE`] for bounded bulk insertion.
@@ -287,7 +287,7 @@ pub fn flatten_metadata(staged: &[StagedConcept]) -> MetadataColumns {
 /// # Errors
 ///
 /// Returns a [`CatalogError`] if any link's zero-based `ordinal` exceeds the
-/// `i32` range of the `ordinal` column — the same failure the row-by-row
+/// `i32` range of the `ordinal` column - the same failure the row-by-row
 /// `INSERT` raised, preserved verbatim so behavior is unchanged.
 pub fn marshal_links(staged: &[StagedConcept]) -> Result<LinkColumns, CatalogError> {
     let capacity: usize = staged.iter().map(|entry| entry.concept.links.len()).sum();
