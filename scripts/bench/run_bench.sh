@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# run_bench.sh — end-to-end YAML vs PostgreSQL vs Parquet benchmark for the OKF
+# run_bench.sh - end-to-end YAML vs PostgreSQL vs Parquet benchmark for the OKF
 # catalog. Produces REAL, measured numbers on the host it runs on.
 #
 # Three legs:
@@ -181,7 +181,7 @@ YAML_PEAK_RSS="$(yaml_get peak_rss_mib)"
 # ==========================================================================
 # LEG (b): PostgreSQL
 # ==========================================================================
-log "Leg B: PostgreSQL — install extension"
+log "Leg B: PostgreSQL - install extension"
 ( cd "$REPO_ROOT/crates/extension" &&
   cargo pgrx install --no-default-features --features pg18 \
       --pg-config "$PG_CONFIG" --sudo --release >/dev/null 2>&1 )
@@ -378,7 +378,7 @@ fi
 {
 printf '\n'
 printf '%s\n' '========================================================================'
-printf ' OKF catalog format benchmark — REAL measured results\n'
+printf ' OKF catalog format benchmark - REAL measured results\n'
 printf '%s\n' '========================================================================'
 printf ' host        : %s cores, %s RAM\n' "$HOST_NPROC" "$HOST_MEM"
 printf ' postgres    : %s\n' "$PG_VERSION"
