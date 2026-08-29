@@ -6,6 +6,14 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Reference embedding-generation companion for pgokf: computes concept embeddings against any OpenAI-compatible endpoint and streams them into pgokf.set_concept_embedding."
+homepage.workspace = true
+documentation.workspace = true
+# Overrides the workspace default: this member carries its own README covering
+# the binary's CLI, so it is the one that should render on the registry page.
+readme = "README.md"
+keywords.workspace = true
+# Overrides the workspace default: this member ships a binary, not a library.
+categories = ["database", "command-line-utilities"]
 
 [[bin]]
 name = "pgokf-embed"

@@ -6,6 +6,14 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Mountless OKF ingestion companion: reads an S3-compatible object store and streams bundle bytes into pgokf via register_bundle_content."
+homepage.workspace = true
+documentation.workspace = true
+# Overrides the workspace default: this member carries its own README covering
+# the binary's CLI, so it is the one that should render on the registry page.
+readme = "README.md"
+keywords.workspace = true
+# Overrides the workspace default: this member ships a binary, not a library.
+categories = ["database", "command-line-utilities"]
 
 [[bin]]
 name = "pgokf-ingest"

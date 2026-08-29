@@ -33,11 +33,11 @@ Captured by the harness at run time:
 | Parquet reader | `parquet`/`arrow` 59.2.0 (the extension's own versions) |
 | Dataset | 12,000 generated OKF concepts (seed 1337) |
 
-Reader availability: `pyarrow` and `duckdb` are **not installed** on this host
-(neither the Python modules nor a `duckdb` CLI). The Parquet read leg therefore
-uses a tiny throwaway Rust reader built against the same `parquet`/`arrow`
-59.2.0 crates the extension depends on - not an estimate, a real decode of the
-exported file. See "Parquet read leg" below.
+Reader availability: `pyarrow` and `duckdb` are **not installed** on the
+benchmark host (neither the Python modules nor a `duckdb` CLI). The Parquet read
+leg therefore uses a tiny throwaway Rust reader built against the same
+`parquet`/`arrow` 59.2.0 crates the extension depends on - not an estimate, a
+real decode of the exported file. See "Parquet read leg" below.
 
 ## Dataset
 
@@ -72,8 +72,8 @@ filter returned exactly **1,500** rows (manifest expected 1,500) and the
 
 ```bash
 # From the repo root. Installs the extension into the local PG18, spins up a
-# throwaway cluster under /tmp/claude-1000, runs all three legs, prints the
-# results table, and cleans up the cluster + corpus on exit.
+# throwaway cluster under ${TMPDIR:-/tmp}/pgokf-bench, runs all three legs,
+# prints the results table, and cleans up the cluster + corpus on exit.
 scripts/bench/run_bench.sh
 ```
 
@@ -93,8 +93,8 @@ cd crates/extension
 cargo pgrx install --no-default-features --features pg18 \
     --pg-config /usr/lib/postgresql/18/bin/pg_config --sudo --release
 initdb -D "$PGDATA" --locale=C.UTF-8 -A trust
-pg_ctl -D "$PGDATA" -o "-p 54329 -k /tmp/claude-1000/okf-bs -c listen_addresses=''" -w start
-psql -h /tmp/claude-1000/okf-bs -p 54329 -d okfbench -c "CREATE EXTENSION pgokf"
+pg_ctl -D "$PGDATA" -o "-p 54329 -k /tmp/pgokf-bench/okf-bs -c listen_addresses=''" -w start
+psql -h /tmp/pgokf-bench/okf-bs -p 54329 -d okfbench -c "CREATE EXTENSION pgokf"
 psql ... -c "SELECT * FROM pgokf.register_bundle('/tmp/corpus')"        -- bulk load
 psql ... -c "SELECT count(*) FROM pgokf.concepts WHERE type = 'Runbook'"           -- btree
 psql ... -c "SELECT count(*) FROM pgokf.concepts WHERE tags @> ARRAY['postgres']"  -- GIN
@@ -113,8 +113,9 @@ Notes on methodology:
   would, so the planner picks representative plans.
 - Each query is timed server-side via `psql \timing`, run 6 times; the first run
   is discarded as warm-up and the **median of the remaining 5** is reported.
-- The scratch cluster's socket lives under `/tmp/claude-1000` to stay within the
-  107-byte UNIX socket path limit.
+- The scratch cluster's socket lives in a deliberately short scratch base
+  (`${TMPDIR:-/tmp}/pgokf-bench`) to stay within the 107-byte UNIX socket path
+  limit; point `TMPDIR` somewhere equally short if you override it.
 
 ## Results (real, measured)
 
@@ -199,11 +200,11 @@ tree or a Parquet file; they are what the PostgreSQL projection exists to add.
 
 ## Parquet read leg
 
-No `pyarrow` and no `duckdb` (Python module or CLI) are installed on this host.
-Rather than estimate, the harness builds a small throwaway Rust reader against
-the same `parquet`/`arrow` 59.2.0 crates the extension already uses, opens
-`concepts.parquet`, decodes **every** row group, and counts the rows whose
-`type` column equals `Runbook`. This is a genuine end-to-end decode:
+No `pyarrow` and no `duckdb` (Python module or CLI) are installed on the
+benchmark host. Rather than estimate, the harness builds a small throwaway Rust
+reader against the same `parquet`/`arrow` 59.2.0 crates the extension already
+uses, opens `concepts.parquet`, decodes **every** row group, and counts the rows
+whose `type` column equals `Runbook`. This is a genuine end-to-end decode:
 
 - rows scanned: 12,000; rows matched: 1,500 (matches the PG btree count);
 - elapsed: **55.90 ms**; reader peak RSS: 17.5 MiB.

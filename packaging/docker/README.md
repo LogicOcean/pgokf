@@ -2,21 +2,30 @@
 
 A drop-in replacement for the official [`postgres`](https://hub.docker.com/_/postgres)
 image with the **pgokf** extension pre-built and installed, so
-`CREATE EXTENSION pgokf;` works out of the box. Published to
-`ghcr.io/logicocean/pgokf`.
+`CREATE EXTENSION pgokf;` works out of the box.
 
-## Supported tags
+> **Not published yet - build it yourself.** No registry serves this image.
+> CI ([`.github/workflows/packages.yml`](../../.github/workflows/packages.yml))
+> builds one image per supported PostgreSQL major and smoke-tests it (start the
+> container, register the sample bundle, assert concept rows materialize), but
+> it loads the image into the runner (`push: false` / `load: true`) and never
+> pushes it. Use the [build](#build) command below; there is nothing to pull.
+
+## Image tags
 
 One image per PostgreSQL major (15-19), selected at build time via the
-`PG_MAJOR` build argument:
+`PG_MAJOR` build argument. These are the local tag names produced by the build
+below; `0.1.13` is the extension version, read from
+`crates/extension/pgokf.control` - the single source of truth that CI and
+`packaging/deb/build-deb.sh` both resolve at build time.
 
-| Tag                  | PostgreSQL |
-| -------------------- | ---------- |
-| `0.1.3-pg15`         | 15         |
-| `0.1.3-pg16`         | 16         |
-| `0.1.3-pg17`         | 17         |
-| `0.1.3-pg18`, `latest` | 18       |
-| `0.1.3-pg19`         | 19 (once PGDG ships packages) |
+| Tag             | PostgreSQL                    |
+| --------------- | ----------------------------- |
+| `0.1.13-pg15`   | 15                            |
+| `0.1.13-pg16`   | 16                            |
+| `0.1.13-pg17`   | 17                            |
+| `0.1.13-pg18`   | 18 (the `PG_MAJOR` default)   |
+| `0.1.13-pg19`   | 19 (once PGDG ships packages) |
 
 ## Build
 
@@ -26,8 +35,12 @@ whole source tree:
 ```bash
 docker build -f packaging/docker/Dockerfile \
   --build-arg PG_MAJOR=18 \
-  -t ghcr.io/logicocean/pgokf:0.1.3-pg18 .
+  -t pgokf:0.1.13-pg18 .
 ```
+
+The tag is a purely local name. CI builds the same image under the
+`ghcr.io/logicocean/pgokf:<version>-pg<major>` name it would publish under, but
+that reference is not resolvable until a release actually pushes it.
 
 Pinned build arguments (override only deliberately):
 
@@ -45,9 +58,11 @@ final image - no Rust toolchain, no source.
 
 ## Run
 
+Run the image you just built:
+
 ```bash
 docker run --rm -e POSTGRES_PASSWORD=postgres \
-  ghcr.io/logicocean/pgokf:0.1.3-pg18
+  pgokf:0.1.13-pg18
 ```
 
 The extension is created automatically in the default `postgres` database on
@@ -67,7 +82,8 @@ see the project [README](../../README.md).
 ```yaml
 services:
   db:
-    image: ghcr.io/logicocean/pgokf:0.1.3-pg18
+    # Locally built (see Build above); nothing is pulled.
+    image: pgokf:0.1.13-pg18
     environment:
       POSTGRES_PASSWORD: postgres
     ports:

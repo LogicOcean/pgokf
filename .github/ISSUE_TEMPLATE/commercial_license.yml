@@ -1,0 +1,57 @@
+name: 💼 Commercial license inquiry
+description: Request a commercial license for use the AGPL-3.0 does not permit.
+title: "Commercial license inquiry: "
+labels: ["licensing", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        pgokf is free under the **AGPL-3.0** - if that license already fits your
+        use, you do not need this form. See
+        [LICENSING.md](../blob/main/LICENSING.md) for the dual-license model and
+        [COMM-LICENSE.md](../blob/main/COMM-LICENSE.md) for the commercial terms
+        (which take effect only once an Order Form is executed, so reading them
+        grants no rights).
+
+        **This issue is public.** Give us only enough to reach you - **do not
+        post pricing, contract terms, deployment details, or anything else
+        confidential.** We will follow up privately with an Order Form.
+  - type: input
+    id: organization
+    attributes:
+      label: Company / organization
+      description: The legal entity that would hold the license.
+      placeholder: Example Corp
+    validations:
+      required: true
+  - type: input
+    id: contact
+    attributes:
+      label: How should we reach you?
+      description: A channel you are comfortable posting publicly - a work email address, a contact form on your site, or a company profile page.
+      placeholder: licensing@example.com
+    validations:
+      required: true
+  - type: dropdown
+    id: reason
+    attributes:
+      label: Why the AGPL does not fit
+      options:
+        - Embedding pgokf in a proprietary product
+        - Offering pgokf as a managed / hosted service without releasing modifications
+        - Organizational policy against AGPL software
+        - Other (note below)
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else we should know?
+      description: Timeline, PostgreSQL version, or which companions you plan to use. Keep it non-confidential.
+  - type: checkboxes
+    id: acknowledgement
+    attributes:
+      label: Acknowledgement
+      options:
+        - label: I understand this issue is public and I have not included confidential details.
+          required: true

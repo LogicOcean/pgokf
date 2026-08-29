@@ -106,8 +106,8 @@ SELECT * FROM pgokf.register_bundle('/mnt/okf/knowledge', 'knowledge');
 > workload IAM role and let the mount driver assume it. Do not bake long-lived
 > access keys into the mount config or the environment. This keeps credentials
 > out of the database, out of backups, and out of `pgokf_private.config` - the
-> extension never sees them. `pgokf`'s CLAUDE-level rule is the same one to
-> apply here: no static secrets on the box.
+> extension never sees them. The rule is the same one that governs the rest of
+> the deployment: no static secrets on the box.
 
 ### Verified example: MinIO + s3fs
 

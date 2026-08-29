@@ -39,7 +39,7 @@ PG_CONFIG="${PG_CONFIG:-/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config}"
 DEB_REVISION="${DEB_REVISION:-1}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/target/packaging/deb}"
 MAINTAINER="${MAINTAINER:-David Saroka <david.saroka@gmail.com>}"
-HOMEPAGE="https://github.com/LogicOcean/okf-pg-catalog"
+HOMEPAGE="https://github.com/LogicOcean/pgokf"
 
 log() { printf '==> %s\n' "$*" >&2; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }

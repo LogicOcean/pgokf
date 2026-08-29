@@ -1,6 +1,6 @@
 # pgokf
 
-**pgokf** is a PostgreSQL extension that materializes [Open Knowledge Format](https://openknowledge.dev)
+**pgokf** is a PostgreSQL extension that materializes [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog)
 (OKF v0.2) bundles - directories of UTF-8 Markdown *concept* documents with YAML
 frontmatter - into a transactional, queryable catalog inside PostgreSQL.
 

@@ -12,6 +12,9 @@
 .vscode/
 .cargo-pgrx/
 
+# AI assistant settings - per-developer local state, never versioned.
+.claude/
+
 # Packaging build output - never commit built packages or images.
 /packaging/**/build/
 *.deb

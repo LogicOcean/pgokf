@@ -29,11 +29,15 @@
 %global __strip       /bin/true
 
 Name:           %{sname}_%{pgmajorversion}
-Version:        0.1.3
+# Keep in lockstep with default_version in crates/extension/pgokf.control, the
+# single source of truth for the extension version. build-deb.sh and the Docker
+# job read that file directly; a spec is parsed before Source0 is unpacked, so
+# this one cannot -- bump it by hand with every release.
+Version:        0.1.13
 Release:        1%{?dist}
 Summary:        Materialized PostgreSQL catalog for Open Knowledge Format bundles
 
-License:        MIT
+License:        AGPL-3.0-only
 URL:            https://github.com/LogicOcean/pgokf
 Source0:        %{sname}-%{version}.tar.gz
 
@@ -93,9 +97,15 @@ cp -a target/release/%{sname}-pg%{pgmajorversion}/. %{buildroot}/
 %{pginstdir}/share/extension/%{sname}--*--*.sql
 
 %changelog
-* Wed Aug 27 2026 David Saroka <david.saroka@gmail.com> - 0.1.3-1
+* Sat Aug 29 2026 David Saroka <david.saroka@gmail.com> - 0.1.13-1
+- Release 0.1.13: audited security and bugfix remediation. The in-database SQL
+  surface is unchanged from 0.1.12; loading the new shared library is what
+  activates the corrected code paths.
+- Upgrade scripts through pgokf--0.1.12--0.1.13.sql ship via the existing glob.
+
+* Thu Aug 27 2026 David Saroka <david.saroka@gmail.com> - 0.1.3-1
 - Release 0.1.3: version coherence across all packaging formats.
 - Ship extension upgrade scripts (0.1.0->0.1.1->0.1.2->0.1.3) via glob.
 
-* Wed Aug 27 2026 David Saroka <david.saroka@gmail.com> - 0.1.0-1
+* Thu Aug 27 2026 David Saroka <david.saroka@gmail.com> - 0.1.0-1
 - Initial RPM packaging of pgokf for PostgreSQL 15-19.

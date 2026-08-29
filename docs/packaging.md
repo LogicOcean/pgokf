@@ -121,7 +121,7 @@ jq -e 'has("name") and has("version") and has("abstract")
 
 ---
 
-## Docker image (ghcr.io)
+## Docker image
 
 [`packaging/docker/Dockerfile`](https://github.com/LogicOcean/pgokf/blob/main/packaging/docker/Dockerfile) is a stock
 `postgres:N` image with the extension pre-installed, so `CREATE EXTENSION
@@ -131,8 +131,11 @@ pgokf;` works out of the box (auto-created on first init). Build from the
 ```bash
 docker build -f packaging/docker/Dockerfile \
   --build-arg PG_MAJOR=18 \
-  -t ghcr.io/logicocean/pgokf:0.1.13-pg18 .
+  -t pgokf:0.1.13-pg18 .
 ```
+
+CI builds and smoke-tests this image for every supported major, but does not
+push it: no image is published to a registry yet, so build locally.
 
 Add a `.dockerignore` excluding `target/` and `.git/` to keep the build
 context small. Details and a compose snippet: [packaging/docker/README.md](https://github.com/LogicOcean/pgokf/blob/main/packaging/docker/README.md).
@@ -174,9 +177,10 @@ dependency at each release.
    (`cd crates/extension && cargo pgrx schema pg18 > sql/pgokf--0.1.13.sql`),
    build the distribution zip (repo contents + `META.json` + generated SQL),
    and upload it at <https://manager.pgxn.org/> under the `pgokf` distribution.
-5. **Docker.** Push each major's image to
-   `ghcr.io/logicocean/pgokf:0.1.13-pgN` and retag the default major as
-   `latest`.
+5. **Docker.** Not yet automated: the packages workflow builds and smoke-tests
+   an image per major but does not push one. Publishing requires adding a
+   registry-push job (with `packages: write` and a registry login) before this
+   step means anything.
 6. **Homebrew.** In the tap repo, update `pgokf.rb` `url` + `sha256` for
    `v0.1.13` and open the PR (`brew audit --new pgokf` locally first).
 7. **Announce.** GitHub Release notes from the CHANGELOG entry.

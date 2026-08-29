@@ -4,12 +4,13 @@
 #
 # A drop-in replacement for the official `postgres` image with the pgokf
 # extension already built and installed, so `CREATE EXTENSION pgokf;` works
-# out of the box. Intended for ghcr.io/logicocean/pgokf.
+# out of the box. CI builds and smoke-tests it per major; no image is published
+# to a registry yet, so the tag below is a local name.
 #
 # Build (templated for PostgreSQL 15-19 via PG_MAJOR):
 #   docker build -f packaging/docker/Dockerfile \
 #     --build-arg PG_MAJOR=18 \
-#     -t ghcr.io/logicocean/pgokf:0.1.3-pg18 .
+#     -t pgokf:0.1.13-pg18 .
 #
 # The build context MUST be the repository root (it copies the whole source
 # tree). The build is DRY: it delegates the filesystem image to

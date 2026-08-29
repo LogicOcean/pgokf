@@ -13,9 +13,11 @@
 #   (c) Parquet  : export the catalog to Parquet (timing + file sizes), then a
 #                  filtered read of concepts.parquet.
 #
-# Everything scratch lives under /tmp/claude-1000 and is removed on exit (the
-# Parquet reader build is cached there to keep re-runs fast). The installed
-# extension is left in place (installing it is part of the benchmark).
+# Everything scratch lives under "${TMPDIR:-/tmp}/pgokf-bench" and is removed on
+# exit (the Parquet reader build is cached there to keep re-runs fast). That base
+# is deliberately short: the scratch cluster's UNIX socket lives under it and the
+# full socket path must fit PostgreSQL's 107-byte limit. The installed extension
+# is left in place (installing it is part of the benchmark).
 #
 # Usage:  scripts/bench/run_bench.sh
 # Env overrides: OKF_BENCH_COUNT (default 12000), OKF_BENCH_SEED (1337),
@@ -37,7 +39,7 @@ PGPORT="${OKF_BENCH_PORT:-54329}"
 QUERY_REPEATS="${OKF_BENCH_QUERY_REPEATS:-6}"
 DB="okfbench"
 
-WORK_BASE="/tmp/claude-1000"
+WORK_BASE="${TMPDIR:-/tmp}/pgokf-bench"   # keep short: see socket note below
 RUN_ID="okf-bench-$$"
 WORK="$WORK_BASE/$RUN_ID"
 SOCK="$WORK_BASE/okf-bs-$$"           # short socket dir (< 107-byte limit)

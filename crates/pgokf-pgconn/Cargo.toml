@@ -6,6 +6,13 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Shared PostgreSQL connection helper for the pgokf companions: NoTls by default, optional rustls TLS honoring sslmode=require or an explicit flag."
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+keywords.workspace = true
+# Overrides the workspace default: this member only opens and optionally
+# TLS-wraps a connection; it processes no text.
+categories = ["database", "network-programming"]
 
 [lib]
 name = "pgokf_pgconn"

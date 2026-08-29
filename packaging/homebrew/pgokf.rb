@@ -11,12 +11,15 @@
 class Pgokf < Formula
   desc "Materialized PostgreSQL catalog for Open Knowledge Format bundles"
   homepage "https://github.com/LogicOcean/pgokf"
-  url "https://github.com/LogicOcean/pgokf/archive/refs/tags/v0.1.3.tar.gz"
-  # PLACEHOLDER: replace with the real tarball digest at release time, once the
-  # v0.1.3 tag exists:
-  #   curl -fsSL https://github.com/LogicOcean/pgokf/archive/refs/tags/v0.1.3.tar.gz | shasum -a 256
+  # The tag tracks default_version in crates/extension/pgokf.control, the single
+  # source of truth for the extension version; bump the url, the sha256 below,
+  # and the version assertions in `test do` together.
+  url "https://github.com/LogicOcean/pgokf/archive/refs/tags/v0.1.13.tar.gz"
+  # PLACEHOLDER: a digest exists only once GitHub serves the v0.1.13 tag
+  # tarball. Replace it at release time with the output of:
+  #   curl -fsSL https://github.com/LogicOcean/pgokf/archive/refs/tags/v0.1.13.tar.gz | shasum -a 256
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"
-  license "MIT"
+  license "AGPL-3.0-only"
   head "https://github.com/LogicOcean/pgokf.git", branch: "main"
 
   # Track Homebrew's current default PostgreSQL. The formula is written to
@@ -74,7 +77,7 @@ class Pgokf < Formula
 
       Registering an OKF bundle requires a server-readable absolute bundle path
       and membership in pgokf_admin. See:
-        https://github.com/LogicOcean/pgokf#quickstart
+        https://github.com/LogicOcean/pgokf#quick-start
     EOS
   end
 
@@ -86,7 +89,7 @@ class Pgokf < Formula
     control = share/"postgresql@#{pg_major}/extension/pgokf.control"
     control = share/"postgresql/extension/pgokf.control" unless control.exist?
     assert_predicate control, :exist?, "pgokf.control not installed"
-    assert_match "default_version = '0.1.3'", control.read
+    assert_match "default_version = '0.1.13'", control.read
 
     # End-to-end: initialize a throwaway cluster and CREATE EXTENSION.
     pg_bin = pg.opt_bin
@@ -100,7 +103,7 @@ class Pgokf < Formula
         "#{pg_bin}/psql -h 127.0.0.1 -p #{port} -U postgres -d postgres " \
         "-tAc 'CREATE EXTENSION pgokf; SELECT extversion FROM pg_extension WHERE extname=''pgokf'';'",
       )
-      assert_match "0.1.3", output
+      assert_match "0.1.13", output
     ensure
       system pg_bin/"pg_ctl", "-D", datadir, "-w", "stop"
     end

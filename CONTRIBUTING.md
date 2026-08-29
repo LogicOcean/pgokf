@@ -22,7 +22,7 @@ instead of a pull request - we can often implement it independently.
 ## Development setup
 
 - Rust 1.96 (see `rust-toolchain.toml`), `cargo-pgrx` 0.19.2.
-- Install a PostgreSQL 15–18 dev environment: `cargo pgrx init --pgNN=…`.
+- Install a PostgreSQL 15–19 dev environment: `cargo pgrx init --pgNN=…`.
 - Optional runtime extensions the seams probe for: `pgvector` (semantic search),
   ParadeDB `pg_search` (BM25), `pg_cron` (scheduled refresh) - all optional.
 

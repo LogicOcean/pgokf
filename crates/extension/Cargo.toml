@@ -5,6 +5,18 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "PostgreSQL extension that materializes Open Knowledge Format bundles into a transactional, queryable catalog: ranked search, a link graph, provenance, and multi-tenant isolation."
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+# A pgrx `cdylib` is not consumable from crates.io: it only becomes an
+# extension through `cargo pgrx install`/`package`, which needs PostgreSQL
+# headers, one `pgNN` feature selected at build time, and the generated
+# control/SQL files installed alongside the shared library. Distribution is
+# via PGXN and OS packages (see docs/packaging.md), never `cargo add`.
+publish = false
 
 [lib]
 crate-type = ["cdylib", "lib"]

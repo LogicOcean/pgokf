@@ -17,6 +17,14 @@ edition = "2024"
 rust-version = "1.96"
 license = "AGPL-3.0-only"
 repository = "https://github.com/LogicOcean/pgokf"
+homepage = "https://logicocean.github.io/pgokf/"
+documentation = "https://logicocean.github.io/pgokf/"
+# Resolved relative to this workspace root, so every member inherits the one
+# top-level README rather than carrying a copy.
+readme = "README.md"
+# crates.io caps this at 5 keywords of at most 20 characters each.
+keywords = ["postgresql", "okf", "knowledge-base", "catalog", "search"]
+categories = ["database", "text-processing"]
 
 [workspace.dependencies]
 # Arrow/Parquet are pure-Rust (no system libraries). default-features are

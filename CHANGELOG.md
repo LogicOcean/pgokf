@@ -12,11 +12,12 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 ### Changed
 
-- **Relicensed to dual AGPL-3.0 + commercial** (previously MIT). The core - the
-  extension and the `okf-parser` / `okf-sync` crates - is now `AGPL-3.0-only`;
+- **Relicensed to dual AGPL-3.0 + commercial** (previously MIT). Every crate in
+  the workspace - the extension, the `okf-parser` / `okf-sync` libraries, and
   the companion tools (`pgokf-ingest`, `pgokf-embed`, `pgokf-mcp`,
-  `pgokf-pgconn`) are `MIT`; and a commercial license is available for use the
-  AGPL does not permit. See `LICENSING.md`.
+  `pgokf-pgconn`) - is now `AGPL-3.0-only`, and a commercial license is
+  available for use the AGPL does not permit. See `LICENSING.md` and
+  `COMM-LICENSE.md`.
 
 ## [0.1.13] - 2026-08-29
 
@@ -795,7 +796,13 @@ queries, native full-text search, and link-graph traversal.
 - The `pgokf_private` schema and its `config` table are readable and writable
   only by the extension owner and `pgokf_admin`; readers cannot see policy.
 
-[Unreleased]: https://github.com/LogicOcean/pgokf/compare/v0.1.7...HEAD
+[Unreleased]: https://github.com/LogicOcean/pgokf/compare/v0.1.13...HEAD
+[0.1.13]: https://github.com/LogicOcean/pgokf/compare/v0.1.12...v0.1.13
+[0.1.12]: https://github.com/LogicOcean/pgokf/compare/v0.1.11...v0.1.12
+[0.1.11]: https://github.com/LogicOcean/pgokf/compare/v0.1.10...v0.1.11
+[0.1.10]: https://github.com/LogicOcean/pgokf/compare/v0.1.9...v0.1.10
+[0.1.9]: https://github.com/LogicOcean/pgokf/compare/v0.1.8...v0.1.9
+[0.1.8]: https://github.com/LogicOcean/pgokf/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/LogicOcean/pgokf/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/LogicOcean/pgokf/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/LogicOcean/pgokf/compare/v0.1.4...v0.1.5

@@ -5,6 +5,14 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "PostgreSQL-independent parser for Open Knowledge Format Markdown concepts: YAML frontmatter, link extraction, and path/ID normalization."
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+keywords.workspace = true
+# Overrides the workspace default: this member is a standalone Markdown/YAML
+# parser with no database surface of its own.
+categories = ["parser-implementations", "text-processing"]
 
 [dependencies]
 pulldown-cmark.workspace = true

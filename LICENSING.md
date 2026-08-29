@@ -1,5 +1,8 @@
 # Licensing
 
+**Copyright (c) 2026 LogicOcean.** LogicOcean holds the copyright in `pgokf`
+and is the party that grants both of the licenses described below.
+
 `pgokf` is **dual-licensed**: an open-source license (AGPL-3.0) for the whole
 project, and a separate **commercial license** for use the AGPL does not permit.
 

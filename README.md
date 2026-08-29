@@ -1,6 +1,6 @@
 # pgokf
 
-**A PostgreSQL extension that turns [Open Knowledge Format](https://openknowledge.dev) bundles into a queryable, transactional catalog** - full-text, semantic, and hybrid search, a link graph, multi-tenant isolation, version history, and an audit trail, all inside PostgreSQL.
+**A PostgreSQL extension that turns [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog) bundles into a queryable, transactional catalog** - full-text, semantic, and hybrid search, a link graph, multi-tenant isolation, version history, and an audit trail, all inside PostgreSQL.
 
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 [![PostgreSQL 15–19](https://img.shields.io/badge/PostgreSQL-15%E2%80%9319-336791.svg)](https://www.postgresql.org/)
@@ -118,6 +118,8 @@ RUST_TEST_THREADS=1 cargo pgrx test pg18 --no-default-features --features pg18 #
 Pre-1.0 (`0.1.x`). The enumerated SQL surface is treated as stable and every change ships an upgrade script verified `upgrade == fresh`, but per SemVer a `0.MINOR` bump may still carry a breaking change (called out in [CHANGELOG.md](CHANGELOG.md)). Reaching `1.0.0` is a deliberate decision, not an automatic bump.
 
 ## License
+
+Copyright (c) 2026 LogicOcean.
 
 pgokf is **dual-licensed**: **AGPL-3.0-only** for all crates ([`LICENSE`](LICENSE); every source file carries an SPDX header), plus a **commercial license** for use the AGPL does not permit - embedding in a proprietary product, offering it as a managed service without releasing source, or an organizational no-AGPL policy. See [`LICENSING.md`](LICENSING.md) for the model and [`COMM-LICENSE.md`](COMM-LICENSE.md) for the commercial terms.
 

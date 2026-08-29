@@ -1,4 +1,7 @@
-blank_issues_enabled: false
+# Blank issues stay enabled on purpose: SECURITY.md tells a reporter who cannot
+# use private vulnerability reporting to open a bare "security report, please
+# reach out" issue, which no form can express.
+blank_issues_enabled: true
 contact_links:
   - name: 🔒 Report a security vulnerability
     url: https://github.com/LogicOcean/pgokf/security/advisories/new
@@ -8,7 +11,7 @@ contact_links:
     about: The full pgokf documentation site.
   - name: 💬 Questions & discussion
     url: https://github.com/LogicOcean/pgokf/discussions
-    about: For usage questions, ideas, and general discussion (enable Discussions on the repo).
+    about: For usage questions, ideas, and general discussion.
   - name: 💼 Commercial licensing
     url: https://github.com/LogicOcean/pgokf/blob/main/LICENSING.md
     about: pgokf is AGPL-3.0; a commercial license is available for other uses.

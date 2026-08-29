@@ -1,0 +1,42 @@
+version: 2
+
+# Weekly version updates for the two ecosystems this repository actually pins:
+# the Cargo workspace (root manifest + every member crate) and the GitHub
+# Actions used by the workflows. Every action is pinned to a commit SHA, so
+# Dependabot is the only thing that keeps those pins current.
+#
+# Minor and patch bumps are grouped into a single pull request per ecosystem to
+# keep review load low; majors stay ungrouped so a breaking bump is reviewed on
+# its own.
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "triage"]
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      cargo-minor-and-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "triage"]
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      actions-minor-and-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
