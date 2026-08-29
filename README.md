@@ -119,7 +119,7 @@ Pre-1.0 (`0.1.x`). The enumerated SQL surface is treated as stable and every cha
 
 ## License
 
-pgokf is **dual-licensed**: **AGPL-3.0-only** for all crates ([`LICENSE`](LICENSE); every source file carries an SPDX header), plus a **commercial license** for use the AGPL does not permit - embedding in a proprietary product, offering it as a managed service without releasing source, or an organizational no-AGPL policy. See [`LICENSING.md`](LICENSING.md).
+pgokf is **dual-licensed**: **AGPL-3.0-only** for all crates ([`LICENSE`](LICENSE); every source file carries an SPDX header), plus a **commercial license** for use the AGPL does not permit - embedding in a proprietary product, offering it as a managed service without releasing source, or an organizational no-AGPL policy. See [`LICENSING.md`](LICENSING.md) for the model and [`COMM-LICENSE.md`](COMM-LICENSE.md) for the commercial terms.
 
 ## Security & contributing
 

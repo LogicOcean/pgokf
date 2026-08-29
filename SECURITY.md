@@ -15,12 +15,12 @@ release to receive fixes.
 
 **Please do not open a public GitHub issue for a security vulnerability.**
 
-Report it privately through one of:
-
-- GitHub's **[Private vulnerability reporting](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability)**
-  (the **Security → Report a vulnerability** button on this repository), or
-- email **security@logicocean.example** *(replace with the real address before
-  publishing)*.
+Report it privately through GitHub's
+**[Private vulnerability reporting](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability)**:
+the **Security → Report a vulnerability** button on this repository. If that
+button is unavailable to you, open a public issue that says only "security
+report, please reach out" with a way to contact you - **do not include any
+vulnerability details in the issue** - and we will move to a private channel.
 
 Please include: the affected version/commit, a description of the issue, and a
 minimal reproduction if you have one. We aim to acknowledge a report within a

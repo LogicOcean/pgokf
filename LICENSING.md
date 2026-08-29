@@ -32,11 +32,14 @@ If the AGPL does not fit your needs - for example you want to **embed pgokf into
 a proprietary product**, **offer it as a managed/hosted service without releasing
 your modifications**, or your organization has a policy against AGPL software - a
 **separate commercial license** is available that removes the AGPL copyleft
-obligations.
+obligations. The terms are in [`COMM-LICENSE.md`](COMM-LICENSE.md); it takes
+effect only once an Order Form is executed with LogicOcean, so simply reading it
+grants no rights.
 
-To obtain a commercial license, contact **LogicOcean** at
-`licensing@logicocean.example` *(replace with the real contact before
-publishing)*.
+To obtain a commercial license, open an issue titled **"Commercial license
+inquiry"** on [github.com/LogicOcean/pgokf](https://github.com/LogicOcean/pgokf/issues)
+with a way to reach you (keep confidential details out of the issue), and
+LogicOcean will follow up privately with an Order Form.
 
 ## Contributing
 
