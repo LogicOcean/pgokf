@@ -45,7 +45,6 @@ RUST_TEST_THREADS=1 cargo pgrx test pg18 --no-default-features --features pg18  
   `crates/extension/tests/api_stability.rs` (the surface is locked).
 - Any change to stored data ships an upgrade script
   `crates/extension/sql/pgokf--<from>--<to>.sql`, verified `upgrade == fresh`.
-- New source files carry an `SPDX-License-Identifier` header
-  (`AGPL-3.0-only` for the core crates, `MIT` for the companions).
+- New source files carry an `SPDX-License-Identifier: AGPL-3.0-only` header.
 - See [`docs/api-stability.md`](docs/api-stability.md) for the versioning and
   compatibility rules.

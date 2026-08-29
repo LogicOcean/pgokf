@@ -1,0 +1,46 @@
+name: ✨ Feature request
+description: Suggest a capability or improvement for pgokf.
+title: "[feature]: "
+labels: ["enhancement", "triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / use case
+      description: What are you trying to do, and why is it hard or impossible today?
+      placeholder: As an operator running a clustered catalog, I want to …
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What would you like pgokf to do? A function, config key, backend, companion, etc.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Search & retrieval
+        - Link graph / OKF conformance
+        - Multi-tenancy / security
+        - Lifecycle / audit / history
+        - Ingestion / companions
+        - Operations / packaging
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you've tried, or other designs you weighed.
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I'd be willing to help implement this (under the project CLA).

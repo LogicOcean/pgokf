@@ -29,8 +29,8 @@ allow = [
   # no copyleft or attribution obligations on the consuming code.
   "CDLA-Permissive-2.0",
   "ISC",
-  # pgokf's own core crates (extension, okf-parser, okf-sync) are AGPL-3.0-only;
-  # the companion crates are MIT. Both appear in the workspace dependency graph.
+  # All pgokf crates (extension, okf-parser, okf-sync, and the pgokf-* companions)
+  # are AGPL-3.0-only. MIT below remains for permissively-licensed dependencies.
   "AGPL-3.0-only",
   "MIT",
   "MPL-2.0",

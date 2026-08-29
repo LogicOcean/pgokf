@@ -1,0 +1,68 @@
+name: 🐛 Bug report
+description: Something in the pgokf extension or a companion tool behaves incorrectly.
+title: "[bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please **do not** report security
+        vulnerabilities here — see [SECURITY.md](../blob/main/SECURITY.md) for
+        private disclosure.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug — what you observed vs. what you expected.
+      placeholder: |
+        Observed: concept_search returned duplicate rows across pages.
+        Expected: pages tile the result set with no duplicates.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The smallest SQL / commands that reproduce it. Include the bundle shape if relevant.
+      render: sql
+      placeholder: |
+        CREATE EXTENSION pgokf;
+        SELECT * FROM pgokf.register_bundle('/abs/path/to/bundle');
+        SELECT * FROM pgokf.concept_search('...');
+    validations:
+      required: true
+  - type: input
+    id: pgokf-version
+    attributes:
+      label: pgokf version
+      description: Output of `SELECT pgokf.version();` (or the git tag/commit).
+      placeholder: "0.1.13"
+    validations:
+      required: true
+  - type: dropdown
+    id: pg-version
+    attributes:
+      label: PostgreSQL major version
+      options: ["15", "16", "17", "18", "19", "other (note below)"]
+    validations:
+      required: true
+  - type: checkboxes
+    id: optional-extensions
+    attributes:
+      label: Optional extensions installed
+      description: Which optional runtime extensions are present?
+      options:
+        - label: pgvector (semantic / hybrid search)
+        - label: pg_search / ParadeDB (BM25)
+        - label: pg_cron (scheduled refresh)
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs / SQLSTATE / error text
+      description: Server log lines, the exact error message and SQLSTATE, or `\errverbose` output.
+      render: shell
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, install method (source / .deb / .rpm / Docker), and anything else relevant.

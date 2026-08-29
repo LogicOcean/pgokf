@@ -3,7 +3,7 @@ name = "pgokf-ingest"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license = "MIT"
+license.workspace = true
 repository.workspace = true
 description = "Mountless OKF ingestion companion: reads an S3-compatible object store and streams bundle bytes into pgokf via register_bundle_content."
 

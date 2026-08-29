@@ -3,7 +3,7 @@ name = "pgokf-mcp"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license = "MIT"
+license.workspace = true
 repository.workspace = true
 description = "Model Context Protocol (MCP) server exposing the pgokf catalog to AI agents over stdio JSON-RPC."
 

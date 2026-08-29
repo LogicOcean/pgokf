@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: AGPL-3.0-only
 //! `pgokf-ingest` — the mountless OKF ingestion companion.
 //!
 //! This standalone binary is the network-facing half of the mountless

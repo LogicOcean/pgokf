@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: AGPL-3.0-only
 //! `pgokf-embed` — the reference embedding-generation companion for `pgokf`.
 //!
 //! This standalone async binary is the embedder half of the shipped semantic

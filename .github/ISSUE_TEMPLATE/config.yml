@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 🔒 Report a security vulnerability
+    url: https://github.com/LogicOcean/pgokf/security/advisories/new
+    about: Please report vulnerabilities privately — do not open a public issue. See SECURITY.md.
+  - name: 📖 Documentation
+    url: https://logicocean.github.io/pgokf/
+    about: The full pgokf documentation site.
+  - name: 💬 Questions & discussion
+    url: https://github.com/LogicOcean/pgokf/discussions
+    about: For usage questions, ideas, and general discussion (enable Discussions on the repo).
+  - name: 💼 Commercial licensing
+    url: https://github.com/LogicOcean/pgokf/blob/main/LICENSING.md
+    about: pgokf is AGPL-3.0; a commercial license is available for other uses.

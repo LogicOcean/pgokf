@@ -3,7 +3,7 @@ name = "pgokf-embed"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license = "MIT"
+license.workspace = true
 repository.workspace = true
 description = "Reference embedding-generation companion for pgokf: computes concept embeddings against any OpenAI-compatible endpoint and streams them into pgokf.set_concept_embedding."
 

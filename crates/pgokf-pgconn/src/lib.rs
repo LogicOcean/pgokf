@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Shared PostgreSQL connection helper for the `pgokf` companions.
 //!
 //! The three companions (`pgokf-ingest`, `pgokf-embed`, `pgokf-mcp`) all open a

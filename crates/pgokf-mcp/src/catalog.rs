@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Catalog access and MCP tool definitions.
 //!
 //! Each MCP tool is backed by a single query against the shipped `pgokf` public
