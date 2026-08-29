@@ -28,3 +28,31 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check
+
+  # COMM-LICENSE.md section 5 promises commercial licensees a third-party
+  # notices file with every release, and the .deb/.rpm builds install it. A
+  # dependency change that is not reflected in the committed file would make
+  # that promise false, so regenerate and fail on any drift.
+  notices:
+    name: Third-party notices are current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: "1.96.0"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Install cargo-about
+        run: |
+          curl -fsSL https://github.com/EmbarkStudios/cargo-about/releases/download/0.9.2/cargo-about-0.9.2-x86_64-unknown-linux-musl.tar.gz \
+            | tar xz --strip-components=1 -C /usr/local/bin --wildcards '*/cargo-about'
+      - name: Regenerate and diff
+        run: |
+          cargo about generate --workspace --all-features \
+            -o /tmp/notices-fresh.txt about.hbs
+          if ! diff -q THIRD-PARTY-NOTICES.txt /tmp/notices-fresh.txt; then
+            echo "::error::THIRD-PARTY-NOTICES.txt is stale. Regenerate it with:"
+            echo "  cargo about generate --workspace --all-features -o THIRD-PARTY-NOTICES.txt about.hbs"
+            diff -u THIRD-PARTY-NOTICES.txt /tmp/notices-fresh.txt | head -40
+            exit 1
+          fi

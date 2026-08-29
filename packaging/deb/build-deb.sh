@@ -88,6 +88,19 @@ mkdir -p "${PKG_ROOT}" "${OUTPUT_DIR}"
 log "Staging pgrx image into ${PKG_ROOT}"
 cp -a "${STAGED_TREE}/usr" "${PKG_ROOT}/usr"
 
+# Ship the license and the generated third-party notices in the conventional
+# Debian doc directory. COMM-LICENSE.md section 5 tells commercial licensees a
+# notices file accompanies each release, so this is a licensing obligation, not
+# a nicety; the build fails loudly if it has not been generated.
+DOC_DIR="${PKG_ROOT}/usr/share/doc/${PKG_NAME}"
+if [ ! -f "${REPO_ROOT}/THIRD-PARTY-NOTICES.txt" ]; then
+  echo "error: THIRD-PARTY-NOTICES.txt is missing; regenerate it with" >&2
+  echo "  cargo about generate --workspace --all-features -o THIRD-PARTY-NOTICES.txt about.hbs" >&2
+  exit 1
+fi
+install -Dm644 "${REPO_ROOT}/LICENSE"                 "${DOC_DIR}/copyright"
+install -Dm644 "${REPO_ROOT}/THIRD-PARTY-NOTICES.txt" "${DOC_DIR}/THIRD-PARTY-NOTICES.txt"
+
 # Enforce the canonical file mode set expected in a .deb payload.
 find "${PKG_ROOT}" -type d -exec chmod 0755 {} +
 find "${PKG_ROOT}/usr/lib" -name '*.so' -exec chmod 0644 {} +

@@ -19,3 +19,6 @@
 /packaging/**/build/
 *.deb
 *.rpm
+
+# cargo-about scratch output; the committed notices file is THIRD-PARTY-NOTICES.txt
+/notices-fresh.txt

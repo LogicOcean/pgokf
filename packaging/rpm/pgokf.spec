@@ -88,6 +88,10 @@ rm -rf %{buildroot}
 cp -a target/release/%{sname}-pg%{pgmajorversion}/. %{buildroot}/
 
 %files
+# COMM-LICENSE.md section 5 promises commercial licensees a third-party notices
+# file with each release; %license installs both into the standard licence dir.
+%license LICENSE
+%license THIRD-PARTY-NOTICES.txt
 %{pginstdir}/lib/%{sname}.so
 %{pginstdir}/share/extension/%{sname}.control
 %{pginstdir}/share/extension/%{sname}--%{version}.sql

@@ -1,0 +1,36 @@
+# cargo-about configuration for THIRD-PARTY-NOTICES.txt.
+#
+# COMM-LICENSE.md section 5 tells commercial licensees that a third-party
+# notices file ships with a release; this file is what makes that true. The
+# accepted list mirrors the `allow` list in deny.toml, so a dependency that
+# passes `cargo deny check licenses` also has a reproducible notice here.
+#
+# Regenerate with:
+#   cargo about generate --workspace --all-features -o THIRD-PARTY-NOTICES.txt about.hbs
+
+# Every target matters: the .deb/.rpm ship a Linux cdylib, but the companions
+# are built on whatever a user targets, so do not filter by triple.
+accepted = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    # The workspace's own crates are AGPL-3.0-only. They are not third-party,
+    # but they appear in the dependency graph and must resolve to something.
+    "AGPL-3.0-only",
+]
+
+# Workspace crates are first-party: their license is LICENSE at the repo root,
+# not a third-party notice.
+workarounds = []
+
+[pgokf]
+accepted = ["AGPL-3.0-only"]

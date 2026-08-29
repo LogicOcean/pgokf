@@ -143,11 +143,14 @@ Agreement obligates Licensee to disclose Modifications to Licensor or to
 anyone else.
 
 The Software incorporates third-party components licensed under their own
-terms (for example MIT, Apache-2.0, BSD, and MPL-2.0 licensed libraries),
-identified in the repository's dependency manifests and in any third-party
-notices file shipped with a release. Those terms, not this Agreement, govern
-those components; Licensee must retain their notices and, for MPL-2.0 licensed
-files, comply with their source-availability terms on distribution. The AGPL
+permissive terms (at the date of this Agreement: Apache-2.0, MIT, ISC,
+BSD-3-Clause, Unicode-3.0, CC0-1.0, CDLA-Permissive-2.0, and Zlib), enumerated
+with their full license texts in the `THIRD-PARTY-NOTICES.txt` file generated
+from the dependency graph and shipped with each release. Those terms, not this
+Agreement, govern those components, and Licensee must retain their notices on
+distribution. Should a future release introduce a component under terms
+carrying source-availability obligations, those obligations apply to that
+component and are recorded in the notices file for that release. The AGPL
 waiver in Section 2 applies only to obligations arising under the AGPL in code
 in which Licensor holds sufficient rights.
 
