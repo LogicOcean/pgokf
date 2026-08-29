@@ -131,15 +131,57 @@ paths that write. Forcing RLS on the owner would break the write path (which mus
 stamp `tenant_id` and read across the bundle it owns) without adding isolation
 that the single-bundle scoping does not already guarantee.
 
-## Strict isolation: the operational contract
+## The trust model: what the `pgokf.tenant` GUC does and does not contain
 
-The see-all default exists for backward compatibility, but it also means a tenant
-connection that forgets to set `pgokf.tenant` sees **everything**. For hard
-isolation:
+State this plainly, because it governs how the feature may safely be deployed:
+
+> **`pgokf.tenant` is a scoping selector, not a hard security boundary against a
+> tenant who can execute arbitrary SQL.**
+
+`pgokf.tenant` is a `USERSET` GUC, so **any session that can run SQL can change
+its own value** — with `SET pgokf.tenant = 'other'`, `RESET pgokf.tenant`, or
+`SELECT set_config('pgokf.tenant', '', false)` — to another tenant's value or to
+empty, which the policy treats as *see-all*. Pinning it with `ALTER ROLE acme_app
+SET pgokf.tenant = 'acme'` sets only a **session default**: a subsequent plain
+`SET pgokf.tenant` in that same session overrides it, and RLS then filters by the
+new value. So the GUC contains an **honest, cooperating** client — one that
+issues no `SET` of its own and simply inherits the scope it is given — but it does
+**not** contain a **hostile** tenant who can submit raw SQL. This is inherent to
+any GUC-based tenancy, not a defect in the RLS policies (which are correct); the
+GUC is simply the wrong anchor for a boundary the adversary can move.
+
+Also note the **fail-open default**: unset (or empty) `pgokf.tenant` means *see
+every row*. A tenant-facing connection that is not forced to carry a tenant, and
+forgets to set one, sees the whole catalog.
+
+### Getting a *hard* boundary
+
+To make tenant isolation a real security boundary against an untrusted tenant,
+the tenant must not be able to run arbitrary `SET` / SQL against the database.
+Use one of:
+
+- **A constrained access layer.** Let the tenant reach PostgreSQL only through a
+  trusted connection pooler or a restricted API that pins `pgokf.tenant` on every
+  checkout and refuses to pass through raw `SET` or ad-hoc SQL. The GUC is then
+  set by infrastructure the tenant cannot influence.
+- **A per-tenant database role.** Give each tenant its own login role and let
+  ordinary PostgreSQL privileges — not a session GUC — enforce isolation
+  (optionally combined with `FORCE ROW LEVEL SECURITY` and per-tenant grants).
+  This holds even against a tenant issuing arbitrary SQL, because the role, not
+  the GUC, is the boundary.
+
+Without one of these, treat `pgokf.tenant` as convenience scoping among *trusted*
+callers, not as isolation against a hostile one.
+
+## Operational hardening (for the cooperating-client model)
+
+Even within the cooperating-client model above, these reduce accidental
+cross-tenant exposure:
 
 - **Pin the tenant to the role or connection**, not to ad-hoc `SET` statements:
   `ALTER ROLE acme_app SET pgokf.tenant = 'acme'`, or a connection-string option.
-  A pinned tenant cannot be "forgotten" between statements.
+  This stops an honest client from *accidentally* running unscoped; it does not
+  stop one that deliberately issues its own `SET` (see the trust model above).
 - **Never leave `pgokf.tenant` unset for a tenant-facing connection.** Reserve the
   unset (see-all) session for a trusted operator/admin.
 - **Reads run as a non-superuser.** RLS is bypassed by superusers and the table

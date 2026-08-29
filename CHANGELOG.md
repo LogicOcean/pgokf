@@ -12,6 +12,90 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 Nothing yet.
 
+## [0.1.13] - 2026-08-29
+
+**Security and bugfix remediation.** This release fixes a set of audited defects
+in the shipped catalog and companions. **The in-database SQL surface is
+unchanged from 0.1.12** — no table, type, function signature, index, grant,
+comment, role, or configuration key is added, dropped, renamed, or rewritten, so
+`ALTER EXTENSION pgokf UPDATE TO '0.1.13'` is a documented no-op that yields a
+catalog identical to a fresh 0.1.13, with every bundle, concept, embedding, link,
+history version, and provenance record intact. Every fix is internal code, a new
+input validation, companion behavior, or documentation; loading the 0.1.13
+shared library is what activates the corrected code paths. `api_stability` and
+the no-data-loss upgrade guarantees are preserved.
+
+### Security
+
+- **Denial-of-service in `concept_neighbors` closed (HIGH).** The recursive
+  traversal previously enumerated *every simple path* from the seed
+  (≈`O(N^hops)`), so a reader calling `concept_neighbors(seed, 5)` on a dense
+  bundle could spin the backend on millions of walk rows for a tiny answer. The
+  traversal is rewritten as a set-based, cycle-safe **breadth-first search** that
+  records the first (minimum-hop) visit of each neighbor and never re-expands a
+  visited node — `O(V + E)` work — returning **identical results** (distinct
+  neighbors, shortest hop distance, cycle-safe, active-bundle-scoped) for normal
+  graphs. A dense `K30` bundle that formerly timed out now answers in
+  milliseconds.
+- **Embedding poisoning rejected at write (HIGH).** `set_concept_embedding` now
+  validates that every element of the supplied vector is finite, raising SQLSTATE
+  `22023` (naming the offending index) for a `NaN`/`Infinity` element *before* the
+  upsert. Storage is `real[]`, so such a value inserted silently but was rejected
+  by pgvector at every query/index cast — one bad write could break semantic and
+  hybrid search and `rebuild_embedding_index` catalog-wide until the row was found
+  and fixed.
+- **`purge_retired` data-loss race closed (HIGH).** `purge_retired` snapshotted
+  the eligible bundles and then hard-deleted each without re-checking, so a
+  concurrent `unretire_bundle` that committed in between could have its restored
+  bundle (and its concept history) silently deleted. The per-bundle delete now
+  re-evaluates the eligibility predicate (`retired_at IS NOT NULL AND retired_at <
+  now() - older_than`) atomically under the bundle advisory lock, skipping — never
+  deleting — a bundle that is no longer eligible.
+- **Multi-tenancy trust model documented honestly.** `docs/security.md` and
+  `docs/multi-tenancy.md` now state plainly that the `pgokf.tenant` GUC is a
+  **scoping selector, not a hard security boundary** against a tenant who can run
+  arbitrary SQL (any session can `SET`/`RESET` it, and a pinned `ALTER ROLE`
+  default is overridable in-session), that the unset default fails open to
+  *see-all*, and that a hard boundary requires a constrained access layer that
+  pins the GUC or a per-tenant-role model.
+
+### Fixed
+
+- **`log.md` midnight-timestamp corruption (MED).** A space-separated
+  `YYYY-MM-DD HH:MM[:SS]` leading timestamp in a reserved `log.md` entry parsed to
+  **midnight** (only the first whitespace token was read). It now parses to the
+  real instant, while an untimestamped line still yields a `NULL` `logged_at` and
+  the entry text stays lossless.
+- **`concept_neighbors` NULL-bundle disambiguation counted inactive bundles
+  (LOW).** With no `bundle_id`, disambiguation now counts only **active** bundles
+  (`enabled AND retired_at IS NULL`), so a disabled/retired duplicate of a concept
+  id no longer raises a spurious `22023` that blocked the only active bundle.
+- **Self-linked seed excluded from its own neighbor set (LOW).** A concept that
+  links to itself is no longer returned as its own neighbor.
+- **Deterministic tiebreak for semantic/hybrid search (LOW).**
+  `concept_search_semantic` and `concept_search_hybrid` now break equal
+  distance/fused-score ties on `(bundle_id, concept_id)` for a stable order.
+
+### Companions
+
+- **Optional TLS to PostgreSQL for all three companions (MED).** `pgokf-ingest`,
+  `pgokf-embed`, and `pgokf-mcp` now share a small `pgokf-pgconn` helper crate and
+  accept a `--tls` flag (env `OKF_PG_TLS`); TLS is also enabled by
+  `sslmode=require` in the connection string. When enabled, the link uses `rustls`
+  (reusing the stack already pulled by `object_store`/`reqwest`, so `cargo deny`
+  stays green) and verifies the server certificate against the platform trust
+  store. **`NoTls` remains the default** for a local socket / trusted network.
+- **`pgokf-ingest` unit tests.** Added AAA unit tests for the companion's
+  path-derivation (prefix strip) and change-detection (content-hash) helpers.
+
+### Internal
+
+- New `crates/pgokf-pgconn` workspace crate centralizes the companions'
+  PostgreSQL connect step. Version bumped to `0.1.13` across the workspace,
+  `pgokf.control`, and `META.json`; a documented no-op
+  `pgokf--0.1.12--0.1.13.sql` upgrade script ships. Regression tests (Rust unit
+  tests and in-database `#[pg_test]`s) cover every fix above.
+
 ## [0.1.12] - 2026-08-28
 
 **Companion tooling**: three new out-of-process binaries that pair with the

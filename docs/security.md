@@ -280,6 +280,34 @@ must connect as an ordinary (non-superuser) login role that is a member of
 never accidentally left unset. See [multi-tenancy.md](multi-tenancy.md) for the
 full model and the strict-isolation contract.
 
+### What the `pgokf.tenant` GUC is — and is not
+
+Be precise about the trust boundary. `pgokf.tenant` is a `USERSET` GUC: it is a
+**scoping selector, not a hard security boundary against a tenant who can run
+arbitrary SQL.** Any session that can execute `SET` / `RESET` / `set_config()`
+can change its own `pgokf.tenant` at will — including to another tenant's value,
+or to empty, which the policy treats as *see-all* (the fail-open, backward-
+compatible default). Pinning the value with `ALTER ROLE … SET pgokf.tenant` does
+not close this: an `ALTER ROLE` default is only a session default and a plain
+`SET pgokf.tenant = '…'` in the same session overrides it. So GUC-based tenancy
+contains an *honest, cooperating* client that never issues its own `SET`; it does
+**not** contain a hostile tenant who can submit raw SQL.
+
+A **hard** boundary therefore requires one of:
+
+- reaching the database only through a constrained layer that pins `pgokf.tenant`
+  and refuses to pass through raw `SET` / arbitrary SQL — a trusted connection
+  pooler or a restricted API in front of PostgreSQL; or
+- a **per-tenant database role** model, where each tenant connects as its own
+  role and ordinary PostgreSQL privileges (not a session GUC) enforce isolation.
+
+Treat the see-all default the same way: because unset means *every row*, a
+tenant-facing connection that is not forced through such a layer (and forgets to
+set `pgokf.tenant`) sees the whole catalog. Reserve the unset session for a
+trusted operator. This is inherent to any GUC-based scoping and is not a defect
+in the RLS policies themselves — the policies are correct; the GUC is simply the
+wrong place to anchor a boundary against an adversary who can change it.
+
 ## The private schema
 
 `pgokf_private` holds internal catalog state (currently the `config` policy row)

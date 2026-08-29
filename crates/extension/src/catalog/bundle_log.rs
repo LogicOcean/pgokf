@@ -126,14 +126,41 @@ fn timestamp_candidate(entry: &str) -> &str {
     trimmed
 }
 
+/// Extract the leading ISO 8601 instant from a timestamp candidate, tolerating
+/// the space-separated `YYYY-MM-DD HH:MM[:SS]` form.
+///
+/// A `log.md` entry may lead with either a single self-contained token
+/// (`2026-08-01T09:30:00Z rest…`) or a space-separated date and time
+/// (`2026-08-01 09:30 rest…`). Passing only the first whitespace token to
+/// [`parse_iso8601_epoch`] would silently truncate the latter to its date and
+/// project **midnight** — wrong data, not `NULL`. So the first two tokens are
+/// joined and preferred, falling back to the first token alone. That first
+/// fallback covers both a date-only lead (`2026-08-01 did X` → the date at
+/// midnight, as before) and a self-contained single-token instant carrying
+/// trailing prose (whose two-token join would fold the following word into the
+/// zone/time and fail to parse). A candidate with no parseable leading
+/// timestamp — the common case for prose entries — yields `None`.
+fn leading_timestamp(candidate: &str) -> Option<f64> {
+    let mut tokens = candidate.split_whitespace();
+    let first = tokens.next()?;
+    if let Some(second) = tokens.next()
+        && let Some(epoch) = parse_iso8601_epoch(&format!("{first} {second}"))
+    {
+        return Some(epoch);
+    }
+    parse_iso8601_epoch(first)
+}
+
 /// Parse a `log.md`'s raw bytes into ordered [`LogEntry`]s, defensively.
 ///
 /// The bytes are decoded lossily (so a non-UTF-8 log still yields entries), then
 /// split into lines. Every non-blank line becomes one entry: its text is the
 /// trimmed line stored verbatim (lossless), and its `logged_at` is the leading
-/// ISO 8601 token — after any Markdown bullet/heading marker — parsed with
-/// [`parse_iso8601_epoch`], or `None` when there is no parseable timestamp.
-/// Blank lines are skipped and do not consume an ordinal. This never fails.
+/// ISO 8601 timestamp — after any Markdown bullet/heading marker, and honoring
+/// the space-separated `YYYY-MM-DD HH:MM[:SS]` form via [`leading_timestamp`] —
+/// parsed with [`parse_iso8601_epoch`], or `None` when there is no parseable
+/// timestamp. Blank lines are skipped and do not consume an ordinal. This never
+/// fails.
 pub(crate) fn parse_log(bytes: &[u8]) -> Vec<LogEntry> {
     let text = String::from_utf8_lossy(bytes);
     let mut entries = Vec::new();
@@ -143,10 +170,7 @@ pub(crate) fn parse_log(bytes: &[u8]) -> Vec<LogEntry> {
         if trimmed.is_empty() {
             continue;
         }
-        let logged_at = timestamp_candidate(trimmed)
-            .split_whitespace()
-            .next()
-            .and_then(parse_iso8601_epoch);
+        let logged_at = leading_timestamp(timestamp_candidate(trimmed));
         entries.push(LogEntry {
             ordinal,
             logged_at,
@@ -454,6 +478,64 @@ mod tests {
             entries[2].logged_at,
             parse_iso8601_epoch("2026-07-02T09:30:00Z")
         );
+    }
+
+    #[test]
+    fn parse_log_reads_a_space_separated_date_and_time_as_the_real_instant() {
+        // Arrange: a bulleted entry whose leading timestamp is a space-separated
+        // `YYYY-MM-DD HH:MM` (not a single `T`-joined token). Taking only the
+        // first whitespace token would silently parse it to midnight; the entry
+        // must instead resolve to 09:30 of that day.
+        let log = b"- 2026-08-01 09:30 did the thing\n";
+
+        // Act
+        let entries = parse_log(log);
+
+        // Assert: the parsed instant is the real 09:30 time, not midnight, and
+        // the source line is preserved verbatim.
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].entry, "- 2026-08-01 09:30 did the thing");
+        assert_eq!(
+            entries[0].logged_at,
+            parse_iso8601_epoch("2026-08-01 09:30"),
+            "a space-separated date and time must parse to the real instant",
+        );
+        assert_ne!(
+            entries[0].logged_at,
+            parse_iso8601_epoch("2026-08-01"),
+            "it must not collapse to the date's midnight",
+        );
+    }
+
+    #[test]
+    fn parse_log_reads_a_space_separated_date_time_with_seconds() {
+        // Arrange: the same shape carrying an explicit seconds field.
+        let log = b"2026-08-01 09:30:15 released\n";
+
+        // Act
+        let entries = parse_log(log);
+
+        // Assert
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].logged_at,
+            parse_iso8601_epoch("2026-08-01 09:30:15"),
+        );
+    }
+
+    #[test]
+    fn parse_log_reads_a_date_only_lead_as_midnight() {
+        // Arrange: a leading date followed only by prose (no time). This still
+        // resolves to the date's midnight — the two-token join fails to parse and
+        // falls back to the date token alone.
+        let log = b"2026-08-01 shipped the release\n";
+
+        // Act
+        let entries = parse_log(log);
+
+        // Assert
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].logged_at, parse_iso8601_epoch("2026-08-01"));
     }
 
     #[test]

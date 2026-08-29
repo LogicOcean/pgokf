@@ -75,6 +75,17 @@ Every flag has an environment-variable equivalent:
 | `--batch-size` | `OKF_EMBED_BATCH` | Concepts per HTTP request (default 32) |
 | `--max-chars` | `OKF_EMBED_MAX_CHARS` | Per-concept input character bound (default 8000) |
 | `--tenant` | `OKF_TENANT` | Apply a `pgokf.tenant` scope for the session |
+| `--tls` | `OKF_PG_TLS` | Require a TLS-encrypted link to PostgreSQL (default off) |
+
+### PostgreSQL transport (TLS)
+
+The database link is plaintext (`NoTls`) by default — fine for a local socket or
+trusted network. To encrypt it, pass `--tls` (env `OKF_PG_TLS=true`) or put
+`sslmode=require` in the connection string; either negotiates a `rustls` TLS
+session that verifies the server certificate against the platform trust store.
+`sslmode=disable`/`prefer` (or an omitted `sslmode`) keep the plaintext default.
+This is independent of the TLS used to reach the embeddings endpoint (always
+HTTPS when the endpoint URL is `https://`).
 
 After a run, `pgokf.concept_embedding` is populated and
 `pgokf.concept_search_semantic(query_embedding)` returns ranked hits (compute the

@@ -67,6 +67,25 @@ Every flag has an environment-variable equivalent:
 | `--database-url` | `OKF_PG_URL` | PostgreSQL connection string for a `pgokf_writer` role (required) |
 | `--bundle-name` | `OKF_BUNDLE_NAME` | Bundle name; keyed as `content:<name>` (required) |
 | `--concurrency` | `OKF_DOWNLOAD_CONCURRENCY` | Max concurrent object downloads (default 8) |
+| `--tls` | `OKF_PG_TLS` | Require a TLS-encrypted link to PostgreSQL (default off) |
+
+### PostgreSQL transport (TLS)
+
+The link to PostgreSQL is plaintext (`NoTls`) by default, which suits a local
+socket or a trusted private network. To encrypt it, either pass `--tls` (env
+`OKF_PG_TLS=true`) or put `sslmode=require` in the connection string — either one
+negotiates a `rustls` TLS session and verifies the server certificate against the
+platform trust store:
+
+```bash
+pgokf-ingest --tls --database-url "postgresql://okf_ingest@db.internal/app" ...
+# or, equivalently:
+pgokf-ingest --database-url "postgresql://okf_ingest@db.internal/app?sslmode=require" ...
+```
+
+`sslmode=disable`/`prefer` (and an omitted `sslmode`) keep the plaintext default.
+Object-store TLS is configured separately (via the endpoint URL and `--allow-http`)
+and is unaffected by `--tls`.
 
 On success it prints the sync counts, for example:
 
@@ -88,6 +107,6 @@ Deliberately minimal but real:
   partial (chunked) call would wrongly delete everything absent from the chunk.
   Downloads are streamed with bounded concurrency; a future large-corpus mode
   could add server-side incremental batching.
-- **Plaintext transport (`NoTls`).** Suitable for a private network or a local
-  socket. Front a public PostgreSQL endpoint with TLS termination, or extend the
-  connector with `tokio-postgres` + rustls.
+- **Optional TLS to PostgreSQL.** Plaintext by default (a private network or
+  local socket); `--tls` / `sslmode=require` negotiates a verified `rustls`
+  session (see [PostgreSQL transport (TLS)](#postgresql-transport-tls) above).

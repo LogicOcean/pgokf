@@ -1,0 +1,30 @@
+[package]
+name = "pgokf-pgconn"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared PostgreSQL connection helper for the pgokf companions: NoTls by default, optional rustls TLS honoring sslmode=require or an explicit flag."
+
+[lib]
+name = "pgokf_pgconn"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1.0"
+tokio = { version = "1.40", features = ["rt"] }
+tokio-postgres = "0.7"
+# rustls is already pulled into the workspace tree by object_store -> reqwest, so
+# reusing it for the optional PostgreSQL TLS link adds no new crypto stack. The
+# aws_lc_rs provider (rustls' default) is selected explicitly so no process-wide
+# default provider needs installing. tokio-postgres-rustls bridges it into
+# tokio-postgres' MakeTlsConnect. cargo deny stays green: rustls / ring /
+# aws-lc-rs / rustls-native-certs are all already in Cargo.lock via the ingest
+# companion's object_store -> reqwest dependency.
+rustls = "0.23"
+rustls-native-certs = "0.8"
+tokio-postgres-rustls = "0.13"
+
+[lints]
+workspace = true

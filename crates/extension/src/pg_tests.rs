@@ -1187,7 +1187,7 @@ The gamma concept is introduced during the refresh cycle.\n";
         // an existing install can be stepped up to this release.
         let upgrade_script = manifest_dir
             .join("sql")
-            .join(format!("pgokf--0.1.11--{crate_version}.sql"));
+            .join(format!("pgokf--0.1.12--{crate_version}.sql"));
         let metadata =
             fs::metadata(&upgrade_script).expect("the current upgrade script ships on disk");
         assert!(
@@ -4418,5 +4418,479 @@ The anchor concept never changes across the runbook's revisions.\n";
             globex_rows, 0,
             "a foreign tenant sees none of acme's history"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // 0.1.13 remediation regressions.
+    // ---------------------------------------------------------------------
+
+    // HIGH-1: a non-finite (NaN/Infinity) embedding element must be rejected at
+    // write time, before it poisons every semantic/hybrid/index-rebuild path.
+
+    #[pg_test]
+    fn set_concept_embedding_rejects_a_non_finite_element_at_write() {
+        // Arrange: a small embedding dimension, a registered fixture, and a
+        // plpgsql probe that reports the SQLSTATE of a set_concept_embedding call.
+        Spi::run("SELECT pgokf.set_config('embedding_dim', '4'::jsonb)")
+            .expect("embedding_dim is configurable");
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        Spi::run(
+            "CREATE FUNCTION pg_temp.embed_sqlstate(bid bigint, emb real[]) RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.set_concept_embedding(bid, 'alpha', emb);
+                 RETURN 'stored';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("embedding probe is creatable");
+
+        // Act / Assert: a NaN element is rejected with invalid_parameter (22023)
+        // before any row is written — pgvector would otherwise reject the stored
+        // real[] at every query/index cast and break search catalog-wide.
+        let nan = Spi::get_one_with_args::<String>(
+            "SELECT pg_temp.embed_sqlstate($1, '{0.1,0.2,NaN,0.4}'::real[])",
+            &[bundle_id.into()],
+        )
+        .expect("NaN probe executes")
+        .expect("probe reports a SQLSTATE");
+        assert_eq!(
+            nan, "22023",
+            "a NaN embedding element must be rejected with 22023"
+        );
+
+        // Assert: an infinite element is likewise rejected.
+        let inf = Spi::get_one_with_args::<String>(
+            "SELECT pg_temp.embed_sqlstate($1, '{0.1,0.2,0.3,Infinity}'::real[])",
+            &[bundle_id.into()],
+        )
+        .expect("infinity probe executes")
+        .expect("probe reports a SQLSTATE");
+        assert_eq!(
+            inf, "22023",
+            "an infinite embedding element must be rejected with 22023"
+        );
+
+        // Assert: neither rejected call wrote a poisoned row.
+        let poisoned = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concept_embedding
+             WHERE bundle_id = $1 AND concept_id = 'alpha'",
+            &[bundle_id.into()],
+        )
+        .expect("count executes")
+        .expect("count is not NULL");
+        assert_eq!(poisoned, 0, "a rejected embedding writes no row");
+
+        // Act / Assert: a fully finite embedding of the right length still stores.
+        let stored = Spi::get_one_with_args::<String>(
+            "SELECT pg_temp.embed_sqlstate($1, '{0.1,0.2,0.3,0.4}'::real[])",
+            &[bundle_id.into()],
+        )
+        .expect("valid probe executes")
+        .expect("probe reports an outcome");
+        assert_eq!(
+            stored, "stored",
+            "a finite embedding of the configured dimension is stored",
+        );
+        let rows = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concept_embedding
+             WHERE bundle_id = $1 AND concept_id = 'alpha'",
+            &[bundle_id.into()],
+        )
+        .expect("row count executes")
+        .expect("count is not NULL");
+        assert_eq!(rows, 1, "the valid embedding persisted exactly one row");
+    }
+
+    // MED-1: a space-separated `YYYY-MM-DD HH:MM[:SS]` log.md timestamp must
+    // parse to the real instant, not silently collapse to midnight.
+
+    #[pg_test]
+    fn bundle_log_parses_a_space_separated_timestamp_to_the_real_instant() {
+        // Arrange: a bundle whose root log.md carries a space-separated
+        // `YYYY-MM-DD HH:MM` entry (not a single `T`-joined token) plus a plain
+        // prose line with no timestamp.
+        let bundle = FixtureBundle::create();
+        fs::write(
+            bundle.root.join("log.md"),
+            "- 2026-08-01 09:30 shipped the release\n- plain prose with no timestamp\n",
+        )
+        .expect("log.md is writable");
+        let bundle_id = Spi::get_one_with_args::<i64>(
+            "SELECT bundle_id FROM pgokf.register_bundle($1) AS r",
+            &[bundle.path().into()],
+        )
+        .expect("register_bundle executes")
+        .expect("bundle_id is not NULL");
+
+        // Act / Assert: the entry's logged_at is the real 09:30 instant.
+        let is_real_time = Spi::get_one_with_args::<bool>(
+            "SELECT logged_at = '2026-08-01T09:30:00Z'::timestamptz
+             FROM pgokf.list_bundle_log($1)
+             WHERE entry LIKE '%shipped the release%'",
+            &[bundle_id.into()],
+        )
+        .expect("timestamp query executes")
+        .expect("the dated entry exists");
+        assert!(
+            is_real_time,
+            "a space-separated date and time must parse to the real instant",
+        );
+
+        // Assert: it did not silently collapse to the date's midnight.
+        let is_midnight = Spi::get_one_with_args::<bool>(
+            "SELECT logged_at = '2026-08-01T00:00:00Z'::timestamptz
+             FROM pgokf.list_bundle_log($1)
+             WHERE entry LIKE '%shipped the release%'",
+            &[bundle_id.into()],
+        )
+        .expect("midnight query executes")
+        .expect("the dated entry exists");
+        assert!(
+            !is_midnight,
+            "the timestamp must not collapse to the date's midnight",
+        );
+
+        // Assert: the entry text is preserved verbatim (lossless).
+        let entry = Spi::get_one_with_args::<String>(
+            "SELECT entry FROM pgokf.list_bundle_log($1)
+             WHERE entry LIKE '%shipped the release%'",
+            &[bundle_id.into()],
+        )
+        .expect("entry query executes")
+        .expect("the dated entry exists");
+        assert_eq!(entry, "- 2026-08-01 09:30 shipped the release");
+
+        // Assert: a line with no leading timestamp still yields NULL logged_at.
+        let prose_null = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.list_bundle_log($1)
+             WHERE entry LIKE '%plain prose%' AND logged_at IS NULL",
+            &[bundle_id.into()],
+        )
+        .expect("prose query executes")
+        .expect("count is not NULL");
+        assert_eq!(
+            prose_null, 1,
+            "an untimestamped line still yields a NULL logged_at",
+        );
+    }
+
+    // HIGH-2 + LOW-a + LOW-b: the O(V+E) breadth-first concept_neighbors
+    // traversal. The pre-0.1.13 recursive CTE, kept verbatim as the correctness
+    // baseline. `$1` = bundle_id, `$2` = source concept, `$3` = max hops.
+    const OLD_TRAVERSAL_QUERY: &str = "
+        WITH RECURSIVE walk AS (
+            SELECT l.source_id,
+                   l.target_id AS neighbor_id,
+                   1 AS hops,
+                   ARRAY[l.source_id, l.target_id]::text[] AS path
+            FROM pgokf.links l
+            JOIN pgokf.bundles b ON b.id = l.bundle_id AND b.enabled AND b.retired_at IS NULL
+            WHERE l.bundle_id = $1
+              AND l.source_id = $2
+              AND l.resolved
+              AND NOT l.is_external
+            UNION ALL
+            SELECT w.source_id,
+                   l.target_id,
+                   w.hops + 1,
+                   w.path || l.target_id
+            FROM walk w
+            JOIN pgokf.links l
+              ON l.bundle_id = $1
+             AND l.source_id = w.neighbor_id
+            JOIN pgokf.bundles b ON b.id = l.bundle_id AND b.enabled AND b.retired_at IS NULL
+            WHERE l.resolved
+              AND NOT l.is_external
+              AND w.hops < $3
+              AND NOT (l.target_id = ANY (w.path))
+        )
+        SELECT s.source_id, s.neighbor_id, s.hops, s.path, s.title
+        FROM (
+            SELECT DISTINCT ON (w.neighbor_id)
+                   w.source_id,
+                   w.neighbor_id,
+                   w.hops,
+                   w.path,
+                   c.title
+            FROM walk w
+            JOIN pgokf.concepts c
+              ON c.bundle_id = $1 AND c.id = w.neighbor_id
+            ORDER BY w.neighbor_id, w.hops
+        ) s
+        ORDER BY s.hops, s.neighbor_id";
+
+    /// One OKF concept file linking to each of `links` (bundle-absolute paths).
+    fn concept_with_links(title: &str, links: &[&str]) -> Vec<u8> {
+        use std::fmt::Write as _;
+        let mut body = format!("---\ntype: Reference\ntitle: {title}\n---\n\n# {title}\n\n");
+        for link in links {
+            let _ = writeln!(body, "See [link]({link}).");
+        }
+        body.into_bytes()
+    }
+
+    /// Read `(neighbor_id, hops, path)` triples from a traversal query, ordered
+    /// by `(hops, neighbor_id)`.
+    fn traversal_rows(
+        query: &str,
+        bundle_id: i64,
+        seed: &str,
+        hops: i32,
+    ) -> Vec<(String, i32, Vec<String>)> {
+        Spi::connect(|client| {
+            let table = client
+                .select(query, None, &[bundle_id.into(), seed.into(), hops.into()])
+                .expect("traversal query executes");
+            let mut rows = Vec::with_capacity(table.len());
+            for row in table {
+                let neighbor = row
+                    .get::<String>(2)
+                    .expect("neighbor_id readable")
+                    .expect("neighbor_id is not NULL");
+                let hop = row
+                    .get::<i32>(3)
+                    .expect("hops readable")
+                    .expect("hops not NULL");
+                let path = row
+                    .get::<Vec<String>>(4)
+                    .expect("path readable")
+                    .expect("path is not NULL");
+                rows.push((neighbor, hop, path));
+            }
+            rows
+        })
+    }
+
+    /// The new BFS result via the public function, in the same shape/order.
+    fn actual_rows(bundle_id: i64, seed: &str, hops: i32) -> Vec<(String, i32, Vec<String>)> {
+        traversal_rows(
+            "SELECT source_id, neighbor_id, hops, path, title
+             FROM pgokf.concept_neighbors($2, $3, $1)
+             ORDER BY hops, neighbor_id",
+            bundle_id,
+            seed,
+            hops,
+        )
+    }
+
+    #[pg_test]
+    fn concept_neighbors_matches_the_prior_recursive_query_on_a_cyclic_graph() {
+        // Arrange: a content bundle with a chain a->b->c->d, a cycle edge d->a,
+        // and a self-link b->b, all resolved internal links.
+        let paths = vec![
+            "a.md".to_owned(),
+            "b.md".to_owned(),
+            "c.md".to_owned(),
+            "d.md".to_owned(),
+        ];
+        let contents = vec![
+            concept_with_links("A", &["/b.md"]),
+            concept_with_links("B", &["/b.md", "/c.md"]),
+            concept_with_links("C", &["/d.md"]),
+            concept_with_links("D", &["/a.md"]),
+        ];
+        let (bundle_id, _, _, _, _) = register_content("graph-cyclic", paths, contents);
+
+        // Seed a: no self-link on a, and the cycle guard blocks re-adding a, so
+        // the new BFS is byte-identical to the prior recursive query.
+        assert_eq!(
+            actual_rows(bundle_id, "a", 5),
+            traversal_rows(OLD_TRAVERSAL_QUERY, bundle_id, "a", 5),
+            "the BFS matches the prior query, paths and all, from seed a",
+        );
+
+        // Seed b: the self-link b->b made the OLD query wrongly return b as its
+        // own neighbor; the new BFS excludes the seed (LOW-b). Results therefore
+        // diverge by exactly that one row, and match once it is removed.
+        let baseline_b = traversal_rows(OLD_TRAVERSAL_QUERY, bundle_id, "b", 5);
+        let actual_b = actual_rows(bundle_id, "b", 5);
+        assert!(
+            baseline_b.iter().any(|(id, _, _)| id == "b"),
+            "the prior query wrongly returned the self-linked seed as its own neighbor",
+        );
+        assert!(
+            !actual_b.iter().any(|(id, _, _)| id == "b"),
+            "the BFS excludes the self-linked seed from its own neighbor set",
+        );
+        let baseline_b_without_seed: Vec<_> = baseline_b
+            .into_iter()
+            .filter(|(id, _, _)| id != "b")
+            .collect();
+        assert_eq!(
+            actual_b, baseline_b_without_seed,
+            "apart from the corrected self-neighbor, the BFS matches the prior query",
+        );
+    }
+
+    #[pg_test]
+    fn concept_neighbors_on_a_dense_complete_graph_is_fast_and_correct() {
+        // Arrange: a complete directed graph K30 — 30 concepts, each linking to
+        // all 29 others. The old recursive CTE enumerated every simple path
+        // (≈30^5 walk rows at 5 hops) and timed out; the O(V+E) BFS answers
+        // instantly with the 29 direct neighbors.
+        const N: i32 = 30;
+        let capacity = usize::try_from(N).expect("N is positive");
+        let mut paths = Vec::with_capacity(capacity);
+        let mut contents = Vec::with_capacity(capacity);
+        for i in 0..N {
+            paths.push(format!("c{i}.md"));
+            let links: Vec<String> = (0..N)
+                .filter(|j| *j != i)
+                .map(|j| format!("/c{j}.md"))
+                .collect();
+            let refs: Vec<&str> = links.iter().map(String::as_str).collect();
+            contents.push(concept_with_links(&format!("C{i}"), &refs));
+        }
+        let (bundle_id, added, _, _, _) = register_content("graph-k30", paths, contents);
+        assert_eq!(added, N, "all K30 concepts registered");
+
+        // Act: traverse from c0 at the maximum default hops (5); time it.
+        let start = std::time::Instant::now();
+        let neighbors = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concept_neighbors('c0', 5, $1)",
+            &[bundle_id.into()],
+        )
+        .expect("concept_neighbors executes")
+        .expect("count is not NULL");
+        let elapsed = start.elapsed();
+
+        // Assert: every other node is a single-hop neighbor, returned once, and
+        // the traversal completes far under a second (the DoS is gone). A generous
+        // ceiling still separates O(V+E) (milliseconds) from the old explosion.
+        assert_eq!(neighbors, i64::from(N - 1), "c0 reaches all 29 other nodes");
+        let not_hop_one = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concept_neighbors('c0', 5, $1) WHERE hops <> 1",
+            &[bundle_id.into()],
+        )
+        .expect("hop query executes")
+        .expect("count is not NULL");
+        assert_eq!(
+            not_hop_one, 0,
+            "in a complete graph every neighbor is exactly one hop away",
+        );
+        assert!(
+            elapsed.as_secs() < 5,
+            "the dense-graph traversal must complete quickly; took {elapsed:?}",
+        );
+    }
+
+    #[pg_test]
+    fn concept_neighbors_null_bundle_ignores_disabled_duplicates() {
+        // Arrange: the concept id 'a' exists in two bundles — one active, one
+        // disabled. Without an explicit bundle_id, disambiguation must count only
+        // the ACTIVE bundle (LOW-a): counting the disabled duplicate would raise a
+        // spurious 22023 that blocks the one answerable bundle.
+        let (_active_id, _, _, _, _) = register_content(
+            "graph-active",
+            vec!["a.md".to_owned(), "b.md".to_owned()],
+            vec![
+                concept_with_links("A", &["/b.md"]),
+                concept_with_links("B", &[]),
+            ],
+        );
+        let (disabled_id, _, _, _, _) = register_content(
+            "graph-disabled",
+            vec!["a.md".to_owned(), "z.md".to_owned()],
+            vec![
+                concept_with_links("A", &["/z.md"]),
+                concept_with_links("Z", &[]),
+            ],
+        );
+        Spi::run_with_args(
+            "SELECT pgokf.set_bundle_enabled($1, false)",
+            &[disabled_id.into()],
+        )
+        .expect("the duplicate bundle is disabled");
+
+        // Act / Assert: a NULL-bundle traversal from 'a' resolves to the active
+        // bundle and returns its neighbor b — no spurious ambiguity error (which,
+        // before the fix, the disabled duplicate would have triggered).
+        let neighbor = Spi::get_one::<String>(
+            "SELECT neighbor_id FROM pgokf.concept_neighbors('a')
+             ORDER BY hops, neighbor_id LIMIT 1",
+        )
+        .expect("concept_neighbors executes without a spurious ambiguity error")
+        .expect("a reaches a neighbor in the active bundle");
+        assert_eq!(
+            neighbor, "b",
+            "the NULL-bundle traversal scopes to the active bundle"
+        );
+
+        // Assert: the disabled bundle's edge (a->z) is never traversed.
+        let reaches_z = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgokf.concept_neighbors('a') WHERE neighbor_id = 'z'",
+        )
+        .expect("z query executes")
+        .expect("count is not NULL");
+        assert_eq!(reaches_z, 0, "a disabled bundle's edges are not traversed");
+    }
+
+    // HIGH-3: purge_retired must respect the eligibility predicate. The true
+    // snapshot/unretire TOCTOU race requires two concurrent committed
+    // transactions and is proven in the live scratch-cluster run; this
+    // deterministic test locks the observable contract — a bundle restored by
+    // unretire_bundle is never purged and keeps all of its data.
+
+    #[pg_test]
+    fn purge_retired_leaves_an_unretired_bundle_and_its_data_intact() {
+        // Arrange: two bundles, both retired long ago (so both would be purge
+        // candidates), then one is unretired (restored).
+        let keep = FixtureBundle::create();
+        let keep_id = register_fixture(&keep);
+        let drop = FixtureBundle::create();
+        let drop_id = register_fixture(&drop);
+        for id in [keep_id, drop_id] {
+            Spi::run_with_args("SELECT pgokf.retire_bundle($1)", &[id.into()])
+                .expect("retire_bundle executes");
+            // Backdate retired_at so both are past any small purge window.
+            Spi::run_with_args(
+                "UPDATE pgokf.bundles SET retired_at = pg_catalog.now() - interval '30 days'
+                 WHERE id = $1",
+                &[id.into()],
+            )
+            .expect("retired_at is backdated");
+        }
+        // Restore the bundle we intend to keep — the operation the race would
+        // otherwise lose.
+        Spi::run_with_args("SELECT pgokf.unretire_bundle($1)", &[keep_id.into()])
+            .expect("unretire_bundle executes");
+
+        // Act: purge everything retired longer than one day.
+        let purged = Spi::get_one::<i64>("SELECT pgokf.purge_retired('1 day')")
+            .expect("purge_retired executes")
+            .expect("purge count is not NULL");
+
+        // Assert: only the still-retired bundle was purged.
+        assert_eq!(purged, 1, "exactly the still-retired bundle is purged");
+
+        // Assert: the restored bundle and its concepts survive intact.
+        let keep_rows = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.bundles WHERE id = $1",
+            &[keep_id.into()],
+        )
+        .expect("keep bundle query executes")
+        .expect("count is not NULL");
+        assert_eq!(keep_rows, 1, "the unretired bundle is not purged");
+        let keep_concepts = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concepts WHERE bundle_id = $1",
+            &[keep_id.into()],
+        )
+        .expect("keep concepts query executes")
+        .expect("count is not NULL");
+        assert_eq!(keep_concepts, 2, "the unretired bundle keeps its concepts");
+
+        // Assert: the still-retired bundle really is gone (cascade).
+        let dropped_rows = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.bundles WHERE id = $1",
+            &[drop_id.into()],
+        )
+        .expect("dropped bundle query executes")
+        .expect("count is not NULL");
+        assert_eq!(dropped_rows, 0, "the still-retired bundle is hard-deleted");
     }
 }

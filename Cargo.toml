@@ -6,12 +6,13 @@ members = [
     "crates/pgokf-embed",
     "crates/pgokf-ingest",
     "crates/pgokf-mcp",
+    "crates/pgokf-pgconn",
 ]
 default-members = ["crates/okf-parser", "crates/okf-sync"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.12"
+version = "0.1.13"
 edition = "2024"
 rust-version = "1.96"
 license = "MIT"

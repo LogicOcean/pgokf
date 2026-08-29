@@ -9,10 +9,14 @@
 //! - `pgokf.concept_neighbors(concept_id, max_hops, bundle_id)` returns
 //!   `SETOF pgokf.concept_neighbor` — the reachable concepts, the shortest
 //!   hop count to each, and the path taken;
-//! - traversal is a cycle-safe recursive CTE over `pgokf.links`, bundle-scoped
-//!   and depth-limited by [`crate::guc::max_graph_hops`] (a hard ceiling that
+//! - traversal is a cycle-safe, set-based **breadth-first search** over
+//!   `pgokf.links` (one level-expansion query per hop), bundle-scoped and
+//!   depth-limited by [`crate::guc::max_graph_hops`] (a hard ceiling that
 //!   `max_hops` is capped to); `max_hops < 1` is rejected with SQLSTATE
-//!   `22023`;
+//!   `22023`. It records the first (minimum-hop) visit of each neighbor and
+//!   never re-expands a visited node, so total work is `O(V + E)` — it replaced
+//!   a recursive CTE that enumerated every simple path (≈`O(N^hops)`) and let a
+//!   dense bundle spin a reader backend for a tiny answer;
 //! - only resolved internal edges (`resolved AND NOT is_external`) become
 //!   traversal edges; external and unresolved rows never do;
 //! - only edges in an **active** bundle are traversed — active meaning
@@ -29,6 +33,7 @@
 //! - the return type and function SQL are ordered after the links table with
 //!   `requires`.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use pgrx::heap_tuple::PgHeapTuple;
@@ -74,67 +79,134 @@ struct NeighborHit {
     title: Option<String>,
 }
 
-/// Depth-limited, cycle-safe traversal over resolved internal edges.
+/// One level's set-based edge expansion: the resolved internal out-edges of an
+/// entire frontier of source concepts, returned as sorted `(source, target)`
+/// pairs.
 ///
-/// The recursive CTE seeds from the start concept's outgoing resolved edges
-/// and walks forward, guarding against cycles by refusing to revisit a
-/// concept already on the current path. The outer query keeps the shortest
-/// path per neighbor, and its `JOIN pgokf.concepts` is an inner join so a
-/// neighbor whose concept no longer exists is never emitted — defense in depth
-/// alongside the bundle-wide link re-resolution that already clears `resolved`
-/// on edges to deleted targets ([`crate::catalog::links::reresolve_bundle`]).
-const TRAVERSAL_QUERY: &str = "
-    WITH RECURSIVE walk AS (
-        SELECT l.source_id,
-               l.target_id AS neighbor_id,
-               1 AS hops,
-               ARRAY[l.source_id, l.target_id]::text[] AS path
-        FROM pgokf.links l
-        JOIN pgokf.bundles b ON b.id = l.bundle_id AND b.enabled AND b.retired_at IS NULL
-        WHERE l.bundle_id = $1
-          AND l.source_id = $2
-          AND l.resolved
-          AND NOT l.is_external
-        UNION ALL
-        SELECT w.source_id,
-               l.target_id,
-               w.hops + 1,
-               w.path || l.target_id
-        FROM walk w
-        JOIN pgokf.links l
-          ON l.bundle_id = $1
-         AND l.source_id = w.neighbor_id
-        JOIN pgokf.bundles b ON b.id = l.bundle_id AND b.enabled AND b.retired_at IS NULL
-        WHERE l.resolved
-          AND NOT l.is_external
-          AND w.hops < $3
-          AND NOT (l.target_id = ANY (w.path))
-    )
-    SELECT s.source_id, s.neighbor_id, s.hops, s.path, s.title
-    FROM (
-        SELECT DISTINCT ON (w.neighbor_id)
-               w.source_id,
-               w.neighbor_id,
-               w.hops,
-               w.path,
-               c.title
-        FROM walk w
-        JOIN pgokf.concepts c
-          ON c.bundle_id = $1 AND c.id = w.neighbor_id
-        ORDER BY w.neighbor_id, w.hops
-    ) s
-    ORDER BY s.hops, s.neighbor_id";
+/// This replaces the recursive term of the former `WITH RECURSIVE` walk. The old
+/// query's only cycle guard was "target not on the current path", so it
+/// enumerated **every simple path** from the seed (≈`O(N^hops)`); on a dense
+/// bundle a single `concept_neighbors(seed, 5)` could spin the backend on
+/// millions of walk rows for a tiny answer — an algorithmic-complexity `DoS`.
+/// [`breadth_first_neighbors`] instead drives one of these queries per hop level
+/// over the *whole* frontier, visiting each node and edge at most once
+/// (`O(V + E)`).
+///
+/// The predicates are byte-for-byte the old walk's edge filter: the bundle is
+/// scoped by `$1`, only **active** bundles (`enabled AND retired_at IS NULL`)
+/// contribute edges (matching [`crate::catalog::search`]), and only resolved,
+/// non-external links are traversed. `ORDER BY` makes the per-level discovery
+/// order deterministic, so the shortest path recorded for each neighbor is
+/// stable.
+const EDGE_QUERY: &str = "
+    SELECT DISTINCT l.source_id, l.target_id
+    FROM pgokf.links l
+    JOIN pgokf.bundles b ON b.id = l.bundle_id AND b.enabled AND b.retired_at IS NULL
+    WHERE l.bundle_id = $1
+      AND l.source_id = ANY ($2)
+      AND l.resolved
+      AND NOT l.is_external
+    ORDER BY l.source_id, l.target_id";
 
 fn spi_error(context: &str, error: &pgrx::spi::Error) -> CatalogError {
     CatalogError::internal(format!("{context}: {error}"), Path::new(""))
 }
 
+/// One node's shortest-path record while the breadth-first traversal runs: the
+/// hop count of its first (minimum-hop) visit and the path taken to reach it.
+#[derive(Debug, Clone)]
+struct VisitRecord {
+    hops: i32,
+    path: Vec<String>,
+}
+
+/// Breadth-first traversal core over the resolved internal link graph.
+///
+/// Expands one hop level at a time from the current frontier, recording the
+/// **first** (minimum-hop) visit of each neighbor and never re-expanding a node
+/// once it is visited. Each node is therefore expanded at most once and each
+/// edge examined at most once, bounding total work to `O(V + E)` — in place of
+/// the former recursive CTE that enumerated every simple path (≈`O(N^hops)`).
+/// The result is identical to that query's for a normal graph: the set of
+/// reachable neighbors, each with its shortest hop distance and a shortest path.
+///
+/// The traversal is cycle-safe (a visited node is never re-expanded, so a cycle
+/// cannot loop) and the seed is pre-marked visited at hop 0, so it is never
+/// emitted as its own neighbor even across a self-link. Within a level,
+/// neighbors are discovered in the sorted `(source, target)` order
+/// [`EDGE_QUERY`] returns, so the shortest path recorded for each neighbor is
+/// deterministic.
+///
+/// `edges_from` yields the resolved internal out-edges of a frontier; injecting
+/// it keeps this core unit-testable without a backend. Neighbors are returned in
+/// discovery order (the seed excluded); the caller applies the final
+/// `(hops, neighbor_id)` ordering after attaching titles.
+fn breadth_first_neighbors<F>(
+    seed: &str,
+    max_hops: i32,
+    mut edges_from: F,
+) -> Result<Vec<(String, VisitRecord)>, CatalogError>
+where
+    F: FnMut(&[String]) -> Result<Vec<(String, String)>, CatalogError>,
+{
+    let mut visited: HashMap<String, VisitRecord> = HashMap::new();
+    visited.insert(
+        seed.to_owned(),
+        VisitRecord {
+            hops: 0,
+            path: vec![seed.to_owned()],
+        },
+    );
+    // Discovered neighbors in first-visit order (the seed is never pushed);
+    // `visited` provides O(1) membership so a node is recorded exactly once.
+    let mut discovered: Vec<String> = Vec::new();
+    let mut frontier: Vec<String> = vec![seed.to_owned()];
+    let mut hop: i32 = 1;
+
+    while hop <= max_hops && !frontier.is_empty() {
+        let edges = edges_from(&frontier)?;
+        let mut next: Vec<String> = Vec::new();
+        for (source, target) in edges {
+            if visited.contains_key(&target) {
+                continue;
+            }
+            // `source` is always already visited — it is a frontier member, and
+            // every frontier member was recorded when it was discovered — so its
+            // shortest path is available to extend by one edge.
+            let mut path = visited
+                .get(&source)
+                .map_or_else(|| vec![seed.to_owned()], |record| record.path.clone());
+            path.push(target.clone());
+            visited.insert(target.clone(), VisitRecord { hops: hop, path });
+            discovered.push(target.clone());
+            next.push(target);
+        }
+        frontier = next;
+        hop += 1;
+    }
+
+    // Detach each discovered neighbor's record (discovery order; seed excluded).
+    Ok(discovered
+        .into_iter()
+        .map(|id| {
+            let record = visited
+                .remove(&id)
+                .expect("a discovered neighbor is always recorded in visited");
+            (id, record)
+        })
+        .collect())
+}
+
 /// Resolve which bundle a traversal should be scoped to.
 ///
 /// An explicit `bundle_id` is used verbatim. Otherwise the concept ID is
-/// looked up across bundles: a single match is scoped to it, no match yields
-/// `None` (an empty traversal), and multiple matches are rejected with
-/// SQLSTATE `22023` so the caller disambiguates.
+/// looked up across **active** bundles only — `enabled AND retired_at IS NULL`,
+/// mirroring the traversal's own edge filter: a single match is scoped to it,
+/// no match yields `None` (an empty traversal), and multiple matches are
+/// rejected with SQLSTATE `22023` so the caller disambiguates. Filtering to
+/// active bundles here is essential — counting a disabled or retired duplicate
+/// of the concept would raise a spurious `22023` that blocks a traversal the
+/// only *active* bundle could answer unambiguously.
 fn resolve_bundle_scope(
     concept_id: &str,
     bundle_id: Option<i64>,
@@ -146,7 +218,12 @@ fn resolve_bundle_scope(
     let bundles = Spi::connect(|client| {
         let table = client
             .select(
-                "SELECT DISTINCT bundle_id FROM pgokf.concepts WHERE id = $1 ORDER BY bundle_id",
+                "SELECT DISTINCT c.bundle_id
+                 FROM pgokf.concepts c
+                 JOIN pgokf.bundles b
+                   ON b.id = c.bundle_id AND b.enabled AND b.retired_at IS NULL
+                 WHERE c.id = $1
+                 ORDER BY c.bundle_id",
                 None,
                 &[concept_id.into()],
             )
@@ -207,32 +284,105 @@ fn effective_max_hops(max_hops: i32) -> Result<i32, CatalogError> {
     cap_max_hops(max_hops, ceiling)
 }
 
+/// Fetch one hop level's resolved internal out-edges for a whole frontier, via
+/// the set-based [`EDGE_QUERY`]. Returned pairs are sorted `(source, target)`.
+fn expand_frontier(
+    bundle_id: i64,
+    frontier: &[String],
+) -> Result<Vec<(String, String)>, CatalogError> {
+    Spi::connect(|client| {
+        let table = client
+            .select(
+                EDGE_QUERY,
+                None,
+                &[bundle_id.into(), frontier.to_vec().into()],
+            )
+            .map_err(|error| spi_error("neighbor traversal edge query failed", &error))?;
+        let mut edges = Vec::with_capacity(table.len());
+        for row in table {
+            let reader = RowReader::new(&row, "failed to read neighbor edge", "neighbor edge");
+            let source = reader.required::<String>(1, "source_id")?;
+            let target = reader.required::<String>(2, "target_id")?;
+            edges.push((source, target));
+        }
+        Ok(edges)
+    })
+}
+
+/// Look up the titles of the discovered neighbors in one set-based query, keyed
+/// by concept id.
+///
+/// A neighbor absent from the returned map is one whose concept no longer exists
+/// in the bundle; the caller drops it, giving the same inner-join semantics the
+/// former traversal's `JOIN pgokf.concepts` had — defense in depth alongside the
+/// bundle-wide re-resolution that already clears `resolved` on edges to deleted
+/// targets ([`crate::catalog::links::reresolve_bundle`]).
+fn fetch_neighbor_titles(
+    bundle_id: i64,
+    neighbor_ids: &[String],
+) -> Result<HashMap<String, Option<String>>, CatalogError> {
+    Spi::connect(|client| {
+        let table = client
+            .select(
+                "SELECT c.id, c.title
+                 FROM pgokf.concepts c
+                 WHERE c.bundle_id = $1 AND c.id = ANY ($2)",
+                None,
+                &[bundle_id.into(), neighbor_ids.to_vec().into()],
+            )
+            .map_err(|error| spi_error("failed to read neighbor titles", &error))?;
+        let mut titles = HashMap::with_capacity(table.len());
+        for row in table {
+            let reader = RowReader::new(&row, "failed to read neighbor title", "neighbor title");
+            let id = reader.required::<String>(1, "id")?;
+            let title = reader.optional::<String>(2)?;
+            titles.insert(id, title);
+        }
+        Ok(titles)
+    })
+}
+
+/// Traverse the bundle's resolved internal link graph outward from a concept and
+/// return each reachable neighbor with its shortest hop count, path, and title.
+///
+/// Runs the `O(V + E)` breadth-first [`breadth_first_neighbors`] core, fetching
+/// each level's out-edges through the set-based [`EDGE_QUERY`], then attaches
+/// titles (dropping any neighbor whose concept no longer exists) and applies the
+/// stable `(hops, neighbor_id)` ordering the SQL surface promises.
 fn read_neighbor_rows(
     bundle_id: i64,
     concept_id: &str,
     hops: i32,
 ) -> Result<Vec<NeighborHit>, CatalogError> {
-    Spi::connect(|client| {
-        let table = client
-            .select(
-                TRAVERSAL_QUERY,
-                None,
-                &[bundle_id.into(), concept_id.into(), hops.into()],
-            )
-            .map_err(|error| spi_error("neighbor traversal query failed", &error))?;
-        let mut hits = Vec::with_capacity(table.len());
-        for row in table {
-            let reader = RowReader::new(&row, "failed to read neighbor row", "neighbor result");
-            hits.push(NeighborHit {
-                source_id: reader.required(1, "source_id")?,
-                neighbor_id: reader.required(2, "neighbor_id")?,
-                hops: reader.required(3, "hops")?,
-                path: reader.required::<Vec<String>>(4, "path")?,
-                title: reader.optional(5)?,
-            });
-        }
-        Ok(hits)
-    })
+    let visits = breadth_first_neighbors(concept_id, hops, |frontier| {
+        expand_frontier(bundle_id, frontier)
+    })?;
+    if visits.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let neighbor_ids: Vec<String> = visits.iter().map(|(id, _)| id.clone()).collect();
+    let titles = fetch_neighbor_titles(bundle_id, &neighbor_ids)?;
+
+    let mut hits: Vec<NeighborHit> = visits
+        .into_iter()
+        .filter_map(|(id, record)| {
+            // Present in `titles` ⇔ the concept still exists (inner-join parity).
+            titles.get(&id).map(|title| NeighborHit {
+                source_id: concept_id.to_owned(),
+                neighbor_id: id,
+                hops: record.hops,
+                path: record.path,
+                title: title.clone(),
+            })
+        })
+        .collect();
+    hits.sort_by(|left, right| {
+        left.hops
+            .cmp(&right.hops)
+            .then_with(|| left.neighbor_id.cmp(&right.neighbor_id))
+    });
+    Ok(hits)
 }
 
 fn concept_neighbors_impl(
@@ -357,5 +507,128 @@ mod tests {
 
         // Assert
         assert_eq!(effective, 3);
+    }
+
+    /// An in-memory directed graph as a sorted adjacency list, used to drive the
+    /// pure [`breadth_first_neighbors`] core without a backend. Returns the
+    /// out-edges of a whole frontier as sorted `(source, target)` pairs, exactly
+    /// as `EDGE_QUERY` does.
+    fn edges_from_graph<'a>(
+        adjacency: &'a [(&'a str, &'a str)],
+    ) -> impl Fn(&[String]) -> Result<Vec<(String, String)>, CatalogError> + 'a {
+        move |frontier: &[String]| {
+            let mut edges: Vec<(String, String)> = adjacency
+                .iter()
+                .filter(|(source, _)| frontier.iter().any(|node| node == source))
+                .map(|(source, target)| ((*source).to_owned(), (*target).to_owned()))
+                .collect();
+            edges.sort();
+            Ok(edges)
+        }
+    }
+
+    /// Run the BFS core and flatten it to `(neighbor_id, hops, path)` triples in
+    /// the final `(hops, neighbor_id)` order the SQL surface promises.
+    fn neighbors_of(
+        seed: &str,
+        max_hops: i32,
+        adjacency: &[(&str, &str)],
+    ) -> Vec<(String, i32, Vec<String>)> {
+        let visits = breadth_first_neighbors(seed, max_hops, edges_from_graph(adjacency))
+            .expect("the in-memory traversal never errors");
+        let mut rows: Vec<(String, i32, Vec<String>)> = visits
+            .into_iter()
+            .map(|(id, record)| (id, record.hops, record.path))
+            .collect();
+        rows.sort_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)));
+        rows
+    }
+
+    #[test]
+    fn breadth_first_neighbors_walks_a_chain_with_shortest_paths() {
+        // Arrange: a --> b --> c.
+        let graph = [("a", "b"), ("b", "c")];
+
+        // Act
+        let rows = neighbors_of("a", 5, &graph);
+
+        // Assert: b at hop 1, c at hop 2, each with its shortest path.
+        assert_eq!(
+            rows,
+            vec![
+                ("b".to_owned(), 1, vec!["a".to_owned(), "b".to_owned()]),
+                (
+                    "c".to_owned(),
+                    2,
+                    vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn breadth_first_neighbors_keeps_the_minimum_hop_on_multiple_paths() {
+        // Arrange: a diamond a->b, a->c, b->d, c->d. d is reachable at hop 2 by
+        // two paths; the shortest hop (2) and a single deterministic path win.
+        let graph = [("a", "b"), ("a", "c"), ("b", "d"), ("c", "d")];
+
+        // Act
+        let rows = neighbors_of("a", 5, &graph);
+
+        // Assert: b, c at hop 1; d at hop 2 via the sorted-first source (b).
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0], ("b".to_owned(), 1, vec!["a".into(), "b".into()]));
+        assert_eq!(rows[1], ("c".to_owned(), 1, vec!["a".into(), "c".into()]));
+        assert_eq!(
+            rows[2],
+            ("d".to_owned(), 2, vec!["a".into(), "b".into(), "d".into()])
+        );
+    }
+
+    #[test]
+    fn breadth_first_neighbors_is_cycle_safe() {
+        // Arrange: a cycle a -> b -> a. The seed must never re-expand and must
+        // not appear as its own neighbor.
+        let graph = [("a", "b"), ("b", "a")];
+
+        // Act
+        let rows = neighbors_of("a", 5, &graph);
+
+        // Assert: only b, at hop 1; no run-away and no self-neighbor.
+        assert_eq!(
+            rows,
+            vec![("b".to_owned(), 1, vec!["a".into(), "b".into()])]
+        );
+    }
+
+    #[test]
+    fn breadth_first_neighbors_excludes_the_seed_across_a_self_link() {
+        // Arrange: a self-link a -> a plus a real edge a -> b. The self-link must
+        // not make the seed its own neighbor.
+        let graph = [("a", "a"), ("a", "b")];
+
+        // Act
+        let rows = neighbors_of("a", 5, &graph);
+
+        // Assert: only b is a neighbor; a (the seed) is excluded.
+        assert_eq!(
+            rows,
+            vec![("b".to_owned(), 1, vec!["a".into(), "b".into()])]
+        );
+    }
+
+    #[test]
+    fn breadth_first_neighbors_honors_the_hop_ceiling() {
+        // Arrange: a --> b --> c --> d, capped at one hop.
+        let graph = [("a", "b"), ("b", "c"), ("c", "d")];
+
+        // Act
+        let rows = neighbors_of("a", 1, &graph);
+
+        // Assert: only the direct neighbor b is returned.
+        assert_eq!(
+            rows,
+            vec![("b".to_owned(), 1, vec!["a".into(), "b".into()])]
+        );
     }
 }

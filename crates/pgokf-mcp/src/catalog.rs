@@ -7,8 +7,8 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
+use tokio_postgres::Client;
 use tokio_postgres::types::ToSql;
-use tokio_postgres::{Client, NoTls};
 
 /// Default `limit` for `concept_search` when the caller omits it.
 const DEFAULT_SEARCH_LIMIT: i32 = 20;
@@ -26,18 +26,22 @@ impl Catalog {
     /// Connect to PostgreSQL and, when `tenant` is set, apply it as the
     /// session's `pgokf.tenant` so tenant row-level security is enforced.
     ///
+    /// `force_tls` (the `--tls` flag) requires an encrypted link; TLS is also
+    /// negotiated for an `sslmode=require` connection URL. The connection driver
+    /// task is spawned by the shared helper; its handle is detached because the
+    /// server runs until stdin EOF and the process exit tears the task down.
+    ///
     /// # Errors
     ///
     /// Returns an error if the connection or the tenant scoping fails.
-    pub async fn connect(database_url: &str, tenant: Option<&str>) -> Result<Self> {
-        let (client, connection) = tokio_postgres::connect(database_url, NoTls)
+    pub async fn connect(
+        database_url: &str,
+        tenant: Option<&str>,
+        force_tls: bool,
+    ) -> Result<Self> {
+        let (client, _connection) = pgokf_pgconn::connect(database_url, force_tls)
             .await
             .context("connecting to PostgreSQL")?;
-        tokio::spawn(async move {
-            if let Err(error) = connection.await {
-                eprintln!("pgokf-mcp: PostgreSQL connection error: {error}");
-            }
-        });
 
         if let Some(tenant) = tenant {
             client

@@ -391,15 +391,34 @@ fn select_purgeable_bundles(older_than: Interval) -> Result<Vec<(i64, String)>, 
     })
 }
 
-/// Hard-delete a single bundle by id under the caller-held advisory lock,
-/// returning whether a row was removed.
-fn delete_bundle_row(bundle_id: i64) -> Result<bool, CatalogError> {
+/// Hard-delete a single bundle by id under the caller-held advisory lock, but
+/// only if it is *still* purge-eligible, returning whether a row was removed.
+///
+/// This re-evaluates the eligibility predicate (`retired_at IS NOT NULL AND
+/// retired_at < now() - older_than`) inside the `DELETE ... WHERE`, atomically,
+/// so it closes the TOCTOU window between [`select_purgeable_bundles`] snapshot
+/// and this delete: the candidate list is taken without the per-bundle advisory
+/// lock, so a concurrent `unretire_bundle` (which takes that same lock) can
+/// commit in between and restore a bundle. Because the re-check runs under the
+/// now-held lock — after that `unretire` has committed and released it — a
+/// bundle that is no longer retired (or was re-retired inside the window) simply
+/// fails the `WHERE` and is skipped, never hard-deleted. `older_than` is bound
+/// as a parameter; the same transaction-stable `now()` the snapshot used is
+/// re-read here.
+fn delete_bundle_row_if_eligible(
+    bundle_id: i64,
+    older_than: Interval,
+) -> Result<bool, CatalogError> {
     Spi::connect_mut(|client| {
         let mut table = client
             .update(
-                "DELETE FROM pgokf.bundles WHERE id = $1 RETURNING id",
+                "DELETE FROM pgokf.bundles
+                 WHERE id = $1
+                   AND retired_at IS NOT NULL
+                   AND retired_at < pg_catalog.now() - $2
+                 RETURNING id",
                 None,
-                &[bundle_id.into()],
+                &[bundle_id.into(), older_than.into()],
             )
             .map_err(|error| spi_error("failed to purge retired bundle", &error))?;
         Ok(table.next().is_some())
@@ -423,10 +442,13 @@ fn purge_retired_impl(older_than: Interval) -> Result<i64, CatalogError> {
 
     let mut purged: i64 = 0;
     for (bundle_id, stored_path) in candidates {
-        // Serialize with a concurrent register/refresh/unregister of the same
-        // bundle before mutating, exactly as unregister does.
+        // Serialize with a concurrent register/refresh/unregister/unretire of the
+        // same bundle before mutating, exactly as unregister does. The eligibility
+        // predicate is then re-checked inside the DELETE under this lock, so a
+        // bundle a concurrent unretire_bundle restored between the snapshot and
+        // this iteration is skipped rather than silently hard-deleted.
         acquire_bundle_lock(&stored_path)?;
-        if delete_bundle_row(bundle_id)? {
+        if delete_bundle_row_if_eligible(bundle_id, older_than)? {
             // Same FK-free unregister audit row a manual unregister writes; the
             // returned sync id is unused (a purge has no per-concept manifest).
             let _ = crate::catalog::audit::record(

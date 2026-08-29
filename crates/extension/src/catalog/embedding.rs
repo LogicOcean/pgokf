@@ -191,6 +191,31 @@ fn validate_embedding_length(len: usize, expected_dim: i32) -> Result<(), Catalo
     }
 }
 
+/// Validate that every element of a caller-supplied embedding is finite.
+///
+/// Storage is `real[]`, so a `NaN`/`Infinity` element inserts without complaint,
+/// but every query, index-build, and `rebuild_embedding_index` path casts the
+/// stored array to `vector(dim)`, and `pgvector` rejects a non-finite component
+/// at that cast — SQLSTATE `22023`. One poisoned write would therefore break
+/// semantic/hybrid search and index rebuilds catalog-wide until the row is
+/// found and fixed. Rejecting the non-finite element at write time (the same
+/// `22023` class the length check raises), naming the offending index for the
+/// caller, contains the fault to the single bad call.
+fn validate_embedding_finite(embedding: &[f32]) -> Result<(), CatalogError> {
+    if let Some(index) = embedding.iter().position(|value| !value.is_finite()) {
+        return Err(CatalogError::invalid_parameter(
+            format!(
+                "embedding element at index {index} is not finite ({}); every element must be a \
+                 finite real number — NaN and infinity are rejected because pgvector refuses them \
+                 when the stored real[] is cast to vector(dim) at query and index time",
+                embedding[index]
+            ),
+            Path::new(""),
+        ));
+    }
+    Ok(())
+}
+
 /// The clear `22023` raised when a semantic query needs `pgvector` but it is
 /// absent. Semantic search has no lexical equivalent, so this is an error rather
 /// than a silent empty result.
@@ -252,7 +277,8 @@ fn run_semantic_query(
          JOIN pgokf.concepts c ON c.bundle_id = e.bundle_id AND c.id = e.concept_id
          JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled AND b.retired_at IS NULL
          WHERE ($2 IS NULL OR c.bundle_id = $2)
-         ORDER BY e.embedding::vector({dim}) <=> $1::vector({dim})
+         ORDER BY e.embedding::vector({dim}) <=> $1::vector({dim}),
+                  c.bundle_id, c.id
          LIMIT $3"
     );
     Spi::connect(|client| {
@@ -296,6 +322,11 @@ fn set_concept_embedding_impl(
 
     let dim = config::embedding_dim()?;
     validate_embedding_length(embedding.len(), dim)?;
+    // Reject NaN/Infinity before the upsert: real[] would store them silently,
+    // but pgvector rejects a non-finite component when the array is cast to
+    // vector(dim) on every read/index path, so one bad write would otherwise
+    // poison semantic/hybrid search and rebuild_embedding_index catalog-wide.
+    validate_embedding_finite(&embedding)?;
 
     if !concept_exists(bundle_id, concept_id)? {
         return Err(CatalogError::invalid_parameter(
@@ -405,7 +436,7 @@ fn fuse_rrf(
          FROM fused f
          JOIN pgokf.concepts c ON c.bundle_id = f.bundle_id AND c.id = f.concept_id
          JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled AND b.retired_at IS NULL
-         ORDER BY f.score DESC, c.id
+         ORDER BY f.score DESC, c.bundle_id, c.id
          LIMIT $5"
     );
     Spi::connect(|client| {
@@ -669,6 +700,37 @@ mod tests {
         assert_eq!(error.sqlstate(), "22023");
         assert!(error.message().contains("768"));
         assert!(error.message().contains("1536"));
+    }
+
+    #[test]
+    fn validate_embedding_finite_accepts_all_finite_elements() {
+        // Arrange / Act / Assert: an ordinary vector passes.
+        assert!(validate_embedding_finite(&[0.0, -1.5, 3.25, 1e30]).is_ok());
+    }
+
+    #[test]
+    fn validate_embedding_finite_rejects_nan_and_names_the_index() {
+        // Arrange: a vector with a NaN in a known position.
+        let embedding = [0.1, 0.2, f32::NAN, 0.4];
+
+        // Act
+        let error = validate_embedding_finite(&embedding)
+            .expect_err("a NaN element must be rejected before storage");
+
+        // Assert: invalid-parameter (22023), naming the offending index.
+        assert_eq!(error.sqlstate(), "22023");
+        assert!(error.message().contains("index 2"));
+    }
+
+    #[test]
+    fn validate_embedding_finite_rejects_infinity() {
+        // Arrange / Act
+        let error = validate_embedding_finite(&[f32::INFINITY])
+            .expect_err("an infinite element must be rejected");
+
+        // Assert
+        assert_eq!(error.sqlstate(), "22023");
+        assert!(error.message().contains("index 0"));
     }
 
     #[test]

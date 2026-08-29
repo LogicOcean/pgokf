@@ -28,6 +28,15 @@ JSON array of rows exactly as the SQL function produced them.
 | --- | --- | --- |
 | `--database-url` | `OKF_PG_URL` | PostgreSQL URL for a `pgokf_reader`-capable role (required) |
 | `--tenant` | `OKF_TENANT` | Apply a `pgokf.tenant` scope for the session (multi-tenant isolation) |
+| `--tls` | `OKF_PG_TLS` | Require a TLS-encrypted link to PostgreSQL (default off) |
+
+### PostgreSQL transport (TLS)
+
+The database link is plaintext (`NoTls`) by default — fine for a local socket or
+trusted network. To encrypt it, pass `--tls` (env `OKF_PG_TLS=true`) or put
+`sslmode=require` in the connection string; either negotiates a `rustls` TLS
+session that verifies the server certificate against the platform trust store.
+`sslmode=disable`/`prefer` (or an omitted `sslmode`) keep the plaintext default.
 
 ## Wiring it into an MCP client
 

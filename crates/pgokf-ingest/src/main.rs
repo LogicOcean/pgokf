@@ -30,7 +30,6 @@ use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt};
 use tokio::signal;
 use tokio::time::sleep;
-use tokio_postgres::NoTls;
 
 /// Command-line / environment configuration for one ingestion run.
 ///
@@ -102,6 +101,13 @@ struct Cli {
     /// `--watch`). Must be at least 1.
     #[arg(long, env = "OKF_WATCH_INTERVAL", default_value_t = 60)]
     interval: u64,
+
+    /// Require a TLS-encrypted link to PostgreSQL. TLS is also enabled by an
+    /// `sslmode=require` (or stricter) in the connection URL; otherwise the link
+    /// is plaintext (the default, for a local socket / trusted network). Object-
+    /// store TLS is independent and unaffected by this flag.
+    #[arg(long, env = "OKF_PG_TLS", default_value_t = false)]
+    tls: bool,
 }
 
 /// One collected object: its bundle-relative path and verbatim bytes.
@@ -370,14 +376,25 @@ async fn download_object<S: ObjectStore>(
         .await
         .with_context(|| format!("reading {location}"))?;
     let full = location.to_string();
-    let relative = match &strip {
-        Some(prefix) => full.strip_prefix(prefix).unwrap_or(&full).to_owned(),
-        None => full,
-    };
     Ok(BundleObject {
-        path: relative,
+        path: relative_path(&full, strip.as_deref()),
         bytes: bytes.to_vec(),
     })
+}
+
+/// Derive an object's bundle-relative path by stripping the listing prefix.
+///
+/// The strip value, when present, is the normalized prefix plus a trailing
+/// slash (built in [`collect_bundle`]), so stripping it turns
+/// `handbook/topics/a.md` into the bundle-relative `topics/a.md`. `None` (a
+/// whole-bucket listing) keeps the key verbatim. An object whose key does not
+/// start with the prefix — which the prefixed listing should never surface — is
+/// returned whole rather than mangled.
+fn relative_path(full: &str, strip: Option<&str>) -> String {
+    match strip {
+        Some(prefix) => full.strip_prefix(prefix).unwrap_or(full).to_owned(),
+        None => full.to_owned(),
+    }
 }
 
 /// Connect to PostgreSQL and call `pgokf.register_bundle_content`, printing the
@@ -386,16 +403,12 @@ async fn register_content(cli: &Cli, objects: Vec<BundleObject>) -> Result<()> {
     let (paths, contents): (Vec<String>, Vec<Vec<u8>>) =
         objects.into_iter().map(|o| (o.path, o.bytes)).unzip();
 
-    let (client, connection) = tokio_postgres::connect(&cli.database_url, NoTls)
+    // The shared helper opens the link (NoTls by default; rustls TLS when --tls
+    // is set or the URL requires it) and drives the connection's protocol future
+    // on the returned background task.
+    let (client, connection_handle) = pgokf_pgconn::connect(&cli.database_url, cli.tls)
         .await
         .context("connecting to PostgreSQL")?;
-    // The connection future drives the protocol; run it in the background and
-    // surface any transport error.
-    let connection_handle = tokio::spawn(async move {
-        if let Err(error) = connection.await {
-            eprintln!("pgokf-ingest: PostgreSQL connection error: {error}");
-        }
-    });
 
     let row = client
         .query_one(
@@ -425,4 +438,94 @@ async fn register_content(cli: &Cli, objects: Vec<BundleObject>) -> Result<()> {
         .await
         .context("joining the PostgreSQL connection task")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BundleObject, hash_objects, normalize_prefix, relative_path};
+
+    fn object(path: &str, bytes: &[u8]) -> BundleObject {
+        BundleObject {
+            path: path.to_owned(),
+            bytes: bytes.to_vec(),
+        }
+    }
+
+    #[test]
+    fn relative_path_strips_the_listing_prefix() {
+        // Arrange: a nested key under a `handbook/` prefix.
+        let full = "handbook/topics/alpha.md";
+
+        // Act
+        let relative = relative_path(full, Some("handbook/"));
+
+        // Assert: the prefix is removed, leaving the bundle-relative path.
+        assert_eq!(relative, "topics/alpha.md");
+    }
+
+    #[test]
+    fn relative_path_keeps_the_whole_key_without_a_prefix() {
+        // Arrange / Act: a whole-bucket listing passes no strip prefix.
+        let relative = relative_path("alpha.md", None);
+
+        // Assert
+        assert_eq!(relative, "alpha.md");
+    }
+
+    #[test]
+    fn relative_path_leaves_a_non_matching_key_unmangled() {
+        // Arrange: a key that does not start with the strip prefix (which a
+        // prefixed listing should never surface) is returned whole, not
+        // truncated mid-segment.
+        let full = "other/alpha.md";
+
+        // Act
+        let relative = relative_path(full, Some("handbook/"));
+
+        // Assert
+        assert_eq!(relative, "other/alpha.md");
+    }
+
+    #[test]
+    fn normalize_prefix_trims_slashes_and_empties_to_none() {
+        // Arrange / Act / Assert: surrounding slashes are trimmed, and an
+        // effectively empty prefix normalizes to a whole-bucket listing.
+        assert_eq!(normalize_prefix("/handbook/"), Some("handbook".to_owned()));
+        assert_eq!(normalize_prefix("handbook"), Some("handbook".to_owned()));
+        assert_eq!(normalize_prefix(""), None);
+        assert_eq!(normalize_prefix("///"), None);
+    }
+
+    #[test]
+    fn hash_objects_is_stable_for_identical_content() {
+        // Arrange: two independently built but byte-identical object sets.
+        let first = [object("a.md", b"alpha"), object("b.md", b"beta")];
+        let second = [object("a.md", b"alpha"), object("b.md", b"beta")];
+
+        // Act / Assert: an unchanged pass fingerprints identically, so the watch
+        // daemon can skip the resync.
+        assert_eq!(hash_objects(&first), hash_objects(&second));
+    }
+
+    #[test]
+    fn hash_objects_changes_when_content_changes() {
+        // Arrange: same paths, one differing body.
+        let before = [object("a.md", b"alpha"), object("b.md", b"beta")];
+        let after = [object("a.md", b"alpha"), object("b.md", b"BETA")];
+
+        // Act / Assert: a content change flips the fingerprint, forcing a resync.
+        assert_ne!(hash_objects(&before), hash_objects(&after));
+    }
+
+    #[test]
+    fn hash_objects_is_unambiguous_across_the_path_content_boundary() {
+        // Arrange: the same concatenated bytes split differently between path and
+        // content. Length-prefixing must keep the two fingerprints distinct so a
+        // boundary shift cannot be forged into a "no change" pass.
+        let left_split = [object("a.md", b"xbeta")];
+        let right_split = [object("a.mdx", b"beta")];
+
+        // Act / Assert
+        assert_ne!(hash_objects(&left_split), hash_objects(&right_split));
+    }
 }

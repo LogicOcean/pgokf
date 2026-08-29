@@ -23,7 +23,6 @@ mod db;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use tokio_postgres::NoTls;
 
 use crate::client::EmbeddingsClient;
 use crate::db::PendingConcept;
@@ -80,6 +79,12 @@ struct Cli {
     /// Optional multi-tenant scope applied as `pgokf.tenant` for the session.
     #[arg(long, env = "OKF_TENANT")]
     tenant: Option<String>,
+
+    /// Require a TLS-encrypted link to PostgreSQL. TLS is also enabled by an
+    /// `sslmode=require` (or stricter) in the connection URL; otherwise the link
+    /// is plaintext (the default, for a local socket / trusted network).
+    #[arg(long, env = "OKF_PG_TLS", default_value_t = false)]
+    tls: bool,
 }
 
 #[tokio::main]
@@ -98,14 +103,9 @@ async fn run(cli: Cli) -> Result<()> {
         bail!("--max-chars must be at least 1");
     }
 
-    let (pg_client, connection) = tokio_postgres::connect(&cli.database_url, NoTls)
+    let (pg_client, connection_handle) = pgokf_pgconn::connect(&cli.database_url, cli.tls)
         .await
         .context("connecting to PostgreSQL")?;
-    let connection_handle = tokio::spawn(async move {
-        if let Err(error) = connection.await {
-            eprintln!("pgokf-embed: PostgreSQL connection error: {error}");
-        }
-    });
 
     let result = embed_all(&cli, &pg_client).await;
 

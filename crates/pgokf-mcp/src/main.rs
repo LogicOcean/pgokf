@@ -42,12 +42,18 @@ struct Cli {
     /// Optional multi-tenant scope applied as `pgokf.tenant` for the session.
     #[arg(long, env = "OKF_TENANT")]
     tenant: Option<String>,
+
+    /// Require a TLS-encrypted link to PostgreSQL. TLS is also enabled by an
+    /// `sslmode=require` (or stricter) in the connection URL; otherwise the link
+    /// is plaintext (the default, for a local socket / trusted network).
+    #[arg(long, env = "OKF_PG_TLS", default_value_t = false)]
+    tls: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let catalog = Catalog::connect(&cli.database_url, cli.tenant.as_deref())
+    let catalog = Catalog::connect(&cli.database_url, cli.tenant.as_deref(), cli.tls)
         .await
         .context("failed to connect to the catalog")?;
     serve(catalog).await
