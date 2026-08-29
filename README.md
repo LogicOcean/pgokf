@@ -2,6 +2,8 @@
 
 **A PostgreSQL extension that turns [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog) bundles into a queryable, transactional catalog** - full-text, semantic, and hybrid search, a link graph, multi-tenant isolation, version history, and an audit trail, all inside PostgreSQL.
 
+[![CI](https://github.com/LogicOcean/pgokf/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/LogicOcean/pgokf/actions/workflows/ci.yml)
+[![pgrx test](https://github.com/LogicOcean/pgokf/actions/workflows/pgrx-test.yml/badge.svg?branch=main)](https://github.com/LogicOcean/pgokf/actions/workflows/pgrx-test.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 [![PostgreSQL 15–19](https://img.shields.io/badge/PostgreSQL-15%E2%80%9319-336791.svg)](https://www.postgresql.org/)
 [![Built with pgrx](https://img.shields.io/badge/built%20with-pgrx%200.19-000000.svg)](https://github.com/pgcentralfoundation/pgrx)
