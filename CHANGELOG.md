@@ -10,19 +10,13 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 ## [Unreleased]
 
-### Changed
-
-- **Relicensed to dual AGPL-3.0 + commercial** (previously MIT). Every crate in
-  the workspace - the extension, the `okf-parser` / `okf-sync` libraries, and
-  the companion tools (`pgokf-ingest`, `pgokf-embed`, `pgokf-mcp`,
-  `pgokf-pgconn`) - is now `AGPL-3.0-only`, and a commercial license is
-  available for use the AGPL does not permit. See `LICENSING.md` and
-  `COMM-LICENSE.md`.
+Nothing yet.
 
 ## [0.1.13] - 2026-08-29
 
-**Security and bugfix remediation.** This release fixes a set of audited defects
-in the shipped catalog and companions. **The in-database SQL surface is
+**Relicensed to AGPL-3.0 plus commercial, and the first public release.** This
+release also fixes a set of audited defects in the shipped catalog and
+companions. **The in-database SQL surface is
 unchanged from 0.1.12** - no table, type, function signature, index, grant,
 comment, role, or configuration key is added, dropped, renamed, or rewritten, so
 `ALTER EXTENSION pgokf UPDATE TO '0.1.13'` is a documented no-op that yields a
@@ -31,6 +25,15 @@ history version, and provenance record intact. Every fix is internal code, a new
 input validation, companion behavior, or documentation; loading the 0.1.13
 shared library is what activates the corrected code paths. `api_stability` and
 the no-data-loss upgrade guarantees are preserved.
+
+### Changed
+
+- **Relicensed to dual AGPL-3.0 + commercial** (previously MIT). Every crate in
+  the workspace - the extension, the `okf-parser` / `okf-sync` libraries, and
+  the companion tools (`pgokf-ingest`, `pgokf-embed`, `pgokf-mcp`,
+  `pgokf-pgconn`) - is now `AGPL-3.0-only`, and a commercial license is
+  available for use the AGPL does not permit. See [`LICENSING.md`](LICENSING.md)
+  and [`COMM-LICENSE.md`](COMM-LICENSE.md).
 
 ### Security
 
