@@ -36,7 +36,7 @@ jobs:
     name: Validate META.json (PGXN)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: jq well-formedness + required PGXN v1 fields
         run: |
@@ -54,11 +54,12 @@ jobs:
       # before zipping (see docs/packaging.md). Reproduce that emit here so the
       # manifest's promised file is proven to exist at dist-build time, rather
       # than only when a human runs the release steps.
-      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Install PostgreSQL 18 dev files (PGDG)
         run: |
@@ -108,16 +109,17 @@ jobs:
           - pg: 19
             experimental: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Pinned via the action ref (1.96.0), consistent with ci.yml and
       # pgrx-test.yml; RUST_TOOLCHAIN below documents the same version for the
       # Docker build args.
-      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Install PostgreSQL ${{ matrix.pg }} server + dev files (PGDG)
         id: pgdg
@@ -211,7 +213,7 @@ jobs:
 
       - name: Upload .deb artifact
         if: steps.pgdg.outputs.available == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: pgokf-deb-pg${{ matrix.pg }}
           path: target/packaging/deb/*.deb
@@ -234,9 +236,9 @@ jobs:
           - pg: 19
             experimental: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Resolve extension version and base-image availability
         id: prep
@@ -269,7 +271,7 @@ jobs:
 
       - name: Build image
         if: steps.prep.outputs.base_available == 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: packaging/docker/Dockerfile
