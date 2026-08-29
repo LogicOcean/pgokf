@@ -1187,7 +1187,7 @@ The gamma concept is introduced during the refresh cycle.\n";
         // an existing install can be stepped up to this release.
         let upgrade_script = manifest_dir
             .join("sql")
-            .join(format!("pgokf--0.1.10--{crate_version}.sql"));
+            .join(format!("pgokf--0.1.11--{crate_version}.sql"));
         let metadata =
             fs::metadata(&upgrade_script).expect("the current upgrade script ships on disk");
         assert!(

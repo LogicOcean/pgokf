@@ -12,6 +12,58 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 Nothing yet.
 
+## [0.1.12] - 2026-08-28
+
+**Companion tooling**: three new out-of-process binaries that pair with the
+already-shipped catalog surface. **The in-database extension is functionally
+unchanged from 0.1.11** — no table, type, function, index, grant, comment, or
+configuration key is added, dropped, renamed, or rewritten, so
+`ALTER EXTENSION pgokf UPDATE TO '0.1.12'` is a documented no-op that yields a
+catalog identical to a fresh 0.1.12 with every bundle, concept, embedding,
+history version, and provenance record intact. All three tools do their network
+and credential handling **outside** PostgreSQL and reach the catalog only
+through its public SQL functions, preserving the extension's no-network-I/O
+guarantee.
+
+### Added
+
+- **`pgokf-embed`** (new `crates/pgokf-embed`) — the reference **embedding
+  generator** that pairs with the shipped semantic search. A standalone async
+  binary that connects as a `pgokf_writer` role, finds concepts in
+  `pgokf.concepts` with no matching `pgokf.concept_embedding` row (optionally
+  scoped by `--bundle`), builds a bounded `title + description + body_text`
+  text per concept, calls a configurable **OpenAI-compatible** `/v1/embeddings`
+  endpoint (`POST {endpoint}/v1/embeddings` with `{model, input}` and a
+  `Bearer` token) in batches, and streams each returned vector back through
+  `pgokf.set_concept_embedding(bundle_id, concept_id, embedding)`. The endpoint,
+  model, and API key are supplied by CLI/env and are **never** stored in
+  PostgreSQL or hard-coded; the target dimension comes from `pgokf.get_config`
+  (`embedding_dim`) or `--dim`. Any OpenAI-compatible server works — OpenAI, a
+  local `text-embeddings-inference` / `llama.cpp` server, or a mock.
+- **`pgokf-mcp`** (new `crates/pgokf-mcp`) — a **Model Context Protocol** server
+  that exposes the catalog to AI agents over stdio JSON-RPC 2.0. A hand-rolled,
+  dependency-light server (no MCP SDK) implementing the MCP handshake
+  (`initialize` → `serverInfo`/`capabilities`, `tools/list`, `tools/call`) and
+  four tools backed by the shipped functions: `concept_search`
+  (`query`, `bundle_id?`, `limit?`, plus `type`/`tags`/`status`/`trust_tier`
+  filters), `find_similar` (`concept_id`, `bundle_id?`, `limit?`),
+  `concept_neighbors` (`concept_id`, `max_hops?`, `bundle_id?`), and
+  `get_concept` (`concept_id`, `bundle_id?`). Connection string and optional
+  `pgokf.tenant` come from CLI/env.
+- **`pgokf-ingest --watch`** — the mountless ingestion companion gains a **watch
+  daemon** mode (`--watch`, with `--interval` seconds, default 60) that
+  periodically re-lists the object store and re-ingests through
+  `register_bundle_content` (which diffs server-side, so a changed object
+  resyncs on the next pass). A content hash of the collected object set lets an
+  unchanged pass skip the round-trip. One-shot mode (no `--watch`) is unchanged.
+  Shutdown is graceful on `SIGINT`.
+
+### Changed
+
+- The workspace version is `0.1.12`; the extension's `default_version`,
+  `META.json`, and the runtime `pgokf.version()` all report `0.1.12`. The
+  release ships the no-op `sql/pgokf--0.1.11--0.1.12.sql` upgrade script.
+
 ## [0.1.11] - 2026-08-28
 
 **Opt-in concept version history**: an append-only SCD Type-2 version trail of

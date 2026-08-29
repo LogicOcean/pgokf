@@ -20,12 +20,16 @@
 // than it helps, so the pedantic doc-markdown lint is relaxed crate-wide.
 #![allow(clippy::doc_markdown)]
 
+use std::time::Duration;
+
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use futures::{StreamExt, TryStreamExt};
 use object_store::aws::AmazonS3Builder;
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt};
+use tokio::signal;
+use tokio::time::sleep;
 use tokio_postgres::NoTls;
 
 /// Command-line / environment configuration for one ingestion run.
@@ -87,6 +91,17 @@ struct Cli {
     /// Maximum number of objects downloaded concurrently.
     #[arg(long, env = "OKF_DOWNLOAD_CONCURRENCY", default_value_t = 8)]
     concurrency: usize,
+
+    /// Run as a daemon: after the initial sync, re-list the object store every
+    /// `--interval` seconds and re-ingest when the collected content changed.
+    /// Omit for the default one-shot sync. Stops cleanly on SIGINT (Ctrl-C).
+    #[arg(long, env = "OKF_WATCH", default_value_t = false)]
+    watch: bool,
+
+    /// Poll interval, in seconds, between watch passes (only used with
+    /// `--watch`). Must be at least 1.
+    #[arg(long, env = "OKF_WATCH_INTERVAL", default_value_t = 60)]
+    interval: u64,
 }
 
 /// One collected object: its bundle-relative path and verbatim bytes.
@@ -101,12 +116,30 @@ async fn main() -> Result<()> {
     run(cli).await
 }
 
-/// Build the object store, collect the bundle, and stream it into PostgreSQL.
+/// Build the object store and dispatch to the one-shot or watch-daemon flow.
 async fn run(cli: Cli) -> Result<()> {
-    let store = build_object_store(&cli).context("failed to build the S3 object store")?;
+    if cli.watch && cli.interval == 0 {
+        bail!("--interval must be at least 1 second");
+    }
 
+    let store = build_object_store(&cli).context("failed to build the S3 object store")?;
     let normalized_prefix = normalize_prefix(&cli.prefix);
-    let objects = collect_bundle(&store, normalized_prefix.as_deref(), cli.concurrency)
+
+    if cli.watch {
+        run_watch(&cli, &store, normalized_prefix.as_deref()).await
+    } else {
+        run_once(&cli, &store, normalized_prefix.as_deref()).await
+    }
+}
+
+/// One-shot sync: collect the bundle and stream it into PostgreSQL. Empty is a
+/// hard error, matching the original single-run behavior.
+async fn run_once<S: ObjectStore>(
+    cli: &Cli,
+    store: &S,
+    normalized_prefix: Option<&str>,
+) -> Result<()> {
+    let objects = collect_bundle(store, normalized_prefix, cli.concurrency)
         .await
         .context("failed to read the bundle from the object store")?;
 
@@ -125,9 +158,114 @@ async fn run(cli: Cli) -> Result<()> {
         normalized_prefix.unwrap_or_default()
     );
 
-    register_content(&cli, objects)
+    register_content(cli, objects)
         .await
         .context("failed to register the bundle content in PostgreSQL")
+}
+
+/// Watch daemon: run an initial sync, then re-list and re-ingest on each
+/// interval, skipping passes whose collected content is byte-identical to the
+/// previous one. Runs until SIGINT (Ctrl-C), then returns cleanly.
+///
+/// A transient error in one pass (a listing/download hiccup, a momentary
+/// database outage) is logged and the daemon keeps polling; it does not abort
+/// the whole watch. The initial collect is deliberately allowed to see an empty
+/// bundle without erroring, because a watched bundle may legitimately be
+/// populated after the daemon starts.
+async fn run_watch<S: ObjectStore>(
+    cli: &Cli,
+    store: &S,
+    normalized_prefix: Option<&str>,
+) -> Result<()> {
+    let interval = Duration::from_secs(cli.interval);
+    eprintln!(
+        "pgokf-ingest: watching s3://{}/{} every {}s (Ctrl-C to stop)",
+        cli.bucket,
+        normalized_prefix.unwrap_or_default(),
+        cli.interval,
+    );
+
+    let mut last_hash: Option<[u8; blake3::OUT_LEN]> = None;
+    loop {
+        match sync_pass(cli, store, normalized_prefix, last_hash).await {
+            Ok(Some(hash)) => last_hash = Some(hash),
+            // No change (or an empty bundle): keep the prior fingerprint.
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!("pgokf-ingest: watch pass failed, retrying next interval: {error:#}");
+            }
+        }
+
+        // Sleep until the next interval, but wake immediately on Ctrl-C so
+        // shutdown is prompt regardless of the interval length.
+        tokio::select! {
+            () = sleep(interval) => {}
+            result = signal::ctrl_c() => {
+                result.context("failed to install the SIGINT handler")?;
+                eprintln!("pgokf-ingest: received SIGINT, shutting down");
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// Run one watch pass: collect the current object set, and register it only
+/// when its content hash differs from `last_hash`. Returns the new hash when a
+/// (re)sync happened, or `None` when the pass was skipped (unchanged) or the
+/// bundle was empty.
+async fn sync_pass<S: ObjectStore>(
+    cli: &Cli,
+    store: &S,
+    normalized_prefix: Option<&str>,
+    last_hash: Option<[u8; blake3::OUT_LEN]>,
+) -> Result<Option<[u8; blake3::OUT_LEN]>> {
+    let objects = collect_bundle(store, normalized_prefix, cli.concurrency)
+        .await
+        .context("failed to read the bundle from the object store")?;
+
+    if objects.is_empty() {
+        eprintln!(
+            "pgokf-ingest: no OKF (.md) objects under s3://{}/{}; waiting",
+            cli.bucket,
+            normalized_prefix.unwrap_or_default(),
+        );
+        return Ok(None);
+    }
+
+    let hash = hash_objects(&objects);
+    if Some(hash) == last_hash {
+        eprintln!(
+            "pgokf-ingest: {} object(s) unchanged; skipping resync",
+            objects.len(),
+        );
+        return Ok(None);
+    }
+
+    eprintln!(
+        "pgokf-ingest: collected {} object(s) from s3://{}/{}",
+        objects.len(),
+        cli.bucket,
+        normalized_prefix.unwrap_or_default(),
+    );
+    register_content(cli, objects)
+        .await
+        .context("failed to register the bundle content in PostgreSQL")?;
+    Ok(Some(hash))
+}
+
+/// Fingerprint the collected object set so an unchanged watch pass can skip the
+/// PostgreSQL round-trip. Objects arrive sorted by path (see [`collect_bundle`]),
+/// so the digest is order-stable; length prefixes make the concatenation
+/// unambiguous (no path/content boundary can be forged by concatenation).
+fn hash_objects(objects: &[BundleObject]) -> [u8; blake3::OUT_LEN] {
+    let mut hasher = blake3::Hasher::new();
+    for object in objects {
+        hasher.update(&(object.path.len() as u64).to_le_bytes());
+        hasher.update(object.path.as_bytes());
+        hasher.update(&(object.bytes.len() as u64).to_le_bytes());
+        hasher.update(&object.bytes);
+    }
+    *hasher.finalize().as_bytes()
 }
 
 /// Construct the S3 object store from the environment (including an instance
