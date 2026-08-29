@@ -6,11 +6,15 @@ Thanks for your interest in improving pgokf.
 
 pgokf is **dual-licensed** (AGPL-3.0 + a commercial license - see
 [`LICENSING.md`](LICENSING.md)). So that the project can keep offering the
-commercial option, **every contribution must be covered by a Contributor
-License Agreement (CLA)** granting LogicOcean the right to relicense your
-contribution under both the AGPL and the commercial license. By opening a pull
-request you agree to the CLA terms. *(The CLA signing process will be linked
-here before the repository is made public.)*
+commercial option, **every contribution must be covered by a signed
+Contributor License Agreement (CLA)** granting LogicOcean a perpetual,
+irrevocable license to the contribution, including the right to sublicense it
+and to relicense it under any terms (including the commercial license),
+together with a patent grant. **Until the CLA signing process is live,
+external pull requests cannot be merged.** A pull request opened before then
+will be held, not merged, until its author has signed; opening a pull request
+does not by itself create a CLA. The CLA signing link will be added here when
+the process is live.
 
 If you cannot agree to the CLA, please open an issue describing the bug or idea
 instead of a pull request - we can often implement it independently.
