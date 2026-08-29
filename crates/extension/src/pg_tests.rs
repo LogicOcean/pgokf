@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! In-database (`#[pg_test]`) integration tests for the `pgokf` SQL surface.
 //!
 //! Unlike the crate's unit tests (which exercise pure Rust logic without a

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Integration tests over the repository's shared bundle fixtures
 //! (`tests/bundles/`), exercising link normalization and Unicode handling
 //! against real files.

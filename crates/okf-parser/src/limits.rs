@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 /// Resource limits applied before parsing untrusted concept files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParserLimits {

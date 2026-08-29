@@ -105,4 +105,10 @@ in-database tests).
 
 ## License
 
-MIT. See the workspace manifest for details.
+pgokf is **dual-licensed**. The core — the PostgreSQL extension and its
+`okf-parser` / `okf-sync` crates — is **AGPL-3.0-only** ([`LICENSE`](LICENSE)).
+The companion tools (`pgokf-ingest`, `pgokf-embed`, `pgokf-mcp`,
+`pgokf-pgconn`) are **MIT** ([`LICENSE-MIT`](LICENSE-MIT)). A **commercial
+license** is available for use the AGPL does not permit (embedding in a
+proprietary product, offering it as a managed service without releasing source,
+or an organizational no-AGPL policy). See [`LICENSING.md`](LICENSING.md).

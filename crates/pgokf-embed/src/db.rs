@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! PostgreSQL access for the embedder.
 //!
 //! Every statement goes through the shipped `pgokf` public surface (the

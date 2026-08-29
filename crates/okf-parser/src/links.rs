@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 use pulldown_cmark::{CowStr, Event, LinkType, Options, Parser, Tag, TagEnd};
 use serde::{Deserialize, Serialize};
 

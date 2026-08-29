@@ -233,7 +233,7 @@ account carries no object-store credentials. Neither secret ever lands in
 
 # Object-store credentials live here, in the companion's environment (or, in
 # production, an attached IAM role so there is no static key at all).
-export AWS_ACCESS_KEY_ID=okfadmin
+export AWS_ACCESS_KEY_ID=…                # your object-store access key id
 export AWS_SECRET_ACCESS_KEY=…            # out of band; never sent to PostgreSQL
 
 # PostgreSQL is reached as a pgokf_writer login role, separately.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Link-graph projection seam (OKF v0.2 `pgokf.links`).
 //!
 //! # Seam contract for the links feature wave

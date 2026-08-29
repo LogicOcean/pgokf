@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Full-text search over the catalog: `pgokf.concept_search`.
 //!
 //! This module owns the SQL-facing search entry point, its input validation,

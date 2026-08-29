@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Minimal, hand-rolled JSON-RPC 2.0 types for the MCP stdio transport.
 //!
 //! MCP frames each message as a single line of JSON terminated by a newline

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Error types produced by discovery, hashing, and planning.
 
 use std::path::PathBuf;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Search-index health and coverage: `pgokf.search_index_status`.
 //!
 //! The two optional ranked-search accelerators — the `ParadeDB` `pg_search`

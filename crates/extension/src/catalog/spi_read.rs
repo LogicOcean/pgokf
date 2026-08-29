@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Shared SPI-tuple column extraction.
 //!
 //! Every reader-level projection in this crate reshapes an SPI result row into

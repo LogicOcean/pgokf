@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Exfiltration / access audit: `pgokf_private.access_log` and
 //! `pgokf.list_access_log`.
 //!

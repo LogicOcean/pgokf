@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Graph-traversal seam (recursive neighbor queries).
 //!
 //! # Seam contract for the neighbors feature wave

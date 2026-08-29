@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Reserved `log.md` activity-log projection seam (`pgokf.bundle_log`).
 //!
 //! # What this projects

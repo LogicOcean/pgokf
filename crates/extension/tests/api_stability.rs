@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Stable-API guardrail tests for the `pgokf` extension.
 //!
 //! These tests lock the public SQL surface and its documentation coverage at

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Domain error types with stable `PostgreSQL` SQLSTATE mappings.
 //!
 //! Every catalog operation reports failures as a [`CatalogError`], which

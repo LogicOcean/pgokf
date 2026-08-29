@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Bundle-administration API: `bundle_info`, `unregister_bundle`,
 //! `list_bundles`.
 //!

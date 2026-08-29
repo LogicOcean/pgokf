@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Defensive ISO 8601 / RFC 3339 timestamp parsing shared across projections.
 //!
 //! OKF frontmatter (provenance `generated.at`, `verified[].at`, `stale_after`,

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Opt-in verbatim source-byte storage and retrieval (`pgokf.concept_source`).
 //!
 //! # Two deployment tiers, one toggle

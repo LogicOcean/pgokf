@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Sync/audit log: `pgokf_private.sync_log` and `pgokf.list_sync_log`.
 //!
 //! # What this records

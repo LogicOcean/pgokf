@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! `pgokf` — a `PostgreSQL` extension that materializes Open Knowledge Format
 //! bundles into a queryable catalog.
 //!

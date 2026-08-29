@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Durable catalog configuration surface (`allowed_roots` and friends).
 //!
 //! This module owns the cluster-persistent policy that governs bundle

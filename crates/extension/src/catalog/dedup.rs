@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Cross-bundle content-duplicate detection (`pgokf.duplicate_concepts`).
 //!
 //! Concepts are stored with a BLAKE3 `file_hash` of their source bytes

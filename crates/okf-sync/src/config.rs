@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Scan configuration for bundle discovery.
 
 use std::path::PathBuf;

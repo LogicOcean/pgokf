@@ -6,7 +6,7 @@
    "maintainer": [
       "David Saroka <david.saroka@gmail.com>"
    ],
-   "license": "mit",
+   "license": "agpl_3",
    "provides": {
       "pgokf": {
          "abstract": "Materialized PostgreSQL catalog for Open Knowledge Format bundles",

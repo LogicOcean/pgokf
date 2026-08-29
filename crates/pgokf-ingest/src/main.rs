@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `pgokf-ingest` — the mountless OKF ingestion companion.
 //!
 //! This standalone binary is the network-facing half of the mountless

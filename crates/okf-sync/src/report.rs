@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Count-only summaries of a sync plan.
 
 use crate::SyncPlan;

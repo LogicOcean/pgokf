@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 use thiserror::Error;
 
 /// High-level classification of a parse failure.

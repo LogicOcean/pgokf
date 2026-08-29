@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Catalog backbone: base tables, the shared register/refresh sync engine,
 //! and native full-text search.
 //!

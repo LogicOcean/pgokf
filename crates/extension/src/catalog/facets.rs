@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Faceted result counts over the search set: `pgokf.search_facets`.
 //!
 //! A search UI often needs the *breakdown* of a result set, not the rows — "42

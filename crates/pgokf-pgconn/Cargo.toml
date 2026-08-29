@@ -3,7 +3,7 @@ name = "pgokf-pgconn"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license = "MIT"
 repository.workspace = true
 description = "Shared PostgreSQL connection helper for the pgokf companions: NoTls by default, optional rustls TLS honoring sslmode=require or an explicit flag."
 

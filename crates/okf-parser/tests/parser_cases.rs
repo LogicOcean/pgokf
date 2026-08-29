@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 use std::path::Path;
 
 use okf_parser::{Error, ErrorCategory, LinkKind, ParserLimits, normalize_path, parse_concept};

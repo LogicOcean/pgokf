@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Content "more-like-this" over the catalog: `pgokf.find_similar`.
 //!
 //! # What it does

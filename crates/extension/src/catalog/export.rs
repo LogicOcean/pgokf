@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Parquet snapshot export of the catalog projection (`pgokf.export_parquet`).
 //!
 //! # What this wave adds

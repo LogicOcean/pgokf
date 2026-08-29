@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! OpenAI-compatible embeddings HTTP client.
 //!
 //! Speaks the `POST {endpoint}/v1/embeddings` protocol shared by OpenAI, a

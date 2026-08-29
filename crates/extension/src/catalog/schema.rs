@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Base-table DDL for the catalog projection.
 //!
 //! Everything here ships as the single named SQL block **`catalog_tables`**,

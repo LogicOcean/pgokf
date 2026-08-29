@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Path-containment and role-authorization policy for catalog operations.
 //!
 //! Filesystem access is only permitted under explicitly configured allowed

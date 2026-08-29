@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Column-major marshalling for the sync engine's bounded bulk inserts.
 //!
 //! The register/refresh engine ([`crate::catalog::sync`]) writes concept and

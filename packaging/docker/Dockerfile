@@ -78,7 +78,7 @@ ARG PG_MAJOR
 LABEL org.opencontainers.image.title="pgokf" \
       org.opencontainers.image.description="PostgreSQL ${PG_MAJOR} with the pgokf Open Knowledge Format catalog extension" \
       org.opencontainers.image.source="https://github.com/LogicOcean/pgokf" \
-      org.opencontainers.image.licenses="MIT"
+      org.opencontainers.image.licenses="AGPL-3.0-only"
 
 # Copy the staged pgrx tree verbatim: .so into the pkglibdir and
 # control + sql into the extension sharedir.

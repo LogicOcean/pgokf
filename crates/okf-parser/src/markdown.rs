@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 /// Render Markdown into compact readable plain text.

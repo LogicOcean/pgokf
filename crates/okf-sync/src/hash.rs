@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! BLAKE3 content hashing helpers.
 //!
 //! Both helpers produce the same lowercase hexadecimal digest for the same

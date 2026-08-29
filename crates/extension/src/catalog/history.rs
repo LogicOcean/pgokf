@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Opt-in temporal concept version history (`pgokf.concept_history`).
 //!
 //! # SCD Type-2 temporal history, opt-in for backward compatibility

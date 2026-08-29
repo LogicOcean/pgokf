@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `pgokf-mcp` — a Model Context Protocol server exposing the `pgokf` catalog.
 //!
 //! This standalone async binary speaks MCP over stdio: newline-delimited

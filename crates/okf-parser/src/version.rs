@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! OKF format-version conformance.
 //!
 //! The accepted set of Open Knowledge Format versions is deliberately small and

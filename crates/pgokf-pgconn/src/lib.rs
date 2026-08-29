@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Shared PostgreSQL connection helper for the `pgokf` companions.
 //!
 //! The three companions (`pgokf-ingest`, `pgokf-embed`, `pgokf-mcp`) all open a

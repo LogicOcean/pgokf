@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Mountless content ingestion: `pgokf.register_bundle_content`.
 //!
 //! # Why this exists

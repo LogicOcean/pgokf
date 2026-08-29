@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Optional semantic (vector) and hybrid search over the catalog.
 //!
 //! This module adds three query surfaces plus the storage and index management

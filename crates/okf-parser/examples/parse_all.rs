@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Parse-all latency harness for the OKF format benchmark (YAML leg).
 //!
 //! Recursively walks a corpus directory and times parsing every `.md` file

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! OKF v0.2 provenance / trust / lifecycle projection seam.
 //!
 //! # Seam contract for the provenance feature wave

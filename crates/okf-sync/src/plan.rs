@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Incremental sync planning: comparing two snapshots deterministically.
 
 use std::collections::BTreeSet;

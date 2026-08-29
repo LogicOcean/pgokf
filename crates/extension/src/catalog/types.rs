@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Composite result construction and the projection-seam payload.
 //!
 //! The SQL definitions of `pgokf.bundle_sync_result` and

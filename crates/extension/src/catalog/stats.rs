@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Observability surface: `catalog_stats`, `health`, and `stale_concepts`.
 //!
 //! These three reader-level functions expose the operational state of the

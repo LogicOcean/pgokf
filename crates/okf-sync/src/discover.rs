@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Filesystem discovery of Markdown documents under a bundle root.
 
 use std::{

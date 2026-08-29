@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Integration tests exercising the public API end to end: incremental sync
 //! reporting, hashing helpers, and the symlink containment policy.
 

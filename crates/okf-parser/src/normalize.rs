@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 use std::path::{Component, Path};
 
 use crate::{Error, Result};

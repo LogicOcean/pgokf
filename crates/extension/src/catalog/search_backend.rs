@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Ranked-search backend seam: the [`SearchBackend`] Strategy and its two
 //! implementations, plus BM25 index management.
 //!

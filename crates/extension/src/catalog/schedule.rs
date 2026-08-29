@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Optional `pg_cron` scheduled bundle re-sync: `pgokf.schedule_refresh` /
 //! `pgokf.unschedule_refresh`.
 //!

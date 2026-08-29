@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Filesystem-backed incremental synchronization for Open Knowledge Format bundles.
 //!
 //! This crate deliberately has no database dependency. It discovers Markdown files,

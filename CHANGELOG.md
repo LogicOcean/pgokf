@@ -10,7 +10,13 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- **Relicensed to dual AGPL-3.0 + commercial** (previously MIT). The core — the
+  extension and the `okf-parser` / `okf-sync` crates — is now `AGPL-3.0-only`;
+  the companion tools (`pgokf-ingest`, `pgokf-embed`, `pgokf-mcp`,
+  `pgokf-pgconn`) are `MIT`; and a commercial license is available for use the
+  AGPL does not permit. See `LICENSING.md`.
 
 ## [0.1.13] - 2026-08-29
 

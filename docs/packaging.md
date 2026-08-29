@@ -105,7 +105,7 @@ build primitive; `%install` copies the staged tree into `%{buildroot}`.
 
 [`META.json`](https://github.com/LogicOcean/pgokf/blob/main/META.json) is a PGXN meta-spec v1.0.0 distribution manifest
 (`name` `pgokf`, `version` `0.1.0`, `provides.pgokf`, `prereqs` PostgreSQL
-≥ 15, `resources`, MIT license). `provides.pgokf.file` points at the generated
+≥ 15, `resources`, `AGPL-3.0-only` core license). `provides.pgokf.file` points at the generated
 `crates/extension/sql/pgokf--0.1.0.sql`, which the release process emits into
 the tree before building the PGXN zip.
 

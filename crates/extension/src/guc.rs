@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Configuration variables (GUCs) exposed by the `pgokf` extension.
 //!
 //! The four resource ceilings are registered with the `Sighup` context: they

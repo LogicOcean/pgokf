@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! The shared register/refresh engine.
 //!
 //! `pgokf.register_bundle`, `pgokf.refresh_bundle`, and
