@@ -227,6 +227,11 @@ jobs:
     name: Build Docker image (PostgreSQL ${{ matrix.pg }})${{ matrix.experimental && ' (advisory)' || '' }}
     runs-on: ubuntu-24.04
     continue-on-error: ${{ matrix.experimental }}
+    # packages:write is needed only by the tag-gated publish step below; the
+    # workflow-level default stays contents:read.
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -324,3 +329,22 @@ jobs:
           docker rm -f "$cid"
           test "${n}" -gt 0 \
             || { echo "::error::no concept rows materialized from the sample bundle"; exit 1; }
+
+      # Publish only from a version tag, and only after the smoke test above
+      # proved the image actually starts, creates the extension, and
+      # materializes a bundle. An advisory leg whose base image does not exist
+      # is skipped by the same base_available guard as the build.
+      - name: Log in to GHCR
+        if: steps.prep.outputs.base_available == 'true' && startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image to GHCR
+        if: steps.prep.outputs.base_available == 'true' && startsWith(github.ref, 'refs/tags/v')
+        run: |
+          # The image was built and loaded locally under this exact tag, so the
+          # bytes pushed here are the bytes the smoke test just exercised.
+          docker push "ghcr.io/logicocean/pgokf:${{ steps.prep.outputs.version }}-pg${{ matrix.pg }}"

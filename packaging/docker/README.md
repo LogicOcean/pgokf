@@ -4,12 +4,13 @@ A drop-in replacement for the official [`postgres`](https://hub.docker.com/_/pos
 image with the **pgokf** extension pre-built and installed, so
 `CREATE EXTENSION pgokf;` works out of the box.
 
-> **Not published yet - build it yourself.** No registry serves this image.
-> CI ([`.github/workflows/packages.yml`](../../.github/workflows/packages.yml))
+> **Published on release.** CI
+> ([`.github/workflows/packages.yml`](../../.github/workflows/packages.yml))
 > builds one image per supported PostgreSQL major and smoke-tests it (start the
-> container, register the sample bundle, assert concept rows materialize), but
-> it loads the image into the runner (`push: false` / `load: true`) and never
-> pushes it. Use the [build](#build) command below; there is nothing to pull.
+> container, register the sample bundle, assert concept rows materialize). On a
+> version tag it then pushes the smoke-tested image to
+> `ghcr.io/logicocean/pgokf:<version>-pg<major>`. Between releases there is
+> nothing to pull, so use the [build](#build) command below.
 
 ## Image tags
 

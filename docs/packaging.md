@@ -134,8 +134,9 @@ docker build -f packaging/docker/Dockerfile \
   -t pgokf:0.1.13-pg18 .
 ```
 
-CI builds and smoke-tests this image for every supported major, but does not
-push it: no image is published to a registry yet, so build locally.
+CI builds and smoke-tests this image for every supported major on every run,
+and pushes it to `ghcr.io/logicocean/pgokf:<version>-pg<major>` when the run is
+for a version tag. Between releases, build locally with the command above.
 
 Add a `.dockerignore` excluding `target/` and `.git/` to keep the build
 context small. Details and a compose snippet: [packaging/docker/README.md](https://github.com/LogicOcean/pgokf/blob/main/packaging/docker/README.md).
@@ -177,12 +178,14 @@ dependency at each release.
    (`cd crates/extension && cargo pgrx schema pg18 > sql/pgokf--0.1.13.sql`),
    build the distribution zip (repo contents + `META.json` + generated SQL),
    and upload it at <https://manager.pgxn.org/> under the `pgokf` distribution.
-5. **Docker.** Not yet automated: the packages workflow builds and smoke-tests
-   an image per major but does not push one. Publishing requires adding a
-   registry-push job (with `packages: write` and a registry login) before this
-   step means anything.
-6. **Homebrew.** In the tap repo, update `pgokf.rb` `url` + `sha256` for
-   `v0.1.13` and open the PR (`brew audit --new pgokf` locally first).
+5. **Docker.** Automatic: pushing the version tag runs the packages workflow,
+   which builds, smoke-tests, then pushes
+   `ghcr.io/logicocean/pgokf:<version>-pg<major>` for each supported major.
+   A newly created GHCR package is private; flip it to public once, in the
+   package settings, on the first release only.
+6. **Homebrew.** In [`LogicOcean/homebrew-pgokf`](https://github.com/LogicOcean/homebrew-pgokf),
+   update `Formula/pgokf.rb` `url` + `sha256` for the new tag
+   (`curl -fsSL <tarball> | shasum -a 256`) and push.
 7. **Announce.** GitHub Release notes from the CHANGELOG entry.
 
 ## Build-output hygiene

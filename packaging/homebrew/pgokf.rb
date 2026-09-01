@@ -15,10 +15,9 @@ class Pgokf < Formula
   # source of truth for the extension version; bump the url, the sha256 below,
   # and the version assertions in `test do` together.
   url "https://github.com/LogicOcean/pgokf/archive/refs/tags/v0.1.13.tar.gz"
-  # PLACEHOLDER: a digest exists only once GitHub serves the v0.1.13 tag
-  # tarball. Replace it at release time with the output of:
-  #   curl -fsSL https://github.com/LogicOcean/pgokf/archive/refs/tags/v0.1.13.tar.gz | shasum -a 256
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  # Digest of the GitHub-generated tag tarball. Regenerate on every release with:
+  #   curl -fsSL https://github.com/LogicOcean/pgokf/archive/refs/tags/vX.Y.Z.tar.gz | shasum -a 256
+  sha256 "3998961518ee0951eba238dc313c584f66beb2556f3d34339030ebb5525b9a4d"
   license "AGPL-3.0-only"
   head "https://github.com/LogicOcean/pgokf.git", branch: "main"
 
@@ -76,7 +75,7 @@ class Pgokf < Formula
         CREATE EXTENSION pgokf;
 
       Registering an OKF bundle requires a server-readable absolute bundle path
-      and membership in pgokf_admin. See:
+      and membership in pgokf_writer (reader < writer < admin). See:
         https://github.com/LogicOcean/pgokf#quick-start
     EOS
   end
