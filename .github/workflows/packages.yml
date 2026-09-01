@@ -19,6 +19,14 @@ on:
       - "META.json"
       - ".github/workflows/packages.yml"
   workflow_dispatch:
+    inputs:
+      publish_images:
+        description: >-
+          Push the smoke-tested images to GHCR for the version in
+          pgokf.control. Use this to publish images for a release whose tag
+          predates the publish step; a version tag publishes automatically.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -335,7 +343,7 @@ jobs:
       # materializes a bundle. An advisory leg whose base image does not exist
       # is skipped by the same base_available guard as the build.
       - name: Log in to GHCR
-        if: steps.prep.outputs.base_available == 'true' && startsWith(github.ref, 'refs/tags/v')
+        if: steps.prep.outputs.base_available == 'true' && (startsWith(github.ref, 'refs/tags/v') || inputs.publish_images)
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
@@ -343,7 +351,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Push image to GHCR
-        if: steps.prep.outputs.base_available == 'true' && startsWith(github.ref, 'refs/tags/v')
+        if: steps.prep.outputs.base_available == 'true' && (startsWith(github.ref, 'refs/tags/v') || inputs.publish_images)
         run: |
           # The image was built and loaded locally under this exact tag, so the
           # bytes pushed here are the bytes the smoke test just exercised.
