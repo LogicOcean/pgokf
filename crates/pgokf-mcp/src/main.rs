@@ -51,9 +51,18 @@ struct Cli {
     tls: bool,
 }
 
+impl Cli {
+    /// Apply the shared rule for optional values that also come from the
+    /// environment: empty means unset (see [`pgokf_companion::cli::non_empty`]).
+    fn normalized(mut self) -> Self {
+        self.tenant = pgokf_companion::cli::non_empty(self.tenant);
+        self
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = Cli::parse().normalized();
     let catalog = Catalog::connect(&cli.database_url, cli.tenant.as_deref(), cli.tls)
         .await
         .context("failed to connect to the catalog")?;

@@ -76,6 +76,19 @@ Every flag has an environment-variable equivalent:
 | `--max-chars` | `OKF_EMBED_MAX_CHARS` | Per-concept input character bound (default 8000) |
 | `--tenant` | `OKF_TENANT` | Apply a `pgokf.tenant` scope for the session |
 | `--tls` | `OKF_PG_TLS` | Require a TLS-encrypted link to PostgreSQL (default off) |
+| `--watch` | `OKF_WATCH` | Run as a daemon: re-check for concepts without a vector every `--interval` seconds (default off) |
+| `--interval` | `OKF_WATCH_INTERVAL` | Seconds between watch passes, minimum 1 (default 60) |
+
+### Daemon mode
+
+`--watch` turns the one-shot run into a service: after the initial pass it
+polls the catalog every `--interval` seconds and embeds whatever
+`register_bundle` / `refresh_bundle` / `register_bundle_content` added or
+changed since, so new content is searchable semantically within one interval
+with no operator action. Each pass opens its own connection, a failed pass is
+logged and retried on the next interval (a database or endpoint restart never
+kills the daemon), passes with nothing to do are silent, and SIGINT or SIGTERM
+(`docker stop`) ends it cleanly. The shipped compose stack runs it this way.
 
 ### PostgreSQL transport (TLS)
 

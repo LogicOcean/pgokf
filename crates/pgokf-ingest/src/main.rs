@@ -29,8 +29,6 @@ use futures::{StreamExt, TryStreamExt};
 use object_store::aws::AmazonS3Builder;
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt};
-use tokio::signal;
-use tokio::time::sleep;
 
 /// Command-line / environment configuration for one ingestion run.
 ///
@@ -119,8 +117,20 @@ struct BundleObject {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = Cli::parse().normalized();
     run(cli).await
+}
+
+impl Cli {
+    /// Apply the shared rule for optional values that also come from the
+    /// environment: empty means unset (see [`pgokf_companion::cli::non_empty`]),
+    /// so an empty endpoint or static key never overrides the AWS defaults.
+    fn normalized(mut self) -> Self {
+        self.endpoint = pgokf_companion::cli::non_empty(self.endpoint);
+        self.access_key_id = pgokf_companion::cli::non_empty(self.access_key_id);
+        self.secret_access_key = pgokf_companion::cli::non_empty(self.secret_access_key);
+        self
+    }
 }
 
 /// Build the object store and dispatch to the one-shot or watch-daemon flow.
@@ -172,7 +182,7 @@ async fn run_once<S: ObjectStore>(
 
 /// Watch daemon: run an initial sync, then re-list and re-ingest on each
 /// interval, skipping passes whose collected content is byte-identical to the
-/// previous one. Runs until SIGINT (Ctrl-C), then returns cleanly.
+/// previous one. Runs until SIGINT or SIGTERM, then returns cleanly.
 ///
 /// A transient error in one pass (a listing/download hiccup, a momentary
 /// database outage) is logged and the daemon keeps polling; it does not abort
@@ -184,36 +194,31 @@ async fn run_watch<S: ObjectStore>(
     store: &S,
     normalized_prefix: Option<&str>,
 ) -> Result<()> {
-    let interval = Duration::from_secs(cli.interval);
     eprintln!(
-        "pgokf-ingest: watching s3://{}/{} every {}s (Ctrl-C to stop)",
+        "pgokf-ingest: watching s3://{}/{} every {}s (SIGINT/SIGTERM to stop)",
         cli.bucket,
         normalized_prefix.unwrap_or_default(),
         cli.interval,
     );
 
     let mut last_hash: Option<[u8; blake3::OUT_LEN]> = None;
-    loop {
-        match sync_pass(cli, store, normalized_prefix, last_hash).await {
-            Ok(Some(hash)) => last_hash = Some(hash),
-            // No change (or an empty bundle): keep the prior fingerprint.
-            Ok(None) => {}
-            Err(error) => {
-                eprintln!("pgokf-ingest: watch pass failed, retrying next interval: {error:#}");
+    let shutdown = pgokf_companion::daemon::shutdown_signal()?;
+    pgokf_companion::daemon::run(
+        Duration::from_secs(cli.interval),
+        async || {
+            // No change (or an empty bundle) keeps the prior fingerprint.
+            if let Some(hash) = sync_pass(cli, store, normalized_prefix, last_hash).await? {
+                last_hash = Some(hash);
             }
-        }
+            Ok(())
+        },
+        shutdown,
+        |error| eprintln!("pgokf-ingest: watch pass failed, retrying next interval: {error:#}"),
+    )
+    .await?;
 
-        // Sleep until the next interval, but wake immediately on Ctrl-C so
-        // shutdown is prompt regardless of the interval length.
-        tokio::select! {
-            () = sleep(interval) => {}
-            result = signal::ctrl_c() => {
-                result.context("failed to install the SIGINT handler")?;
-                eprintln!("pgokf-ingest: received SIGINT, shutting down");
-                return Ok(());
-            }
-        }
-    }
+    eprintln!("pgokf-ingest: shutdown requested, exiting");
+    Ok(())
 }
 
 /// Run one watch pass: collect the current object set, and register it only
