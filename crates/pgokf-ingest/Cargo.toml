@@ -25,13 +25,9 @@ blake3.workspace = true
 clap = { version = "4.5", features = ["derive", "env"] }
 futures = "0.3"
 object_store = { version = "0.14", features = ["aws"] }
-pgokf-pgconn = { version = "=0.1.13", path = "../pgokf-pgconn" }
-tokio = { version = "1.40", features = [
-    "macros",
-    "rt-multi-thread",
-    "signal",
-    "time",
-] }
+pgokf-companion = { version = "=0.1.14", path = "../pgokf-companion" }
+pgokf-pgconn = { version = "=0.1.14", path = "../pgokf-pgconn" }
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread"] }
 tokio-postgres = "0.7"
 
 [lints]

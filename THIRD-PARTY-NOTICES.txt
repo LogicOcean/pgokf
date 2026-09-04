@@ -19,7 +19,7 @@ Regenerate it with:
   MIT License: 90 crate(s)
   ISC License: 22 crate(s)
   Unicode License v3: 19 crate(s)
-  GNU Affero General Public License v3.0 only: 7 crate(s)
+  GNU Affero General Public License v3.0 only: 8 crate(s)
   BSD 3-Clause "New" or "Revised" License: 6 crate(s)
   Creative Commons Zero v1.0 Universal: 1 crate(s)
   Community Data License Agreement Permissive 2.0: 1 crate(s)
@@ -30,13 +30,14 @@ GNU Affero General Public License v3.0 only
 ================================================================================
 
 Used by:
-  - pgokf 0.1.13  (https://github.com/LogicOcean/pgokf)
-  - okf-parser 0.1.13  (https://github.com/LogicOcean/pgokf)
-  - okf-sync 0.1.13  (https://github.com/LogicOcean/pgokf)
-  - pgokf-embed 0.1.13  (https://github.com/LogicOcean/pgokf)
-  - pgokf-ingest 0.1.13  (https://github.com/LogicOcean/pgokf)
-  - pgokf-mcp 0.1.13  (https://github.com/LogicOcean/pgokf)
-  - pgokf-pgconn 0.1.13  (https://github.com/LogicOcean/pgokf)
+  - pgokf 0.1.14  (https://github.com/LogicOcean/pgokf)
+  - okf-parser 0.1.14  (https://github.com/LogicOcean/pgokf)
+  - okf-sync 0.1.14  (https://github.com/LogicOcean/pgokf)
+  - pgokf-companion 0.1.14  (https://github.com/LogicOcean/pgokf)
+  - pgokf-embed 0.1.14  (https://github.com/LogicOcean/pgokf)
+  - pgokf-ingest 0.1.14  (https://github.com/LogicOcean/pgokf)
+  - pgokf-mcp 0.1.14  (https://github.com/LogicOcean/pgokf)
+  - pgokf-pgconn 0.1.14  (https://github.com/LogicOcean/pgokf)
 
 GNU AFFERO GENERAL PUBLIC LICENSE
 Version 3, 19 November 2007
