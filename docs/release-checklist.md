@@ -119,7 +119,7 @@ The extension ships forward-compatible upgrade scripts named
 script as `pgokf--<crate-version>.sql` and copies every upgrade script
 alongside it, so the update path is available without any manual step. The
 shipped chain runs one script per step from `0.1.0 → 0.1.1` through
-`0.1.12 → 0.1.13` (the current `default_version`).
+`0.1.13 → 0.1.14` (the current `default_version`).
 
 > **0.1.3 was a breaking pre-release re-model.** The `pgokf.concept_provenance`
 > shape changed to conform to OKF v0.2 (see [CHANGELOG.md](https://github.com/LogicOcean/pgokf/blob/main/CHANGELOG.md)).
@@ -173,11 +173,20 @@ ${PG_BIN}/pg_ctl -D "$DATA" -w stop -m fast && rm -rf /tmp/pgokf-rel
       exists and passed the upgrade gate above.
 - [ ] `cargo pgrx package --pg-config ${PG_CONFIG}` produces the install tree
       for each supported major.
+- [ ] The Docker images build and pass their smoke tests locally
+      (`packaging/docker/smoke-test.sh`, `smoke-test-companions.sh`); if
+      `PG_SEARCH_VERSION` changed, `packaging/docker/pg_search.sha256` was
+      regenerated.
 
 ## 7. Version bump, changelog, tag
 
 - [ ] Bump `version` in the workspace `Cargo.toml` (and `default_version` in
-      `pgokf.control`) as a **single, deliberate commit**.
+      `pgokf.control`) as a **single, deliberate commit**, together with every
+      other pin of the version: `META.json`, `packaging/rpm/pgokf.spec`,
+      `packaging/homebrew/pgokf.rb`, the `=<version>` path-dependency pins in
+      the companion crates, the image tags in `deploy/compose/.env.example`
+      and the `packaging/docker/*` / `docs/` examples, and `Cargo.lock`
+      (`cargo update --workspace`).
 - [ ] Move the `Unreleased` changelog section under the new version with the
       release date; add fresh compare/tag links.
 - [ ] Re-run gates 1–5 against the bumped version.
@@ -186,6 +195,10 @@ ${PG_BIN}/pg_ctl -D "$DATA" -w stop -m fast && rm -rf /tmp/pgokf-rel
 ## 8. Publish
 
 - [ ] Attach the per-major `cargo pgrx package` artifacts to the release.
+- [ ] Confirm the `packages` workflow run for the tag published the
+      multi-architecture images (`ghcr.io/logicocean/pgokf:<version>-pg<major>`
+      and `ghcr.io/logicocean/pgokf-companions:<version>`, each listing
+      `linux/amd64` and `linux/arm64` in `docker buildx imagetools inspect`).
 - [ ] Publish to [PGXN](https://pgxn.org): update `META.json` (name, version,
       abstract, `provides`, license, resources), build the release zip, and
       upload. Confirm the version and extension name match the tag.

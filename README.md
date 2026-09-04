@@ -25,7 +25,7 @@ An OKF **bundle** is just a directory of UTF-8 Markdown "concept" documents with
 - 🧾 **Audit & lifecycle.** A durable sync log + per-sync change manifest, an exfiltration/access log, reversible **retire**/**purge**, and cross-bundle **dedup**.
 - 📥 **Two ingestion paths.** From a **filesystem** path, or **mountless** - bytes streamed from an S3-compatible object store, with the extension performing zero network I/O.
 - 🧰 **Companion tools.** Object-store ingestion, a reference **embedder**, and an **MCP server** that exposes the catalog to AI agents.
-- 📦 **Operable.** `catalog_stats()` / `health()` / `search_index_status()`, Parquet + source-file exports, `pg_cron` scheduled refresh, PGXN / `.deb` / `.rpm` / Docker packaging.
+- 📦 **Operable.** `catalog_stats()` / `health()` / `search_index_status()`, Parquet + source-file exports, `pg_cron` scheduled refresh, `pg_dump`-complete backups, PGXN / `.deb` / `.rpm` packaging, and multi-architecture Docker images (amd64 + arm64, so Apple Silicon too) that bundle pgvector, pg_cron, and pg_search.
 
 See the exact, versioned surface - every function, table, type, GUC, and role - in **[docs/sql-api.md](docs/sql-api.md)** and **[docs/api-stability.md](docs/api-stability.md)**.
 
@@ -70,12 +70,12 @@ Everything works with stock PostgreSQL; these unlock more when installed, and de
 
 ## Companion tools
 
-Standalone binaries (in [`crates/`](crates)) that pair with the extension - credentials live in the companion, never in PostgreSQL, and each can connect over TLS:
+Standalone binaries (in [`crates/`](crates)) that pair with the extension - credentials live in the companion, never in PostgreSQL, and each can connect over TLS. They ship together in the multi-architecture `ghcr.io/logicocean/pgokf-companions:<version>` image:
 
 | Tool | What it does |
 | ---- | ------------ |
 | [`pgokf-ingest`](crates/pgokf-ingest) | Mountless ingestion: reads an S3/MinIO/SeaweedFS bucket and streams it into the catalog. `--watch` re-syncs on change. |
-| [`pgokf-embed`](crates/pgokf-embed) | Reference embedder: computes vectors via any OpenAI-compatible `/v1/embeddings` endpoint and stores them. |
+| [`pgokf-embed`](crates/pgokf-embed) | Reference embedder: computes vectors via any OpenAI-compatible `/v1/embeddings` endpoint and stores them. `--watch` keeps up with new content. |
 | [`pgokf-mcp`](crates/pgokf-mcp) | A Model Context Protocol server exposing `concept_search` / `find_similar` / `concept_neighbors` as agent tools. |
 
 ## Documentation
@@ -91,6 +91,7 @@ Full docs are published at **<https://logicocean.github.io/pgokf/>**. Key entry 
 | [multi-tenancy](docs/multi-tenancy.md) | Tenant isolation model, RLS, and its trust boundaries |
 | [version-history](docs/version-history.md) | Opt-in temporal history and point-in-time queries |
 | [deployment-topologies](docs/deployment-topologies.md) | Storage tiers, bucket-mount, mountless ingestion, Parquet |
+| [compose-deployment](docs/compose-deployment.md) | The reference Docker Compose production stack (multi-arch images with pgvector, pg_cron, pg_search; embedding daemon; backups) |
 | [operations](docs/operations.md) · [configuration](docs/configuration.md) | Day-2 ops, monitoring, upgrades; GUCs and policy keys |
 | [security](docs/security.md) | Roles, `SECURITY DEFINER` model, path containment, least privilege |
 | [okf-authoring](docs/okf-authoring.md) | Authoring OKF v0.2 bundles (frontmatter, actors, reserved files) |

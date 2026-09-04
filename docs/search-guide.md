@@ -563,10 +563,21 @@ without it, and the code reaches every `pg_search` object only through runtime
 SQL. If you cannot take that dependency, stay on `native` - nothing else in
 `pgokf` needs it.
 
+Because row-level security wraps the catalog tables for every session that is
+not their owner in a shape `pg_search` cannot plan, the BM25 hit query runs
+through the `SECURITY DEFINER` helper `pgokf.bm25_hits` (since 0.1.14), which
+applies the same `pgokf.tenant` predicate the policies enforce. Readers keep
+calling `concept_search`; the helper is an implementation detail with the same
+reader-level access rule.
+
 ### Steps
 
-1. **Install `pg_search` (and `pgvector`) at the cluster level.** Add
-   `pg_search` to `shared_preload_libraries` in `postgresql.conf` and restart:
+1. **Install `pg_search` (and `pgvector`) at the cluster level.** The official
+   `ghcr.io/logicocean/pgokf` image already ships both (and creates them when
+   preloaded - see [compose-deployment.md](compose-deployment.md#bm25-ranking-with-pg_search)),
+   so on the image this step is only the preload. Elsewhere, install the
+   packages, then add `pg_search` to `shared_preload_libraries` in
+   `postgresql.conf` and restart:
 
    ```conf
    # postgresql.conf

@@ -7,7 +7,7 @@ bundle of OKF concepts, searched it full-text, walked its link graph, and
 retrieved a concept's original source bytes.
 
 Everything below was run against a live PostgreSQL 18 cluster with `pgokf`
-`0.1.13` installed; the output blocks are the real output, lightly trimmed for
+`0.1.14` installed; the output blocks are the real output, lightly trimmed for
 width. If your numbers differ, it is because your bundle differs, the shapes
 will match.
 
@@ -63,7 +63,7 @@ SELECT pgokf.version();
 CREATE EXTENSION
  version
 ---------
- 0.1.13
+ 0.1.14
 (1 row)
 ```
 

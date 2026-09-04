@@ -47,6 +47,7 @@ nav:
   - Search Guide: search-guide.md
   - Architecture: architecture.md
   - Deployment: deployment-topologies.md
+  - Docker Compose Deployment: compose-deployment.md
   - Operations: operations.md
   - SQL API: sql-api.md
   - Configuration: configuration.md

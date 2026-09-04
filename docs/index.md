@@ -118,6 +118,7 @@ your first real bundle - start with [Getting started](getting-started.md).
 | [OKF authoring](okf-authoring.md) | How to structure a bundle: concepts, frontmatter, the reserved `index.md`, provenance families, the actor convention. |
 | [Search guide](search-guide.md) | Writing effective `concept_search` queries, ranking and headlines, structured filters, keyset pagination, facets, and the optional BM25, semantic, and hybrid backends. |
 | [Deployment topologies](deployment-topologies.md) | The two storage tiers, data-lake vs self-contained installs, bucket mounts vs mountless ingestion, and where the files live. |
+| [Docker Compose deployment](compose-deployment.md) | The reference single-host production stack: the multi-arch server image with pgvector, pg_cron, and pg_search, the embedding daemon, verified backups, and optional ingestion and MCP services. |
 | [Operations](operations.md) | Running pgokf in production: monitoring, audit logs, retirement, sync scheduling, exports, backup, and upgrades. |
 | [Multi-tenancy](multi-tenancy.md) | Opt-in row-level tenant isolation keyed on the `pgokf.tenant` session GUC, and what it does and does not guarantee. |
 | [Version history](version-history.md) | Opt-in append-only concept history and point-in-time queries (`concept_history`, `concept_as_of`). |
@@ -149,6 +150,6 @@ your first real bundle - start with [Getting started](getting-started.md).
 
 - New here? Read [Getting started](getting-started.md).
 - Authoring a bundle? Read [OKF authoring](okf-authoring.md).
-- Deciding how to deploy? Read [Deployment topologies](deployment-topologies.md).
+- Deciding how to deploy? Read [Deployment topologies](deployment-topologies.md), then stand it up with the [Docker Compose deployment](compose-deployment.md).
 - Need an exact signature? Read the [SQL API](sql-api.md).
 - Hit an error? Check [Troubleshooting](troubleshooting.md) and the [FAQ](faq.md).
