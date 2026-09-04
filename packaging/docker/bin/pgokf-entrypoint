@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+#
+# pgokf-entrypoint -- the image's ENTRYPOINT: a guard in front of the official
+# postgres docker-entrypoint.sh.
+#
+# The postgres entrypoint runs the first-init hooks (extension creation, login
+# roles, catalog policy) once, after initdb. If one of them fails, the cluster
+# is nevertheless fully initialized, and a plain restart would skip
+# initialization and bring up a server with no roles and a default policy - a
+# silently mis-provisioned database under `restart: always`. The hooks leave a
+# marker on failure; this guard refuses to start while it exists and says what
+# to do. Everything else is passed through verbatim.
+set -euo pipefail
+
+marker="${PGDATA:-/var/lib/postgresql/data}/.pgokf-init-failed"
+if [ -e "${marker}" ]; then
+  cat >&2 <<EOF
+pgokf: the first initialization of this data directory failed in a pgokf init
+hook (see the previous container log), so the cluster is incomplete: login
+roles or the catalog policy are missing. Refusing to start it as if it were
+healthy. Fix the environment, empty the data directory, and start again.
+(marker: ${marker})
+EOF
+  exit 1
+fi
+
+exec docker-entrypoint.sh "$@"
