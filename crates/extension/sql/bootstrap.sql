@@ -47,3 +47,37 @@ COMMENT ON ROLE pgokf_writer IS
     'pgokf ingestion API role: may register, refresh, and unregister bundles; inherits pgokf_reader. Intended account for an automated ingestion pipeline / the content-ingestion API. Does not include configuration or file-writing exports.';
 COMMENT ON ROLE pgokf_admin IS
     'pgokf administrative API role: everything a writer can do plus configuration (set_config/reset_config) and file-writing exports (export_parquet/export_sources); inherits pgokf_writer (and thus pgokf_reader).';
+
+-- Register every extension-owned table and sequence with pg_dump, so a logical
+-- backup carries the catalog's rows and sequence positions rather than just the
+-- CREATE EXTENSION statement. Discovered from the extension's own dependency
+-- graph, so nothing is listed by hand. pg_extension_config_dump may only run
+-- from an extension script: the fresh install calls this at the end of its
+-- SQL, and EVERY upgrade script that creates a table or sequence must call it
+-- again as its last statement.
+CREATE FUNCTION pgokf_private.register_dump_relations() RETURNS void
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, pg_temp
+    AS $fn$
+DECLARE
+    rel regclass;
+BEGIN
+    FOR rel IN
+        SELECT c.oid::regclass
+          FROM pg_catalog.pg_depend d
+          JOIN pg_catalog.pg_extension e ON e.oid = d.refobjid AND e.extname = 'pgokf'
+          JOIN pg_catalog.pg_class c ON c.oid = d.objid
+         WHERE d.classid = 'pg_catalog.pg_class'::regclass
+           AND d.refclassid = 'pg_catalog.pg_extension'::regclass
+           AND d.deptype = 'e'
+           AND c.relkind IN ('r', 'S')
+         ORDER BY c.oid
+    LOOP
+        PERFORM pg_catalog.pg_extension_config_dump(rel, '');
+    END LOOP;
+END
+$fn$;
+
+REVOKE ALL ON FUNCTION pgokf_private.register_dump_relations() FROM PUBLIC;
+COMMENT ON FUNCTION pgokf_private.register_dump_relations() IS
+    'Internal, extension-script only: registers every pgokf-owned table and sequence with pg_extension_config_dump so pg_dump carries the catalog. Called at the end of the fresh install and of every upgrade script that adds a relation.';

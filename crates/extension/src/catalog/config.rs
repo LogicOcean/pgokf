@@ -901,6 +901,47 @@ CREATE TABLE pgokf_private.config (
 
 INSERT INTO pgokf_private.config DEFAULT VALUES;
 
+-- A logical restore (pg_restore / psql of a pg_dump archive) replays CREATE
+-- EXTENSION - which seeds the row above - and then COPYs the dumped policy row
+-- into the same singleton key. Fold that COPY into an UPDATE of the seeded row
+-- so the restored catalog carries the dumped policy instead of failing on a
+-- duplicate key. The column list is derived from the catalog at run time, so a
+-- column added by a later upgrade is carried across automatically.
+CREATE FUNCTION pgokf_private.config_restore_upsert() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, pg_temp
+    AS $fn$
+DECLARE
+    assignments text;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pgokf_private.config WHERE singleton) THEN
+        RETURN NEW;
+    END IF;
+    SELECT string_agg(format('%I = ($1).%I', attname, attname), ', ' ORDER BY attnum)
+      INTO assignments
+      FROM pg_catalog.pg_attribute
+     WHERE attrelid = 'pgokf_private.config'::regclass
+       AND attnum > 0
+       AND NOT attisdropped
+       AND attname <> 'singleton';
+    EXECUTE format('UPDATE pgokf_private.config SET %s WHERE singleton', assignments)
+      USING NEW;
+    RETURN NULL;
+END
+$fn$;
+
+CREATE TRIGGER config_restore_upsert
+    BEFORE INSERT ON pgokf_private.config
+    FOR EACH ROW EXECUTE FUNCTION pgokf_private.config_restore_upsert();
+-- ALWAYS: a logical-replication subscriber (session_replication_role = replica)
+-- applying the row must fold it too. pg_restore --disable-triggers is the one
+-- path that bypasses it, and is documented as unsupported for this table.
+ALTER TABLE pgokf_private.config ENABLE ALWAYS TRIGGER config_restore_upsert;
+
+REVOKE ALL ON FUNCTION pgokf_private.config_restore_upsert() FROM PUBLIC;
+COMMENT ON FUNCTION pgokf_private.config_restore_upsert() IS
+    'BEFORE INSERT trigger on pgokf_private.config: when the singleton policy row already exists (seeded by CREATE EXTENSION), an incoming row - the COPY of a pg_dump archive during restore - replaces it column for column (a column omitted by the INSERT takes its default) and the insert is suppressed, so a restore carries the dumped policy across without a duplicate-key failure. Policy changes go through pgokf.set_config, never through INSERT.';
+
 REVOKE ALL ON pgokf_private.config FROM PUBLIC;
 
 COMMENT ON TABLE pgokf_private.config IS

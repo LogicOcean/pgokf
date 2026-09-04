@@ -1963,7 +1963,7 @@ dependencies = [
 
 [[package]]
 name = "okf-parser"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "pulldown-cmark",
  "serde",
@@ -1975,7 +1975,7 @@ dependencies = [
 
 [[package]]
 name = "okf-sync"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "blake3",
  "globset",
@@ -2093,7 +2093,7 @@ dependencies = [
 
 [[package]]
 name = "pgokf"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "arrow",
  "okf-parser",
@@ -2104,11 +2104,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "pgokf-companion"
+version = "0.1.14"
+dependencies = [
+ "anyhow",
+ "tokio",
+]
+
+[[package]]
 name = "pgokf-embed"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "anyhow",
  "clap",
+ "pgokf-companion",
  "pgokf-pgconn",
  "reqwest",
  "serde",
@@ -2119,13 +2128,14 @@ dependencies = [
 
 [[package]]
 name = "pgokf-ingest"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "anyhow",
  "blake3",
  "clap",
  "futures",
  "object_store",
+ "pgokf-companion",
  "pgokf-pgconn",
  "tokio",
  "tokio-postgres",
@@ -2133,10 +2143,11 @@ dependencies = [
 
 [[package]]
 name = "pgokf-mcp"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "anyhow",
  "clap",
+ "pgokf-companion",
  "pgokf-pgconn",
  "serde",
  "serde_json",
@@ -2146,7 +2157,7 @@ dependencies = [
 
 [[package]]
 name = "pgokf-pgconn"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "anyhow",
  "rustls",

@@ -1184,13 +1184,36 @@ The gamma concept is introduced during the refresh cycle.\n";
             "the installed extension reports the declared default_version",
         );
 
-        // Assert: the prior->current upgrade script exists and is non-empty, so
-        // an existing install can be stepped up to this release.
-        let upgrade_script = manifest_dir
-            .join("sql")
-            .join(format!("pgokf--0.1.12--{crate_version}.sql"));
+        // Assert: exactly one prior->current upgrade script ships and is
+        // non-empty, so `ALTER EXTENSION pgokf UPDATE` can reach this release
+        // from the previous one. The prior version is discovered from the
+        // shipped scripts rather than hard-coded, so this guard does not need
+        // editing at every release.
+        let sql_dir = manifest_dir.join("sql");
+        let suffix = format!("--{crate_version}.sql");
+        let upgrade_scripts: Vec<PathBuf> = fs::read_dir(&sql_dir)
+            .expect("sql directory is readable")
+            .map(|entry| entry.expect("directory entry is readable").path())
+            .filter(|path| {
+                // pgokf--<prior>--<current>.sql only: the base install script
+                // pgokf--<current>.sql also ends with the suffix but has no
+                // prior version between the two separators.
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(|name| name.strip_prefix("pgokf--"))
+                    .and_then(|rest| rest.strip_suffix(&suffix))
+                    .is_some_and(|prior| !prior.is_empty())
+            })
+            .collect();
+        assert_eq!(
+            upgrade_scripts.len(),
+            1,
+            "exactly one pgokf--<prior>--{crate_version}.sql upgrade script must ship in {}",
+            sql_dir.display(),
+        );
+        let upgrade_script = &upgrade_scripts[0];
         let metadata =
-            fs::metadata(&upgrade_script).expect("the current upgrade script ships on disk");
+            fs::metadata(upgrade_script).expect("the current upgrade script ships on disk");
         assert!(
             metadata.len() > 0,
             "the upgrade script {} must be non-empty",
@@ -4419,6 +4442,172 @@ The anchor concept never changes across the runbook's revisions.\n";
             globex_rows, 0,
             "a foreign tenant sees none of acme's history"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // 0.1.14: logical backups carry the catalog.
+    // ---------------------------------------------------------------------
+
+    /// Every extension-owned table and sequence must be registered with
+    /// pg_extension_config_dump, or pg_dump silently skips its rows and a
+    /// restore comes back as an empty catalog.
+    #[pg_test]
+    fn every_catalog_table_and_sequence_is_registered_for_pg_dump() {
+        // Arrange: the extension's own relations, from its dependency graph.
+        let owned = Spi::get_one::<i64>(
+            "SELECT count(*)
+               FROM pg_catalog.pg_depend d
+               JOIN pg_catalog.pg_extension e ON e.oid = d.refobjid AND e.extname = 'pgokf'
+               JOIN pg_catalog.pg_class c ON c.oid = d.objid
+              WHERE d.classid = 'pg_catalog.pg_class'::regclass
+                AND d.refclassid = 'pg_catalog.pg_extension'::regclass
+                AND d.deptype = 'e'
+                AND c.relkind IN ('r', 'S')",
+        )
+        .expect("owned-relation probe executes")
+        .expect("count is not null");
+
+        // Act: how many of them pg_extension.extconfig lists.
+        let registered = Spi::get_one::<i64>(
+            "SELECT count(*)
+               FROM pg_catalog.pg_extension e
+               CROSS JOIN LATERAL unnest(e.extconfig) AS cfg(relid)
+               JOIN pg_catalog.pg_class c ON c.oid = cfg.relid
+              WHERE e.extname = 'pgokf'",
+        )
+        .expect("extconfig probe executes")
+        .expect("count is not null");
+
+        // Assert: the catalog has tables to protect, and all of them are covered.
+        assert!(
+            owned >= 15,
+            "expected the catalog tables + sequences, found {owned}"
+        );
+        assert_eq!(
+            registered, owned,
+            "pg_extension_config_dump must cover every pgokf table and sequence"
+        );
+    }
+
+    /// A restore replays CREATE EXTENSION (seeding the default policy row) and
+    /// then COPYs the dumped row into the same singleton key. The trigger must
+    /// fold that insert into an update, carrying every column across, and the
+    /// table must still hold exactly one row afterwards.
+    #[pg_test]
+    fn config_restore_insert_folds_into_the_seeded_row() {
+        // Arrange: a non-default policy row shaped like a pg_dump COPY.
+        let before = Spi::get_one::<i64>("SELECT count(*) FROM pgokf_private.config")
+            .expect("count executes")
+            .expect("count is not null");
+        assert_eq!(before, 1, "the bootstrap seeds exactly one policy row");
+
+        // Act: the insert a restore would perform.
+        Spi::run(
+            "INSERT INTO pgokf_private.config
+                 (singleton, allowed_roots, store_source, embedding_dim, search_backend,
+                  track_history, history_retention_days)
+             VALUES (true, ARRAY['/restored'], true, 1024, 'bm25', true, 7)",
+        )
+        .expect("the restore-shaped insert succeeds instead of raising 23505");
+
+        // Assert: still a singleton, now carrying the incoming values.
+        let after = Spi::get_one::<i64>("SELECT count(*) FROM pgokf_private.config")
+            .expect("count executes")
+            .expect("count is not null");
+        assert_eq!(after, 1, "the trigger must suppress the duplicate insert");
+
+        let config = Spi::get_one::<pgrx::JsonB>("SELECT pgokf.get_config()")
+            .expect("get_config executes")
+            .expect("config is not null")
+            .0;
+        assert_eq!(config["allowed_roots"][0].as_str(), Some("/restored"));
+        assert_eq!(config["allowed_roots"].as_array().map(Vec::len), Some(1));
+        assert_eq!(config["store_source"].as_bool(), Some(true));
+        assert_eq!(config["embedding_dim"].as_i64(), Some(1024));
+        assert_eq!(config["search_backend"].as_str(), Some("bm25"));
+        assert_eq!(config["track_history"].as_bool(), Some(true));
+        assert_eq!(config["history_retention_days"].as_i64(), Some(7));
+    }
+
+    /// The bm25 backend must serve a non-superuser reader. Row-level security
+    /// wraps the catalog tables for non-owners in a security-barrier subquery
+    /// that pg_search cannot plan its custom scan over, so the backend runs its
+    /// hit query through the SECURITY DEFINER `pgokf.bm25_hits` helper, which
+    /// applies the tenant predicate explicitly. Requires pg_search to be
+    /// installed AND preloaded in the test cluster (it refuses to be created
+    /// otherwise); skips with a NOTICE when it is not, so the suite stays green
+    /// on servers without it.
+    #[pg_test]
+    fn bm25_backend_serves_a_non_superuser_reader_under_rls() {
+        // Arrange: pg_search available and loadable, else skip.
+        let usable = Spi::get_one::<bool>(
+            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_available_extensions WHERE name = 'pg_search')
+                AND pg_catalog.current_setting('shared_preload_libraries') ~ '(^|,)\\s*pg_search\\s*(,|$)'",
+        )
+        .expect("availability probe executes")
+        .expect("probe is not null");
+        if !usable {
+            pgrx::notice!(
+                "skipping bm25 RLS test: pg_search is not installed and preloaded in this cluster"
+            );
+            return;
+        }
+        Spi::run("CREATE EXTENSION IF NOT EXISTS pg_search CASCADE")
+            .expect("pg_search is creatable");
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        Spi::run("SELECT pgokf.set_config('search_backend', '\"bm25\"'::jsonb)")
+            .expect("backend is switchable");
+        let built = Spi::get_one::<bool>("SELECT pgokf.rebuild_search_index()")
+            .expect("rebuild executes")
+            .expect("rebuild returns a boolean");
+        assert!(
+            built,
+            "the bm25 index must be built when pg_search is present"
+        );
+        Spi::run("CREATE ROLE pgokf_bm25_reader").expect("reader role is creatable");
+        Spi::run("GRANT pgokf_reader TO pgokf_bm25_reader").expect("reader role is grantable");
+
+        // Act: search as the non-owner reader (RLS applies to this session).
+        Spi::run("SET ROLE pgokf_bm25_reader").expect("role switch succeeds");
+        let hit = Spi::get_one_with_args::<String>(
+            "SELECT concept_id FROM pgokf.concept_search('peregrine', $1, 5)",
+            &[bundle_id.into()],
+        )
+        .expect("bm25 search executes for a non-superuser reader");
+
+        // Act: the helper itself, as the reader, must agree with the search
+        // (proving the search really ran through it, not through a fallback).
+        let helper_hit = Spi::get_one_with_args::<String>(
+            "SELECT concept_id FROM pgokf.bm25_hits('peregrine', $1, 5, 'pg_catalog.english',
+                                                   NULL, NULL, NULL, NULL, NULL, NULL, NULL)",
+            &[bundle_id.into()],
+        )
+        .expect("bm25_hits executes for a non-superuser reader");
+
+        // Act: the same search scoped to a tenant that owns nothing.
+        Spi::run("SELECT set_config('pgokf.tenant', 'someone-else', true)")
+            .expect("tenant scope is settable");
+        let foreign_hits = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concept_search('peregrine', $1, 5)",
+            &[bundle_id.into()],
+        )
+        .expect("scoped bm25 search executes")
+        .expect("count is not null");
+        Spi::run("SELECT set_config('pgokf.tenant', '', true)").expect("tenant scope resets");
+        Spi::run("RESET ROLE").expect("role resets");
+
+        // Assert: ranked by BM25, and tenant-scoped exactly like the policy.
+        assert_eq!(
+            hit.as_deref(),
+            Some("alpha"),
+            "the reader gets the BM25-ranked hit"
+        );
+        assert_eq!(
+            helper_hit, hit,
+            "concept_search and bm25_hits agree for the reader"
+        );
+        assert_eq!(foreign_hits, 0, "a foreign tenant sees none of the rows");
     }
 
     // ---------------------------------------------------------------------

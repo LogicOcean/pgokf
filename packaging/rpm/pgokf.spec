@@ -33,7 +33,7 @@ Name:           %{sname}_%{pgmajorversion}
 # single source of truth for the extension version. build-deb.sh and the Docker
 # job read that file directly; a spec is parsed before Source0 is unpacked, so
 # this one cannot -- bump it by hand with every release.
-Version:        0.1.13
+Version:        0.1.14
 Release:        1%{?dist}
 Summary:        Materialized PostgreSQL catalog for Open Knowledge Format bundles
 
@@ -101,6 +101,12 @@ cp -a target/release/%{sname}-pg%{pgmajorversion}/. %{buildroot}/
 %{pginstdir}/share/extension/%{sname}--*--*.sql
 
 %changelog
+* Fri Sep 04 2026 David Saroka <david.saroka@gmail.com> - 0.1.14-1
+- Release 0.1.14: logical backups now carry the catalog (every pgokf table and
+  sequence is registered with pg_extension_config_dump; a restore-safe upsert
+  trigger on the singleton policy table). Upgrade script
+  pgokf--0.1.13--0.1.14.sql adds both; no existing row is touched.
+
 * Sat Aug 29 2026 David Saroka <david.saroka@gmail.com> - 0.1.13-1
 - Release 0.1.13: audited security and bugfix remediation. The in-database SQL
   surface is unchanged from 0.1.12; loading the new shared library is what

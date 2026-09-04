@@ -327,48 +327,22 @@ pub struct Bm25Backend {
     fallback: NativeBackend,
 }
 
-// The `@@@` operator lives in `pg_catalog`, so it resolves under any
-// search_path; every `paradedb.*` object is schema-qualified. `paradedb.score`
-// takes the whole-row relation reference `c`, so it scores per scanned tuple
-// (by ctid) rather than by key - cross-bundle duplicate `id` values are ranked
-// independently and correctly. The regconfig binds as `$4` and drives only the
-// `ts_headline` snippet, keeping snippets identical to the native backend. The
-// `@@@` match, `paradedb.score`, and the filters live in the `hits` subquery so
-// the shared KEYSET_ORDER_LIMIT tail applies the cursor, the stable total order,
-// and the limit over the already-scored rows.
-const BM25_QUERY: &str = "
-    SELECT hits.bundle_id,
-           hits.concept_id,
-           hits.path,
-           hits.title,
-           hits.type,
-           hits.rank,
-           hits.headline
-    FROM (
-        SELECT c.bundle_id AS bundle_id,
-               c.id AS concept_id,
-               c.path AS path,
-               c.title AS title,
-               c.type AS type,
-               paradedb.score(c) AS rank,
-               pg_catalog.ts_headline(
-                   $4::pg_catalog.regconfig,
-                   pg_catalog.concat_ws(' ', c.title, c.description, c.body_text),
-                   pg_catalog.websearch_to_tsquery($4::pg_catalog.regconfig, $1)) AS headline
-        FROM pgokf.concepts c
-        JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled AND b.retired_at IS NULL
-        LEFT JOIN pgokf.concept_provenance cp
-               ON cp.bundle_id = c.bundle_id AND cp.concept_id = c.id
-        WHERE c.id @@@ paradedb.boolean(should => ARRAY[
-                  paradedb.match('title', $1),
-                  paradedb.match('description', $1),
-                  paradedb.match('body_text', $1)])
-          AND ($2 IS NULL OR c.bundle_id = $2)
-          AND ($5 IS NULL OR c.type = $5)
-          AND ($6 IS NULL OR c.tags @> $6)
-          AND ($7 IS NULL OR cp.status = $7)
-          AND ($8 IS NULL OR cp.trust_tier = $8)
-    ) AS hits";
+// The BM25 hit query lives in SQL, as the `SECURITY DEFINER` helper
+// `pgokf.bm25_hits` created by the `bm25_hits_function` SQL block below, and this is
+// merely its call. Why not a query string like the native backend: for any
+// session that is not the table owner, row-level security injects the tenant
+// policy - a predicate that calls `current_setting()` inline - around
+// `pgokf.concepts`, and `pg_search` cannot plan its custom scan under such a
+// predicate: it falls back to a sequential scan and `paradedb.score` then
+// raises "Unsupported query shape". Every production reader is a non-owner, so
+// the BM25 path must run with the owner's privileges (no policy injected) and
+// apply the tenant scope itself, through a bound parameter rather than an
+// inline function call. The helper does exactly that and keeps every other
+// property of the query: the same eleven parameters as [`bind_search_args`],
+// the same seven-column projection, the same keyset tail, the same limit.
+const BM25_HITS_CALL: &str = "
+    SELECT bundle_id, concept_id, path, title, type, rank, headline
+    FROM pgokf.bm25_hits($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
 
 impl Bm25Backend {
     #[must_use]
@@ -379,10 +353,9 @@ impl Bm25Backend {
     }
 
     fn run_bm25(request: &SearchRequest) -> Result<Vec<SearchHit>, CatalogError> {
-        let query = format!("{BM25_QUERY}{KEYSET_ORDER_LIMIT}");
         Spi::connect(|client| {
             let table = client
-                .select(&query, None, &bind_search_args(request))
+                .select(BM25_HITS_CALL, None, &bind_search_args(request))
                 .map_err(spi_error("bm25 search query failed"))?;
             read_hits(table)
         })
@@ -480,6 +453,106 @@ fn rebuild() -> Result<bool, CatalogError> {
     })?;
     Ok(true)
 }
+
+// The `SECURITY DEFINER` BM25 hit query (see `BM25_HITS_CALL` for why).
+//
+// `plpgsql` on purpose: its body is not resolved until first execution, so
+// `CREATE EXTENSION pgokf` succeeds on a server without `pg_search` (the
+// runtime-only coupling this module guarantees), and [`Bm25Backend::search`]
+// only calls it after confirming the extension and its index exist. The
+// `search_path` is pinned to `pg_catalog` - `pg_search` installs its `@@@`
+// operators there and every `paradedb.*` object is schema-qualified - so a
+// caller cannot hijack a name resolved under the owner's privileges. The
+// tenant predicate is the one the row-level-security policies inline, applied
+// here explicitly because the owner bypasses the policies. `EXECUTE` is
+// granted to `pgokf_reader` only, the tier `concept_search` itself requires;
+// direct calls return the same rows `concept_search` would.
+pgrx::extension_sql!(
+    r"
+CREATE FUNCTION pgokf.bm25_hits(
+    p_query text,
+    p_bundle_id bigint,
+    p_limit bigint,
+    p_text_search_config text,
+    p_concept_type text,
+    p_tags text[],
+    p_status text,
+    p_trust_tier text,
+    p_after_rank real,
+    p_after_bundle_id bigint,
+    p_after_concept_id text)
+RETURNS TABLE (
+    bundle_id bigint,
+    concept_id text,
+    path text,
+    title text,
+    type text,
+    rank real,
+    headline text)
+LANGUAGE plpgsql
+STABLE PARALLEL SAFE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+    -- Resolved once, up front, and bound into the query as a parameter: the
+    -- policies inline current_setting() directly, but pg_search 0.25 cannot
+    -- plan its scan under a predicate that calls a function (that inline
+    -- form is exactly what row-level security injects for non-owners, and
+    -- exactly what the Unsupported-query-shape error was about). Empty = unset.
+    v_tenant text := NULLIF(pg_catalog.current_setting('pgokf.tenant', true), '');
+BEGIN
+    RETURN QUERY
+    SELECT hits.bundle_id,
+           hits.concept_id,
+           hits.path,
+           hits.title,
+           hits.type,
+           hits.rank,
+           hits.headline
+    FROM (
+        SELECT c.bundle_id AS bundle_id,
+               c.id AS concept_id,
+               c.path AS path,
+               c.title AS title,
+               c.type AS type,
+               paradedb.score(c) AS rank,
+               pg_catalog.ts_headline(
+                   p_text_search_config::pg_catalog.regconfig,
+                   pg_catalog.concat_ws(' ', c.title, c.description, c.body_text),
+                   pg_catalog.websearch_to_tsquery(p_text_search_config::pg_catalog.regconfig, p_query)) AS headline
+        FROM pgokf.concepts c
+        JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled AND b.retired_at IS NULL
+        LEFT JOIN pgokf.concept_provenance cp
+               ON cp.bundle_id = c.bundle_id AND cp.concept_id = c.id
+        WHERE c.id @@@ paradedb.boolean(should => ARRAY[
+                  paradedb.match('title', p_query),
+                  paradedb.match('description', p_query),
+                  paradedb.match('body_text', p_query)])
+          AND (v_tenant IS NULL OR c.tenant_id = v_tenant)
+          AND (p_bundle_id IS NULL OR c.bundle_id = p_bundle_id)
+          AND (p_concept_type IS NULL OR c.type = p_concept_type)
+          AND (p_tags IS NULL OR c.tags @> p_tags)
+          AND (p_status IS NULL OR cp.status = p_status)
+          AND (p_trust_tier IS NULL OR cp.trust_tier = p_trust_tier)
+    ) AS hits
+    WHERE p_after_rank IS NULL
+       OR hits.rank < p_after_rank
+       OR (hits.rank = p_after_rank AND hits.bundle_id > p_after_bundle_id)
+       OR (hits.rank = p_after_rank AND hits.bundle_id = p_after_bundle_id AND hits.concept_id > p_after_concept_id)
+    ORDER BY hits.rank DESC, hits.bundle_id ASC, hits.concept_id ASC
+    LIMIT p_limit;
+END
+$fn$;
+
+REVOKE ALL ON FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text) TO pgokf_reader;
+COMMENT ON FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text) IS
+    'Internal helper behind concept_search when search_backend = bm25; not part of the stable API. Runs the ParadeDB pg_search BM25 hit query with the owner''s privileges (row-level security wraps the catalog tables in a shape pg_search cannot plan for non-owners) while applying the same pgokf.tenant scoping the policies enforce, over active bundles only, with concept_search''s filters, keyset cursor, and limit. Reader-level; returns exactly the rows concept_search would.';
+",
+    name = "bm25_hits_function",
+    requires = ["catalog_tables", "provenance_table"]
+);
 
 /// SQL-facing BM25 index management, installed into the `pgokf` schema.
 #[pgrx::pg_schema]
