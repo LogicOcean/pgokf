@@ -1,0 +1,181 @@
+# Production compose stack for a pgokf catalog on one Docker host.
+#
+# Services
+#   db       the pgokf server image (PostgreSQL + pgokf + pgvector + pg_cron +
+#            pg_search), preloading the extensions, with the GUC ceilings set
+#            and bundles bind-mounted read-only at /bundles
+#   embed    the pgokf-embed companion as a daemon: every OKF_EMBED_INTERVAL
+#            seconds it embeds concepts that have no vector yet
+#   backup   (profile "ops") one-shot logical backup via the image's
+#            pgokf-backup; drive it from cron:  docker compose run --rm backup
+#   ingest   (profile "ingest") the mountless object-store ingestion daemon,
+#            for a bucket-hosted bundle instead of (or as well as) /bundles
+#   mcp      (profile "tools") the MCP server over stdio for AI-agent clients
+#
+# Everything is parameterized through .env - copy .env.example and fill it in.
+# The network is external (create it once with `docker network create
+# pgokf-net`) so `docker compose down` can never tear it out from under
+# containers that other stacks attach to it. See README.md in this directory
+# and docs/compose-deployment.md for the full runbook.
+
+name: pgokf
+
+x-pg-url: &writer-url "postgresql://${PGOKF_WRITER_ROLE:-okf_writer}:${PGOKF_WRITER_PASSWORD:?PGOKF_WRITER_PASSWORD is required}@db:5432/${POSTGRES_DB:-okf}"
+
+services:
+  db:
+    image: ${PGOKF_IMAGE:?PGOKF_IMAGE is required (e.g. ghcr.io/logicocean/pgokf:0.1.14-pg18 or a locally built tag)}
+    container_name: pgokf-db
+    restart: always
+    # PostgreSQL parallel workers and the pg_search index share memory through
+    # /dev/shm; the Docker default of 64 MiB is far too small.
+    shm_size: ${PGOKF_SHM_SIZE:-1g}
+    stop_grace_period: 60s
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-okf}
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+      # First-init hooks shipped in the image (see packaging/docker/README.md):
+      # least-privilege login roles per pgokf tier ...
+      PGOKF_ADMIN_ROLE: ${PGOKF_ADMIN_ROLE:-okf_admin}
+      PGOKF_ADMIN_PASSWORD: ${PGOKF_ADMIN_PASSWORD:?PGOKF_ADMIN_PASSWORD is required}
+      PGOKF_WRITER_ROLE: ${PGOKF_WRITER_ROLE:-okf_writer}
+      PGOKF_WRITER_PASSWORD: ${PGOKF_WRITER_PASSWORD:?PGOKF_WRITER_PASSWORD is required}
+      PGOKF_READER_ROLE: ${PGOKF_READER_ROLE:-okf_reader}
+      PGOKF_READER_PASSWORD: ${PGOKF_READER_PASSWORD:?PGOKF_READER_PASSWORD is required}
+      # ... and the durable catalog policy (embedding_dim MUST match the
+      # embedding model; allowed_roots confines registration to the mount).
+      PGOKF_POLICY: ${PGOKF_POLICY:?PGOKF_POLICY is required}
+    command:
+      - postgres
+      # pgokf: GUC ceilings visible from connection start and settable below.
+      # pg_cron / pg_search: both require preloading before CREATE EXTENSION.
+      - -c
+      - shared_preload_libraries=pgokf,pg_cron,pg_search
+      - -c
+      - cron.database_name=${POSTGRES_DB:-okf}
+      # Hard, cluster-wide resource ceilings (docs/configuration.md).
+      - -c
+      - pgokf.max_file_bytes=${PGOKF_MAX_FILE_BYTES:-8388608}
+      - -c
+      - pgokf.max_bundle_files=${PGOKF_MAX_BUNDLE_FILES:-250000}
+      - -c
+      - pgokf.max_frontmatter_bytes=${PGOKF_MAX_FRONTMATTER_BYTES:-262144}
+      - -c
+      - pgokf.max_graph_hops=${PGOKF_MAX_GRAPH_HOPS:-8}
+      # Memory sizing for the host; tune to the box (docs/operations.md).
+      - -c
+      - shared_buffers=${PGOKF_SHARED_BUFFERS:-1GB}
+      - -c
+      - effective_cache_size=${PGOKF_EFFECTIVE_CACHE_SIZE:-3GB}
+      - -c
+      - maintenance_work_mem=${PGOKF_MAINTENANCE_WORK_MEM:-512MB}
+      - -c
+      - work_mem=${PGOKF_WORK_MEM:-32MB}
+      - -c
+      - log_min_duration_statement=${PGOKF_LOG_MIN_DURATION_MS:-1000}
+    ports:
+      # Bind to a specific interface (loopback, or a private/VPN address);
+      # never 0.0.0.0 unless the host firewall already confines 5432.
+      - "${PGOKF_BIND_ADDR:-127.0.0.1}:${PGOKF_PORT:-5432}:5432"
+    volumes:
+      # Cluster data. The container-side path is the postgres:18 image's PGDATA
+      # (/var/lib/postgresql/18/docker); override PGOKF_PGDATA for another major.
+      - ${PGOKF_DATA_DIR:?PGOKF_DATA_DIR is required}:${PGOKF_PGDATA:-/var/lib/postgresql/18/docker}
+      # OKF bundles, read-only. Register them as /bundles/<name>.
+      - ${PGOKF_BUNDLES_DIR:?PGOKF_BUNDLES_DIR is required}:/bundles:ro
+    networks:
+      - pgokf-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  embed:
+    image: ${PGOKF_COMPANIONS_IMAGE:?PGOKF_COMPANIONS_IMAGE is required (e.g. ghcr.io/logicocean/pgokf-companions:0.1.14 or a locally built tag)}
+    container_name: pgokf-embed
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["pgokf-embed", "--watch"]
+    environment:
+      OKF_PG_URL: *writer-url
+      # Base URL of the OpenAI-compatible server; /v1/embeddings is appended.
+      # Not `:?`-required here: compose interpolates every service even for
+      # `docker compose run --rm backup`; pgokf-embed itself refuses to start
+      # without them, which `docker compose ps` shows immediately.
+      OKF_EMBED_ENDPOINT: ${OKF_EMBED_ENDPOINT:-}
+      OKF_EMBED_MODEL: ${OKF_EMBED_MODEL:-}
+      OKF_EMBED_API_KEY: ${OKF_EMBED_API_KEY:-}
+      OKF_EMBED_BATCH: ${OKF_EMBED_BATCH:-32}
+      OKF_EMBED_MAX_CHARS: ${OKF_EMBED_MAX_CHARS:-8000}
+      OKF_WATCH_INTERVAL: ${OKF_EMBED_INTERVAL:-60}
+    networks:
+      - pgokf-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  backup:
+    image: ${PGOKF_IMAGE}
+    profiles: ["ops"]
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["pgokf-backup"]
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      PGUSER: ${POSTGRES_USER:-postgres}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB:-okf}
+      PGOKF_BACKUP_DIR: /backups
+      PGOKF_BACKUP_RETENTION_DAYS: ${PGOKF_BACKUP_RETENTION_DAYS:-14}
+    volumes:
+      - ${PGOKF_BACKUP_DIR:?PGOKF_BACKUP_DIR is required}:/backups
+    networks:
+      - pgokf-net
+
+  ingest:
+    image: ${PGOKF_COMPANIONS_IMAGE}
+    container_name: pgokf-ingest
+    profiles: ["ingest"]
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["pgokf-ingest", "--watch"]
+    environment:
+      OKF_PG_URL: *writer-url
+      OKF_S3_BUCKET: ${OKF_S3_BUCKET:-}
+      OKF_S3_PREFIX: ${OKF_S3_PREFIX:-}
+      OKF_S3_ENDPOINT: ${OKF_S3_ENDPOINT:-}
+      OKF_S3_ALLOW_HTTP: ${OKF_S3_ALLOW_HTTP:-false}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      OKF_BUNDLE_NAME: ${OKF_BUNDLE_NAME:-}
+      OKF_WATCH_INTERVAL: ${OKF_INGEST_INTERVAL:-60}
+    networks:
+      - pgokf-net
+
+  mcp:
+    image: ${PGOKF_COMPANIONS_IMAGE}
+    profiles: ["tools"]
+    stdin_open: true
+    command: ["pgokf-mcp"]
+    environment:
+      OKF_PG_URL: "postgresql://${PGOKF_READER_ROLE:-okf_reader}:${PGOKF_READER_PASSWORD}@db:5432/${POSTGRES_DB:-okf}"
+      OKF_TENANT: ${OKF_MCP_TENANT:-}
+    networks:
+      - pgokf-net
+
+networks:
+  pgokf-net:
+    name: ${PGOKF_NETWORK:-pgokf-net}
+    external: true

@@ -1,0 +1,20 @@
+# SHA256 checksums for the ParadeDB pg_search .deb packages that
+# packaging/docker/install-optional-extensions.sh installs into the image.
+#
+# One line per (PostgreSQL major, Debian codename, architecture) in the standard
+# `sha256sum` format. The installer looks up the exact file it is about to
+# install and refuses to proceed when no pinned entry exists, so a bumped
+# PG_SEARCH_VERSION or a new base-image codename must be accompanied by a
+# regenerated table:
+#
+#   packaging/docker/update-pg-search-checksums.sh <pg_search version>
+#
+# Generated for pg_search 0.25.6 (Debian trixie, amd64 + arm64).
+a4ee259de90569a178cd8ec96ded4408714193a71e46a0b7bb3e7034accbe707  postgresql-15-pg-search_0.25.6-1PARADEDB-trixie_amd64.deb
+2d1b6cf50432e814f86799e31dac79c0faa50e199183b7dc2fc069d28422e2f0  postgresql-15-pg-search_0.25.6-1PARADEDB-trixie_arm64.deb
+a50f2145529cc40c94cd5ab39a412621495ee087b03555a02ccb9fae2e992d8a  postgresql-16-pg-search_0.25.6-1PARADEDB-trixie_amd64.deb
+41eec76ddccf5e1e4eab21071b11f7ea24394f7d39e8f1edf167f651aec7b3f9  postgresql-16-pg-search_0.25.6-1PARADEDB-trixie_arm64.deb
+7bde281e629b0e6b97a920725352400a702bbf0c8965998eb9db46c193814627  postgresql-17-pg-search_0.25.6-1PARADEDB-trixie_amd64.deb
+a965bf1477c8bf6e2323fed7c3774c9cdcb6eaa8d9a22c1e0081f787fab72972  postgresql-17-pg-search_0.25.6-1PARADEDB-trixie_arm64.deb
+752cd6000bda74f9751bbc41855fd394fda1db58a505db7a52e2b8f134090e0b  postgresql-18-pg-search_0.25.6-1PARADEDB-trixie_amd64.deb
+3fe3019a0d56e918a9f567c8286a37892187bb5c6e5eae1c53e41beccb651cf0  postgresql-18-pg-search_0.25.6-1PARADEDB-trixie_arm64.deb

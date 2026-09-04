@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+#
+# pgokf-restore -- restore a pgokf-backup archive into a database served by
+# this image, shipped alongside pgokf-backup.
+#
+# Usage:
+#   pgokf-restore <archive.dump> [extra pg_restore options...]
+#
+# Connection settings are the standard libpq variables (PGHOST, PGPORT, PGUSER,
+# PGPASSWORD / PGPASSFILE, PGDATABASE). The target database must exist; a
+# fresh one initialized by this image (pgokf and the optional extensions
+# created by the init hooks) is the intended shape, and the dumped catalog rows
+# then land in the empty tables. The restore runs as one transaction and stops
+# on the first error, so a failed restore leaves no half-restored catalog.
+#
+# Why a wrapper rather than plain pg_restore: the archive's table of contents
+# carries two kinds of entries that cannot be replayed into a database this
+# image initialized and that pg_restore would otherwise report as errors:
+#
+#   * `SCHEMA - paradedb` (and pg_search's internal typmod cache under it):
+#     pg_search does not own its schema, so pg_dump emits CREATE SCHEMA, which
+#     fails once pg_search exists in the target. Nothing pgokf needs lives there.
+#   * the pg_cron and pg_search extension entries (and pg_cron's job tables)
+#     when the target database does not already have that extension: neither
+#     can be created by the restore (both must be preloaded, and pg_cron only
+#     exists in the database named by cron.database_name), and the image's
+#     init hook has already created whichever the target can support.
+#
+# The filtered list is derived from the archive itself with `pg_restore -l`,
+# so every other object - pgokf, its policy row, bundles, concepts, embeddings,
+# history, audit tables, and sequence positions - restores exactly as dumped.
+# Indexes that pgokf builds at runtime (the bm25 index, the pgvector HNSW
+# index) live on extension-owned tables and are NOT in the archive; the tool
+# rebuilds them afterwards when the restored policy or data calls for them.
+set -euo pipefail
+umask 077
+
+archive="${1:?usage: pgokf-restore <archive.dump> [pg_restore options...]}"
+shift
+database="${PGDATABASE:?PGDATABASE is required}"
+
+log() { printf '%s pgokf-restore: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
+die() { log "error: $*"; exit 1; }
+
+[ -r "${archive}" ] || die "archive ${archive} is not readable"
+pg_restore --list "${archive}" > /dev/null 2>&1 || die "${archive} is not a pg_dump custom-format archive"
+
+has_extension() {
+  [ "$(psql -X -tA -c "SELECT count(*) FROM pg_catalog.pg_extension WHERE extname = '$1'")" = 1 ]
+}
+
+toc="$(mktemp)"
+trap 'rm -f "${toc}"' EXIT
+
+# Drop the entries that cannot be replayed into an initialized target. A TOC
+# line reads `<id>; <catalog> <oid> <TYPE> <schema> <name> <owner>` (for a
+# schema: `SCHEMA - <name> <owner>`; for an extension: `EXTENSION - <name> `),
+# so every pattern is anchored on the surrounding spaces, never on end of line.
+filter=' SCHEMA - paradedb( |$)| (TABLE|TABLE DATA|SEQUENCE|SEQUENCE SET) paradedb '
+if ! has_extension pg_search; then
+  filter="${filter}| EXTENSION - pg_search( |$)| COMMENT - EXTENSION pg_search( |$)"
+  log "target has no pg_search; its extension entries excluded"
+fi
+if ! has_extension pg_cron; then
+  filter="${filter}| EXTENSION - pg_cron( |$)| COMMENT - EXTENSION pg_cron( |$)| (TABLE|TABLE DATA|SEQUENCE|SEQUENCE SET) cron "
+  log "target database ${database} has no pg_cron (it lives only in cron.database_name); its entries excluded"
+fi
+pg_restore --list "${archive}" | grep -v -E "${filter}" > "${toc}"
+
+kept="$(grep -c -v '^;' "${toc}" || true)"
+log "restoring ${archive} into ${database} (${kept} archive entries)"
+pg_restore --dbname="${database}" --single-transaction --exit-on-error --use-list="${toc}" "$@" "${archive}"
+
+# Runtime-built indexes are not in the archive: rebuild what the restored
+# catalog uses (admin-only functions; the restore runs as a superuser).
+if [ "$(psql -X -tA -c "SELECT pgokf.get_config() ->> 'search_backend'")" = bm25 ]; then
+  log "restored policy uses search_backend=bm25; rebuilding the bm25 index"
+  psql -X -v ON_ERROR_STOP=1 -q -c "SELECT pgokf.rebuild_search_index()"
+fi
+if has_extension vector \
+   && [ "$(psql -X -tA -c "SELECT EXISTS (SELECT 1 FROM pgokf.concept_embedding)")" = t ]; then
+  log "restored embeddings present; rebuilding the pgvector index"
+  psql -X -v ON_ERROR_STOP=1 -q -c "SELECT pgokf.rebuild_embedding_index()"
+fi
+
+summary="$(psql -X -tA -c "SELECT 'bundles=' || (SELECT count(*) FROM pgokf.bundles) || ' concepts=' || (SELECT count(*) FROM pgokf.concepts) || ' health_ok=' || (pgokf.health() ->> 'ok')")"
+log "done: ${summary}"

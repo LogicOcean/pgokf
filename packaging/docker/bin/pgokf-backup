@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+#
+# pgokf-backup -- logical backup of a pgokf catalog, shipped in the image.
+#
+# Produces, in PGOKF_BACKUP_DIR (default /backups):
+#   <db>-<UTC stamp>.dump      pg_dump custom-format archive of the database
+#                              (metadata, search index, and - in the small tier -
+#                              the stored source bytes; see
+#                              docs/deployment-topologies.md)
+#   roles-<UTC stamp>.sql      pg_dumpall --roles-only, because the pgokf role
+#                              hierarchy and login roles are cluster-wide and
+#                              are NOT captured by a database-scoped pg_dump
+#   <file>.sha256              checksum of each artifact
+#
+# The archive is verified with `pg_restore --list` before it is published
+# (written under a .partial name first, so a crashed run never leaves a
+# plausible-looking but truncated file), then artifacts older than
+# PGOKF_BACKUP_RETENTION_DAYS (default 14; 0 disables pruning) are removed.
+#
+# Connection settings are the standard libpq variables (PGHOST, PGPORT, PGUSER,
+# PGPASSWORD / PGPASSFILE, PGDATABASE). Run it as a superuser, or as a role
+# that has both pg_read_all_data and BYPASSRLS: the catalog tables carry
+# row-level security and the extension owns their sequences, so anything less
+# fails outright (never a silently smaller dump).
+#
+# Restore (see docs/operations.md#backup-and-restore):
+#   psql -f roles-<stamp>.sql            # roles first (cluster-wide)
+#   pg_restore --dbname=<db> <db>-<stamp>.dump
+set -euo pipefail
+# Artifacts contain the whole catalog and every role's password hash: private
+# to the (root) user that runs the tool, whatever the target directory allows.
+umask 077
+
+backup_dir="${PGOKF_BACKUP_DIR:-/backups}"
+retention_days="${PGOKF_BACKUP_RETENTION_DAYS:-14}"
+database="${PGDATABASE:?PGDATABASE is required}"
+
+log() { printf '%s pgokf-backup: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
+die() { log "error: $*"; exit 1; }
+
+case "${retention_days}" in
+  ''|*[!0-9]*) die "PGOKF_BACKUP_RETENTION_DAYS must be a non-negative integer (got '${retention_days}')" ;;
+esac
+
+mkdir -p "${backup_dir}"
+[ -w "${backup_dir}" ] || die "backup directory ${backup_dir} is not writable"
+
+stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+dump="${backup_dir}/${database}-${stamp}.dump"
+roles="${backup_dir}/roles-${stamp}.sql"
+
+# Never leave a partial artifact behind under its final name.
+cleanup_partials() { rm -f "${dump}.partial" "${roles}.partial"; }
+trap cleanup_partials EXIT
+
+log "dumping database ${database} to ${dump}"
+pg_dump --format=custom --file="${dump}.partial" --dbname="${database}"
+
+log "dumping cluster roles to ${roles}"
+pg_dumpall --roles-only --file="${roles}.partial"
+
+# A readable table of contents proves the archive is complete and well-formed.
+pg_restore --list "${dump}.partial" > /dev/null \
+  || die "verification failed: pg_restore cannot read ${dump}.partial"
+
+mv "${dump}.partial" "${dump}"
+mv "${roles}.partial" "${roles}"
+(cd "${backup_dir}" && sha256sum -- "$(basename "${dump}")" "$(basename "${roles}")" > "${database}-${stamp}.sha256")
+
+if [ "${retention_days}" -gt 0 ]; then
+  # Exact stamp shape (never a bare prefix, so `okf` does not prune `okf-archive`
+  # artifacts sharing the directory), and "older than N days" measured in
+  # minutes, since find's -mtime +N means "at least N+1 days". Glob characters
+  # in a database name are escaped so they match literally.
+  name_glob="$(printf '%s' "${database}" | sed 's/[][*?\\]/\\&/g')"
+  stamp='[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z'
+  pruned="$(find "${backup_dir}" -maxdepth 1 -type f \
+    \( -name "${name_glob}-${stamp}.dump" -o -name "roles-${stamp}.sql" -o -name "${name_glob}-${stamp}.sha256" \) \
+    -mmin +"$((retention_days * 24 * 60))" -print -delete | wc -l)"
+  log "pruned ${pruned} artifact(s) older than ${retention_days} day(s)"
+fi
+# A .partial left by a run that was killed before its cleanup could run is
+# never a valid artifact; drop any that are older than a day.
+find "${backup_dir}" -maxdepth 1 -type f -name '*.partial' -mmin +1440 -delete
+
+size="$(du -h "${dump}" | cut -f1)"
+log "done: ${dump} (${size}), ${roles}"

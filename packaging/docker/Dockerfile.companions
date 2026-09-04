@@ -1,0 +1,85 @@
+# syntax=docker/dockerfile:1
+#
+# pgokf companions image: the three standalone network companions of the
+# extension in one small, non-root runtime image.
+#
+#   pgokf-ingest   mountless ingestion from an S3-compatible object store
+#   pgokf-embed    reference embedder (any OpenAI-compatible /v1/embeddings)
+#   pgokf-mcp      Model Context Protocol server over stdio
+#
+# The extension performs no network I/O; these do, and talk to the catalog only
+# through its public SQL surface (see docs/deployment-topologies.md). The image
+# has no entrypoint so the service picks the binary:
+#
+#   docker run --rm ghcr.io/logicocean/pgokf-companions:<version> pgokf-embed --help
+#
+# Build from the repository root (.dockerignore keeps target/ and .git out):
+#   docker build -f packaging/docker/Dockerfile.companions -t pgokf-companions:0.1.14 .
+#
+# CI builds it natively on amd64 and arm64 and publishes a multi-architecture
+# manifest to ghcr.io/logicocean/pgokf-companions:<version> on version tags.
+
+ARG RUST_VERSION=1.96.0
+ARG DEBIAN_CODENAME=trixie
+
+# --------------------------------------------------------------------------
+# Stage 1: compile the three binaries with the pinned toolchain
+# --------------------------------------------------------------------------
+FROM rust:${RUST_VERSION}-slim-${DEBIAN_CODENAME} AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# A C toolchain (and cmake) for the TLS stack's aws-lc-rs build; pkg-config
+# for crates that probe the system. Everything else is pure Rust.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        cmake \
+        pkg-config \
+        ca-certificates; \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+
+# --locked: the lockfile is the supply-chain contract (cargo deny runs against
+# it in CI). Cache mounts keep the registry and incremental output across
+# builds without leaking them into the image; the binaries are copied out of
+# the cache within the same step.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    set -eux; \
+    cargo build --release --locked \
+        -p pgokf-ingest -p pgokf-embed -p pgokf-mcp; \
+    install -d /out; \
+    install -m 0755 target/release/pgokf-ingest target/release/pgokf-embed \
+        target/release/pgokf-mcp /out/
+
+# --------------------------------------------------------------------------
+# Stage 2: minimal runtime
+# --------------------------------------------------------------------------
+FROM debian:${DEBIAN_CODENAME}-slim
+
+LABEL org.opencontainers.image.title="pgokf-companions" \
+      org.opencontainers.image.description="pgokf network companions: pgokf-ingest, pgokf-embed, pgokf-mcp" \
+      org.opencontainers.image.source="https://github.com/LogicOcean/pgokf" \
+      org.opencontainers.image.licenses="AGPL-3.0-only"
+
+# ca-certificates: the rustls trust store for TLS to PostgreSQL, object stores,
+# and embedding endpoints. A dedicated unprivileged user runs the binaries.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates; \
+    rm -rf /var/lib/apt/lists/*; \
+    groupadd --system --gid 10001 pgokf; \
+    useradd --system --uid 10001 --gid pgokf --no-create-home \
+        --home-dir /nonexistent --shell /usr/sbin/nologin pgokf
+
+COPY --from=builder /out/ /usr/local/bin/
+
+# Numeric so runtime policies (runAsNonRoot) can verify it without /etc/passwd.
+USER 10001:10001
+# No ENTRYPOINT: each service names its binary. The default just documents
+# what the image contains.
+CMD ["pgokf-embed", "--help"]

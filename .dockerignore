@@ -1,0 +1,36 @@
+# Build-context hygiene for packaging/docker/Dockerfile and
+# packaging/docker/Dockerfile.companions. Both are built from the repository
+# root, so everything not listed here is shipped to the (possibly remote)
+# BuildKit daemon. Keep the context to the sources the builds actually need.
+
+# Cargo build output: gigabytes locally, and never a build input (the images
+# compile from source inside the builder stage).
+target/
+
+# Version control and editor state.
+.git/
+.gitignore
+.github/
+.editorconfig
+.vscode/
+.idea/
+
+# Generated documentation site and its sources are not build inputs.
+site/
+docs/
+mkdocs.yml
+
+# Packaging formats that do not feed the container builds.
+packaging/deb/
+packaging/rpm/
+packaging/homebrew/
+META.json
+
+# Local deployment assets, benchmarks, and scratch files.
+deploy/
+scripts/
+**/*.log
+**/*.dump
+**/.env
+**/.env.*
+!**/.env.example
