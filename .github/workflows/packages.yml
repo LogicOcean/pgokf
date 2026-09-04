@@ -1,6 +1,10 @@
 name: packages
 
-# Build the distributable artifacts for every supported PostgreSQL major.
+# Build the distributable artifacts for every supported PostgreSQL major, on
+# amd64 AND arm64. Each architecture builds natively on its own hosted runner
+# (no QEMU emulation), is smoke-tested there, and the per-arch images are
+# merged into one multi-architecture manifest per tag - so the published
+# images run unchanged on x86 servers, arm64 servers, and Apple Silicon.
 # Runs on tags (a release) and on demand; also on pushes touching packaging so
 # the build scripts stay green.
 on:
@@ -11,12 +15,18 @@ on:
       - "v*"
     paths:
       - "packaging/**"
+      - "deploy/**"
       - "META.json"
+      - ".dockerignore"
+      - ".hadolint.yaml"
       - ".github/workflows/packages.yml"
   pull_request:
     paths:
       - "packaging/**"
+      - "deploy/**"
       - "META.json"
+      - ".dockerignore"
+      - ".hadolint.yaml"
       - ".github/workflows/packages.yml"
   workflow_dispatch:
     inputs:
@@ -35,8 +45,92 @@ env:
   # Keep in sync with rust-toolchain.toml and the workspace pgrx dependency.
   RUST_TOOLCHAIN: "1.96.0"
   CARGO_PGRX_VERSION: "0.19.2"
+  SERVER_IMAGE: ghcr.io/logicocean/pgokf
+  COMPANIONS_IMAGE: ghcr.io/logicocean/pgokf-companions
+  # Pinned Dockerfile linter (binary + checksum) for the lint job.
+  HADOLINT_VERSION: "2.15.1"
+  HADOLINT_SHA256: "c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507"
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Resolve the one version every artifact carries, and whether this run
+  # publishes images. The control file is the single source of truth (the same
+  # one build-deb.sh reads); a version tag must agree with it.
+  # ---------------------------------------------------------------------------
+  prep:
+    name: Resolve version and publish intent
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      publish: ${{ steps.resolve.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Read default_version from pgokf.control
+        id: resolve
+        env:
+          PUBLISH_INPUT: ${{ inputs.publish_images }}
+        run: |
+          version=$(sed -n "s/^default_version *= *'\([^']*\)'.*/\1/p" crates/extension/pgokf.control)
+          [ -n "$version" ] || { echo "::error::could not read default_version from pgokf.control"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "resolved extension version: $version"
+
+          publish=false
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tag="${GITHUB_REF#refs/tags/v}"
+            if [[ "$tag" != "$version" ]]; then
+              echo "::error::tag v$tag does not match pgokf.control default_version $version"
+              exit 1
+            fi
+            publish=true
+          elif [[ "$PUBLISH_INPUT" == "true" ]]; then
+            publish=true
+          fi
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "publish images: $publish"
+
+  # ---------------------------------------------------------------------------
+  # Static checks on the container packaging: Dockerfiles, the shell scripts
+  # they run, and the shipped compose stack.
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint container packaging
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: hadolint (pinned binary, checksum-verified)
+        run: |
+          curl -fsSL -o /usr/local/bin/hadolint \
+            "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-linux-x86_64"
+          echo "${HADOLINT_SHA256}  /usr/local/bin/hadolint" | sha256sum -c -
+          chmod +x /usr/local/bin/hadolint
+          hadolint packaging/docker/Dockerfile packaging/docker/Dockerfile.companions
+
+      - name: shellcheck
+        run: |
+          shellcheck -s bash \
+            packaging/docker/*.sh \
+            packaging/docker/initdb/*.sh \
+            packaging/docker/bin/* \
+            packaging/deb/build-deb.sh
+
+      - name: Dockerfile semantics check for every major
+        run: |
+          for pg in 15 16 17 18; do
+            docker build --check -f packaging/docker/Dockerfile --build-arg PG_MAJOR="$pg" .
+          done
+          docker build --check -f packaging/docker/Dockerfile.companions .
+
+      - name: Compose stack renders with the example environment
+        working-directory: deploy/compose
+        run: |
+          # Placeholder secrets: the example leaves them empty on purpose.
+          sed -E 's/^(POSTGRES_PASSWORD|PGOKF_[A-Z]+_PASSWORD)=$/\1=placeholder/' .env.example > .env
+          docker compose --profile ops --profile ingest --profile tools config --quiet
+          echo "compose stack renders."
+
   # ---------------------------------------------------------------------------
   # META.json is PG-independent; validate it once.
   # ---------------------------------------------------------------------------
@@ -102,19 +196,31 @@ jobs:
           done
 
   # ---------------------------------------------------------------------------
-  # Per-major .deb (+ rpm spec check). PG19 is advisory until PGDG ships it.
+  # Per-major, per-architecture .deb (+ rpm spec check). Each architecture
+  # builds natively on its own runner. PG19 is advisory until PGDG ships it.
   # ---------------------------------------------------------------------------
   deb:
-    name: Build .deb (PostgreSQL ${{ matrix.pg }})${{ matrix.experimental && ' (advisory)' || '' }}
-    runs-on: ubuntu-24.04
+    name: Build .deb (PostgreSQL ${{ matrix.pg }}, ${{ matrix.arch }})${{ matrix.experimental && ' (advisory)' || '' }}
+    runs-on: ${{ matrix.runner }}
     continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
       matrix:
         pg: [15, 16, 17, 18]
+        arch: [amd64, arm64]
         experimental: [false]
         include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
           - pg: 19
+            arch: amd64
+            runner: ubuntu-24.04
+            experimental: true
+          - pg: 19
+            arch: arm64
+            runner: ubuntu-24.04-arm
             experimental: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -181,7 +287,7 @@ jobs:
       - name: Inspect .deb (metadata + payload)
         if: steps.pgdg.outputs.available == 'true'
         run: |
-          deb=$(ls target/packaging/deb/postgresql-${{ matrix.pg }}-pgokf_*.deb)
+          deb=$(ls target/packaging/deb/postgresql-${{ matrix.pg }}-pgokf_*_${{ matrix.arch }}.deb)
           echo "== dpkg-deb -I =="; dpkg-deb -I "$deb"
           echo "== dpkg-deb -c =="; dpkg-deb -c "$deb"
 
@@ -192,7 +298,7 @@ jobs:
           # absolute or ./-prefixed; a bare relative path (target/...) is parsed
           # as a package name and fails with "Unable to locate package". Resolve
           # to an absolute path so `apt-get install` installs the built file.
-          deb=$(ls "$PWD"/target/packaging/deb/postgresql-${{ matrix.pg }}-pgokf_*.deb)
+          deb=$(ls "$PWD"/target/packaging/deb/postgresql-${{ matrix.pg }}-pgokf_*_${{ matrix.arch }}.deb)
           sudo apt-get install -y "$deb"
           PGBIN=/usr/lib/postgresql/${{ matrix.pg }}/bin
           DATA=/tmp/pgokf-ci/data; SOCK=/tmp/pgokf-ci/s
@@ -205,7 +311,7 @@ jobs:
           "$PGBIN/pg_ctl" -D "$DATA" -w stop
 
       - name: Structurally check the RPM spec
-        if: steps.pgdg.outputs.available == 'true' && matrix.pg == 18
+        if: steps.pgdg.outputs.available == 'true' && matrix.pg == 18 && matrix.arch == 'amd64'
         run: |
           # rpmspec is not installed on ubuntu runners by default; use it if
           # present (full macro parse), otherwise assert the required sections.
@@ -223,20 +329,155 @@ jobs:
         if: steps.pgdg.outputs.available == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: pgokf-deb-pg${{ matrix.pg }}
+          name: pgokf-deb-pg${{ matrix.pg }}-${{ matrix.arch }}
           path: target/packaging/deb/*.deb
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  # Per-major Docker image. Build only (loaded locally); push happens in the
-  # release step, not here.
+  # Per-major, per-architecture server image. Built and smoke-tested natively
+  # on each runner; on a publish run the same build is pushed by digest, and
+  # the manifest job below merges the digests into one multi-arch tag.
   # ---------------------------------------------------------------------------
   docker:
-    name: Build Docker image (PostgreSQL ${{ matrix.pg }})${{ matrix.experimental && ' (advisory)' || '' }}
+    name: Build image (PostgreSQL ${{ matrix.pg }}, ${{ matrix.arch }})${{ matrix.experimental && ' (advisory)' || '' }}
+    needs: prep
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.experimental }}
+    # packages:write is needed only by the publish steps below; the
+    # workflow-level default stays contents:read.
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [15, 16, 17, 18]
+        arch: [amd64, arm64]
+        experimental: [false]
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          # ParadeDB publishes no pg_search package for a pre-GA major, so the
+          # advisory legs build without it (the smoke test adapts).
+          - pg: 19
+            arch: amd64
+            runner: ubuntu-24.04
+            experimental: true
+            with_pg_search: "0"
+          - pg: 19
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            experimental: true
+            with_pg_search: "0"
+    env:
+      VERSION: ${{ needs.prep.outputs.version }}
+      LOCAL_TAG: pgokf:${{ needs.prep.outputs.version }}-pg${{ matrix.pg }}
+      WITH_PG_SEARCH: ${{ matrix.with_pg_search || '1' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Check base-image availability
+        id: base
+        run: |
+          # The Dockerfile builds FROM postgres:${PG_MAJOR}; that base image does
+          # not exist for a pre-GA major (e.g. 19). Skip an advisory leg cleanly
+          # rather than failing on a missing base.
+          if docker manifest inspect "postgres:${{ matrix.pg }}" >/dev/null 2>&1; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ matrix.experimental }}" == "true" ]]; then
+            echo "::notice::postgres:${{ matrix.pg }} base image is not published yet; skipping this advisory leg."
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::postgres:${{ matrix.pg }} base image is missing (required leg)."
+            exit 1
+          fi
+
+      - name: Build image (native ${{ matrix.arch }})
+        if: steps.base.outputs.available == 'true'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: packaging/docker/Dockerfile
+          build-args: |
+            PG_MAJOR=${{ matrix.pg }}
+            RUST_VERSION=${{ env.RUST_TOOLCHAIN }}
+            CARGO_PGRX_VERSION=${{ env.CARGO_PGRX_VERSION }}
+            PGOKF_VERSION=${{ env.VERSION }}
+            WITH_PG_SEARCH=${{ env.WITH_PG_SEARCH }}
+          tags: ${{ env.LOCAL_TAG }}
+          push: false
+          load: true
+
+      # End-to-end: preload every optional extension, apply env-driven roles and
+      # policy, register the sample bundle, search, back up. The script is the
+      # same one operators run locally (packaging/docker/README.md).
+      - name: Smoke test image
+        if: steps.base.outputs.available == 'true'
+        run: packaging/docker/smoke-test.sh "$LOCAL_TAG" "$VERSION"
+
+      # Publish only from a version tag (or an explicit dispatch), and only
+      # after the smoke test above proved the image starts, creates the
+      # extensions, and materializes a bundle. The push re-runs the build
+      # against the BuildKit cache the smoke-tested build just filled (every
+      # layer a cache hit, so the same content) and exports it by digest; the
+      # manifest job merges the per-arch digests into the versioned tag.
+      - name: Log in to GHCR
+        if: steps.base.outputs.available == 'true' && needs.prep.outputs.publish == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image by digest
+        if: steps.base.outputs.available == 'true' && needs.prep.outputs.publish == 'true'
+        id: push
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: packaging/docker/Dockerfile
+          build-args: |
+            PG_MAJOR=${{ matrix.pg }}
+            RUST_VERSION=${{ env.RUST_TOOLCHAIN }}
+            CARGO_PGRX_VERSION=${{ env.CARGO_PGRX_VERSION }}
+            PGOKF_VERSION=${{ env.VERSION }}
+            WITH_PG_SEARCH=${{ env.WITH_PG_SEARCH }}
+          outputs: type=image,name=${{ env.SERVER_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        if: steps.base.outputs.available == 'true' && needs.prep.outputs.publish == 'true'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          [[ "$DIGEST" == sha256:* ]] || { echo "::error::push produced no digest"; exit 1; }
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+          echo "pushed ${SERVER_IMAGE}@${DIGEST} (${{ matrix.arch }}, pg${{ matrix.pg }})"
+
+      - name: Upload digest
+        if: steps.base.outputs.available == 'true' && needs.prep.outputs.publish == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: digests-server-pg${{ matrix.pg }}-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # Merge the per-architecture digests of each major into the one tag users
+  # pull: ghcr.io/logicocean/pgokf:<version>-pg<major> (linux/amd64 +
+  # linux/arm64).
+  # ---------------------------------------------------------------------------
+  docker-manifest:
+    name: Publish multi-arch manifest (PostgreSQL ${{ matrix.pg }})${{ matrix.experimental && ' (advisory)' || '' }}
+    needs: [prep, docker]
+    if: needs.prep.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     continue-on-error: ${{ matrix.experimental }}
-    # packages:write is needed only by the tag-gated publish step below; the
-    # workflow-level default stays contents:read.
     permissions:
       contents: read
       packages: write
@@ -248,111 +489,157 @@ jobs:
         include:
           - pg: 19
             experimental: true
+    env:
+      TAG: ghcr.io/logicocean/pgokf:${{ needs.prep.outputs.version }}-pg${{ matrix.pg }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download per-arch digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: digests-server-pg${{ matrix.pg }}-*
+          path: /tmp/digests
+          merge-multiple: true
 
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
-      - name: Resolve extension version and base-image availability
-        id: prep
-        run: |
-          # The extension's control file is the single source of truth for the
-          # released version (same source build-deb.sh reads); never hard-code it.
-          version=$(sed -n "s/^default_version *= *'\([^']*\)'.*/\1/p" crates/extension/pgokf.control)
-          [ -n "$version" ] || { echo "::error::could not read default_version from pgokf.control"; exit 1; }
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "resolved extension version: $version"
-          # The Dockerfile builds FROM postgres:${PG_MAJOR}; that base image does
-          # not exist for a pre-GA major (e.g. 19). Skip an advisory leg cleanly
-          # rather than failing docker build --check on a missing base.
-          if docker manifest inspect "postgres:${{ matrix.pg }}" >/dev/null 2>&1; then
-            echo "base_available=true" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ matrix.experimental }}" == "true" ]]; then
-            echo "::notice::postgres:${{ matrix.pg }} base image is not published yet; skipping this advisory leg."
-            echo "base_available=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "::error::postgres:${{ matrix.pg }} base image is missing (required leg)."
-            exit 1
-          fi
-
-      - name: Validate Dockerfile
-        if: steps.prep.outputs.base_available == 'true'
-        run: |
-          docker build --check \
-            -f packaging/docker/Dockerfile \
-            --build-arg PG_MAJOR=${{ matrix.pg }} .
-
-      - name: Build image
-        if: steps.prep.outputs.base_available == 'true'
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          context: .
-          file: packaging/docker/Dockerfile
-          build-args: |
-            PG_MAJOR=${{ matrix.pg }}
-            RUST_VERSION=${{ env.RUST_TOOLCHAIN }}
-            CARGO_PGRX_VERSION=${{ env.CARGO_PGRX_VERSION }}
-          tags: ghcr.io/logicocean/pgokf:${{ steps.prep.outputs.version }}-pg${{ matrix.pg }}
-          push: false
-          load: true
-
-      - name: Smoke test image (register sample bundle + assert a concept row)
-        if: steps.prep.outputs.base_available == 'true'
-        run: |
-          VER='${{ steps.prep.outputs.version }}'
-          # Mount the repo's sample OKF bundle where the server process can read
-          # it, so the smoke exercises the real pipeline end to end -- not just
-          # that CREATE EXTENSION succeeds. The bootstrap superuser passes the
-          # pgokf_admin check (pg_has_role), so register_bundle is authorized.
-          cid=$(docker run -d -e POSTGRES_PASSWORD=postgres \
-            -v "$PWD/examples/sample-bundle:/bundles/sample:ro" \
-            "ghcr.io/logicocean/pgokf:${VER}-pg${{ matrix.pg }}")
-          # Wait until the extension is actually created at the expected version,
-          # not merely until the socket accepts connections. The postgres image
-          # runs /docker-entrypoint-initdb.d (CREATE EXTENSION) during init, and a
-          # slow container can leave a window where pg_isready is up but the init
-          # script has not finished - polling only pg_isready then querying once
-          # races and flakes. Poll the real condition with an explicit timeout so
-          # a slow leg fails loudly instead of reading an empty version.
-          ready=""
-          for i in $(seq 1 60); do
-            got=$(docker exec "$cid" psql -U postgres -tAc \
-              "SELECT extversion FROM pg_extension WHERE extname='pgokf'" 2>/dev/null \
-              | tr -d '[:space:]' || true)
-            if [ "$got" = "$VER" ]; then ready=1; break; fi
-            sleep 2
-          done
-          [ -n "$ready" ] \
-            || { echo "::error::pgokf extension not present at ${VER} after 120s"; docker logs "$cid"; docker rm -f "$cid"; exit 1; }
-          # Register the mounted bundle and materialize its concepts. Call the
-          # function in the FROM clause, not as (register_bundle(...)).*: the
-          # composite-star form re-evaluates the volatile function once per
-          # output column, so the second evaluation fails with "already
-          # registered". FROM evaluates it exactly once.
-          docker exec "$cid" psql -U postgres -v ON_ERROR_STOP=1 \
-            -c "SELECT * FROM pgokf.register_bundle('/bundles/sample');"
-          # Assert at least one concept row landed in the catalog.
-          n=$(docker exec "$cid" psql -U postgres -tAc "SELECT count(*) FROM pgokf.concepts;")
-          echo "concept rows materialized: ${n}"
-          docker rm -f "$cid"
-          test "${n}" -gt 0 \
-            || { echo "::error::no concept rows materialized from the sample bundle"; exit 1; }
-
-      # Publish only from a version tag, and only after the smoke test above
-      # proved the image actually starts, creates the extension, and
-      # materializes a bundle. An advisory leg whose base image does not exist
-      # is skipped by the same base_available guard as the build.
       - name: Log in to GHCR
-        if: steps.prep.outputs.base_available == 'true' && (startsWith(github.ref, 'refs/tags/v') || inputs.publish_images)
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Push image to GHCR
-        if: steps.prep.outputs.base_available == 'true' && (startsWith(github.ref, 'refs/tags/v') || inputs.publish_images)
+      # No working-directory: download-artifact creates nothing when no artifact
+      # matched (the advisory pg19 leg), and a missing directory would fail the
+      # step before the "nothing to publish" branch could run.
+      - name: Create and inspect the manifest list
         run: |
-          # The image was built and loaded locally under this exact tag, so the
-          # bytes pushed here are the bytes the smoke test just exercised.
-          docker push "ghcr.io/logicocean/pgokf:${{ steps.prep.outputs.version }}-pg${{ matrix.pg }}"
+          shopt -s nullglob
+          digests=(/tmp/digests/*)
+          if [[ ${#digests[@]} -eq 0 ]]; then
+            if [[ "${{ matrix.experimental }}" == "true" ]]; then
+              echo "::notice::no images were built for PostgreSQL ${{ matrix.pg }} (advisory); nothing to publish."
+              exit 0
+            fi
+            echo "::error::no digests found for PostgreSQL ${{ matrix.pg }}"
+            exit 1
+          fi
+          refs=()
+          for d in "${digests[@]}"; do refs+=("${SERVER_IMAGE}@sha256:$(basename "$d")"); done
+          docker buildx imagetools create -t "$TAG" "${refs[@]}"
+          docker buildx imagetools inspect "$TAG"
+
+  # ---------------------------------------------------------------------------
+  # The companions image (pgokf-ingest / pgokf-embed / pgokf-mcp), likewise
+  # native per architecture and merged into ghcr.io/logicocean/pgokf-companions:<version>.
+  # ---------------------------------------------------------------------------
+  companions:
+    name: Build companions image (${{ matrix.arch }})
+    needs: prep
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      VERSION: ${{ needs.prep.outputs.version }}
+      LOCAL_TAG: pgokf-companions:${{ needs.prep.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Build image (native ${{ matrix.arch }})
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: packaging/docker/Dockerfile.companions
+          build-args: |
+            RUST_VERSION=${{ env.RUST_TOOLCHAIN }}
+          tags: ${{ env.LOCAL_TAG }}
+          push: false
+          load: true
+
+      - name: Smoke test image
+        run: packaging/docker/smoke-test-companions.sh "$LOCAL_TAG"
+
+      - name: Log in to GHCR
+        if: needs.prep.outputs.publish == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image by digest
+        if: needs.prep.outputs.publish == 'true'
+        id: push
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: packaging/docker/Dockerfile.companions
+          build-args: |
+            RUST_VERSION=${{ env.RUST_TOOLCHAIN }}
+          outputs: type=image,name=${{ env.COMPANIONS_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        if: needs.prep.outputs.publish == 'true'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          [[ "$DIGEST" == sha256:* ]] || { echo "::error::push produced no digest"; exit 1; }
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+          echo "pushed ${COMPANIONS_IMAGE}@${DIGEST} (${{ matrix.arch }})"
+
+      - name: Upload digest
+        if: needs.prep.outputs.publish == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: digests-companions-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  companions-manifest:
+    name: Publish multi-arch companions manifest
+    needs: [prep, companions]
+    if: needs.prep.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    env:
+      TAG: ghcr.io/logicocean/pgokf-companions:${{ needs.prep.outputs.version }}
+    steps:
+      - name: Download per-arch digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: digests-companions-*
+          path: /tmp/digests
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and inspect the manifest list
+        run: |
+          shopt -s nullglob
+          digests=(/tmp/digests/*)
+          [[ ${#digests[@]} -gt 0 ]] || { echo "::error::no companions digests found"; exit 1; }
+          refs=()
+          for d in "${digests[@]}"; do refs+=("${COMPANIONS_IMAGE}@sha256:$(basename "$d")"); done
+          docker buildx imagetools create -t "$TAG" "${refs[@]}"
+          docker buildx imagetools inspect "$TAG"
