@@ -1,0 +1,29 @@
+[package]
+name = "pgokf-companion"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared runtime for the pgokf companion binaries: CLI conventions, an error-tolerant fixed-interval watch loop, and a SIGINT/SIGTERM shutdown signal."
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+keywords.workspace = true
+# Overrides the workspace default: this member schedules work; it processes no
+# text and touches no database.
+categories = ["asynchronous", "command-line-utilities"]
+
+[lib]
+name = "pgokf_companion"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1.0"
+tokio = { version = "1.40", features = ["macros", "signal", "time"] }
+
+[dev-dependencies]
+tokio = { version = "1.40", features = ["macros", "rt", "sync", "test-util", "time"] }
+
+[lints]
+workspace = true

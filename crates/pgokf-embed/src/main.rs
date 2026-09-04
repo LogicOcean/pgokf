@@ -10,10 +10,14 @@
 //! configurable OpenAI-compatible embeddings endpoint, and streams the vectors
 //! back through the setter.
 //!
+//! It runs once by default, or as a daemon with `--watch`: every `--interval`
+//! seconds it looks again for concepts without a vector (newly registered or
+//! refreshed content) and embeds them, until SIGINT / SIGTERM.
+//!
 //! Credentials live here - the endpoint URL, model name, and bearer API key all
 //! come from the CLI or environment and are **never** hard-coded or written to
 //! PostgreSQL. Any OpenAI-compatible server works: OpenAI itself, a local
-//! `text-embeddings-inference` or `llama.cpp` server, or a test mock.
+//! Ollama, `text-embeddings-inference`, or `llama.cpp` server, or a test mock.
 
 // The prose names many products (PostgreSQL, OpenAI, ...); backticking each
 // occurrence would harm readability more than it helps.
@@ -21,6 +25,8 @@
 
 mod client;
 mod db;
+
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
@@ -86,29 +92,103 @@ struct Cli {
     /// is plaintext (the default, for a local socket / trusted network).
     #[arg(long, env = "OKF_PG_TLS", default_value_t = false)]
     tls: bool,
+
+    /// Run as a daemon: after the initial pass, look for concepts without an
+    /// embedding every `--interval` seconds and embed them, until SIGINT or
+    /// SIGTERM. A failed pass is logged and retried on the next interval.
+    #[arg(long, env = "OKF_WATCH", default_value_t = false)]
+    watch: bool,
+
+    /// Poll interval, in seconds, between watch passes (only used with
+    /// `--watch`). Must be at least 1.
+    #[arg(long, env = "OKF_WATCH_INTERVAL", default_value_t = 60)]
+    interval: u64,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = Cli::parse().normalized();
     run(cli).await
 }
 
-/// Connect, resolve the target dimension, find concepts that need an embedding,
-/// and embed them in batches.
+impl Cli {
+    /// Apply the shared rule for optional values that also come from the
+    /// environment: empty means unset (see [`pgokf_companion::cli::non_empty`]).
+    fn normalized(mut self) -> Self {
+        self.api_key = pgokf_companion::cli::non_empty(self.api_key);
+        self.tenant = pgokf_companion::cli::non_empty(self.tenant);
+        self
+    }
+}
+
+/// Validate the configuration and dispatch to the one-shot or watch-daemon flow.
 async fn run(cli: Cli) -> Result<()> {
+    validate(&cli)?;
+
+    if cli.watch {
+        run_watch(&cli).await
+    } else {
+        let embedded = run_pass(&cli).await?;
+        if embedded == 0 {
+            println!("pgokf-embed: no concepts need an embedding; nothing to do");
+        } else {
+            println!("pgokf-embed: stored {embedded} embedding(s)");
+        }
+        Ok(())
+    }
+}
+
+/// Reject configurations that could only fail later or loop uselessly.
+fn validate(cli: &Cli) -> Result<()> {
     if cli.batch_size == 0 {
         bail!("--batch-size must be at least 1");
     }
     if cli.max_chars == 0 {
         bail!("--max-chars must be at least 1");
     }
+    if cli.watch && cli.interval == 0 {
+        bail!("--interval must be at least 1 second");
+    }
+    Ok(())
+}
 
+/// Watch daemon: embed whatever is pending now, then again every interval,
+/// until SIGINT / SIGTERM. Each pass opens its own connection so a database
+/// restart between passes is survived rather than poisoning a long-lived link.
+async fn run_watch(cli: &Cli) -> Result<()> {
+    eprintln!(
+        "pgokf-embed: watching for concepts without an embedding every {}s (SIGINT/SIGTERM to stop)",
+        cli.interval,
+    );
+
+    let shutdown = pgokf_companion::daemon::shutdown_signal()?;
+    pgokf_companion::daemon::run(
+        Duration::from_secs(cli.interval),
+        async || {
+            let embedded = run_pass(cli).await?;
+            if embedded > 0 {
+                eprintln!("pgokf-embed: watch pass stored {embedded} embedding(s)");
+            }
+            Ok(())
+        },
+        shutdown,
+        |error| eprintln!("pgokf-embed: watch pass failed, retrying next interval: {error:#}"),
+    )
+    .await?;
+
+    eprintln!("pgokf-embed: shutdown requested, exiting");
+    Ok(())
+}
+
+/// One complete pass: connect, resolve the target dimension, find concepts
+/// that need an embedding, embed them in batches, and close the connection.
+/// Returns the number of embeddings stored.
+async fn run_pass(cli: &Cli) -> Result<usize> {
     let (pg_client, connection_handle) = pgokf_pgconn::connect(&cli.database_url, cli.tls)
         .await
         .context("connecting to PostgreSQL")?;
 
-    let result = embed_all(&cli, &pg_client).await;
+    let result = embed_all(cli, &pg_client).await;
 
     // Drop the client so the connection future completes, then join it, before
     // surfacing any embedding error.
@@ -120,8 +200,8 @@ async fn run(cli: Cli) -> Result<()> {
 }
 
 /// The core embedding workflow, factored out so the connection lifecycle in
-/// [`run`] stays linear.
-async fn embed_all(cli: &Cli, pg_client: &tokio_postgres::Client) -> Result<()> {
+/// [`run_pass`] stays linear. Returns the number of embeddings stored.
+async fn embed_all(cli: &Cli, pg_client: &tokio_postgres::Client) -> Result<usize> {
     if let Some(tenant) = &cli.tenant {
         db::set_tenant(pg_client, tenant).await?;
     }
@@ -135,8 +215,7 @@ async fn embed_all(cli: &Cli, pg_client: &tokio_postgres::Client) -> Result<()> 
 
     let pending = db::pending_concepts(pg_client, cli.bundle).await?;
     if pending.is_empty() {
-        println!("pgokf-embed: no concepts need an embedding; nothing to do");
-        return Ok(());
+        return Ok(0);
     }
 
     eprintln!(
@@ -159,8 +238,7 @@ async fn embed_all(cli: &Cli, pg_client: &tokio_postgres::Client) -> Result<()> 
         );
     }
 
-    println!("pgokf-embed: stored {embedded} embedding(s) of dimension {dim}");
-    Ok(())
+    Ok(embedded)
 }
 
 /// Embed one batch of concepts and store each returned vector. Returns the
@@ -194,4 +272,87 @@ async fn embed_batch(
     }
 
     Ok(batch.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Parse a command line the way `main` does, with the required options
+    /// supplied so only the arguments under test vary.
+    fn parse(extra: &[&str]) -> Cli {
+        let mut args = vec![
+            "pgokf-embed",
+            "--database-url",
+            "postgresql://okf_embed@localhost/app",
+            "--endpoint",
+            "http://127.0.0.1:8080",
+            "--model",
+            "test-model",
+        ];
+        args.extend_from_slice(extra);
+        Cli::parse_from(args)
+    }
+
+    #[test]
+    fn normalized_treats_empty_optional_values_as_unset() {
+        // Arrange: the shape a compose stack produces for an unset variable.
+        let cli = parse(&["--api-key", "", "--tenant", ""]);
+
+        // Act
+        let cli = cli.normalized();
+
+        // Assert
+        assert_eq!(cli.api_key, None);
+        assert_eq!(cli.tenant, None);
+    }
+
+    #[test]
+    fn validate_accepts_the_defaults() {
+        // Arrange
+        let cli = parse(&[]);
+
+        // Act / Assert
+        assert!(validate(&cli).is_ok());
+        assert!(!cli.watch);
+        assert_eq!(cli.interval, 60);
+    }
+
+    #[test]
+    fn validate_rejects_a_zero_watch_interval() {
+        // Arrange
+        let cli = parse(&["--watch", "--interval", "0"]);
+
+        // Act
+        let error = validate(&cli).expect_err("zero interval must be rejected");
+
+        // Assert
+        assert_eq!(error.to_string(), "--interval must be at least 1 second");
+    }
+
+    #[test]
+    fn validate_ignores_the_interval_without_watch() {
+        // Arrange: an interval of 0 is meaningless but harmless in one-shot mode.
+        let cli = parse(&["--interval", "0"]);
+
+        // Act / Assert
+        assert!(validate(&cli).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_an_empty_batch_or_input_bound() {
+        // Arrange
+        let no_batch = parse(&["--batch-size", "0"]);
+        let no_chars = parse(&["--max-chars", "0"]);
+
+        // Act / Assert
+        assert_eq!(
+            validate(&no_batch).expect_err("zero batch").to_string(),
+            "--batch-size must be at least 1"
+        );
+        assert_eq!(
+            validate(&no_chars).expect_err("zero chars").to_string(),
+            "--max-chars must be at least 1"
+        );
+    }
 }

@@ -105,7 +105,8 @@ Deliberately minimal but real:
   performs a single sync and exits. With `--watch` it re-lists the object store
   every `--interval` seconds (default 60), re-ingests only when the collected
   content changed (unchanged passes skip the server round-trip), retries a
-  failed pass on the next interval, and stops cleanly on Ctrl-C. No metrics
+  failed pass on the next interval, and stops cleanly on SIGINT or SIGTERM
+  (`docker stop`). No metrics
   endpoint.
 - **Whole-bundle call.** The current object set is sent in a single
   `register_bundle_content` call. This is required for correctness - the server
