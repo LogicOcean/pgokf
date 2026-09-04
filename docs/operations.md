@@ -304,7 +304,8 @@ schedule. Drive it from `cron`, a systemd timer, `pg_cron`, or your orchestrator
 #### In-database scheduling with `pg_cron`
 
 When [`pg_cron`](https://github.com/citusdata/pg_cron) is installed (in
-`shared_preload_libraries`, then `CREATE EXTENSION pg_cron`), the built-in
+`shared_preload_libraries`, then `CREATE EXTENSION pg_cron`; the official
+Docker image ships it and the compose stack preloads it), the built-in
 adapter registers the recurring refresh for you - no external cron entry to
 maintain:
 
@@ -376,16 +377,46 @@ PITR are the backup story.** What a dump captures depends on the tier:
 # whole database (roles are cluster-wide - see the note below)
 pg_dump --format=custom --file=okf.dump "$OKF_DSN"
 
-# just the catalog schemas
-pg_dump --format=custom --file=okf-schemas.dump \
-        --schema=pgokf --schema=pgokf_private "$OKF_DSN"
+# just the catalog tables (NOT --schema=...: both schemas belong to the
+# extension, and a schema-scoped dump of an extension carries no data)
+pg_dump --format=custom --file=okf-tables.dump \
+        --table='pgokf.*' --table='pgokf_private.*' "$OKF_DSN"
 ```
 
 ```bash
 pg_restore --dbname="$OKF_DSN" okf.dump
 ```
 
+The Docker image bundles this procedure as `pgokf-backup` (one command that
+writes a verified custom-format archive, a `pg_dumpall --roles-only` file, and
+checksums, with retention) and `pgokf-restore` (a single-transaction,
+stop-on-first-error restore that skips the archive entries a database this
+image initialized cannot replay: pg_search's unowned `paradedb` schema and,
+for a differently named target database, pg_cron's objects) - see
+[compose-deployment.md](compose-deployment.md#backups-and-restore).
+
 Notes:
+
+- **The catalog tables are dumped by `pg_dump`.** `pgokf` registers every
+  `pgokf.*` and `pgokf_private.*` table and sequence with
+  `pg_extension_config_dump`, so an archive carries their rows and sequence
+  positions, not just the `CREATE EXTENSION` statement, and a restore
+  rehydrates the catalog. (Installs older than 0.1.14 lack this registration;
+  run `ALTER EXTENSION pgokf UPDATE` before relying on `pg_dump`.)
+- **Runtime indexes are not in the archive.** `pg_dump` skips indexes on
+  extension-owned tables, so the BM25 index (`rebuild_search_index`), the
+  pgvector index (`rebuild_embedding_index`), and any index you added to a
+  `pgokf` table yourself must be rebuilt after a restore; the Docker image's
+  `pgokf-restore` does the two built-in ones for you. `pg_restore
+  --disable-triggers` bypasses the policy-row trigger and is not supported for
+  this catalog.
+- **Dump as a superuser** (or a role with `pg_read_all_data` **and**
+  `BYPASSRLS`). The catalog tables carry row-level security and the
+  extension owns their sequences, so a `pgokf_admin` member or a plain
+  `pg_read_all_data` role fails outright (`failed to get data for sequence`,
+  `query would be affected by row-level security policy`) rather than
+  silently dumping less. The compose stack's `backup` service runs as the
+  bootstrap superuser for this reason.
 
 - **Roles are cluster-wide** and are **not** captured by a database-scoped
   `pg_dump`. Back them up with `pg_dumpall --roles-only`, or recreate them by
@@ -420,7 +451,7 @@ SELECT pgokf.version();   -- the loaded library's version
 
 `pgokf` ships an explicit migration chain, so PostgreSQL can walk intermediate
 steps for you: the packaged scripts step one minor at a time from `0.1.0`
-through `0.1.13` (`0.1.0 -> 0.1.1 -> ... -> 0.1.12 -> 0.1.13`), alongside a full
+through `0.1.14` (`0.1.0 -> 0.1.1 -> ... -> 0.1.13 -> 0.1.14`), alongside a full
 base install for the current version. `ALTER EXTENSION pgokf UPDATE` applies the
 necessary steps in order.
 

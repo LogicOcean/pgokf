@@ -263,7 +263,7 @@ useful even here for a self-contained backup). Re-run the companion whenever the
 bucket changes, or run it with `--watch` and it becomes a daemon: after the
 initial sync it re-lists the object store every `--interval` seconds (default
 60) and re-ingests only when the collected content actually changed, stopping
-cleanly on Ctrl-C. Either way the server-side diff makes each pass incremental.
+cleanly on SIGINT or SIGTERM. Either way the server-side diff makes each pass incremental.
 
 The link to PostgreSQL is plaintext by default, which suits a local socket or a
 trusted private network; pass `--tls` (env `OKF_PG_TLS=true`) or put
@@ -286,7 +286,8 @@ outside the database and talks to the catalog through the public SQL surface.
   calls a configurable OpenAI-compatible embeddings endpoint, and streams each
   vector back through the writer-tier `pgokf.set_concept_embedding`. The
   endpoint URL, model, and API key live only in its environment; the database
-  only ever receives finished vectors.
+  only ever receives finished vectors. With `--watch` it is a daemon that
+  embeds newly registered or refreshed concepts every `--interval` seconds.
 - **[`pgokf-mcp`](https://github.com/LogicOcean/pgokf/tree/main/crates/pgokf-mcp)** is a Model Context Protocol server that
   exposes read-only catalog tools (search, similar, neighbors, get-concept) to
   AI agents over stdio, connecting as a `pgokf_reader`-capable role and
@@ -381,7 +382,8 @@ How it behaves:
 - **Reads filter automatically.** The invoker-rights readers (`concept_search`,
   `concept_neighbors`, `list_bundles`, `bundle_info`, `catalog_stats`, and the
   rest) run over the base tables, so RLS scopes them with no argument change. The
-  few `SECURITY DEFINER` readers apply the identical tenant predicate explicitly.
+  few `SECURITY DEFINER` readers apply the identical tenant predicate explicitly,
+  as does the `pgokf.bm25_hits` helper the BM25 backend runs through.
 - **Writes are confined too.** The `SECURITY DEFINER` write/admin functions that
   take an explicit `bundle_id` (`refresh_bundle`, `unregister_bundle`,
   `set_bundle_enabled`, `retire_bundle` / `unretire_bundle`,
@@ -436,4 +438,7 @@ Answer these in order:
    per tenant**, or front PostgreSQL with a pooler/API that pins `pgokf.tenant`.
 
 Then follow [operations.md](operations.md) for running whichever you pick, and
-[configuration.md](configuration.md) for the exact knobs.
+[configuration.md](configuration.md) for the exact knobs. For a ready-made
+single-host stack - the multi-architecture server image with pgvector, pg_cron,
+and pg_search, the embedding daemon, and verified backups - see
+[compose-deployment.md](compose-deployment.md).

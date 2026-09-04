@@ -109,7 +109,7 @@ to confirm the installed SQL and the loaded module agree after an upgrade.
 SELECT pgokf.version();
 --  version
 -- ---------
---  0.1.13
+--  0.1.14
 ```
 
 ### `pgokf.register_bundle(path text, name text DEFAULT NULL, options jsonb DEFAULT '{}') → pgokf.bundle_sync_result`
@@ -540,6 +540,16 @@ SELECT concept_id, round(rank::numeric, 6) AS rrf
 FROM pgokf.concept_search_hybrid('database failover',
                                  ARRAY[0.0123, -0.0456, ...]::real[]);
 ```
+
+### `pgokf.bm25_hits(...)` (internal)
+
+`SECURITY DEFINER` helper behind `concept_search` when `search_backend = bm25`
+(since 0.1.14); reader-level, not part of the stable API. It runs the ParadeDB
+`pg_search` hit query with the owner's privileges - row-level security wraps
+the catalog tables for non-owners in a shape `pg_search` cannot plan - while
+applying the same `pgokf.tenant` scoping the policies enforce, over active
+bundles, with `concept_search`'s filters, keyset cursor, and limit. Call
+`concept_search`, not this.
 
 ### `pgokf.rebuild_embedding_index() → boolean`
 

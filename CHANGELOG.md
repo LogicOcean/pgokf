@@ -12,6 +12,81 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 Nothing yet.
 
+## [0.1.14] - 2026-09-04
+
+**Complete logical backups, production container packaging, and native
+arm64.** The one in-database change makes `pg_dump` actually capture the
+catalog; everything else is packaging, deployment, companion, and CI work.
+`ALTER EXTENSION pgokf UPDATE TO '0.1.14'` adds a trigger and the backup
+registrations and touches no existing row; a catalog upgraded with it is
+identical to a fresh 0.1.14 install.
+
+### Fixed
+
+- **BM25 search works for non-superuser readers.** With `search_backend =
+  bm25`, any session that is not the table owner - every production reader -
+  got `Unsupported query shape` from pg_search: row-level security wraps
+  `pgokf.concepts` in a security-barrier subquery its custom scan cannot plan.
+  The hit query now runs through `pgokf.bm25_hits`, a `SECURITY DEFINER`
+  helper (pinned `search_path`, execute granted to `pgokf_reader` only) that
+  applies the same explicit `pgokf.tenant` predicate the policies enforce, so
+  `concept_search` and the hybrid search keep their invoker-rights contract
+  and the result set is unchanged. Covered by a new in-database test that runs
+  wherever pg_search is preloaded.
+- **`pg_dump` now captures the catalog.** PostgreSQL skips the contents of
+  extension-owned tables unless the extension registers them with
+  `pg_extension_config_dump`; pgokf never did, so every archive carried only
+  the `CREATE EXTENSION` statement and a restore came back empty - despite the
+  operations guide describing dumps as complete. Every `pgokf.*` and
+  `pgokf_private.*` table and sequence is now registered (discovered from the
+  extension's dependency graph, so future tables are covered automatically),
+  and a `BEFORE INSERT` trigger on the singleton `pgokf_private.config` row
+  folds the restored policy row into the one `CREATE EXTENSION` seeds instead
+  of failing on a duplicate key. Registered relations and the trigger are
+  asserted by new in-database tests, and the image smoke test restores a real
+  archive.
+
+### Added
+
+- **Server image with the optional extensions built in.** The Docker image
+  now ships pgvector, pg_cron, and ParadeDB pg_search (each a `WITH_*` build
+  argument; pg_search is fetched from its pinned upstream release and verified
+  against a committed SHA256 table), a `HEALTHCHECK`, an OCI version label,
+  and first-init hooks that create the extensions when preloaded, create
+  least-privilege login roles from `PGOKF_{ADMIN,WRITER,READER}_PASSWORD`, and
+  apply a JSON `PGOKF_POLICY` through `pgokf.set_config`. It also carries
+  `pgokf-backup` (a verified `pg_dump` + roles-dump tool with retention) and
+  `pgokf-restore` (a single-transaction restore that skips the archive entries
+  an initialized target cannot replay: pg_search's unowned `paradedb` schema
+  and, for a differently named database, pg_cron's objects).
+- **Companions image** (`Dockerfile.companions`): `pgokf-ingest`,
+  `pgokf-embed`, and `pgokf-mcp` in one non-root image.
+- **Multi-architecture images.** CI builds and smoke-tests both images
+  natively on amd64 and arm64 runners and merges them into one manifest per
+  tag (`ghcr.io/logicocean/pgokf:<version>-pg<major>`,
+  `ghcr.io/logicocean/pgokf-companions:<version>`), so they run on x86 and
+  arm64 servers and on Apple Silicon. The `.deb` matrix gained arm64 legs.
+- **Reference compose deployment** (`deploy/compose/`, documented in
+  `docs/compose-deployment.md`): server, embedding daemon, cron-driven
+  backups, and optional ingestion and MCP services, all configured from one
+  `.env`.
+- **`pgokf-embed --watch` / `--interval`**: the embedder runs as a daemon that
+  embeds newly registered or refreshed concepts every interval, reconnecting
+  per pass and surviving transient outages. The loop and its SIGINT/SIGTERM
+  shutdown live in the new `pgokf-companion` crate, shared with `pgokf-ingest`
+  (which therefore now also stops cleanly on SIGTERM, i.e. `docker stop`).
+- Packaging lint in CI (hadolint, shellcheck, `docker build --check`, compose
+  render), a `.dockerignore`, and reusable smoke scripts
+  (`packaging/docker/smoke-test.sh`, `smoke-test-companions.sh`).
+
+### Changed
+
+- The image's first-init SQL creates `vector` whenever present and `pg_search`
+  / `pg_cron` when preloaded, instead of only `pgokf`.
+- Documentation: new compose deployment guide; packaging, operations, search,
+  and deployment-topology guides updated for the bundled extensions, the
+  backup tool, the embedder daemon, and multi-arch publishing.
+
 ## [0.1.13] - 2026-08-29
 
 **Relicensed to AGPL-3.0 plus commercial, and the first public release.** This
@@ -799,7 +874,8 @@ queries, native full-text search, and link-graph traversal.
 - The `pgokf_private` schema and its `config` table are readable and writable
   only by the extension owner and `pgokf_admin`; readers cannot see policy.
 
-[Unreleased]: https://github.com/LogicOcean/pgokf/compare/v0.1.13...HEAD
+[Unreleased]: https://github.com/LogicOcean/pgokf/compare/v0.1.14...HEAD
+[0.1.14]: https://github.com/LogicOcean/pgokf/compare/v0.1.13...v0.1.14
 [0.1.13]: https://github.com/LogicOcean/pgokf/compare/v0.1.12...v0.1.13
 [0.1.12]: https://github.com/LogicOcean/pgokf/compare/v0.1.11...v0.1.12
 [0.1.11]: https://github.com/LogicOcean/pgokf/compare/v0.1.10...v0.1.11

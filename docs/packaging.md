@@ -29,8 +29,8 @@ target/release/pgokf-pg18/
     ├── lib/postgresql/18/lib/pgokf.so                      # $(pg_config --pkglibdir)
     └── share/postgresql/18/extension/
         ├── pgokf.control
-        ├── pgokf--0.1.13.sql
-        └── pgokf--0.1.12--0.1.13.sql                        # $(pg_config --sharedir)/extension
+        ├── pgokf--0.1.14.sql
+        └── pgokf--0.1.13--0.1.14.sql                        # $(pg_config --sharedir)/extension
 ```
 
 On PGDG RPM systems the same command against `/usr/pgsql-18/bin/pg_config`
@@ -71,9 +71,9 @@ and calls `dpkg-deb --root-owner-group --build`. Output defaults to
 Inspect and install:
 
 ```bash
-dpkg-deb -I postgresql-18-pgokf_0.1.13-1_amd64.deb   # control metadata
-dpkg-deb -c postgresql-18-pgokf_0.1.13-1_amd64.deb   # payload file list
-sudo apt install ./postgresql-18-pgokf_0.1.13-1_amd64.deb
+dpkg-deb -I postgresql-18-pgokf_0.1.14-1_amd64.deb   # control metadata
+dpkg-deb -c postgresql-18-pgokf_0.1.14-1_amd64.deb   # payload file list
+sudo apt install ./postgresql-18-pgokf_0.1.14-1_amd64.deb
 ```
 
 Building the `.deb` for a major requires that major's `postgresql-server-dev-N`
@@ -97,16 +97,16 @@ mock -r rocky-9-x86_64 --define 'pgmajorversion 16' \
 
 `%build` installs the pinned `cargo-pgrx` into a build-local root and runs the
 build primitive; `%install` copies the staged tree into `%{buildroot}`.
-`Source0` is a `pgokf-0.1.13.tar.gz` of the repository at the release tag.
+`Source0` is a `pgokf-0.1.14.tar.gz` of the repository at the release tag.
 
 ---
 
 ## PGXN (`META.json`)
 
 [`META.json`](https://github.com/LogicOcean/pgokf/blob/main/META.json) is a PGXN meta-spec v1.0.0 distribution manifest
-(`name` `pgokf`, `version` `0.1.13`, `provides.pgokf`, `prereqs` PostgreSQL
+(`name` `pgokf`, `version` `0.1.14`, `provides.pgokf`, `prereqs` PostgreSQL
 ≥ 15, `resources`, `AGPL-3.0-only` core license). `provides.pgokf.file` points at the generated
-`crates/extension/sql/pgokf--0.1.13.sql`, which the release process emits into
+`crates/extension/sql/pgokf--0.1.14.sql`, which the release process emits into
 the tree before building the PGXN zip.
 
 Validate locally:
@@ -125,21 +125,39 @@ jq -e 'has("name") and has("version") and has("abstract")
 
 [`packaging/docker/Dockerfile`](https://github.com/LogicOcean/pgokf/blob/main/packaging/docker/Dockerfile) is a stock
 `postgres:N` image with the extension pre-installed, so `CREATE EXTENSION
-pgokf;` works out of the box (auto-created on first init). Build from the
-**repository root**:
+pgokf;` works out of the box (auto-created on first init), plus the optional
+extensions pgokf lights up at runtime - **pgvector**, **pg_cron**, and ParadeDB
+**pg_search** - each toggled by a `WITH_*` build argument (pg_search is
+fetched from its pinned upstream release and verified against
+`packaging/docker/pg_search.sha256`). First-init hooks create the extensions,
+env-driven least-privilege login roles, and the catalog policy; the image also
+carries the `pgokf-backup` and `pgokf-restore` tools. Build from the **repository root** (a
+`.dockerignore` keeps `target/` and `.git/` out of the context):
 
 ```bash
 docker build -f packaging/docker/Dockerfile \
   --build-arg PG_MAJOR=18 \
-  -t pgokf:0.1.13-pg18 .
+  -t pgokf:0.1.14-pg18 .
 ```
 
-CI builds and smoke-tests this image for every supported major on every run,
-and pushes it to `ghcr.io/logicocean/pgokf:<version>-pg<major>` when the run is
-for a version tag. Between releases, build locally with the command above.
+A second Dockerfile,
+[`packaging/docker/Dockerfile.companions`](https://github.com/LogicOcean/pgokf/blob/main/packaging/docker/Dockerfile.companions),
+packages the three network companions (`pgokf-ingest`, `pgokf-embed`,
+`pgokf-mcp`) into one non-root image.
 
-Add a `.dockerignore` excluding `target/` and `.git/` to keep the build
-context small. Details and a compose snippet: [packaging/docker/README.md](https://github.com/LogicOcean/pgokf/blob/main/packaging/docker/README.md).
+CI builds and smoke-tests both images **natively on amd64 and arm64** for every
+supported major on every packaging change, and on a version tag pushes the
+per-architecture images by digest and merges them into multi-architecture
+manifests: `ghcr.io/logicocean/pgokf:<version>-pg<major>` and
+`ghcr.io/logicocean/pgokf-companions:<version>` (so the same tag runs on x86,
+arm64 servers, and Apple Silicon). Between releases, build locally with the
+commands above. The smoke scripts CI runs
+(`packaging/docker/smoke-test.sh`, `smoke-test-companions.sh`) work against
+any Docker daemon.
+
+Details, build arguments, and the init hooks: [packaging/docker/README.md](https://github.com/LogicOcean/pgokf/blob/main/packaging/docker/README.md).
+The reference production stack built on these images is
+[compose-deployment.md](compose-deployment.md).
 
 ---
 
@@ -166,16 +184,18 @@ dependency at each release.
 1. **Gate.** Complete [release-checklist.md](release-checklist.md) (static,
    supply-chain, schema, and per-major live smoke gates). Confirm
    [CHANGELOG.md](https://github.com/LogicOcean/pgokf/blob/main/CHANGELOG.md) records the release.
-2. **Version bump.** Ensure the version agrees across
-   `Cargo.toml` (`[workspace.package]`), `crates/extension/pgokf.control`
-   (`default_version`), `META.json` (`version` and `provides.pgokf.version`),
-   and `packaging/rpm/pgokf.spec` (`Version`).
-3. **Tag.** `git tag v0.1.13 && git push origin v0.1.13`. CI
+2. **Version bump.** Bump every pin of the version together, as one
+   deliberate commit - the exact list lives in
+   [release-checklist.md](release-checklist.md#7-version-bump-changelog-tag)
+   (crate and control file, `META.json`, the rpm spec and Homebrew formula,
+   the companions' path-dependency pins, the compose and Docker examples, and
+   `Cargo.lock`).
+3. **Tag.** `git tag v0.1.14 && git push origin v0.1.14`. CI
    ([`.github/workflows/packages.yml`](https://github.com/LogicOcean/pgokf/blob/main/.github/workflows/packages.yml))
    builds the `.deb`s (uploaded as workflow artifacts), validates `META.json`,
    and builds the Docker images per major.
 4. **PGXN.** Emit the generated SQL into the tree
-   (`cd crates/extension && cargo pgrx schema pg18 > sql/pgokf--0.1.13.sql`),
+   (`cd crates/extension && cargo pgrx schema pg18 > sql/pgokf--0.1.14.sql`),
    build the distribution zip (repo contents + `META.json` + generated SQL),
    and upload it at <https://manager.pgxn.org/> under the `pgokf` distribution.
 5. **Docker.** Automatic: pushing the version tag runs the packages workflow,
