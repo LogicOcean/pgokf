@@ -35,8 +35,12 @@ die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 check_only=0
 if [ "${1:-}" = "--check" ]; then check_only=1; shift; fi
 major="${1:-}"; arch="${2:-}"; dest="${3:-}"
-[ -n "${major}" ] && [ -n "${arch}" ] || die "usage: $0 [--check] <pg_major> <arch> [<dest_dir>]"
-[ "${check_only}" = 1 ] || [ -n "${dest}" ] || die "usage: $0 <pg_major> <arch> <dest_dir>"
+if [ -z "${major}" ] || [ -z "${arch}" ]; then
+  die "usage: $0 [--check] <pg_major> <arch> [<dest_dir>]"
+fi
+if [ "${check_only}" = 0 ] && [ -z "${dest}" ]; then
+  die "usage: $0 <pg_major> <arch> <dest_dir>"
+fi
 [ -r "${TABLE}" ] || die "checksum table ${TABLE} is missing or unreadable"
 
 # The pinned file name for this (major, arch, version): exact field match on a
