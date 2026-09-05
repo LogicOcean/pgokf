@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.codecatalogue.dev/sync/v1/tag-assignment-payload.json",
+  "title": "Tag Assignment Payload",
+  "type": "object",
+  "properties": {
+    "entry_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "tag": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "slug": {
+          "type": "string"
+        },
+        "display_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "slug",
+        "display_name"
+      ],
+      "additionalProperties": false
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "add",
+        "remove"
+      ]
+    }
+  },
+  "required": [
+    "entry_id",
+    "tag",
+    "action"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.codecatalogue.dev/bundle/v1/file-descriptor.json",
+  "title": "File Descriptor",
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "text",
+        "binary"
+      ]
+    },
+    "language": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "lexer": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "media_type": {
+      "type": "string",
+      "minLength": 1
+    },
+    "size_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 26214400
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "archive_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "is_template": {
+      "type": "boolean"
+    },
+    "executable": {
+      "type": "boolean"
+    },
+    "content": {
+      "type": "object",
+      "properties": {
+        "encoding": {
+          "type": "string",
+          "enum": [
+            "utf-8",
+            "base64"
+          ]
+        },
+        "content": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "encoding",
+        "content"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "path",
+    "mode",
+    "language",
+    "lexer",
+    "media_type",
+    "size_bytes",
+    "sha256",
+    "archive_path",
+    "is_template",
+    "executable"
+  ],
+  "additionalProperties": false
+}

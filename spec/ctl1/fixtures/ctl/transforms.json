@@ -1,0 +1,24 @@
+{
+  "cases": [
+    {
+      "input": "HTTPServer2",
+      "transform": "snake_case",
+      "expected": "http_server_2"
+    },
+    {
+      "input": "café-au-lait",
+      "transform": "kebab_case",
+      "expected": "café-au-lait"
+    },
+    {
+      "input": "é",
+      "transform": "trim",
+      "expected": "é"
+    },
+    {
+      "input": "alpha.beta",
+      "transform": "pascal_case",
+      "expected": "AlphaBeta"
+    }
+  ]
+}

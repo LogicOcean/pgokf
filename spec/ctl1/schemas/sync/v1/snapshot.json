@@ -1,0 +1,658 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.codecatalogue.dev/sync/v1/snapshot.json",
+  "title": "Snapshot",
+  "type": "object",
+  "properties": {
+    "protocol_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "source_instance_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "request_binding": {
+      "type": "object",
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "GET",
+            "POST"
+          ]
+        },
+        "path_query": {
+          "type": "string",
+          "pattern": "^/api/v1/sync/"
+        },
+        "request_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "method",
+        "path_query",
+        "request_id"
+      ],
+      "additionalProperties": false
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "nonce": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "signature": {
+      "type": "object",
+      "properties": {
+        "key_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+$"
+        },
+        "algorithm": {
+          "type": "string",
+          "const": "Ed25519"
+        },
+        "value": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+$"
+        }
+      },
+      "required": [
+        "key_id",
+        "algorithm",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "snapshot_cursor": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "policy": {
+      "type": "object",
+      "properties": {
+        "rules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "source_owner_type": {
+                "type": "string",
+                "enum": [
+                  "user",
+                  "team"
+                ]
+              },
+              "source_owner_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "destination_owner_type": {
+                "type": "string",
+                "enum": [
+                  "user",
+                  "team"
+                ]
+              },
+              "destination_owner_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "maximum_visibility": {
+                "type": "string",
+                "enum": [
+                  "private",
+                  "team",
+                  "public"
+                ]
+              },
+              "allow_releases": {
+                "type": "boolean"
+              },
+              "allow_deletes": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "source_owner_type",
+              "source_owner_id",
+              "destination_owner_type",
+              "destination_owner_id",
+              "maximum_visibility",
+              "allow_releases",
+              "allow_deletes"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "default": {
+          "type": "string",
+          "const": "deny"
+        }
+      },
+      "required": [
+        "rules",
+        "default"
+      ],
+      "additionalProperties": false
+    },
+    "policy_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "entry_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "origin_instance_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "origin_entry_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "remote_revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "slug": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "private",
+              "team",
+              "public"
+            ]
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "published",
+              "archived"
+            ]
+          },
+          "owner": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "user",
+                  "team"
+                ]
+              },
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              }
+            },
+            "required": [
+              "type",
+              "id"
+            ],
+            "additionalProperties": false
+          },
+          "category_path": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "primary_language": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "license_spdx": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "slug": {
+                  "type": "string"
+                },
+                "display_name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "slug",
+                "display_name"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "entry_id",
+          "origin_instance_id",
+          "origin_entry_id",
+          "remote_revision",
+          "slug",
+          "kind",
+          "title",
+          "summary",
+          "visibility",
+          "state",
+          "owner",
+          "category_path",
+          "primary_language",
+          "license_spdx",
+          "tags"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "versions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "version_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "entry_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "number": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "message": {
+            "type": "string"
+          },
+          "description_md": {
+            "type": "string"
+          },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "template_schema": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": true
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "content_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "text",
+                    "binary"
+                  ]
+                },
+                "media_type": {
+                  "type": "string"
+                },
+                "size_bytes": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "is_template": {
+                  "type": "boolean"
+                },
+                "executable": {
+                  "type": "boolean"
+                },
+                "body": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "encoding": {
+                          "type": "string",
+                          "enum": [
+                            "utf-8",
+                            "base64"
+                          ]
+                        },
+                        "content": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "encoding",
+                        "content"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "url": {
+                          "type": "string",
+                          "format": "uri"
+                        },
+                        "sha256": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$"
+                        },
+                        "size_bytes": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "media_type": {
+                          "type": "string"
+                        },
+                        "expires_at": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "source_instance_id": {
+                          "type": "string",
+                          "format": "uuid"
+                        }
+                      },
+                      "required": [
+                        "url",
+                        "sha256",
+                        "size_bytes",
+                        "media_type",
+                        "expires_at",
+                        "source_instance_id"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "path",
+                "mode",
+                "media_type",
+                "size_bytes",
+                "sha256",
+                "is_template",
+                "executable",
+                "body"
+              ],
+              "additionalProperties": false
+            },
+            "maxItems": 1000
+          }
+        },
+        "required": [
+          "version_id",
+          "entry_id",
+          "number",
+          "message",
+          "description_md",
+          "metadata",
+          "template_schema",
+          "content_sha256",
+          "created_at",
+          "files"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "releases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "release_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "entry_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "version_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "semver": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "notes_md": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "is_default": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "release_id",
+          "entry_id",
+          "version_id",
+          "name",
+          "semver",
+          "notes_md",
+          "created_at",
+          "is_default"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "tombstones": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "source_instance_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "origin_entry_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "tombstone_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "resource_type": {
+            "type": "string",
+            "enum": [
+              "entry",
+              "release"
+            ]
+          },
+          "last_known_revision": {
+            "oneOf": [
+              {
+                "type": "integer",
+                "minimum": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_known_hash": {
+            "oneOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "deleted_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "retention_deadline": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "entry_id": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "release_name": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "former_version_id": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "source_instance_id",
+          "origin_entry_id",
+          "tombstone_id",
+          "resource_type",
+          "last_known_revision",
+          "last_known_hash",
+          "deleted_at",
+          "retention_deadline"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "authoritative": {
+      "type": "boolean"
+    },
+    "deletion_semantics": {
+      "type": "string",
+      "enum": [
+        "explicit-tombstones-only",
+        "absence-is-deletion"
+      ]
+    }
+  },
+  "required": [
+    "protocol_version",
+    "source_instance_id",
+    "request_binding",
+    "generated_at",
+    "expires_at",
+    "nonce",
+    "signature",
+    "snapshot_cursor",
+    "policy",
+    "policy_sha256",
+    "entries",
+    "versions",
+    "releases",
+    "tombstones",
+    "authoritative",
+    "deletion_semantics"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,45 @@
+{
+  "description": "Deterministic Ed25519 dual-signature key rotation conformance vector. Private seeds are test-only.",
+  "signing_domain": "CCAT-SYNC-KEY-ROTATION-1\n",
+  "test_keys": {
+    "old": {
+      "private_key_seed": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+      "key_id": "Vkdap1RjR0wChd9dvyvKtw"
+    },
+    "new": {
+      "private_key_seed": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8",
+      "public_key": "Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc",
+      "key_id": "JPbtasv-EAnAMNfKVnwzyg"
+    }
+  },
+  "statement": {
+    "protocol_version": 1,
+    "instance_id": "00000000-0000-4000-8000-000000000002",
+    "old_key_id": "Vkdap1RjR0wChd9dvyvKtw",
+    "new_key_id": "JPbtasv-EAnAMNfKVnwzyg",
+    "new_public_key": "Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc",
+    "not_before": "2026-08-30T12:00:00Z",
+    "not_after": "2026-09-06T12:00:00Z",
+    "rotation_sequence": 2
+  },
+  "canonical_statement_utf8": "{\"instance_id\":\"00000000-0000-4000-8000-000000000002\",\"new_key_id\":\"JPbtasv-EAnAMNfKVnwzyg\",\"new_public_key\":\"Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc\",\"not_after\":\"2026-09-06T12:00:00Z\",\"not_before\":\"2026-08-30T12:00:00Z\",\"old_key_id\":\"Vkdap1RjR0wChd9dvyvKtw\",\"protocol_version\":1,\"rotation_sequence\":2}",
+  "statement_sha256": "acec1d873649c2145932c279f91738253bb7e71d6ee75b3856b052ae8ea6f994",
+  "signing_bytes_base64url": "Q0NBVC1TWU5DLUtFWS1ST1RBVElPTi0xCqzsHYc2ScIUWTLCefkXOCU7t-cdbudbOFawUq6OpvmU",
+  "old_key_signature": {
+    "key_id": "Vkdap1RjR0wChd9dvyvKtw",
+    "algorithm": "Ed25519",
+    "value": "x9m1tG09ZaBLyMdu55DUibu0Kf0gOpXajmTluIn8CoI3b3bdVP985i24kU7mbbxiiqK2w3j1rNTvkH7zViCXBA"
+  },
+  "new_key_signature": {
+    "key_id": "JPbtasv-EAnAMNfKVnwzyg",
+    "algorithm": "Ed25519",
+    "value": "KOf6dD4Xr-lr1SkqSMEjuPmHkX_l7mYS1245dtX1fNYo7qjRtqBtRXXKBa59LUHmC3wiGp_6E7FIiUALbXeoDA"
+  },
+  "expected_verification": {
+    "old_key_signature": true,
+    "new_key_signature": true,
+    "dual_signature_requirement": true,
+    "overall": true
+  }
+}

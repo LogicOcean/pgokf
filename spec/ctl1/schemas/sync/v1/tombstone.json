@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.codecatalogue.dev/sync/v1/tombstone.json",
+  "title": "Tombstone",
+  "type": "object",
+  "properties": {
+    "source_instance_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "origin_entry_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "tombstone_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "resource_type": {
+      "type": "string",
+      "enum": [
+        "entry",
+        "release"
+      ]
+    },
+    "last_known_revision": {
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "last_known_hash": {
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "deleted_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "retention_deadline": {
+      "oneOf": [
+        {
+          "type": "string",
+          "format": "date-time"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "entry_id": {
+      "oneOf": [
+        {
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "release_name": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "former_version_id": {
+      "oneOf": [
+        {
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "source_instance_id",
+    "origin_entry_id",
+    "tombstone_id",
+    "resource_type",
+    "last_known_revision",
+    "last_known_hash",
+    "deleted_at",
+    "retention_deadline"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,35 @@
+{
+  "source_sequence": 1,
+  "event_id": "00000000-0000-4000-8000-000000000012",
+  "root_origin": {
+    "instance_id": "00000000-0000-4000-8000-000000000002",
+    "event_id": "00000000-0000-4000-8000-000000000012"
+  },
+  "via": [],
+  "operation": "upsert",
+  "resource_type": "entry-snapshot",
+  "resource_id": "00000000-0000-4000-8000-000000000010",
+  "entry_id": "00000000-0000-4000-8000-000000000010",
+  "occurred_at": "2026-08-30T12:00:00Z",
+  "payload": {
+    "entry_id": "00000000-0000-4000-8000-000000000010",
+    "origin_instance_id": "00000000-0000-4000-8000-000000000002",
+    "origin_entry_id": "00000000-0000-4000-8000-000000000010",
+    "remote_revision": 1,
+    "slug": "fixture",
+    "kind": "snippet",
+    "title": "Fixture",
+    "summary": "",
+    "visibility": "public",
+    "state": "published",
+    "owner": {
+      "type": "user",
+      "id": "00000000-0000-4000-8000-000000000011"
+    },
+    "category_path": null,
+    "primary_language": "python",
+    "license_spdx": "MIT",
+    "tags": []
+  },
+  "payload_sha256": "cf258478dbd091ca7d0bf6a0546d82a89fd8b0b547cd9c8ec861b2768590b155"
+}

@@ -1,0 +1,17 @@
+{
+  "bundle_id": "00000000-0000-4000-8000-000000000001",
+  "created_at": "2026-08-30T12:00:00Z",
+  "entries": [],
+  "format": "code-catalogue-bundle",
+  "format_version": 1,
+  "hash_algorithm": "sha-256",
+  "selection": {
+    "versions": "current"
+  },
+  "source": {
+    "base_url": "https://example.test",
+    "instance_id": "00000000-0000-4000-8000-000000000002",
+    "name": "Fixture"
+  },
+  "bundle_sha256": "0f61cf00e3e804ccc367aa9f4ac053da4f3f1b1c38a2a410b43c8a3719d76a91"
+}

@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.codecatalogue.dev/sync/v1/event.json",
+  "title": "Event",
+  "type": "object",
+  "properties": {
+    "source_sequence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "event_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "root_origin": {
+      "type": "object",
+      "properties": {
+        "instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "event_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "instance_id",
+        "event_id"
+      ],
+      "additionalProperties": false
+    },
+    "via": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "maxItems": 16,
+      "uniqueItems": true
+    },
+    "operation": {
+      "type": "string",
+      "enum": [
+        "upsert",
+        "delete"
+      ]
+    },
+    "resource_type": {
+      "type": "string",
+      "enum": [
+        "entry-snapshot",
+        "version",
+        "release",
+        "tag-assignment",
+        "tombstone"
+      ]
+    },
+    "resource_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "entry_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "payload": {
+      "type": "object"
+    },
+    "payload_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  },
+  "required": [
+    "source_sequence",
+    "event_id",
+    "root_origin",
+    "via",
+    "operation",
+    "resource_type",
+    "resource_id",
+    "entry_id",
+    "occurred_at",
+    "payload",
+    "payload_sha256"
+  ],
+  "additionalProperties": false,
+  "oneOf": [
+    {
+      "properties": {
+        "operation": {
+          "const": "upsert"
+        },
+        "resource_type": {
+          "const": "entry-snapshot"
+        },
+        "payload": {
+          "$ref": "entry-snapshot-payload.json"
+        }
+      },
+      "required": [
+        "operation",
+        "resource_type",
+        "payload"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "upsert"
+        },
+        "resource_type": {
+          "const": "version"
+        },
+        "payload": {
+          "$ref": "version-payload.json"
+        }
+      },
+      "required": [
+        "operation",
+        "resource_type",
+        "payload"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "upsert"
+        },
+        "resource_type": {
+          "const": "release"
+        },
+        "payload": {
+          "$ref": "release-payload.json"
+        }
+      },
+      "required": [
+        "operation",
+        "resource_type",
+        "payload"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "upsert"
+        },
+        "resource_type": {
+          "const": "tag-assignment"
+        },
+        "payload": {
+          "$ref": "tag-assignment-payload.json"
+        }
+      },
+      "required": [
+        "operation",
+        "resource_type",
+        "payload"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "delete"
+        },
+        "resource_type": {
+          "const": "tombstone"
+        },
+        "payload": {
+          "$ref": "tombstone.json"
+        }
+      },
+      "required": [
+        "operation",
+        "resource_type",
+        "payload"
+      ]
+    }
+  ]
+}

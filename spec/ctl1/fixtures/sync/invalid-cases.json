@@ -1,0 +1,287 @@
+{
+  "description": "Concrete sync-envelope signature and context conformance cases.",
+  "signing_domain": "CCAT-SYNC-ENVELOPE-1\n",
+  "test_key": {
+    "private_key_seed": "QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8",
+    "public_key": "JUO5L_EJVRFHatyDadtt3JM2ZaEZeN2hQE7hBmypVZ0",
+    "key_id": "AzliGSN_daZPEq6385cjqw"
+  },
+  "cases": [
+    {
+      "name": "omitted-signature",
+      "envelope": {
+        "protocol_version": 1,
+        "source_instance_id": "00000000-0000-4000-8000-000000000002",
+        "request_binding": {
+          "method": "GET",
+          "path_query": "/api/v1/sync/changes?after=0&limit=500",
+          "request_id": "00000000-0000-4000-8000-000000000021"
+        },
+        "generated_at": "2026-08-30T12:00:00Z",
+        "expires_at": "2026-08-30T12:05:00Z",
+        "nonce": "bm9uY2UtMDAx",
+        "after": 0,
+        "next_cursor": 0,
+        "minimum_cursor": 0,
+        "has_more": false,
+        "events": []
+      },
+      "verification_context": {
+        "expected_request_binding": {
+          "method": "GET",
+          "path_query": "/api/v1/sync/changes?after=0&limit=500",
+          "request_id": "00000000-0000-4000-8000-000000000021"
+        },
+        "verification_time": "2026-08-30T12:01:00Z",
+        "previously_seen_nonces": []
+      },
+      "expected": {
+        "schema_valid": false,
+        "signature_valid": false,
+        "accepted": false,
+        "failure": "missing_signature"
+      }
+    },
+    {
+      "name": "wrong-request-binding",
+      "envelope": {
+        "protocol_version": 1,
+        "source_instance_id": "00000000-0000-4000-8000-000000000002",
+        "request_binding": {
+          "method": "GET",
+          "path_query": "/api/v1/sync/changes?after=1&limit=500",
+          "request_id": "00000000-0000-4000-8000-000000000021"
+        },
+        "generated_at": "2026-08-30T12:00:00Z",
+        "expires_at": "2026-08-30T12:05:00Z",
+        "nonce": "bm9uY2Utd3Jvbmc",
+        "after": 0,
+        "next_cursor": 0,
+        "minimum_cursor": 0,
+        "has_more": false,
+        "events": [],
+        "signature": {
+          "key_id": "AzliGSN_daZPEq6385cjqw",
+          "algorithm": "Ed25519",
+          "value": "BaNd4LnXcvq94jLYRHXGtB9Gy8dPzYO_JkZORw3VaenL73zaFYyjXArmKAuyKb0ZAPvWZZdvoYYBPLDPCOWkAg"
+        }
+      },
+      "signed_unsigned_envelope_sha256": "2b8ddb3d8cb7ed0ecec8bbf215e495fc0ba18d07e15ca04c37af3b53f804801f",
+      "verification_context": {
+        "expected_request_binding": {
+          "method": "GET",
+          "path_query": "/api/v1/sync/changes?after=1&limit=500",
+          "request_id": "00000000-0000-4000-8000-000000000021"
+        },
+        "verification_time": "2026-08-30T12:01:00Z",
+        "previously_seen_nonces": []
+      },
+      "expected": {
+        "schema_valid": true,
+        "signature_valid": false,
+        "accepted": false,
+        "failure": "signature_mismatch_after_request_binding_tamper"
+      }
+    },
+    {
+      "name": "replayed-nonce",
+      "envelope": {
+        "protocol_version": 1,
+        "source_instance_id": "00000000-0000-4000-8000-000000000002",
+        "request_binding": {
+          "method": "GET",
+          "path_query": "/api/v1/sync/changes?after=0&limit=500",
+          "request_id": "00000000-0000-4000-8000-000000000021"
+        },
+        "generated_at": "2026-08-30T12:00:00Z",
+        "expires_at": "2026-08-30T12:05:00Z",
+        "nonce": "cmVwbGF5ZWQtbm9uY2U",
+        "after": 0,
+        "next_cursor": 0,
+        "minimum_cursor": 0,
+        "has_more": false,
+        "events": [],
+        "signature": {
+          "key_id": "AzliGSN_daZPEq6385cjqw",
+          "algorithm": "Ed25519",
+          "value": "PLR1orxmdReVtQLt3q6dLFxafq5uIBoCTRlEgA6TSk8wlCMTDDgIov3bi9D9XlxG_WQ43OoxFtm0n7fLYhTICQ"
+        }
+      },
+      "unsigned_envelope_sha256": "3838a1d104f6ff7938780a44c2763d8a9be0ecd9e07d6f86062553f11424b93c",
+      "verification_context": {
+        "expected_request_binding": {
+          "method": "GET",
+          "path_query": "/api/v1/sync/changes?after=0&limit=500",
+          "request_id": "00000000-0000-4000-8000-000000000021"
+        },
+        "verification_time": "2026-08-30T12:01:00Z",
+        "previously_seen_nonces": [
+          "cmVwbGF5ZWQtbm9uY2U"
+        ]
+      },
+      "expected": {
+        "schema_valid": true,
+        "signature_valid": true,
+        "accepted": false,
+        "failure": "replayed_nonce"
+      }
+    },
+    {
+      "name": "expired-envelope",
+      "envelope": {
+        "protocol_version": 1,
+        "source_instance_id": "00000000-0000-4000-8000-000000000002",
+        "request_binding": {
+          "method": "GET",
+          "path_query": "/api/v1/sync/changes?after=0&limit=500",
+          "request_id": "00000000-0000-4000-8000-000000000021"
+        },
+        "generated_at": "2026-08-30T11:50:00Z",
+        "expires_at": "2026-08-30T11:55:00Z",
+        "nonce": "ZXhwaXJlZC1ub25jZQ",
+        "after": 0,
+        "next_cursor": 0,
+        "minimum_cursor": 0,
+        "has_more": false,
+        "events": [],
+        "signature": {
+          "key_id": "AzliGSN_daZPEq6385cjqw",
+          "algorithm": "Ed25519",
+          "value": "SBhnHViVB3-eKpsVFUA1aJttM-eMJ1zVeQ3PWKgPHJV5fsxthdhw4nldvaC47LeA57UPRcZjmgp8W-7YZ8eaBg"
+        }
+      },
+      "unsigned_envelope_sha256": "279abba67a52740b2fcf7a75993f31c41f3f98437f383e5db6ec5878578adcef",
+      "verification_context": {
+        "expected_request_binding": {
+          "method": "GET",
+          "path_query": "/api/v1/sync/changes?after=0&limit=500",
+          "request_id": "00000000-0000-4000-8000-000000000021"
+        },
+        "verification_time": "2026-08-30T12:01:00Z",
+        "previously_seen_nonces": []
+      },
+      "expected": {
+        "schema_valid": true,
+        "signature_valid": true,
+        "accepted": false,
+        "failure": "expired_envelope"
+      }
+    },
+    {
+      "name": "property-reordering",
+      "envelope": {
+        "events": [],
+        "signature": {
+          "key_id": "AzliGSN_daZPEq6385cjqw",
+          "algorithm": "Ed25519",
+          "value": "awfHhGIR7lr5mYYi0_g2cW1ZInWXgAbHBxvtzgp2T2XSIMbHoJ_Et_SOgttwH_IuUXQ88FuQrYRWTryPcTcACQ"
+        },
+        "nonce": "bm9uY2UtMDAx",
+        "expires_at": "2026-08-30T12:05:00Z",
+        "generated_at": "2026-08-30T12:00:00Z",
+        "request_binding": {
+          "method": "GET",
+          "path_query": "/api/v1/sync/changes?after=0&limit=500",
+          "request_id": "00000000-0000-4000-8000-000000000021"
+        },
+        "source_instance_id": "00000000-0000-4000-8000-000000000002",
+        "protocol_version": 1,
+        "has_more": false,
+        "minimum_cursor": 0,
+        "next_cursor": 0,
+        "after": 0
+      },
+      "unsigned_envelope_sha256": "c13671561f447ec5c5280e7e8e397c68d786335c710706a91eac7bf154a126ac",
+      "verification_context": {
+        "expected_request_binding": {
+          "method": "GET",
+          "path_query": "/api/v1/sync/changes?after=0&limit=500",
+          "request_id": "00000000-0000-4000-8000-000000000021"
+        },
+        "verification_time": "2026-08-30T12:01:00Z",
+        "previously_seen_nonces": []
+      },
+      "expected": {
+        "schema_valid": true,
+        "signature_valid": true,
+        "accepted": true
+      }
+    },
+    {
+      "name": "unicode-payload",
+      "envelope": {
+        "protocol_version": 1,
+        "source_instance_id": "00000000-0000-4000-8000-000000000002",
+        "request_binding": {
+          "method": "GET",
+          "path_query": "/api/v1/sync/changes?after=0&limit=500",
+          "request_id": "00000000-0000-4000-8000-000000000021"
+        },
+        "generated_at": "2026-08-30T12:00:00Z",
+        "expires_at": "2026-08-30T12:05:00Z",
+        "nonce": "dW5pY29kZS1ub25jZQ",
+        "after": 0,
+        "next_cursor": 0,
+        "minimum_cursor": 0,
+        "has_more": false,
+        "events": [
+          {
+            "source_sequence": 2,
+            "event_id": "00000000-0000-4000-8000-000000000022",
+            "root_origin": {
+              "instance_id": "00000000-0000-4000-8000-000000000002",
+              "event_id": "00000000-0000-4000-8000-000000000022"
+            },
+            "via": [],
+            "operation": "upsert",
+            "resource_type": "entry-snapshot",
+            "resource_id": "00000000-0000-4000-8000-000000000010",
+            "entry_id": "00000000-0000-4000-8000-000000000010",
+            "occurred_at": "2026-08-30T12:00:00Z",
+            "payload": {
+              "entry_id": "00000000-0000-4000-8000-000000000010",
+              "origin_instance_id": "00000000-0000-4000-8000-000000000002",
+              "origin_entry_id": "00000000-0000-4000-8000-000000000010",
+              "remote_revision": 2,
+              "slug": "unicode-fixture",
+              "kind": "snippet",
+              "title": "Café δ 🚀",
+              "summary": "naïve — 東京",
+              "visibility": "public",
+              "state": "published",
+              "owner": {
+                "type": "user",
+                "id": "00000000-0000-4000-8000-000000000011"
+              },
+              "category_path": "例/δ",
+              "primary_language": "python",
+              "license_spdx": "MIT",
+              "tags": []
+            },
+            "payload_sha256": "860a0ef56b47ab36a161f314b162155d52f8cd26ac58440b9eaae7ab8fc2d600"
+          }
+        ],
+        "signature": {
+          "key_id": "AzliGSN_daZPEq6385cjqw",
+          "algorithm": "Ed25519",
+          "value": "coRHPxzp9JzyS0rLblcB3yghuR6QN12YDXUNRg5FLn79QHl49a3K4tNvB7M_LdYwn5YTm9MpC3_Y7L_ZOU0SAA"
+        }
+      },
+      "unsigned_envelope_sha256": "5dc0619db362d3c8fdcb8250e3246e5d74660addc81d1d27970dcb339dd57264",
+      "verification_context": {
+        "expected_request_binding": {
+          "method": "GET",
+          "path_query": "/api/v1/sync/changes?after=0&limit=500",
+          "request_id": "00000000-0000-4000-8000-000000000021"
+        },
+        "verification_time": "2026-08-30T12:01:00Z",
+        "previously_seen_nonces": []
+      },
+      "expected": {
+        "schema_valid": true,
+        "signature_valid": true,
+        "accepted": true
+      }
+    }
+  ]
+}

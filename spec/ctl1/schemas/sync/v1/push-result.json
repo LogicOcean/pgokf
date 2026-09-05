@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.codecatalogue.dev/sync/v1/push-result.json",
+  "title": "Push Result",
+  "type": "object",
+  "properties": {
+    "protocol_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "source_instance_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "request_binding": {
+      "type": "object",
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "GET",
+            "POST"
+          ]
+        },
+        "path_query": {
+          "type": "string",
+          "pattern": "^/api/v1/sync/"
+        },
+        "request_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "method",
+        "path_query",
+        "request_id"
+      ],
+      "additionalProperties": false
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "nonce": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "signature": {
+      "type": "object",
+      "properties": {
+        "key_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+$"
+        },
+        "algorithm": {
+          "type": "string",
+          "const": "Ed25519"
+        },
+        "value": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+$"
+        }
+      },
+      "required": [
+        "key_id",
+        "algorithm",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "push_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "source_first_sequence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "source_last_sequence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "destination_received_cursor": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "duplicate",
+              "quarantined"
+            ]
+          },
+          "destination_sequence": {
+            "oneOf": [
+              {
+                "type": "integer",
+                "minimum": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error_code": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "event_id",
+          "state",
+          "destination_sequence",
+          "error_code"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "protocol_version",
+    "source_instance_id",
+    "request_binding",
+    "generated_at",
+    "expires_at",
+    "nonce",
+    "signature",
+    "push_id",
+    "source_first_sequence",
+    "source_last_sequence",
+    "destination_received_cursor",
+    "results"
+  ],
+  "additionalProperties": false
+}

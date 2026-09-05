@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.codecatalogue.dev/sync/v1/status-envelope.json",
+  "title": "Status Envelope",
+  "type": "object",
+  "properties": {
+    "protocol_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "source_instance_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "request_binding": {
+      "type": "object",
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "GET",
+            "POST"
+          ]
+        },
+        "path_query": {
+          "type": "string",
+          "pattern": "^/api/v1/sync/"
+        },
+        "request_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "method",
+        "path_query",
+        "request_id"
+      ],
+      "additionalProperties": false
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "nonce": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "signature": {
+      "type": "object",
+      "properties": {
+        "key_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+$"
+        },
+        "algorithm": {
+          "type": "string",
+          "const": "Ed25519"
+        },
+        "value": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+$"
+        }
+      },
+      "required": [
+        "key_id",
+        "algorithm",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "instance_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "protocol_versions": {
+      "type": "array",
+      "items": {
+        "type": "integer"
+      },
+      "minItems": 1
+    },
+    "current_cursor": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "minimum_cursor": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "retention_time": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "snapshot_required": {
+      "type": "boolean"
+    },
+    "inbox": {
+      "type": "object",
+      "properties": {
+        "pending": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "quarantined": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dead_letter": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "oldest_unresolved_at": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "pending",
+        "quarantined",
+        "dead_letter",
+        "oldest_unresolved_at"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "protocol_version",
+    "source_instance_id",
+    "request_binding",
+    "generated_at",
+    "expires_at",
+    "nonce",
+    "signature",
+    "instance_id",
+    "protocol_versions",
+    "current_cursor",
+    "minimum_cursor",
+    "retention_time",
+    "snapshot_required",
+    "inbox"
+  ],
+  "additionalProperties": false
+}

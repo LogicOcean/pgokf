@@ -1,0 +1,9 @@
+{
+  "file": "empty-bundle.zip",
+  "sha256": "db1a01435f961afbc65bc471e3507eecd2af107541725e492d30d4973075e362",
+  "members": [
+    "catalogue.json"
+  ],
+  "compression": "STORE",
+  "general_purpose_flags": "0x0800"
+}

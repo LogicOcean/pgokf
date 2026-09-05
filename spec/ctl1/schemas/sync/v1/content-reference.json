@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.codecatalogue.dev/sync/v1/content-reference.json",
+  "title": "Content Reference",
+  "type": "object",
+  "properties": {
+    "url": {
+      "type": "string",
+      "format": "uri"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "size_bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "media_type": {
+      "type": "string"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "source_instance_id": {
+      "type": "string",
+      "format": "uuid"
+    }
+  },
+  "required": [
+    "url",
+    "sha256",
+    "size_bytes",
+    "media_type",
+    "expires_at",
+    "source_instance_id"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.codecatalogue.dev/sync/v1/release-payload.json",
+  "title": "Release Payload",
+  "type": "object",
+  "properties": {
+    "release_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "entry_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "version_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "name": {
+      "type": "string"
+    },
+    "semver": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "notes_md": {
+      "type": "string"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "is_default": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "release_id",
+    "entry_id",
+    "version_id",
+    "name",
+    "semver",
+    "notes_md",
+    "created_at",
+    "is_default"
+  ],
+  "additionalProperties": false
+}

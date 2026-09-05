@@ -1,0 +1,64 @@
+{
+  "format": "code-catalogue-bundle",
+  "format_version": 1,
+  "bundle_id": "00000000-0000-4000-8000-000000000031",
+  "created_at": "2026-08-30T12:00:00Z",
+  "hash_algorithm": "sha-256",
+  "source": {
+    "instance_id": "00000000-0000-4000-8000-000000000002",
+    "base_url": "https://example.test",
+    "name": "Unicode/Binary Fixture"
+  },
+  "selection": {
+    "versions": "current",
+    "entry_ids": [
+      "00000000-0000-4000-8000-000000000032"
+    ]
+  },
+  "entries": [
+    {
+      "id": "00000000-0000-4000-8000-000000000032",
+      "slug": "unicode-binary",
+      "kind": "snippet",
+      "title": "Unicode binary fixture",
+      "summary": "Café δ binary path and payload.",
+      "visibility": "public",
+      "state": "published",
+      "tags": [],
+      "category_path": "fixtures/unicode",
+      "primary_language": null,
+      "license_spdx": "MIT",
+      "versions": [
+        {
+          "id": "00000000-0000-4000-8000-000000000033",
+          "number": 1,
+          "message": "Add café/δ.bin",
+          "description_md": "Binary bytes: 00 ff 10.",
+          "content_sha256": "2da45f2cd1f9c8e69a67abf7a6b26c282533d0a7686787a9533265418680d4d2",
+          "template_schema": null,
+          "created_at": "2026-08-30T12:00:00Z",
+          "files": [
+            {
+              "path": "café/δ.bin",
+              "mode": "binary",
+              "language": null,
+              "lexer": null,
+              "media_type": "application/octet-stream",
+              "size_bytes": 3,
+              "sha256": "2da45f2cd1f9c8e69a67abf7a6b26c282533d0a7686787a9533265418680d4d2",
+              "archive_path": "café/δ.bin",
+              "is_template": false,
+              "executable": false,
+              "content": {
+                "encoding": "base64",
+                "content": "AP8Q"
+              }
+            }
+          ]
+        }
+      ],
+      "releases": []
+    }
+  ],
+  "bundle_sha256": "eb65e21d7406282b0e46bec6d33eb0875225f55783ab1d0063ca73fb23152a29"
+}

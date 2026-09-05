@@ -1,0 +1,9 @@
+{
+  "template": "basic.ctl",
+  "variables": {
+    "project_name": "  api-client  ",
+    "enabled": true
+  },
+  "expected": "ApiClientyes\n",
+  "line_endings": "lf"
+}

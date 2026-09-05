@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.codecatalogue.dev/sync/v1/visibility-policy.json",
+  "title": "Visibility Policy",
+  "type": "object",
+  "properties": {
+    "rules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "source_owner_type": {
+            "type": "string",
+            "enum": [
+              "user",
+              "team"
+            ]
+          },
+          "source_owner_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "destination_owner_type": {
+            "type": "string",
+            "enum": [
+              "user",
+              "team"
+            ]
+          },
+          "destination_owner_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "maximum_visibility": {
+            "type": "string",
+            "enum": [
+              "private",
+              "team",
+              "public"
+            ]
+          },
+          "allow_releases": {
+            "type": "boolean"
+          },
+          "allow_deletes": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "source_owner_type",
+          "source_owner_id",
+          "destination_owner_type",
+          "destination_owner_id",
+          "maximum_visibility",
+          "allow_releases",
+          "allow_deletes"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "default": {
+      "type": "string",
+      "const": "deny"
+    }
+  },
+  "required": [
+    "rules",
+    "default"
+  ],
+  "additionalProperties": false
+}

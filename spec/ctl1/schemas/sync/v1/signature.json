@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.codecatalogue.dev/sync/v1/signature.json",
+  "title": "Signature",
+  "type": "object",
+  "properties": {
+    "key_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "algorithm": {
+      "type": "string",
+      "const": "Ed25519"
+    },
+    "value": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+$"
+    }
+  },
+  "required": [
+    "key_id",
+    "algorithm",
+    "value"
+  ],
+  "additionalProperties": false
+}

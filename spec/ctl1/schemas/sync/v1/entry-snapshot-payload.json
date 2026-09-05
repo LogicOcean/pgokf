@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.codecatalogue.dev/sync/v1/entry-snapshot-payload.json",
+  "title": "Entry Snapshot Payload",
+  "type": "object",
+  "properties": {
+    "entry_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "origin_instance_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "origin_entry_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "remote_revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "slug": {
+      "type": "string"
+    },
+    "kind": {
+      "type": "string"
+    },
+    "title": {
+      "type": "string"
+    },
+    "summary": {
+      "type": "string"
+    },
+    "visibility": {
+      "type": "string",
+      "enum": [
+        "private",
+        "team",
+        "public"
+      ]
+    },
+    "state": {
+      "type": "string",
+      "enum": [
+        "draft",
+        "published",
+        "archived"
+      ]
+    },
+    "owner": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "user",
+            "team"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "type",
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "category_path": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "primary_language": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "license_spdx": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "slug",
+          "display_name"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "entry_id",
+    "origin_instance_id",
+    "origin_entry_id",
+    "remote_revision",
+    "slug",
+    "kind",
+    "title",
+    "summary",
+    "visibility",
+    "state",
+    "owner",
+    "category_path",
+    "primary_language",
+    "license_spdx",
+    "tags"
+  ],
+  "additionalProperties": false
+}

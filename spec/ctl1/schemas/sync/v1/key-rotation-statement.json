@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.codecatalogue.dev/sync/v1/key-rotation-statement.json",
+  "title": "Key Rotation Statement",
+  "type": "object",
+  "properties": {
+    "statement": {
+      "type": "object",
+      "properties": {
+        "protocol_version": {
+          "type": "integer",
+          "const": 1
+        },
+        "instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "old_key_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+$"
+        },
+        "new_key_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+$"
+        },
+        "new_public_key": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{43}$"
+        },
+        "not_before": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "not_after": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "rotation_sequence": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "protocol_version",
+        "instance_id",
+        "old_key_id",
+        "new_key_id",
+        "new_public_key",
+        "not_before",
+        "not_after",
+        "rotation_sequence"
+      ],
+      "additionalProperties": false
+    },
+    "old_key_signature": {
+      "type": "object",
+      "properties": {
+        "key_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+$"
+        },
+        "algorithm": {
+          "type": "string",
+          "const": "Ed25519"
+        },
+        "value": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+$"
+        }
+      },
+      "required": [
+        "key_id",
+        "algorithm",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "new_key_signature": {
+      "type": "object",
+      "properties": {
+        "key_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+$"
+        },
+        "algorithm": {
+          "type": "string",
+          "const": "Ed25519"
+        },
+        "value": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+$"
+        }
+      },
+      "required": [
+        "key_id",
+        "algorithm",
+        "value"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "statement",
+    "old_key_signature",
+    "new_key_signature"
+  ],
+  "additionalProperties": false,
+  "description": "Each signature signs ASCII CCAT-SYNC-KEY-ROTATION-1\\n followed by SHA-256(RFC8785(statement))."
+}

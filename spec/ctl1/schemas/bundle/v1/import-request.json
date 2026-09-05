@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.codecatalogue.dev/bundle/v1/import-request.json",
+  "title": "Bundle Import Request",
+  "type": "object",
+  "properties": {
+    "source_url": {
+      "oneOf": [
+        {
+          "type": "string",
+          "format": "uri"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "expected_sha256": {
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "create",
+        "upsert-origin",
+        "fork",
+        "mirror"
+      ]
+    },
+    "conflict_policy": {
+      "type": "string",
+      "enum": [
+        "reject",
+        "rename",
+        "fork"
+      ]
+    },
+    "owner": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "user",
+            "team",
+            "service"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "type",
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "atomic": {
+      "type": "string",
+      "enum": [
+        "required",
+        "preferred",
+        "per-entry"
+      ]
+    }
+  },
+  "required": [
+    "source_url",
+    "expected_sha256",
+    "mode",
+    "conflict_policy",
+    "owner",
+    "atomic"
+  ],
+  "additionalProperties": false
+}
