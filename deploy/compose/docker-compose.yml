@@ -55,6 +55,11 @@ services:
       - shared_preload_libraries=pgokf,pg_cron,pg_search
       - -c
       - cron.database_name=${POSTGRES_DB:-okf}
+      # pg_search warns on every plain aggregate over a bm25-indexed table
+      # ("Aggregate Scan not used ..."); that is expected for the catalog's
+      # count queries (health(), search_index_status()) and only adds noise.
+      - -c
+      - paradedb.planner_warnings=off
       # Hard, cluster-wide resource ceilings (docs/configuration.md).
       - -c
       - pgokf.max_file_bytes=${PGOKF_MAX_FILE_BYTES:-8388608}
