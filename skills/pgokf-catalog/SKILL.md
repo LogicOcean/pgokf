@@ -171,9 +171,10 @@ SELECT jsonb_pretty(pgokf.search_index_status());
 
 > Large-scale broad-corpus ranking (BM25) is an **optional, config-selected
 > backend**, not a standalone function. Set the durable `search_backend` key to
-> `bm25` (via `pgokf.set_config`) to route `concept_search` through a ParadeDB
-> `pg_search` index - the operator must install `pg_search` separately, and it
-> falls back to native FTS with a warning when absent. There is no `bm25()`
+> `bm25` (via `pgokf.set_config`) to route `concept_search` through a BM25
+> provider's index (Tiger Data `pg_textsearch` or ParadeDB `pg_search`, chosen
+> by the `bm25_provider` key) - the operator must install the provider
+> separately, and it falls back to native FTS with a warning when absent. There is no `bm25()`
 > function; `search_backend` is a config key, and `concept_search` remains the
 > only search entry point. See `docs/search-guide.md` (Enabling the BM25
 > backend) and `docs/configuration.md` (`search_backend`).
@@ -317,6 +318,7 @@ through the config functions (no direct DML). Valid keys and value shapes:
 | `sync_log_retention_days` | integer `>= 0` | Sync-log retention |
 | `store_source` | `true`/`false` | Store verbatim source bytes (section 6) |
 | `search_backend` | `"native"`/`"bm25"` | Search strategy for `concept_search` (section 3) |
+| `bm25_provider` | `"auto"`/`"pg_textsearch"`/`"pg_search"` | Which BM25 provider the `bm25` backend uses (`auto` prefers `pg_textsearch`) |
 | `notify_channel` | `"channel"` (`""` disables) | `pg_notify` channel for sync change notifications |
 | `okf_version_policy` | `"warn"`/`"reject"` | How a declared-but-unsupported bundle `okf_version` is handled |
 | `embedding_dim` | integer | Required embedding vector length (section 3) |
@@ -390,7 +392,7 @@ exist and where they are documented:
   rebuilds the lexical index.
 
 Optional runtime extensions degrade cleanly when absent: `pgvector`
-(semantic/hybrid), `pg_search` (BM25), `pg_cron` (scheduling).
+(semantic/hybrid), `pg_textsearch` or `pg_search` (BM25), `pg_cron` (scheduling).
 
 ## Full flow (copy-paste)
 

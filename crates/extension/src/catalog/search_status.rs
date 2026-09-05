@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Search-index health and coverage: `pgokf.search_index_status`.
 //!
-//! The two optional ranked-search accelerators - the `ParadeDB` `pg_search`
-//! BM25 index and the `pgvector` HNSW embedding index - are invisible from the
+//! The two optional ranked-search accelerators - the BM25 provider's index
+//! (Tiger Data `pg_textsearch` or `ParadeDB` `pg_search`, chosen by
+//! `bm25_provider`) and the `pgvector` HNSW embedding index - are invisible from the
 //! ordinary catalog: an operator cannot tell from `concept_search` alone whether
 //! either is installed, built, and *current* with the concept set. This function
 //! reports exactly that in one `jsonb` document: the configured backend, that
@@ -41,8 +42,11 @@ const STATUS_DOCUMENT_QUERY: &str = "
             (pgokf.get_config() ->> 'embedding_dim')::pg_catalog.int4 AS embedding_dim,
             (SELECT pg_catalog.count(*) FROM pgokf.concepts) AS total_concepts,
             (SELECT pg_catalog.count(*) FROM pgokf.concept_embedding) AS embedded_rows,
-            EXISTS (SELECT 1 FROM pg_catalog.pg_extension WHERE extname = 'pg_search')
-                AS bm25_available,
+            (pgokf.get_config() ->> 'bm25_provider') AS bm25_provider_setting,
+            (SELECT extname::pg_catalog.text FROM pg_catalog.pg_extension
+              WHERE extname IN ('pg_textsearch', 'pg_search')
+              ORDER BY CASE extname WHEN 'pg_textsearch' THEN 0 ELSE 1 END
+              LIMIT 1) AS bm25_installed,
             EXISTS (
                 SELECT 1
                 FROM pg_catalog.pg_index i
@@ -60,11 +64,22 @@ const STATUS_DOCUMENT_QUERY: &str = "
                 WHERE i.indrelid = 'pgokf.concept_embedding'::pg_catalog.regclass
                   AND am.amname = 'hnsw') AS embedding_index_exists
     )
+    , r AS (
+        SELECT s.*,
+               CASE
+                   WHEN bm25_provider_setting = 'auto' THEN bm25_installed
+                   WHEN bm25_provider_setting = bm25_installed THEN bm25_installed
+                   ELSE NULL
+               END AS bm25_provider
+        FROM s
+    )
     SELECT pg_catalog.jsonb_build_object(
         'search_backend', search_backend,
         'native', true,
         'bm25', pg_catalog.jsonb_build_object(
-            'available', bm25_available,
+            'available', bm25_provider IS NOT NULL,
+            'provider', bm25_provider,
+            'provider_setting', bm25_provider_setting,
             'index_exists', bm25_index_exists,
             'indexed_rows', CASE WHEN bm25_index_exists THEN total_concepts ELSE 0 END,
             'total_rows', total_concepts,
@@ -81,7 +96,7 @@ const STATUS_DOCUMENT_QUERY: &str = "
                 WHEN total_concepts = 0 THEN NULL
                 ELSE pg_catalog.round(100.0 * embedded_rows / total_concepts, 2) END,
             'dim', embedding_dim))
-    FROM s";
+    FROM r";
 
 fn search_index_status_impl() -> Result<pgrx::JsonB, CatalogError> {
     security::authorize_current_user(security::Operation::Search, Path::new(""))?;
@@ -109,8 +124,10 @@ mod pgokf {
     ///
     /// Requires membership in `pgokf_reader` (or `pgokf_admin`). The document
     /// reports `search_backend` (the configured backend), `native` (always
-    /// `true`), and two sub-objects: `bm25` (`available` = `pg_search`
-    /// installed, `index_exists`, `indexed_rows`, `total_rows`, `coverage_pct`)
+    /// `true`), and two sub-objects: `bm25` (`available` = the provider
+    /// `bm25_provider` resolves to is installed, `provider` = that provider or
+    /// `null`, `provider_setting` = the policy value, `index_exists`,
+    /// `indexed_rows`, `total_rows`, `coverage_pct`)
     /// and `embedding` (`pgvector_available`, `index_exists`, `embedded_rows`,
     /// `total_concepts`, `coverage_pct`, `dim`). Coverage counts are tenant-
     /// scoped (invoker rights, RLS-filtered); `coverage_pct` is `NULL` when there
@@ -125,7 +142,7 @@ mod pgokf {
 REVOKE ALL ON FUNCTION pgokf.search_index_status() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pgokf.search_index_status() TO pgokf_reader;
 COMMENT ON FUNCTION pgokf.search_index_status() IS
-    'Search-index health and coverage (jsonb) for operators: search_backend (configured), native (always true), bm25 {available (pg_search installed), index_exists, indexed_rows, total_rows, coverage_pct} and embedding {pgvector_available, index_exists, embedded_rows, total_concepts, coverage_pct, dim}. Reader-level, STABLE, invoker rights; coverage counts are tenant-scoped (RLS-filtered). bm25 coverage is all-or-nothing (the index spans every concept row); embedding coverage is the fraction of concepts with a stored vector.';
+    'Search-index health and coverage (jsonb) for operators: search_backend (configured), native (always true), bm25 {available (a usable provider is installed), provider (pg_textsearch or pg_search as resolved from the bm25_provider setting, else null), provider_setting, index_exists, indexed_rows, total_rows, coverage_pct} and embedding {pgvector_available, index_exists, embedded_rows, total_concepts, coverage_pct, dim}. Reader-level, STABLE, invoker rights; coverage counts are tenant-scoped (RLS-filtered). bm25 coverage is all-or-nothing (the index spans every concept row); embedding coverage is the fraction of concepts with a stored vector.';
 ",
         name = "search_index_status_hardening",
         requires = [search_index_status]

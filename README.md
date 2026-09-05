@@ -18,14 +18,14 @@ An OKF **bundle** is just a directory of UTF-8 Markdown "concept" documents with
 
 ## Highlights
 
-- 🔎 **Search, four ways.** Native PostgreSQL full-text ranking out of the box; optional **BM25** (via ParadeDB `pg_search`) and **semantic** + **hybrid RRF** search (via `pgvector`) behind the same seam - none of them a hard dependency. Structured filters (`type`/`tags`/`status`/`trust_tier`), keyset pagination, faceted counts, and `find_similar` more-like-this.
+- 🔎 **Search, four ways.** Native PostgreSQL full-text ranking out of the box; optional **BM25** (via Tiger Data `pg_textsearch` or ParadeDB `pg_search`) and **semantic** + **hybrid RRF** search (via `pgvector`) behind the same seam - none of them a hard dependency. Structured filters (`type`/`tags`/`status`/`trust_tier`), keyset pagination, faceted counts, and `find_similar` more-like-this.
 - 🕸️ **Link graph.** Markdown cross-links and OKF *Attested Computation* references become resolved edges; `concept_neighbors` walks them (bounded, cycle-safe, BFS).
 - 🏢 **Multi-tenant.** Opt-in row-level-security isolation keyed on a session tenant, backward-compatible (unset = see-all) - read *and* write confined.
 - 🕰️ **Version history.** Opt-in point-in-time trail: `concept_history` and `concept_as_of('… last Tuesday')`.
 - 🧾 **Audit & lifecycle.** A durable sync log + per-sync change manifest, an exfiltration/access log, reversible **retire**/**purge**, and cross-bundle **dedup**.
 - 📥 **Two ingestion paths.** From a **filesystem** path, or **mountless** - bytes streamed from an S3-compatible object store, with the extension performing zero network I/O.
 - 🧰 **Companion tools.** Object-store ingestion, a reference **embedder**, and an **MCP server** that exposes the catalog to AI agents.
-- 📦 **Operable.** `catalog_stats()` / `health()` / `search_index_status()`, Parquet + source-file exports, `pg_cron` scheduled refresh, `pg_dump`-complete backups, PGXN / `.deb` / `.rpm` packaging, and multi-architecture Docker images (amd64 + arm64, so Apple Silicon too) that bundle pgvector, pg_cron, and pg_search.
+- 📦 **Operable.** `catalog_stats()` / `health()` / `search_index_status()`, Parquet + source-file exports, `pg_cron` scheduled refresh, `pg_dump`-complete backups, PGXN / `.deb` / `.rpm` packaging, and multi-architecture Docker images (amd64 + arm64, so Apple Silicon too) that bundle pgvector, pg_cron, and pg_textsearch (on the PostgreSQL 17 and 18 images).
 
 See the exact, versioned surface - every function, table, type, GUC, and role - in **[docs/sql-api.md](docs/sql-api.md)** and **[docs/api-stability.md](docs/api-stability.md)**.
 
@@ -65,7 +65,8 @@ Everything works with stock PostgreSQL; these unlock more when installed, and de
 | Extension | Unlocks | Absent behavior |
 | --------- | ------- | --------------- |
 | `pgvector` | `concept_search_semantic`, `concept_search_hybrid`, embeddings | semantic errors clearly; hybrid falls back to lexical |
-| `pg_search` (ParadeDB) | BM25 ranking (`search_backend = bm25`) | falls back to native FTS with a warning |
+| `pg_textsearch` (Tiger Data, PostgreSQL license, PG 17-18) | BM25 ranking (`search_backend = bm25`, the `auto` provider) | falls back to native FTS with a warning |
+| `pg_search` (ParadeDB, AGPL-3.0) | BM25 ranking (`bm25_provider = pg_search`) | falls back to native FTS with a warning |
 | `pg_cron` | `schedule_refresh` / `unschedule_refresh` | scheduling raises a clear "install pg_cron" error |
 
 ## Companion tools
@@ -91,7 +92,7 @@ Full docs are published at **<https://logicocean.github.io/pgokf/>**. Key entry 
 | [multi-tenancy](docs/multi-tenancy.md) | Tenant isolation model, RLS, and its trust boundaries |
 | [version-history](docs/version-history.md) | Opt-in temporal history and point-in-time queries |
 | [deployment-topologies](docs/deployment-topologies.md) | Storage tiers, bucket-mount, mountless ingestion, Parquet |
-| [compose-deployment](docs/compose-deployment.md) | The reference Docker Compose production stack (multi-arch images with pgvector, pg_cron, pg_search; embedding daemon; backups) |
+| [compose-deployment](docs/compose-deployment.md) | The reference Docker Compose production stack (multi-arch images with pgvector, pg_cron, pg_textsearch; embedding daemon; backups) |
 | [operations](docs/operations.md) · [configuration](docs/configuration.md) | Day-2 ops, monitoring, upgrades; GUCs and policy keys |
 | [security](docs/security.md) | Roles, `SECURITY DEFINER` model, path containment, least privilege |
 | [okf-authoring](docs/okf-authoring.md) | Authoring OKF v0.2 bundles (frontmatter, actors, reserved files) |
@@ -114,7 +115,8 @@ cargo test -p pgokf --no-default-features --features pg18                     # 
 RUST_TEST_THREADS=1 cargo pgrx test pg18 --no-default-features --features pg18 # in-database
 ```
 
-> Run the in-database suite **single-threaded** - see [CONTRIBUTING.md](CONTRIBUTING.md) for why.
+> Run the in-database suite **single-threaded** - see [CONTRIBUTING.md](CONTRIBUTING.md) for why,
+> and for `PGOKF_TEST_PRELOAD`, which turns on the tests that need a preloaded BM25 provider.
 
 ## Project status
 

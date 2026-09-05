@@ -617,7 +617,9 @@ mod pgokf {
     // type; it is only borrowed into the impl, so pass-by-value is inherent to the
     // pgrx signature.
     #[allow(clippy::needless_pass_by_value)]
-    #[pg_extern(stable, parallel_safe, requires = ["embedding_table"])]
+    // PARALLEL RESTRICTED like `concept_search`: the lexical half runs the
+    // configured backend, which may execute the bm25 provider's scoring.
+    #[pg_extern(stable, parallel_restricted, requires = ["embedding_table"])]
     fn concept_search_hybrid(
         query: &str,
         query_embedding: Vec<f32>,

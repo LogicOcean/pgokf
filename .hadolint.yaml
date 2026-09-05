@@ -4,8 +4,8 @@
 #         image and debian:slim); Debian's archive drops superseded package
 #         versions, so a pinned `apt-get install pkg=version` rots into a build
 #         failure within weeks. Reproducibility comes from the pinned base image
-#         tag, the pinned Rust / cargo-pgrx / pg_search versions, and the
-#         checksum-verified pg_search download instead.
+#         tag, the pinned Rust / cargo-pgrx / BM25-provider versions, and the
+#         checksum-verified provider downloads instead.
 # DL3059: consecutive RUN instructions are deliberate where each is an
 #         independently cacheable, slow step (toolchain install vs. pgrx init).
 ignored:

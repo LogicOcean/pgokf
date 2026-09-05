@@ -168,8 +168,8 @@ fn catalog_stats_impl() -> Result<Vec<CatalogStat>, CatalogError> {
 // health
 // ---------------------------------------------------------------------------
 
-/// Build the health document. `SECURITY DEFINER` at the SQL layer, so it may
-/// read `pgokf_private.config`. Because `SECURITY DEFINER` bypasses row-level
+/// Build the health document (`$1` binds the pre-computed `bm25_ready`).
+/// `SECURITY DEFINER` at the SQL layer, so it may read `pgokf_private.config`. Because `SECURITY DEFINER` bypasses row-level
 /// security, the bundle and concept counts apply the same opt-in tenant filter
 /// explicitly: a session that set `pgokf.tenant` sees only its own counts, while
 /// an unset session counts every row (backward compatible). The role and config
@@ -189,13 +189,7 @@ const HEALTH_QUERY: &str = "
                 OR pg_catalog.current_setting('pgokf.tenant', true) = ''
                 OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true)) AS concept_count,
             (SELECT search_backend FROM pgokf_private.config WHERE singleton) AS search_backend,
-            (EXISTS (SELECT 1 FROM pg_catalog.pg_extension WHERE extname = 'pg_search')
-             AND EXISTS (
-                 SELECT 1 FROM pg_catalog.pg_index i
-                 JOIN pg_catalog.pg_class ic ON ic.oid = i.indexrelid
-                 JOIN pg_catalog.pg_am am ON am.oid = ic.relam
-                 WHERE i.indrelid = 'pgokf.concepts'::pg_catalog.regclass
-                   AND am.amname = 'bm25')) AS bm25_ready,
+            $1::pg_catalog.bool AS bm25_ready,
             pg_catalog.pg_is_in_recovery() AS in_recovery
     )
     SELECT pg_catalog.jsonb_build_object(
@@ -211,9 +205,24 @@ const HEALTH_QUERY: &str = "
 
 fn health_impl() -> Result<pgrx::JsonB, CatalogError> {
     security::authorize_current_user(security::Operation::Search, Path::new(""))?;
-    Spi::get_one::<pgrx::JsonB>(HEALTH_QUERY)
+    let bm25_ready = bm25_ready()?;
+    Spi::get_one_with_args::<pgrx::JsonB>(HEALTH_QUERY, &[bm25_ready.into()])
         .map_err(|error| spi_error("failed to read catalog health", &error))?
         .ok_or_else(|| CatalogError::internal("health query returned no row", Path::new("")))
+}
+
+/// Whether `search_backend = bm25` would serve rather than fall back: the
+/// provider the `bm25_provider` policy resolves to is installed *and* the
+/// index that provider's query needs exists - the same two checks the
+/// backend makes, so `health()` and `search_index_status()` never disagree.
+fn bm25_ready() -> Result<bool, CatalogError> {
+    use crate::catalog::search_backend::{
+        bm25_index_present, configured_provider, resolve_provider,
+    };
+    match resolve_provider(&configured_provider()?)? {
+        Some(provider) => bm25_index_present(&provider),
+        None => Ok(false),
+    }
 }
 
 // ---------------------------------------------------------------------------

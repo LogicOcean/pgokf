@@ -20,11 +20,13 @@
 #   * `SCHEMA - paradedb` (and pg_search's internal typmod cache under it):
 #     pg_search does not own its schema, so pg_dump emits CREATE SCHEMA, which
 #     fails once pg_search exists in the target. Nothing pgokf needs lives there.
-#   * the pg_cron and pg_search extension entries (and pg_cron's job tables)
-#     when the target database does not already have that extension: neither
-#     can be created by the restore (both must be preloaded, and pg_cron only
-#     exists in the database named by cron.database_name), and the image's
-#     init hook has already created whichever the target can support.
+#   * the pg_cron, pg_textsearch, and pg_search extension entries (and
+#     pg_cron's job tables) when the target database does not already have
+#     that extension: none can be created by the restore (all must be
+#     preloaded, and pg_cron only exists in the database named by
+#     cron.database_name), and the image's init hook has already created
+#     whichever the target can support. A BM25 index is rebuilt afterwards
+#     for whichever provider the target carries.
 #
 # The filtered list is derived from the archive itself with `pg_restore -l`,
 # so every other object - pgokf, its policy row, bundles, concepts, embeddings,
@@ -57,10 +59,12 @@ trap 'rm -f "${toc}"' EXIT
 # schema: `SCHEMA - <name> <owner>`; for an extension: `EXTENSION - <name> `),
 # so every pattern is anchored on the surrounding spaces, never on end of line.
 filter=' SCHEMA - paradedb( |$)| (TABLE|TABLE DATA|SEQUENCE|SEQUENCE SET) paradedb '
-if ! has_extension pg_search; then
-  filter="${filter}| EXTENSION - pg_search( |$)| COMMENT - EXTENSION pg_search( |$)"
-  log "target has no pg_search; its extension entries excluded"
-fi
+for provider in pg_textsearch pg_search; do
+  if ! has_extension "${provider}"; then
+    filter="${filter}| EXTENSION - ${provider}( |$)| COMMENT - EXTENSION ${provider}( |$)"
+    log "target has no ${provider}; its extension entries excluded"
+  fi
+done
 if ! has_extension pg_cron; then
   filter="${filter}| EXTENSION - pg_cron( |$)| COMMENT - EXTENSION pg_cron( |$)| (TABLE|TABLE DATA|SEQUENCE|SEQUENCE SET) cron "
   log "target database ${database} has no pg_cron (it lives only in cron.database_name); its entries excluded"

@@ -2,8 +2,8 @@
 #
 # Services
 #   db       the pgokf server image (PostgreSQL + pgokf + pgvector + pg_cron +
-#            pg_search), preloading the extensions, with the GUC ceilings set
-#            and bundles bind-mounted read-only at /bundles
+#            pg_textsearch), preloading the extensions, with the GUC ceilings
+#            set and bundles bind-mounted read-only at /bundles
 #   embed    the pgokf-embed companion as a daemon: every OKF_EMBED_INTERVAL
 #            seconds it embeds concepts that have no vector yet
 #   backup   (profile "ops") one-shot logical backup via the image's
@@ -24,10 +24,10 @@ x-pg-url: &writer-url "postgresql://${PGOKF_WRITER_ROLE:-okf_writer}:${PGOKF_WRI
 
 services:
   db:
-    image: ${PGOKF_IMAGE:?PGOKF_IMAGE is required (e.g. ghcr.io/logicocean/pgokf:0.1.14-pg18 or a locally built tag)}
+    image: ${PGOKF_IMAGE:?PGOKF_IMAGE is required (e.g. ghcr.io/logicocean/pgokf:0.1.15-pg18 or a locally built tag)}
     container_name: pgokf-db
     restart: always
-    # PostgreSQL parallel workers and the pg_search index share memory through
+    # PostgreSQL parallel workers and the BM25 index build share memory through
     # /dev/shm; the Docker default of 64 MiB is far too small.
     shm_size: ${PGOKF_SHM_SIZE:-1g}
     stop_grace_period: 60s
@@ -50,16 +50,15 @@ services:
     command:
       - postgres
       # pgokf: GUC ceilings visible from connection start and settable below.
-      # pg_cron / pg_search: both require preloading before CREATE EXTENSION.
+      # pg_cron / pg_textsearch: both require preloading before CREATE EXTENSION.
+      # PGOKF_PRELOAD overrides the list for an image without pg_textsearch
+      # (PostgreSQL 15/16/19 tags: pgokf,pg_cron) or one built with ParadeDB
+      # instead (pgokf,pg_cron,pg_search); a preloaded library the image does
+      # not carry stops the server at startup.
       - -c
-      - shared_preload_libraries=pgokf,pg_cron,pg_search
+      - shared_preload_libraries=${PGOKF_PRELOAD:-pgokf,pg_cron,pg_textsearch}
       - -c
       - cron.database_name=${POSTGRES_DB:-okf}
-      # pg_search warns on every plain aggregate over a bm25-indexed table
-      # ("Aggregate Scan not used ..."); that is expected for the catalog's
-      # count queries (health(), search_index_status()) and only adds noise.
-      - -c
-      - paradedb.planner_warnings=off
       # Hard, cluster-wide resource ceilings (docs/configuration.md).
       - -c
       - pgokf.max_file_bytes=${PGOKF_MAX_FILE_BYTES:-8388608}
@@ -99,7 +98,7 @@ services:
         max-file: "5"
 
   embed:
-    image: ${PGOKF_COMPANIONS_IMAGE:?PGOKF_COMPANIONS_IMAGE is required (e.g. ghcr.io/logicocean/pgokf-companions:0.1.14 or a locally built tag)}
+    image: ${PGOKF_COMPANIONS_IMAGE:?PGOKF_COMPANIONS_IMAGE is required (e.g. ghcr.io/logicocean/pgokf-companions:0.1.15 or a locally built tag)}
     container_name: pgokf-embed
     restart: always
     depends_on:

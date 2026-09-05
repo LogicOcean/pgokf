@@ -5,7 +5,7 @@ as the build context (`.dockerignore` keeps `target/` and `.git/` out):
 
 | Image | Dockerfile | Contents |
 | ----- | ---------- | -------- |
-| `ghcr.io/logicocean/pgokf:<version>-pg<major>` | [`Dockerfile`](Dockerfile) | The official `postgres:<major>` image plus **pgokf**, and the optional extensions it lights up: **pgvector** (semantic / hybrid search), **pg_cron** (scheduled refresh), **ParadeDB pg_search** (BM25 ranking). First-init hooks create the extensions, least-privilege login roles, and the catalog policy from the environment. Ships the `pgokf-backup` / `pgokf-restore` tools. |
+| `ghcr.io/logicocean/pgokf:<version>-pg<major>` | [`Dockerfile`](Dockerfile) | The official `postgres:<major>` image plus **pgokf**, and the optional extensions it lights up: **pgvector** (semantic / hybrid search), **pg_cron** (scheduled refresh), and a BM25 provider - **Tiger Data pg_textsearch** (PostgreSQL license) on the 17 and 18 images by default, or **ParadeDB pg_search** when opted in. First-init hooks create the extensions, least-privilege login roles, and the catalog policy from the environment. Ships the `pgokf-backup` / `pgokf-restore` tools. |
 | `ghcr.io/logicocean/pgokf-companions:<version>` | [`Dockerfile.companions`](Dockerfile.companions) | The three network companions - `pgokf-ingest`, `pgokf-embed`, `pgokf-mcp` - in one small non-root image. |
 
 Both are **multi-architecture** (`linux/amd64` + `linux/arm64`): CI
@@ -14,7 +14,7 @@ builds each architecture natively on its own runner, smoke-tests it there
 with the scripts in this directory, and on a version tag re-exports the same
 cached build by digest and merges the two into one manifest per tag - so the
 same tag runs on x86 servers, arm64 servers, and Apple Silicon. Between releases there is nothing new to pull; build
-locally as below. `0.1.14` in the examples is the extension version, read from
+locally as below. `0.1.15` in the examples is the extension version, read from
 `crates/extension/pgokf.control` - the single source of truth CI and
 `packaging/deb/build-deb.sh` both resolve at build time.
 
@@ -30,11 +30,11 @@ One image per PostgreSQL major (15-19), selected at build time via `PG_MAJOR`:
 
 | Tag             | PostgreSQL                    |
 | --------------- | ----------------------------- |
-| `0.1.14-pg15`   | 15                            |
-| `0.1.14-pg16`   | 16                            |
-| `0.1.14-pg17`   | 17                            |
-| `0.1.14-pg18`   | 18 (the `PG_MAJOR` default)   |
-| `0.1.14-pg19`   | 19 (once PGDG ships packages and ParadeDB publishes a pg19 `pg_search`; until then build with `WITH_PG_SEARCH=0`) |
+| `0.1.15-pg15`   | 15 (no BM25 provider: `pg_textsearch` ships for 17 and 18 only) |
+| `0.1.15-pg16`   | 16 (no BM25 provider)         |
+| `0.1.15-pg17`   | 17 (+ `pg_textsearch`)        |
+| `0.1.15-pg18`   | 18 (+ `pg_textsearch`; the `PG_MAJOR` default) |
+| `0.1.15-pg19`   | 19 (once PGDG ships packages; no BM25 provider until Tiger Data publishes a pg19 package) |
 
 ### Build
 
@@ -42,7 +42,7 @@ One image per PostgreSQL major (15-19), selected at build time via `PG_MAJOR`:
 docker build -f packaging/docker/Dockerfile \
   --build-arg PG_MAJOR=18 \
   --build-arg PGOKF_VERSION="$(sed -n "s/^default_version *= *'\([^']*\)'.*/\1/p" crates/extension/pgokf.control)" \
-  -t pgokf:0.1.14-pg18 .
+  -t pgokf:0.1.15-pg18 .
 ```
 
 The build runs natively for the daemon's architecture. To build for an arm64
@@ -59,7 +59,9 @@ Build arguments (override only deliberately):
 | `CARGO_PGRX_VERSION`  | `0.19.2`  | matches the workspace `pgrx` dependency                                 |
 | `WITH_PGVECTOR`       | `1`       | install `postgresql-<major>-pgvector` from PGDG                         |
 | `WITH_PG_CRON`        | `1`       | install `postgresql-<major>-cron` from PGDG                             |
-| `WITH_PG_SEARCH`      | `1`       | install ParadeDB `pg_search` (requires `WITH_PGVECTOR=1`)               |
+| `WITH_PG_TEXTSEARCH`  | `auto`    | install Tiger Data `pg_textsearch` (`auto` = where a package exists: 17, 18; `1` = required; `0` = omit) |
+| `PG_TEXTSEARCH_VERSION` | `1.4.0` | pg_textsearch release; must have entries in `pg_textsearch.sha256`      |
+| `WITH_PG_SEARCH`      | `0`       | install ParadeDB `pg_search` instead (requires `WITH_PGVECTOR=1` and `WITH_PG_TEXTSEARCH=0`: both define the `bm25` access method) |
 | `PG_SEARCH_VERSION`   | `0.25.6`  | ParadeDB release; must have entries in `pg_search.sha256`               |
 | `PGOKF_VERSION`       | `""`      | value of the `org.opencontainers.image.version` label (informational)   |
 
@@ -73,15 +75,28 @@ and `.sql` files, the extension packages, the init hooks, and the
 `pgokf-backup` / `pgokf-restore` tools survive into the final image - no Rust
 toolchain, no source, no download tooling.
 
-**pg_search supply chain.** pgvector and pg_cron come from the PGDG apt
-repository the base image is already configured with. `pg_search` is not in
-PGDG; the installer downloads the exact `.deb` for the image's Debian
-codename and architecture from the pinned ParadeDB GitHub release and refuses
-to install it unless its SHA256 matches the entry in
-[`pg_search.sha256`](pg_search.sha256). Bumping `PG_SEARCH_VERSION` (or a
-base-image codename change) therefore requires regenerating that table:
+**BM25 provider supply chain.** pgvector and pg_cron come from the PGDG apt
+repository the base image is already configured with. Neither BM25 provider
+is in PGDG; the installer downloads the exact package for the image's
+PostgreSQL major and architecture from the pinned upstream GitHub release
+(`pg_textsearch` ships a `.deb` inside a zip, fetched and verified by
+[`fetch-pg-textsearch.sh`](fetch-pg-textsearch.sh), which CI's test workflow
+also uses; `pg_search` a `.deb` per Debian codename) and refuses to install it
+unless its SHA256 matches the entry in
+[`pg_textsearch.sha256`](pg_textsearch.sha256) /
+[`pg_search.sha256`](pg_search.sha256). `WITH_PG_TEXTSEARCH=auto` skips
+quietly when the table has no entry for the major, so CI builds the 17 and 18
+images with `WITH_PG_TEXTSEARCH=1` and the smoke test refuses a 17/18 image
+without a provider. The `pg_textsearch` package carries no copyright file, so
+its PostgreSQL-license notice
+([`pg_textsearch-LICENSE`](pg_textsearch-LICENSE)) is installed as
+`/usr/share/doc/pg-textsearch-postgresql-<major>/copyright`; pgvector and
+pg_cron bring their own from PGDG. Bumping a provider version (or, for
+pg_search, a base-image codename change) therefore requires regenerating the
+matching table:
 
 ```bash
+packaging/docker/update-pg-textsearch-checksums.sh 1.4.0
 packaging/docker/update-pg-search-checksums.sh 0.25.6
 ```
 
@@ -89,16 +104,17 @@ packaging/docker/update-pg-search-checksums.sh 0.25.6
 
 ```bash
 docker run --rm -e POSTGRES_PASSWORD=postgres \
-  pgokf:0.1.14-pg18 \
-  postgres -c shared_preload_libraries=pgokf,pg_cron,pg_search
+  pgokf:0.1.15-pg18 \
+  postgres -c shared_preload_libraries=pgokf,pg_cron,pg_textsearch
 ```
 
 On first initialization the hooks in [`initdb/`](initdb) run, in order:
 
 1. `10-create-extension.sql` creates `pgokf` in the default database, plus
-   `vector` whenever the image carries it, and `pg_search` / `pg_cron` when
-   they are in `shared_preload_libraries` (pg_cron only in the database named
-   by `cron.database_name`, default `postgres`). Preloading `pgokf` itself is
+   `vector` whenever the image carries it, and the preloaded BM25 provider
+   (`pg_textsearch`, else `pg_search`) / `pg_cron` when they are in
+   `shared_preload_libraries` (pg_cron only in the database named by
+   `cron.database_name`, default `postgres`). Preloading `pgokf` itself is
    what makes its `pgokf.*` GUC ceilings settable on the command line.
 2. `20-roles.sh` creates one login role per pgokf tier for each password
    supplied, so a deployment starts with least-privilege accounts:
@@ -146,17 +162,17 @@ archive plus a `pg_dumpall --roles-only` file and checksums into
 `PGOKF_BACKUP_RETENTION_DAYS`. `pgokf-restore <archive>` replays one into the
 target database as a single transaction that stops on the first error,
 skipping the entries a database this image initialized cannot replay
-(pg_search's unowned `paradedb` schema, and pg_cron's objects when the target
-is not `cron.database_name`). Both use the standard libpq variables to connect:
+(ParadeDB pg_search's unowned `paradedb` schema when that provider was used,
+and pg_cron's objects when the target is not `cron.database_name`). Both use the standard libpq variables to connect:
 
 ```bash
 # on the server's network (here the compose network), as the superuser
 docker run --rm --network pgokf-net \
   -e PGHOST=pgokf-db -e PGUSER=postgres -e PGPASSWORD=... -e PGDATABASE=okf \
-  -v /srv/pgokf/backups:/backups pgokf:0.1.14-pg18 pgokf-backup
+  -v /srv/pgokf/backups:/backups pgokf:0.1.15-pg18 pgokf-backup
 docker run --rm --network pgokf-net \
   -e PGHOST=pgokf-db -e PGUSER=postgres -e PGPASSWORD=... -e PGDATABASE=okf \
-  -v /srv/pgokf/backups:/backups pgokf:0.1.14-pg18 pgokf-restore /backups/okf-<stamp>.dump
+  -v /srv/pgokf/backups:/backups pgokf:0.1.15-pg18 pgokf-restore /backups/okf-<stamp>.dump
 ```
 
 Dump as a superuser (or a role with `pg_read_all_data` and `BYPASSRLS`); the
@@ -173,8 +189,8 @@ The same script CI runs, usable against any daemon (the sample bundle is
 copied in with `docker cp`, so no daemon-side path is needed):
 
 ```bash
-packaging/docker/smoke-test.sh pgokf:0.1.14-pg18            # local daemon
-DOCKER="docker --context <remote>" packaging/docker/smoke-test.sh pgokf:0.1.14-pg18
+packaging/docker/smoke-test.sh pgokf:0.1.15-pg18            # local daemon
+DOCKER="docker --context <remote>" packaging/docker/smoke-test.sh pgokf:0.1.15-pg18
 ```
 
 It preloads every optional extension, applies env-driven roles and policy,
@@ -185,9 +201,9 @@ a second fresh container with `pgokf-restore`.
 ## Companions image
 
 ```bash
-docker build -f packaging/docker/Dockerfile.companions -t pgokf-companions:0.1.14 .
-docker run --rm pgokf-companions:0.1.14 pgokf-embed --help
-packaging/docker/smoke-test-companions.sh pgokf-companions:0.1.14
+docker build -f packaging/docker/Dockerfile.companions -t pgokf-companions:0.1.15 .
+docker run --rm pgokf-companions:0.1.15 pgokf-embed --help
+packaging/docker/smoke-test-companions.sh pgokf-companions:0.1.15
 ```
 
 The image has no entrypoint: name the binary as the command. It runs as an
@@ -203,8 +219,8 @@ The minimal shape (the full stack is in [`deploy/compose/`](../../deploy/compose
 ```yaml
 services:
   db:
-    image: ghcr.io/logicocean/pgokf:0.1.14-pg18
-    command: ["postgres", "-c", "shared_preload_libraries=pgokf,pg_cron,pg_search"]
+    image: ghcr.io/logicocean/pgokf:0.1.15-pg18
+    command: ["postgres", "-c", "shared_preload_libraries=pgokf,pg_cron,pg_textsearch"]
     environment:
       POSTGRES_PASSWORD: postgres
       PGOKF_POLICY: '{"allowed_roots": ["/bundles"]}'

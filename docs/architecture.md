@@ -267,11 +267,12 @@ comparable only within
 one query; callers order by them rather than persisting them.
 
 An optional backend selected by the durable `search_backend` key routes the same
-`pgokf.concept_search` through a ParadeDB `pg_search`/BM25 index at runtime,
-returning the identical logical result shape. It is opt-in and requires the
-operator to install `pg_search` separately: `CREATE EXTENSION pgokf` takes no
-hard dependency on ParadeDB, and search falls back to native FTS with a warning
-when `pg_search` is absent. See
+`pgokf.concept_search` through a BM25 provider's index at runtime - Tiger Data
+`pg_textsearch` or ParadeDB `pg_search`, chosen by `bm25_provider` - returning
+the identical logical result shape. It is opt-in and requires the operator to
+install the provider separately: `CREATE EXTENSION pgokf` takes no hard
+dependency on either, and search falls back to native FTS with a warning when
+the provider is absent. See
 [Enabling the BM25 backend](search-guide.md#enabling-the-bm25-backend) and the
 [`search_backend` key](configuration.md#search-backend-search_backend).
 

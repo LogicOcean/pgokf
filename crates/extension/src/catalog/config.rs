@@ -25,8 +25,9 @@
 //! `jsonb` array of strings for `allowed_roots`/`default_exclude`, a boolean
 //! for `default_strict`/`store_source`, an integer for
 //! `sync_log_retention_days`, and a string for `default_text_search_config`,
-//! `search_backend`, `notify_channel` (a `LISTEN`/`NOTIFY` channel, or empty to
-//! disable), and `okf_version_policy` (`warn`/`reject`). Every value is
+//! `search_backend`, `bm25_provider` (`auto`/`pg_textsearch`/`pg_search`),
+//! `notify_channel` (a `LISTEN`/`NOTIFY` channel, or empty to disable), and
+//! `okf_version_policy` (`warn`/`reject`). Every value is
 //! validated and coerced per key ([`coerce`]); an unknown key or a value of the
 //! wrong shape or domain is rejected with SQLSTATE `22023`. `pgokf.get_config()`
 //! is a reader-level projection returning the effective policy as `jsonb`.
@@ -82,6 +83,7 @@ enum ConfigKey {
     /// Retention window, in days, for closed `pgokf.concept_history` versions;
     /// `0` keeps history indefinitely.
     HistoryRetentionDays,
+    Bm25Provider,
 }
 
 impl ConfigKey {
@@ -100,6 +102,7 @@ impl ConfigKey {
             Self::EmbeddingDim => "embedding_dim",
             Self::TrackHistory => "track_history",
             Self::HistoryRetentionDays => "history_retention_days",
+            Self::Bm25Provider => "bm25_provider",
         }
     }
 
@@ -119,6 +122,7 @@ impl ConfigKey {
             "embedding_dim" => Ok(Self::EmbeddingDim),
             "track_history" => Ok(Self::TrackHistory),
             "history_retention_days" => Ok(Self::HistoryRetentionDays),
+            "bm25_provider" => Ok(Self::Bm25Provider),
             other => Err(CatalogError::invalid_parameter(
                 format!("unknown configuration key: {other}"),
                 Path::new(""),
@@ -142,6 +146,7 @@ enum ConfigValue {
     EmbeddingDim(i32),
     TrackHistory(bool),
     HistoryRetentionDays(i32),
+    Bm25Provider(String),
 }
 
 /// The two accepted values of the `okf_version_policy` key.
@@ -251,6 +256,22 @@ fn validate_search_backend(name: &str) -> Result<(), CatalogError> {
             format!(
                 "search_backend must be one of {}, got {name}",
                 crate::catalog::search_backend::supported_display()
+            ),
+            Path::new(""),
+        ))
+    }
+}
+
+/// Validate `bm25_provider`: `auto`, `pg_search`, or `pg_textsearch`, matched
+/// by the shared registry in [`crate::catalog::search_backend`].
+fn validate_bm25_provider(name: &str) -> Result<(), CatalogError> {
+    if crate::catalog::search_backend::is_supported_provider(name) {
+        Ok(())
+    } else {
+        Err(CatalogError::invalid_parameter(
+            format!(
+                "bm25_provider must be one of {}, got {name}",
+                crate::catalog::search_backend::supported_providers_display()
             ),
             Path::new(""),
         ))
@@ -466,6 +487,12 @@ fn coerce(key: ConfigKey, value: pgrx::JsonB) -> Result<ConfigValue, CatalogErro
         ConfigKey::EmbeddingDim => coerce_embedding_dim(value, key),
         ConfigKey::TrackHistory => coerce_bool(value, key, ConfigValue::TrackHistory),
         ConfigKey::HistoryRetentionDays => coerce_history_retention_days(value, key),
+        ConfigKey::Bm25Provider => coerce_string(
+            value,
+            key,
+            validate_bm25_provider,
+            ConfigValue::Bm25Provider,
+        ),
     }
 }
 
@@ -565,6 +592,10 @@ fn persist(value: &ConfigValue) -> Result<(), CatalogError> {
             "UPDATE pgokf_private.config SET history_retention_days = $1 WHERE singleton",
             &[(*days).into()],
         ),
+        ConfigValue::Bm25Provider(name) => Spi::run_with_args(
+            "UPDATE pgokf_private.config SET bm25_provider = $1 WHERE singleton",
+            &[name.as_str().into()],
+        ),
     }
     .map_err(|error| spi_error("failed to persist configuration", &error))
 }
@@ -608,6 +639,9 @@ fn reset_key(key: ConfigKey) -> Result<(), CatalogError> {
         ConfigKey::HistoryRetentionDays => {
             "UPDATE pgokf_private.config SET history_retention_days = DEFAULT WHERE singleton"
         }
+        ConfigKey::Bm25Provider => {
+            "UPDATE pgokf_private.config SET bm25_provider = DEFAULT WHERE singleton"
+        }
     };
     Spi::run(statement).map_err(|error| spi_error("failed to reset configuration key", &error))
 }
@@ -627,7 +661,8 @@ fn reset_all() -> Result<(), CatalogError> {
              okf_version_policy = DEFAULT, \
              embedding_dim = DEFAULT, \
              track_history = DEFAULT, \
-             history_retention_days = DEFAULT \
+             history_retention_days = DEFAULT, \
+             bm25_provider = DEFAULT \
          WHERE singleton",
     )
     .map_err(|error| spi_error("failed to reset configuration", &error))
@@ -666,7 +701,8 @@ fn get_config_impl() -> Result<pgrx::JsonB, CatalogError> {
              'okf_version_policy', pg_catalog.to_jsonb(okf_version_policy),
              'embedding_dim', pg_catalog.to_jsonb(embedding_dim),
              'track_history', pg_catalog.to_jsonb(track_history),
-             'history_retention_days', pg_catalog.to_jsonb(history_retention_days))
+             'history_retention_days', pg_catalog.to_jsonb(history_retention_days),
+             'bm25_provider', pg_catalog.to_jsonb(bm25_provider))
          FROM pgokf_private.config
          WHERE singleton",
     )
@@ -891,12 +927,16 @@ CREATE TABLE pgokf_private.config (
     -- ADD COLUMN (see sql/pgokf--0.1.10--0.1.11.sql).
     track_history              boolean NOT NULL DEFAULT false,
     history_retention_days     integer NOT NULL DEFAULT 0,
+    -- bm25_provider is appended last for the same reason (see
+    -- sql/pgokf--0.1.14--0.1.15.sql).
+    bm25_provider              text    NOT NULL DEFAULT 'auto',
     CONSTRAINT config_singleton_chk CHECK (singleton),
     CONSTRAINT config_retention_nonneg_chk CHECK (sync_log_retention_days >= 0),
     CONSTRAINT config_search_backend_chk CHECK (search_backend IN ('native', 'bm25')),
     CONSTRAINT config_okf_version_policy_chk CHECK (okf_version_policy IN ('warn', 'reject')),
     CONSTRAINT config_embedding_dim_chk CHECK (embedding_dim BETWEEN 1 AND 16000),
-    CONSTRAINT config_history_retention_nonneg_chk CHECK (history_retention_days >= 0)
+    CONSTRAINT config_history_retention_nonneg_chk CHECK (history_retention_days >= 0),
+    CONSTRAINT config_bm25_provider_chk CHECK (bm25_provider IN ('auto', 'pg_search', 'pg_textsearch'))
 );
 
 INSERT INTO pgokf_private.config DEFAULT VALUES;
@@ -959,7 +999,7 @@ COMMENT ON COLUMN pgokf_private.config.default_exclude IS
 COMMENT ON COLUMN pgokf_private.config.store_source IS
     'Whether sync stores each concept''s verbatim source bytes in pgokf.concept_source (true = small self-contained tier: the original files live in Postgres) or leaves the source in its external object-store/data-lake (false, the default = enterprise tier: Postgres holds only metadata and search). Not retroactive: a change takes effect for bundles synced or refreshed afterward; existing rows keep their stored source (or absence of one) until refresh_bundle re-indexes them.';
 COMMENT ON COLUMN pgokf_private.config.search_backend IS
-    'Ranked-search execution backend for pgokf.concept_search: ''native'' (the default, zero-dependency PostgreSQL FTS available on every supported server) or ''bm25'' (Block-Max WAND top-k via the external ParadeDB pg_search extension). When set to ''bm25'' the search transparently falls back to native, with a warning, if pg_search is not installed or no bm25 index exists on pgokf.concepts (build one with pgokf.rebuild_search_index).';
+    'Ranked-search execution backend for pgokf.concept_search: ''native'' (the default, zero-dependency PostgreSQL FTS available on every supported server) or ''bm25'' (BM25 top-k over the external provider extension that bm25_provider resolves to: Tiger Data pg_textsearch or ParadeDB pg_search). When set to ''bm25'' the search transparently falls back to native, with a warning, if the resolved provider is not installed or no bm25 index exists on pgokf.concepts (build one with pgokf.rebuild_search_index).';
 COMMENT ON COLUMN pgokf_private.config.notify_channel IS
     'LISTEN/NOTIFY channel that a successful sync (register/refresh/register_bundle_content) announces on with a JSON payload {bundle_id, op, added, updated, removed, total}. Empty (the default) disables notification, with zero overhead. A non-empty value must be a safe channel identifier (letters, digits, underscore; leading letter or underscore; <= 63 bytes).';
 COMMENT ON COLUMN pgokf_private.config.okf_version_policy IS
@@ -968,6 +1008,8 @@ COMMENT ON COLUMN pgokf_private.config.embedding_dim IS
     'Expected dimension (1..=16000) of the caller-computed concept embeddings streamed in via pgokf.set_concept_embedding: the setter rejects any real[] whose length differs, and pgokf.rebuild_embedding_index builds its pgvector HNSW index with this typmod (vector(embedding_dim)). Default 1536. The extension never computes embeddings; a change is not retroactive to already-stored rows and should be followed by re-ingestion and pgokf.rebuild_embedding_index. HNSW indexing applies only up to pgvector''s 2000-dimension index limit; above it semantic search still works via an exact scan.';
 COMMENT ON COLUMN pgokf_private.config.track_history IS
     'Whether a register/refresh/content sync records an append-only SCD-2 version trail of each changed concept into pgokf.concept_history (true = keep point-in-time history; storage/retention tradeoff) or records nothing (false, the default). Off by default so an existing install, and any bundle synced with history disabled, behaves exactly as before with zero extra storage. Not retroactive: enabling it starts recording at the next sync; a concept first versioned after it was enabled begins at version 1 with the change_kind of that sync.';
+COMMENT ON COLUMN pgokf_private.config.bm25_provider IS
+    'Which BM25 provider extension the bm25 search backend uses: ''auto'' (the default: pg_textsearch when installed, else pg_search), ''pg_textsearch'' (Tiger Data, PostgreSQL license, PostgreSQL 17 and 18), or ''pg_search'' (ParadeDB, AGPL-3.0). Both providers name their index access method bm25 and cannot coexist in one database. A named provider that is not installed makes bm25 search fall back to native with a warning; rebuild_search_index builds the resolved provider''s index.';
 COMMENT ON COLUMN pgokf_private.config.history_retention_days IS
     'Retention window in days for CLOSED pgokf.concept_history versions (valid_to IS NOT NULL): closed versions whose valid_to predates now() - this many days are pruned in the same transaction after each successful sync appends its history, when track_history is on. The single current open version of a concept (valid_to IS NULL) is never pruned. 0 (the default) keeps history indefinitely; must be >= 0.';
 ",
@@ -989,7 +1031,8 @@ mod pgokf {
     /// `default_strict` / `store_source`, an integer for
     /// `sync_log_retention_days`, and a string for
     /// `default_text_search_config` (any installed configuration),
-    /// `search_backend` (`native` or `bm25`), `notify_channel` (a safe
+    /// `search_backend` (`native` or `bm25`), `bm25_provider` (`auto`,
+    /// `pg_textsearch`, or `pg_search`), `notify_channel` (a safe
     /// `LISTEN`/`NOTIFY` identifier, or empty to disable),
     /// `okf_version_policy` (`warn` or `reject`), a boolean for
     /// `track_history`, and an integer for `sync_log_retention_days`,
@@ -1072,6 +1115,7 @@ mod tests {
             ("default_exclude", ConfigKey::DefaultExclude),
             ("store_source", ConfigKey::StoreSource),
             ("search_backend", ConfigKey::SearchBackend),
+            ("bm25_provider", ConfigKey::Bm25Provider),
             ("notify_channel", ConfigKey::NotifyChannel),
             ("okf_version_policy", ConfigKey::OkfVersionPolicy),
             ("embedding_dim", ConfigKey::EmbeddingDim),
@@ -1218,6 +1262,26 @@ mod tests {
         // Arrange & Act & Assert
         assert!(validate_search_backend("native").is_ok());
         assert!(validate_search_backend("bm25").is_ok());
+    }
+
+    #[test]
+    fn validate_bm25_provider_accepts_supported_providers() {
+        // Arrange & Act & Assert
+        assert!(validate_bm25_provider("auto").is_ok());
+        assert!(validate_bm25_provider("pg_search").is_ok());
+        assert!(validate_bm25_provider("pg_textsearch").is_ok());
+    }
+
+    #[test]
+    fn validate_bm25_provider_rejects_unknown_provider() {
+        // Arrange
+        let name = "tantivy";
+
+        // Act
+        let error = validate_bm25_provider(name).expect_err("unknown provider must be rejected");
+
+        // Assert
+        assert!(error.to_string().contains("bm25_provider must be one of"));
     }
 
     #[test]

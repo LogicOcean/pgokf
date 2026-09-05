@@ -254,9 +254,10 @@ weight A, tags/type/description weight B, body weight D. It returns a
 
 BM25 is available as an **optional, config-selected backend**, not a separate
 function. Setting the durable `search_backend` key to `bm25` routes the *same*
-`pgokf.concept_search` through a ParadeDB `pg_search` index - the operator must
-install `pg_search` separately, and search falls back to native FTS with a
-warning when it is absent. There is no standalone `pgokf` `bm25()` function; it
+`pgokf.concept_search` through a provider's `bm25` index (Tiger Data
+`pg_textsearch`, PostgreSQL license, or ParadeDB `pg_search`) - the operator
+must install the provider separately, and search falls back to native FTS
+with a warning when it is absent. There is no standalone `pgokf` `bm25()` function; it
 is a backend mode selected by configuration. See
 [Enabling the BM25 backend](search-guide.md#enabling-the-bm25-backend) and the
 [`search_backend` key](configuration.md#search-backend-search_backend).
@@ -273,10 +274,11 @@ Measured on this project:
   because `ts_rank_cd` must score every match.
 
 For broad top-k queries over very large corpora, the optional `bm25` backend
-(`search_backend=bm25`, backed by ParadeDB `pg_search`) prunes with Block-Max
-WAND top-k instead of scoring the whole match set, so broad queries stay roughly
-flat where native ranking grows linearly. It requires the operator to install
-`pg_search` and falls back to native FTS when it is absent. So native FTS is the
+(`search_backend=bm25`, backed by Tiger Data `pg_textsearch` or ParadeDB
+`pg_search`) prunes with BM25 top-k instead of scoring the whole match set, so
+broad queries stay roughly flat where native ranking grows linearly. It
+requires the operator to install a provider and falls back to native FTS when
+none is present. So native FTS is the
 right default for selective queries and moderate corpora; enable the `bm25`
 backend when you need broad top-k at scale. See
 [Enabling the BM25 backend](search-guide.md#enabling-the-bm25-backend),
@@ -437,14 +439,16 @@ PostgreSQL **15, 16, 17, 18, and 19** from one codebase (pgrx feature flags
 
 ### Which optional extensions does pgokf use?
 
-Three, all runtime-only and all degrading cleanly when absent;
+Four, all runtime-only and all degrading cleanly when absent;
 `CREATE EXTENSION pgokf` never requires any of them:
 
 - **pgvector** enables `concept_search_semantic` (which raises `22023` without
   it) and the semantic half of `concept_search_hybrid` (which degrades to
   lexical-only with a `WARNING`).
-- **`pg_search`** (ParadeDB) enables the `search_backend=bm25` mode;
-  `concept_search` falls back to native FTS with a warning without it.
+- **`pg_textsearch`** (Tiger Data, PostgreSQL license, PostgreSQL 17-18) or
+  **`pg_search`** (ParadeDB, AGPL-3.0) enables the `search_backend=bm25` mode
+  (one per database; `bm25_provider` chooses); `concept_search` falls back to
+  native FTS with a warning without one.
 - **`pg_cron`** enables `schedule_refresh` / `unschedule_refresh`;
   `schedule_refresh` raises `22023` naming the missing dependency without it.
 

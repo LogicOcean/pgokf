@@ -18,11 +18,15 @@ BEGIN
         CREATE EXTENSION IF NOT EXISTS vector;
     END IF;
 
-    -- pg_search must be in shared_preload_libraries before it is created (the
-    -- documented ParadeDB requirement); only auto-create it when the operator
-    -- has preloaded it. It pulls in `vector` via CASCADE.
-    IF EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'pg_search')
+    -- The BM25 providers must be in shared_preload_libraries before they are
+    -- created; only auto-create the one the operator has preloaded. They both
+    -- define the bm25 access method, so at most one can exist per database.
+    IF EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'pg_textsearch')
+       AND preload ~ '(^|,)\s*pg_textsearch\s*(,|$)' THEN
+        CREATE EXTENSION IF NOT EXISTS pg_textsearch;
+    ELSIF EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'pg_search')
        AND preload ~ '(^|,)\s*pg_search\s*(,|$)' THEN
+        -- pg_search pulls in `vector` via CASCADE.
         CREATE EXTENSION IF NOT EXISTS pg_search CASCADE;
     END IF;
 

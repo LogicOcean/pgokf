@@ -12,6 +12,78 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 Nothing yet.
 
+## [0.1.15] - 2026-09-05
+
+**A PostgreSQL-licensed BM25 backend.** The `bm25` search backend now runs on
+a selectable provider, and Tiger Data's `pg_textsearch` (PostgreSQL license,
+PostgreSQL 17 and 18) joins ParadeDB's `pg_search`. The Docker image bundles
+`pg_textsearch` on the 17 and 18 images and no longer bundles `pg_search` by
+default. `ALTER EXTENSION pgokf UPDATE TO '0.1.15'` adds one policy column
+with its default and touches no existing row.
+
+### Added
+
+- **`bm25_provider` policy key** (`auto` | `pg_textsearch` | `pg_search`,
+  default `auto`, which prefers `pg_textsearch` when installed). Both
+  providers name their index access method `bm25` and cannot coexist in one
+  database, so resolution is unambiguous. `rebuild_search_index()` builds the
+  resolved provider's index; `search_index_status()` reports `bm25.provider`
+  and `bm25.provider_setting`; `health().bm25_ready` accepts either provider.
+- **`pg_textsearch` backend.** One expression index over title, description,
+  and body with the catalog's text-search configuration (baked into the
+  index; rebuild after changing it). A page is served by the provider's
+  index-ordered top-k scan (`ORDER BY <expr> <@> to_bm25query(...) LIMIT n`)
+  with the structured filters, the keyset predicate, and row-level security
+  applied as ordinary quals on that scan - inline with invoker rights, no
+  privileged helper - then ordered `rank DESC, bundle_id, concept_id` in SQL.
+  Rows tying the page's last rank are read past the page so keyset pages
+  tile exactly, up to 256 tied rows per boundary (beyond that a `WARNING`
+  and approximate paging). Query text is plain terms, as it already was on
+  `pg_search` (neither provider interprets web-search operators). Covered by
+  new in-database tests (the query shape is asserted to plan as a `bm25`
+  index scan) that run wherever `pg_textsearch` is preloaded, including CI's
+  PostgreSQL 17 and 18 legs.
+- **Image:** `WITH_PG_TEXTSEARCH` (default `auto`: installed on 17 and 18 from
+  the pinned, checksum-verified release package via the shared
+  `fetch-pg-textsearch.sh`, with its PostgreSQL-license notice under
+  `/usr/share/doc`; skipped elsewhere). CI builds the 17/18 images with
+  `WITH_PG_TEXTSEARCH=1` and the smoke test requires a provider there, so a
+  stale checksum table fails the build rather than publishing a provider-less
+  image. `WITH_PG_SEARCH` now defaults to `0`; the ParadeDB build path remains
+  available. `pgokf-restore` skips a `pg_textsearch` extension entry the
+  target cannot replay, as it already did for `pg_search`. The compose stack
+  preloads `pg_textsearch`.
+
+### Changed
+
+- `search_index_status().bm25.available` and `health().bm25_ready` now
+  follow the provider `bm25_provider` resolves to (they were "`pg_search`
+  installed"), so a pinned provider that is missing shows as unavailable
+  even when the other one is present, and the fallback warning names what
+  is installed instead.
+- `concept_search`, `find_similar`, and `concept_search_hybrid` are now
+  `PARALLEL RESTRICTED` (executed in the leader of a parallel plan, never in
+  a worker): the BM25 providers declare their scoring parallel-unsafe, and
+  these functions run it through SPI. Results and signatures are unchanged;
+  the upgrade script relabels the installed functions.
+- Documentation for search backends, configuration, packaging, and the
+  compose deployment covers provider selection and the licensing difference.
+- **Compose stack:** `shared_preload_libraries` now names `pg_textsearch`
+  instead of `pg_search` (overridable through the new `PGOKF_PRELOAD`
+  variable, e.g. `pgokf,pg_cron` for a 15/16/19 image), and the ParadeDB-only
+  `paradedb.planner_warnings` setting is gone. An older compose file that still preloads `pg_search`
+  will not start the 0.1.15 image (the library is no longer in it): update
+  the preload line, or build the image with `WITH_PG_SEARCH=1
+  WITH_PG_TEXTSEARCH=0` to keep ParadeDB. A database that has `pg_search`
+  created must drop it (on the old image, `DROP EXTENSION pg_search CASCADE`)
+  before `pg_textsearch` can be created; the step-by-step migration is in
+  [docs/compose-deployment.md](docs/compose-deployment.md#upgrading-from-0114-paradedb-pg_search-to-0115-pg_textsearch).
+- **Test harness:** the in-database tests that need a preloaded BM25 provider
+  now run when `PGOKF_TEST_PRELOAD` names it (pgrx starts its own instance,
+  so the operator's cluster configuration never reached them, and they had
+  been skipping silently), and fail instead of skipping when the requested
+  provider is unusable.
+
 ## [0.1.14] - 2026-09-04
 
 **Complete logical backups, production container packaging, and native
@@ -874,7 +946,8 @@ queries, native full-text search, and link-graph traversal.
 - The `pgokf_private` schema and its `config` table are readable and writable
   only by the extension owner and `pgokf_admin`; readers cannot see policy.
 
-[Unreleased]: https://github.com/LogicOcean/pgokf/compare/v0.1.14...HEAD
+[Unreleased]: https://github.com/LogicOcean/pgokf/compare/v0.1.15...HEAD
+[0.1.15]: https://github.com/LogicOcean/pgokf/compare/v0.1.14...v0.1.15
 [0.1.14]: https://github.com/LogicOcean/pgokf/compare/v0.1.13...v0.1.14
 [0.1.13]: https://github.com/LogicOcean/pgokf/compare/v0.1.12...v0.1.13
 [0.1.12]: https://github.com/LogicOcean/pgokf/compare/v0.1.11...v0.1.12

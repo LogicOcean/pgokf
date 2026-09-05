@@ -8,7 +8,7 @@ Open Knowledge Format (OKF) catalog on one host:
 - **PostgreSQL** - the `pgokf` extension catalog: `concepts`, `links`,
   `concept_metadata`, and `concept_provenance` with their btree/GIN indexes and
   the weighted `body_tsv` full-text column. The search leg measures the
-  **default native FTS backend**; the optional BM25 (`pg_search`) and pgvector
+  **default native FTS backend**; the optional BM25 (`pg_textsearch` / `pg_search`) and pgvector
   semantic/hybrid backends are not exercised here.
 - **Parquet** - the columnar snapshot produced by `pgokf.export_parquet`
   (zstd-compressed, one file per exported projection table: `concepts`,

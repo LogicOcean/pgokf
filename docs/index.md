@@ -14,7 +14,8 @@ do on its own:
   ranked full-text search runs entirely on stock PostgreSQL FTS with no
   third-party extension, with structured filters, keyset pagination, and faceted
   counts built in, and optional BM25, semantic (vector), and hybrid backends
-  when the operator installs `pg_search` or `pgvector`.
+  when the operator installs a BM25 provider (`pg_textsearch` or `pg_search`)
+  or `pgvector`.
 - **Link-graph traversal** - internal Markdown links become directed edges you
   can walk to a bounded hop count.
 - **Provenance, trust, and lifecycle** - the OKF v0.2 generation/trust/lifecycle
@@ -28,7 +29,8 @@ needs no external file store.
 - **Supported PostgreSQL:** 15, 16, 17, 18, 19
 - **Built with:** Rust (edition 2024) and [pgrx](https://github.com/pgcentralfoundation/pgrx) 0.19
 - **Search backends:** native PostgreSQL FTS by default; an optional
-  `search_backend=bm25` mode routes search through ParadeDB `pg_search`, and
+  `search_backend=bm25` mode routes search through Tiger Data `pg_textsearch`
+  (PostgreSQL license) or ParadeDB `pg_search`, and
   optional semantic and hybrid search use `pgvector`, each when the operator
   installs it (see the [search guide](search-guide.md#enabling-the-bm25-backend)
   and [semantic and hybrid search](search-guide.md#semantic-and-hybrid-search-optional-pgvector))
@@ -72,7 +74,7 @@ OKF term.
 | **Incremental sync** | `register_bundle` / `refresh_bundle` re-parse only changed files (BLAKE3 content hashing); deleted files are removed; unchanged rows keep their `indexed_at`. |
 | **Mountless ingestion** | `register_bundle_content` projects concept bytes handed over the wire; the `pgokf-ingest` companion streams a bundle from S3-compatible object storage (one-shot or `--watch`), so the backend never mounts a bucket. |
 | **Weighted full-text search** | `concept_search` ranks with `websearch_to_tsquery` + `ts_rank_cd` over a `tsvector` weighted title (A), tags/type/description (B), body (D), returning a `ts_headline` snippet, with structured filters (type / tags / status / trust tier), keyset pagination (`after_cursor`), faceted counts (`search_facets`), and `find_similar` content similarity. |
-| **Pluggable search backends** | Native FTS by default; `search_backend=bm25` routes the same call through ParadeDB `pg_search`; `concept_search_semantic` and `concept_search_hybrid` add vector and RRF-fused search when `pgvector` is installed. Each optional backend degrades cleanly when its extension is absent. |
+| **Pluggable search backends** | Native FTS by default; `search_backend=bm25` routes the same call through Tiger Data `pg_textsearch` or ParadeDB `pg_search`; `concept_search_semantic` and `concept_search_hybrid` add vector and RRF-fused search when `pgvector` is installed. Each optional backend degrades cleanly when its extension is absent. |
 | **Link graph** | `concept_neighbors` walks resolved, non-external internal links to a bounded hop count and reports the shortest path taken. |
 | **Provenance projection** | OKF `generated`, `verified[]`, `sources[]`, `status`, `stale_after`, and `usage_window` land in `concept_provenance`, `concept_verification`, and `concept_provenance_source`; Attested-Computation references become graph edges. |
 | **Multi-tenancy (opt-in)** | Row-level security keyed on the `pgokf.tenant` session GUC isolates tenants' bundles; a session that sets no tenant sees everything, so existing installs are unaffected. See [Multi-tenancy](multi-tenancy.md). |
@@ -118,7 +120,7 @@ your first real bundle - start with [Getting started](getting-started.md).
 | [OKF authoring](okf-authoring.md) | How to structure a bundle: concepts, frontmatter, the reserved `index.md`, provenance families, the actor convention. |
 | [Search guide](search-guide.md) | Writing effective `concept_search` queries, ranking and headlines, structured filters, keyset pagination, facets, and the optional BM25, semantic, and hybrid backends. |
 | [Deployment topologies](deployment-topologies.md) | The two storage tiers, data-lake vs self-contained installs, bucket mounts vs mountless ingestion, and where the files live. |
-| [Docker Compose deployment](compose-deployment.md) | The reference single-host production stack: the multi-arch server image with pgvector, pg_cron, and pg_search, the embedding daemon, verified backups, and optional ingestion and MCP services. |
+| [Docker Compose deployment](compose-deployment.md) | The reference single-host production stack: the multi-arch server image with pgvector, pg_cron, and pg_textsearch, the embedding daemon, verified backups, and optional ingestion and MCP services. |
 | [Operations](operations.md) | Running pgokf in production: monitoring, audit logs, retirement, sync scheduling, exports, backup, and upgrades. |
 | [Multi-tenancy](multi-tenancy.md) | Opt-in row-level tenant isolation keyed on the `pgokf.tenant` session GUC, and what it does and does not guarantee. |
 | [Version history](version-history.md) | Opt-in append-only concept history and point-in-time queries (`concept_history`, `concept_as_of`). |

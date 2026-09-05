@@ -77,6 +77,17 @@ jobs:
           fi
           echo "available=true" >> "$GITHUB_OUTPUT"
 
+      # pg_textsearch (the default BM25 provider) ships for 17 and 18 only.
+      # Install its pinned, checksum-verified package on those legs - through
+      # the same script the image build uses - so the in-database provider
+      # tests run for real there (PGOKF_TEST_PRELOAD below) instead of
+      # skipping everywhere.
+      - name: Install pg_textsearch (BM25 provider tests)
+        if: steps.pgdg.outputs.available == 'true' && (matrix.pg == 17 || matrix.pg == 18)
+        run: |
+          deb="$(packaging/docker/fetch-pg-textsearch.sh ${{ matrix.pg }} amd64 "${RUNNER_TEMP}")"
+          sudo apt-get install -y --no-install-recommends "${deb}"
+
       # Keep this version synchronized with the workspace `pgrx` dependency in
       # the root Cargo.toml (currently 0.19.2).
       - name: Install and initialize cargo-pgrx
@@ -114,9 +125,14 @@ jobs:
       # parallel harness. Running the in-DB suite single-threaded is
       # deterministic; it does not reflect any production concurrency issue
       # (real set_config runs in its own short transaction).
+      #
+      # PGOKF_TEST_PRELOAD preloads the provider into pgrx's throwaway instance
+      # on the legs that installed it; with it set, the provider tests fail
+      # rather than skip if the provider turns out to be unusable.
       - name: Test
         if: steps.pgdg.outputs.available == 'true'
         working-directory: crates/extension
         env:
           RUST_TEST_THREADS: "1"
+          PGOKF_TEST_PRELOAD: ${{ (matrix.pg == 17 || matrix.pg == 18) && 'pg_textsearch' || '' }}
         run: cargo pgrx test pg${{ matrix.pg }} --no-default-features --features pg${{ matrix.pg }}

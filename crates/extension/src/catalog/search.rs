@@ -283,7 +283,12 @@ mod pgokf {
     // three original inputs, the four structured filters, and the pagination
     // cursor), not a decomposable Rust smell.
     #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
-    #[pg_extern(stable, parallel_safe, requires = ["catalog_tables", "provenance_table"])]
+    // PARALLEL RESTRICTED (leader only): the bm25 backend's provider scoring
+    // is declared PARALLEL UNSAFE upstream (pg_textsearch attaches per-backend
+    // shared state that a freshly started worker lacks), and the backend runs
+    // it through SPI inside this function. Restricting the function keeps a
+    // parallel outer plan from executing that scoring in a worker.
+    #[pg_extern(stable, parallel_restricted, requires = ["catalog_tables", "provenance_table"])]
     fn concept_search(
         query: &str,
         bundle_id: default!(Option<i64>, "NULL"),
@@ -310,7 +315,7 @@ mod pgokf {
 REVOKE ALL ON FUNCTION pgokf.concept_search(text, bigint, integer, text, text[], text, text, jsonb) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pgokf.concept_search(text, bigint, integer, text, text[], text, text, jsonb) TO pgokf_reader;
 COMMENT ON FUNCTION pgokf.concept_search(text, bigint, integer, text, text[], text, text, jsonb) IS
-    'Rank catalog concepts. Reader-level; searches active bundles only (enabled AND not retired). Optional structured filters (each a no-op when NULL): concept_type (exact type), tags (ALL-of containment), status and trust_tier (from concept_provenance). Stable total order rank DESC, bundle_id ASC, concept_id ASC; pass after_cursor (a {rank,bundle_id,concept_id} JSON object copied from the previous page''s last row) for OFFSET-free keyset pagination (a malformed cursor raises 22023). Uses the search_backend configuration: native full-text search (websearch_to_tsquery + ts_rank_cd) by default, or ParadeDB pg_search BM25 when set to bm25 (falling back to native if pg_search or its index is absent).';
+    'Rank catalog concepts. Reader-level; searches active bundles only (enabled AND not retired). Optional structured filters (each a no-op when NULL): concept_type (exact type), tags (ALL-of containment), status and trust_tier (from concept_provenance). Stable total order rank DESC, bundle_id ASC, concept_id ASC; pass after_cursor (a {rank,bundle_id,concept_id} JSON object copied from the previous page''s last row) for OFFSET-free keyset pagination (a malformed cursor raises 22023). Uses the search_backend configuration: native full-text search (websearch_to_tsquery + ts_rank_cd) by default, or BM25 top-k through the provider the bm25_provider policy resolves to (Tiger Data pg_textsearch or ParadeDB pg_search) when set to bm25, falling back to native if the provider or its index is absent.';
 ",
         name = "search_function_hardening",
         requires = [concept_search]

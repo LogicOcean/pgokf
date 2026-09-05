@@ -312,7 +312,7 @@ The 39 SQL functions in the `pgokf` schema, grouped by tier (`reader` <
 | `reset_config(key)` | admin | Reset one key (or all when `NULL`). |
 | `purge_retired(older_than)` | admin | Hard-delete bundles retired longer than the interval. |
 | `list_access_log(bundle_id, max_rows)` | admin | The access/exfiltration audit trail. |
-| `rebuild_search_index()` | admin | (Re)build the optional `pg_search` BM25 index; no-op without `pg_search`. |
+| `rebuild_search_index()` | admin | (Re)build the optional BM25 index for the provider `bm25_provider` resolves to (`pg_textsearch` or `pg_search`); no-op without one. |
 | `rebuild_embedding_index()` | admin | Build the pgvector HNSW cosine index; logged no-op without pgvector. |
 | `schedule_refresh(bundle_id, schedule)` | admin | Register a `pg_cron` re-sync job; `22023` without `pg_cron`. |
 | `unschedule_refresh(bundle_id)` | admin | Remove the `pg_cron` job; clean no-op when absent. |
@@ -413,7 +413,8 @@ Durable policy in `pgokf_private.config`, managed via `set_config` /
 | `default_strict` | Whether sync rejects malformed files (`true`, the default) instead of skipping them with a warning. |
 | `default_exclude` | Default bundle-relative glob patterns excluded from discovery. |
 | `store_source` | Whether sync stores verbatim source bytes in `concept_source`. See [`store_source`](#store_source). |
-| `search_backend` | `native` (built-in FTS, the default) or `bm25` (route `concept_search` through ParadeDB `pg_search` when installed). |
+| `search_backend` | `native` (built-in FTS, the default) or `bm25` (route `concept_search` through a BM25 provider - Tiger Data `pg_textsearch` or ParadeDB `pg_search` - when installed). |
+| `bm25_provider` | Which BM25 provider the `bm25` backend uses: `auto` (default: `pg_textsearch` when installed, else `pg_search`), `pg_textsearch`, or `pg_search`. |
 | `embedding_dim` | Expected embedding length for `set_concept_embedding` and the HNSW index typmod (default 1536). |
 | `notify_channel` | When set, a successful sync emits `pg_notify(<channel>, ...)` with the change summary; empty (default) disables it. |
 | `okf_version_policy` | `warn` (default) or `reject` for bundles declaring an unsupported OKF `okf_version`. |
@@ -449,17 +450,19 @@ respecting weights), and `ts_headline` produces the snippet returned as
 Best Match 25, a ranking function used by inverted-index search engines. In
 pgokf, BM25 is an **optional, config-selected search backend** - setting the
 durable `search_backend` key to `bm25` routes `pgokf.concept_search` through a
-ParadeDB `pg_search` index when the operator has installed it. It is a backend
+provider's `bm25` index (Tiger Data `pg_textsearch` or ParadeDB `pg_search`,
+chosen by `bm25_provider`) when the operator has installed it. It is a backend
 mode, **not a standalone function** (there is no `bm25()` function), and it
-falls back to native FTS when `pg_search` is absent. See
+falls back to native FTS when the provider is absent. See
 [Enabling the BM25 backend](search-guide.md#enabling-the-bm25-backend).
 
 ### WAND top-k
 
 Weak-AND, a dynamic-pruning algorithm for retrieving the top *k* documents
-without scoring the entire match set. It is the mechanism the optional `bm25`
-search backend uses (via ParadeDB `pg_search`) to keep broad queries roughly
-flat where native `ts_rank_cd` scales linearly. See
+without scoring the entire match set. It is the kind of top-k pruning the
+optional `bm25` search backend relies on (ParadeDB `pg_search` implements
+Block-Max WAND; Tiger Data `pg_textsearch` its own block-max scoring) to keep
+broad queries roughly flat where native `ts_rank_cd` scales linearly. See
 [Enabling the BM25 backend](search-guide.md#enabling-the-bm25-backend).
 
 ### Embedding / semantic search

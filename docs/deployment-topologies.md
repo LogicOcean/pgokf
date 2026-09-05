@@ -383,7 +383,8 @@ How it behaves:
   `concept_neighbors`, `list_bundles`, `bundle_info`, `catalog_stats`, and the
   rest) run over the base tables, so RLS scopes them with no argument change. The
   few `SECURITY DEFINER` readers apply the identical tenant predicate explicitly,
-  as does the `pgokf.bm25_hits` helper the BM25 backend runs through.
+  as does the `pgokf.bm25_hits` helper the BM25 backend runs through on the
+  ParadeDB provider (the `pg_textsearch` provider runs inline under RLS).
 - **Writes are confined too.** The `SECURITY DEFINER` write/admin functions that
   take an explicit `bundle_id` (`refresh_bundle`, `unregister_bundle`,
   `set_bundle_enabled`, `retire_bundle` / `unretire_bundle`,
@@ -440,5 +441,5 @@ Answer these in order:
 Then follow [operations.md](operations.md) for running whichever you pick, and
 [configuration.md](configuration.md) for the exact knobs. For a ready-made
 single-host stack - the multi-architecture server image with pgvector, pg_cron,
-and pg_search, the embedding daemon, and verified backups - see
+and pg_textsearch, the embedding daemon, and verified backups - see
 [compose-deployment.md](compose-deployment.md).

@@ -4529,6 +4529,305 @@ The anchor concept never changes across the runbook's revisions.\n";
         assert_eq!(config["history_retention_days"].as_i64(), Some(7));
     }
 
+    /// `bm25_provider` is a durable policy key: defaults to `auto`, round-trips
+    /// the two named providers, rejects anything else with 22023, and resets.
+    #[pg_test]
+    fn bm25_provider_policy_round_trips_and_rejects_unknown_values() {
+        // Arrange: the default.
+        let initial = Spi::get_one::<String>("SELECT pgokf.get_config() ->> 'bm25_provider'")
+            .expect("get_config executes")
+            .expect("key is present");
+        assert_eq!(initial, "auto");
+
+        // Act: set each supported value, then an unsupported one.
+        Spi::run("SELECT pgokf.set_config('bm25_provider', '\"pg_textsearch\"'::jsonb)")
+            .expect("pg_textsearch is accepted");
+        let set = Spi::get_one::<String>("SELECT pgokf.get_config() ->> 'bm25_provider'")
+            .expect("get_config executes")
+            .expect("key is present");
+        Spi::run(
+            "CREATE FUNCTION pg_temp.pgokf_provider_sqlstate() RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.set_config('bm25_provider', '\"tantivy\"'::jsonb);
+                 RETURN 'not-rejected';
+             EXCEPTION WHEN invalid_parameter_value THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("rejection probe function is creatable");
+        let rejected = Spi::get_one::<String>("SELECT pg_temp.pgokf_provider_sqlstate()")
+            .expect("rejection probe executes")
+            .expect("the probe reports a SQLSTATE");
+
+        // Assert
+        assert_eq!(set, "pg_textsearch");
+        assert_eq!(rejected, "22023", "an unknown provider must raise 22023");
+        Spi::run("SELECT pgokf.reset_config('bm25_provider')").expect("reset executes");
+        let reset = Spi::get_one::<String>("SELECT pgokf.get_config() ->> 'bm25_provider'")
+            .expect("get_config executes")
+            .expect("key is present");
+        assert_eq!(reset, "auto");
+    }
+
+    /// The pg_textsearch provider must serve a non-superuser reader under
+    /// row-level security with plain invoker rights, agree with the direct
+    /// operator, and honour the tenant scope. Requires pg_textsearch to be
+    /// installed and preloaded; skips with a NOTICE otherwise.
+    #[pg_test]
+    fn pg_textsearch_provider_serves_a_non_superuser_reader_under_rls() {
+        // Arrange: pg_textsearch available and loadable, else skip.
+        if !bm25_provider_usable_or_skip("pg_textsearch") {
+            return;
+        }
+        Spi::run("CREATE EXTENSION IF NOT EXISTS pg_textsearch")
+            .expect("pg_textsearch is creatable");
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        Spi::run("SELECT pgokf.set_config('search_backend', '\"bm25\"'::jsonb)")
+            .expect("backend is switchable");
+        let built = Spi::get_one::<bool>("SELECT pgokf.rebuild_search_index()")
+            .expect("rebuild executes")
+            .expect("rebuild returns a boolean");
+        assert!(
+            built,
+            "the bm25 index must be built when pg_textsearch is present"
+        );
+        let status = Spi::get_one::<pgrx::JsonB>("SELECT pgokf.search_index_status()")
+            .expect("status executes")
+            .expect("status is not null")
+            .0;
+        assert_eq!(status["bm25"]["provider"].as_str(), Some("pg_textsearch"));
+        assert_eq!(status["bm25"]["index_exists"].as_bool(), Some(true));
+        Spi::run("CREATE ROLE pgokf_textsearch_reader").expect("reader role is creatable");
+        Spi::run("GRANT pgokf_reader TO pgokf_textsearch_reader")
+            .expect("reader role is grantable");
+
+        // Act: search as the non-owner reader (RLS applies to this session).
+        Spi::run("SET ROLE pgokf_textsearch_reader").expect("role switch succeeds");
+        let hit = Spi::get_one_with_args::<String>(
+            "SELECT concept_id FROM pgokf.concept_search('peregrine', $1, 5)",
+            &[bundle_id.into()],
+        )
+        .expect("pg_textsearch search executes for a non-superuser reader");
+        let rank = Spi::get_one_with_args::<f32>(
+            "SELECT rank FROM pgokf.concept_search('peregrine', $1, 5)",
+            &[bundle_id.into()],
+        )
+        .expect("rank is readable")
+        .expect("rank is not null");
+        let unrelated = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concept_search('zzzqqqxxx', $1, 5)",
+            &[bundle_id.into()],
+        )
+        .expect("non-matching search executes")
+        .expect("count is not null");
+        Spi::run("SELECT set_config('pgokf.tenant', 'someone-else', true)")
+            .expect("tenant scope is settable");
+        let foreign_hits = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concept_search('peregrine', $1, 5)",
+            &[bundle_id.into()],
+        )
+        .expect("scoped search executes")
+        .expect("count is not null");
+        Spi::run("SELECT set_config('pgokf.tenant', '', true)").expect("tenant scope resets");
+        Spi::run("RESET ROLE").expect("role resets");
+
+        // Assert: the BM25 hit, a positive score, no phantom matches, tenant-scoped.
+        assert_eq!(
+            hit.as_deref(),
+            Some("alpha"),
+            "the reader gets the BM25-ranked hit"
+        );
+        assert!(
+            rank > 0.0,
+            "pg_textsearch scores are surfaced as positive ranks"
+        );
+        assert_eq!(unrelated, 0, "rows that do not match are not returned");
+        assert_eq!(foreign_hits, 0, "a foreign tenant sees none of the rows");
+    }
+
+    /// Whether the BM25 provider extension `name` is usable in this test
+    /// cluster: installed in the library directory *and* named in
+    /// `shared_preload_libraries` (both providers refuse to load otherwise).
+    /// Tests that need a provider skip with a NOTICE when it is not - except
+    /// when the run explicitly asked for it through `PGOKF_TEST_PRELOAD`, in
+    /// which case an unusable provider is a setup error and fails the test,
+    /// so a local provider run can never pass vacuously.
+    fn bm25_provider_usable_or_skip(name: &str) -> bool {
+        let usable = Spi::get_one_with_args::<bool>(
+            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_available_extensions WHERE name = $1)
+                AND pg_catalog.current_setting('shared_preload_libraries')
+                    ~ ('(^|,)\\s*' || $1 || '\\s*(,|$)')",
+            &[name.into()],
+        )
+        .expect("availability probe executes")
+        .expect("probe is not null");
+        if usable {
+            return true;
+        }
+        assert!(
+            !crate::test_support::preload_requested(name),
+            "{} was requested through {} but is not installed and preloaded in the test cluster",
+            name,
+            crate::test_support::PRELOAD_ENV,
+        );
+        pgrx::notice!(
+            "skipping {name} test: {name} is not installed and preloaded in this cluster"
+        );
+        false
+    }
+
+    /// The `pg_textsearch` candidate scan must plan as a top-k index scan on
+    /// the provider's index: the shape (`ORDER BY <expr> <@> to_bm25query(...)
+    /// LIMIT n`, filters as quals) is what makes the backend faster than
+    /// native rather than a scored sequential scan. Sequential scans are
+    /// disabled for the check so the two-concept fixture cannot mask a shape
+    /// that would seq-scan a large table.
+    #[pg_test]
+    fn pg_textsearch_candidate_scan_plans_as_a_bm25_index_scan() {
+        // Arrange
+        if !bm25_provider_usable_or_skip("pg_textsearch") {
+            return;
+        }
+        Spi::run("CREATE EXTENSION IF NOT EXISTS pg_textsearch")
+            .expect("pg_textsearch is creatable");
+        let bundle = FixtureBundle::create();
+        let _bundle_id = register_fixture(&bundle);
+        Spi::run("SELECT pgokf.set_config('search_backend', '\"bm25\"'::jsonb)")
+            .expect("backend is switchable");
+        assert_eq!(
+            Spi::get_one::<bool>("SELECT pgokf.rebuild_search_index()").expect("rebuild executes"),
+            Some(true)
+        );
+        Spi::run("SET LOCAL enable_seqscan = off").expect("planner setting applies");
+        let schema = Spi::get_one::<String>(
+            "SELECT n.nspname::pg_catalog.text FROM pg_catalog.pg_extension e
+             JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
+             WHERE e.extname = 'pg_textsearch'",
+        )
+        .expect("schema lookup executes")
+        .expect("pg_textsearch has a schema");
+        let explain = format!(
+            "EXPLAIN (FORMAT TEXT, COSTS OFF) {}",
+            crate::catalog::search_backend::textsearch_candidate_query(&schema)
+        );
+
+        // Act: explain the exact statement the backend runs, with its bound
+        // parameters (query text, no bundle scope, a page of five, the
+        // configuration, no filters, no cursor).
+        let plan: Vec<String> = Spi::connect(|client| {
+            let table = client.select(
+                &explain,
+                None,
+                &[
+                    "peregrine".into(),
+                    None::<i64>.into(),
+                    5i64.into(),
+                    "pg_catalog.english".into(),
+                    None::<&str>.into(),
+                    None::<Vec<String>>.into(),
+                    None::<&str>.into(),
+                    None::<&str>.into(),
+                    None::<f32>.into(),
+                    None::<i64>.into(),
+                    None::<&str>.into(),
+                ],
+            )?;
+            let mut lines = Vec::new();
+            for row in table {
+                lines.push(row.get::<String>(1)?.unwrap_or_default());
+            }
+            Ok::<_, pgrx::spi::Error>(lines)
+        })
+        .expect("explain executes");
+        let plan_text = plan.join("\n");
+
+        // Assert
+        assert!(
+            plan_text.contains("Index Scan using concepts_bm25_idx on concepts"),
+            "the candidate scan must be an index scan on the bm25 index:\n{plan_text}"
+        );
+        assert!(
+            plan_text.contains("Order By:"),
+            "the index scan must be ordered by the provider operator:\n{plan_text}"
+        );
+    }
+
+    /// Keyset pages under `pg_textsearch` must tile the full result set: a
+    /// page size of one, walked with each page's last row as the next cursor,
+    /// visits every hit of the unpaginated search exactly once.
+    #[pg_test]
+    fn pg_textsearch_keyset_pages_tile_the_result_set() {
+        // Arrange
+        if !bm25_provider_usable_or_skip("pg_textsearch") {
+            return;
+        }
+        Spi::run("CREATE EXTENSION IF NOT EXISTS pg_textsearch")
+            .expect("pg_textsearch is creatable");
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        Spi::run("SELECT pgokf.set_config('search_backend', '\"bm25\"'::jsonb)")
+            .expect("backend is switchable");
+        assert_eq!(
+            Spi::get_one::<bool>("SELECT pgokf.rebuild_search_index()").expect("rebuild executes"),
+            Some(true)
+        );
+        let all: Vec<String> = Spi::connect(|client| {
+            let table = client.select(
+                "SELECT concept_id FROM pgokf.concept_search('concept', $1, 10)",
+                None,
+                &[bundle_id.into()],
+            )?;
+            let mut ids = Vec::new();
+            for row in table {
+                ids.push(row.get::<String>(1)?.expect("concept_id is not null"));
+            }
+            Ok::<_, pgrx::spi::Error>(ids)
+        })
+        .expect("unpaginated search executes");
+        assert!(
+            all.len() >= 2,
+            "the fixture must yield at least two hits for 'concept'"
+        );
+
+        // Act: walk pages of one row each until a page comes back empty.
+        let mut walked = Vec::new();
+        let mut cursor: Option<pgrx::JsonB> = None;
+        loop {
+            let page: Option<pgrx::JsonB> = Spi::connect(|client| {
+                let table = client.select(
+                    "SELECT pg_catalog.jsonb_build_object('rank', rank, 'bundle_id', bundle_id, 'concept_id', concept_id)
+                     FROM pgokf.concept_search('concept', $1, 1, NULL, NULL, NULL, NULL, $2)",
+                    None,
+                    &[bundle_id.into(), cursor.take().into()],
+                )?;
+                if table.is_empty() {
+                    return Ok::<_, pgrx::spi::Error>(None);
+                }
+                table.first().get_one::<pgrx::JsonB>()
+            })
+            .expect("page executes");
+            let Some(row) = page else { break };
+            walked.push(
+                row.0["concept_id"]
+                    .as_str()
+                    .expect("concept_id present")
+                    .to_owned(),
+            );
+            assert!(walked.len() <= all.len() + 1, "pagination must terminate");
+            cursor = Some(row);
+        }
+
+        // Assert
+        assert_eq!(
+            walked, all,
+            "pages must visit every hit once, in the total order"
+        );
+    }
+
     /// The bm25 backend must serve a non-superuser reader. Row-level security
     /// wraps the catalog tables for non-owners in a security-barrier subquery
     /// that pg_search cannot plan its custom scan over, so the backend runs its
@@ -4540,16 +4839,7 @@ The anchor concept never changes across the runbook's revisions.\n";
     #[pg_test]
     fn bm25_backend_serves_a_non_superuser_reader_under_rls() {
         // Arrange: pg_search available and loadable, else skip.
-        let usable = Spi::get_one::<bool>(
-            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_available_extensions WHERE name = 'pg_search')
-                AND pg_catalog.current_setting('shared_preload_libraries') ~ '(^|,)\\s*pg_search\\s*(,|$)'",
-        )
-        .expect("availability probe executes")
-        .expect("probe is not null");
-        if !usable {
-            pgrx::notice!(
-                "skipping bm25 RLS test: pg_search is not installed and preloaded in this cluster"
-            );
+        if !bm25_provider_usable_or_skip("pg_search") {
             return;
         }
         Spi::run("CREATE EXTENSION IF NOT EXISTS pg_search CASCADE")

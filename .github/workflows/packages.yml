@@ -359,22 +359,23 @@ jobs:
             runner: ubuntu-24.04
           - arch: arm64
             runner: ubuntu-24.04-arm
-          # ParadeDB publishes no pg_search package for a pre-GA major, so the
-          # advisory legs build without it (the smoke test adapts).
+          # The BM25 provider (pg_textsearch) ships for 17 and 18 only; those
+          # legs require it (WITH_PG_TEXTSEARCH=1, so a stale checksum table
+          # fails the build instead of silently publishing a provider-less
+          # image), the others build with auto (skips) and the smoke test
+          # adapts.
           - pg: 19
             arch: amd64
             runner: ubuntu-24.04
             experimental: true
-            with_pg_search: "0"
           - pg: 19
             arch: arm64
             runner: ubuntu-24.04-arm
             experimental: true
-            with_pg_search: "0"
     env:
       VERSION: ${{ needs.prep.outputs.version }}
       LOCAL_TAG: pgokf:${{ needs.prep.outputs.version }}-pg${{ matrix.pg }}
-      WITH_PG_SEARCH: ${{ matrix.with_pg_search || '1' }}
+      WITH_PG_TEXTSEARCH: ${{ (matrix.pg == 17 || matrix.pg == 18) && '1' || 'auto' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -407,7 +408,7 @@ jobs:
             RUST_VERSION=${{ env.RUST_TOOLCHAIN }}
             CARGO_PGRX_VERSION=${{ env.CARGO_PGRX_VERSION }}
             PGOKF_VERSION=${{ env.VERSION }}
-            WITH_PG_SEARCH=${{ env.WITH_PG_SEARCH }}
+            WITH_PG_TEXTSEARCH=${{ env.WITH_PG_TEXTSEARCH }}
           tags: ${{ env.LOCAL_TAG }}
           push: false
           load: true
@@ -445,7 +446,6 @@ jobs:
             RUST_VERSION=${{ env.RUST_TOOLCHAIN }}
             CARGO_PGRX_VERSION=${{ env.CARGO_PGRX_VERSION }}
             PGOKF_VERSION=${{ env.VERSION }}
-            WITH_PG_SEARCH=${{ env.WITH_PG_SEARCH }}
           outputs: type=image,name=${{ env.SERVER_IMAGE }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Export digest

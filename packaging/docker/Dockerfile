@@ -5,18 +5,20 @@
 # A drop-in replacement for the official `postgres` image with the pgokf
 # extension built and installed, so `CREATE EXTENSION pgokf;` works out of the
 # box, plus the optional extensions pgokf lights up at runtime - pgvector
-# (semantic / hybrid search), pg_cron (scheduled refresh), and ParadeDB
-# pg_search (BM25 ranking) - each toggled by a build argument. CI builds and
+# (semantic / hybrid search), pg_cron (scheduled refresh), and a BM25 provider:
+# Tiger Data pg_textsearch by default (PostgreSQL license; PostgreSQL 17 and
+# 18 only), or ParadeDB pg_search (AGPL-3.0) when opted in - each toggled by a
+# build argument. CI builds and
 # smoke-tests it natively per PostgreSQL major on amd64 AND arm64, and
 # publishes a multi-architecture manifest to
 # ghcr.io/logicocean/pgokf:<version>-pg<major> on every version tag (so it runs
 # unchanged on x86 servers, arm64 servers, and Apple Silicon).
 #
-# Build (templated for PostgreSQL 15-19 via PG_MAJOR; 19 needs WITH_PG_SEARCH=0
-# until ParadeDB publishes a pg19 package and pg_search.sha256 is regenerated):
+# Build (templated for PostgreSQL 15-19 via PG_MAJOR; the BM25 provider is
+# installed where its publisher ships a package - pg_textsearch on 17 and 18):
 #   docker build -f packaging/docker/Dockerfile \
 #     --build-arg PG_MAJOR=18 \
-#     -t pgokf:0.1.14-pg18 .
+#     -t pgokf:0.1.15-pg18 .
 #
 # The build context MUST be the repository root (it copies the source tree;
 # .dockerignore keeps target/ and .git out). The build is DRY: it delegates the
@@ -27,11 +29,18 @@ ARG PG_MAJOR=18
 ARG RUST_VERSION=1.96.0
 ARG CARGO_PGRX_VERSION=0.19.2
 
-# Optional runtime extensions (1 = install, 0 = omit). pgokf degrades cleanly
-# without any of them; see README.md "Optional capabilities".
+# Optional runtime extensions (1 = install, 0 = omit; pg_textsearch also takes
+# auto = install where Tiger Data publishes a package, i.e. PostgreSQL 17 and
+# 18). pgokf degrades cleanly without any of them; see README.md "Optional
+# capabilities". The two BM25 providers both define the bm25 access method
+# and cannot be enabled together.
 ARG WITH_PGVECTOR=1
 ARG WITH_PG_CRON=1
-ARG WITH_PG_SEARCH=1
+ARG WITH_PG_TEXTSEARCH=auto
+ARG WITH_PG_SEARCH=0
+# Tiger Data pg_textsearch release; every (major, arch) package of this version
+# must have a pinned checksum in packaging/docker/pg_textsearch.sha256.
+ARG PG_TEXTSEARCH_VERSION=1.4.0
 # ParadeDB pg_search release to install; every (major, codename, arch) .deb of
 # this version must have a pinned checksum in packaging/docker/pg_search.sha256.
 ARG PG_SEARCH_VERSION=0.25.6
@@ -98,24 +107,28 @@ FROM postgres:${PG_MAJOR}
 ARG PG_MAJOR
 ARG WITH_PGVECTOR
 ARG WITH_PG_CRON
+ARG WITH_PG_TEXTSEARCH
+ARG PG_TEXTSEARCH_VERSION
 ARG WITH_PG_SEARCH
 ARG PG_SEARCH_VERSION
 ARG PGOKF_VERSION
 
 LABEL org.opencontainers.image.title="pgokf" \
-      org.opencontainers.image.description="PostgreSQL ${PG_MAJOR} with the pgokf Open Knowledge Format catalog extension (plus pgvector, pg_cron, and pg_search when enabled)" \
+      org.opencontainers.image.description="PostgreSQL ${PG_MAJOR} with the pgokf Open Knowledge Format catalog extension (plus pgvector, pg_cron, and a BM25 provider when enabled)" \
       org.opencontainers.image.source="https://github.com/LogicOcean/pgokf" \
       org.opencontainers.image.version="${PGOKF_VERSION}" \
       org.opencontainers.image.licenses="AGPL-3.0-only"
 
 # Optional extensions, installed by one auditable script: pgvector and pg_cron
-# from PGDG, pg_search from the pinned ParadeDB release verified against the
-# checksum table. The script and table are bind-mounted for the step only, so
-# neither ends up in an image layer.
+# from PGDG, the BM25 provider from its pinned GitHub release verified against
+# the committed checksum table. The script and tables are bind-mounted for the
+# step only, so none of them ends up in an image layer.
 RUN --mount=type=bind,source=packaging/docker,target=/tmp/pgokf-packaging,readonly \
     PG_MAJOR="${PG_MAJOR}" \
     WITH_PGVECTOR="${WITH_PGVECTOR}" \
     WITH_PG_CRON="${WITH_PG_CRON}" \
+    WITH_PG_TEXTSEARCH="${WITH_PG_TEXTSEARCH}" \
+    PG_TEXTSEARCH_VERSION="${PG_TEXTSEARCH_VERSION}" \
     WITH_PG_SEARCH="${WITH_PG_SEARCH}" \
     PG_SEARCH_VERSION="${PG_SEARCH_VERSION}" \
     /tmp/pgokf-packaging/install-optional-extensions.sh

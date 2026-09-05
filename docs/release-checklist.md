@@ -119,7 +119,7 @@ The extension ships forward-compatible upgrade scripts named
 script as `pgokf--<crate-version>.sql` and copies every upgrade script
 alongside it, so the update path is available without any manual step. The
 shipped chain runs one script per step from `0.1.0 → 0.1.1` through
-`0.1.13 → 0.1.14` (the current `default_version`).
+`0.1.14 → 0.1.15` (the current `default_version`).
 
 > **0.1.3 was a breaking pre-release re-model.** The `pgokf.concept_provenance`
 > shape changed to conform to OKF v0.2 (see [CHANGELOG.md](https://github.com/LogicOcean/pgokf/blob/main/CHANGELOG.md)).
@@ -175,7 +175,8 @@ ${PG_BIN}/pg_ctl -D "$DATA" -w stop -m fast && rm -rf /tmp/pgokf-rel
       for each supported major.
 - [ ] The Docker images build and pass their smoke tests locally
       (`packaging/docker/smoke-test.sh`, `smoke-test-companions.sh`); if
-      `PG_SEARCH_VERSION` changed, `packaging/docker/pg_search.sha256` was
+      `PG_TEXTSEARCH_VERSION` or `PG_SEARCH_VERSION` changed, the matching
+      `packaging/docker/pg_textsearch.sha256` / `pg_search.sha256` table was
       regenerated.
 
 ## 7. Version bump, changelog, tag
@@ -191,6 +192,10 @@ ${PG_BIN}/pg_ctl -D "$DATA" -w stop -m fast && rm -rf /tmp/pgokf-rel
       release date; add fresh compare/tag links.
 - [ ] Re-run gates 1–5 against the bumped version.
 - [ ] Tag `vX.Y.Z` and push the tag.
+- [ ] After the tag exists, recompute the release tarball's SHA256
+      (`curl -fsSL <tarball> | shasum -a 256`) and commit it into
+      `packaging/homebrew/pgokf.rb` (the pre-tag bump necessarily carries the
+      previous tarball's digest); the same value goes to the tap in step 8.
 
 ## 8. Publish
 
@@ -211,6 +216,7 @@ ${PG_BIN}/pg_ctl -D "$DATA" -w stop -m fast && rm -rf /tmp/pgokf-rel
 | Format | `cargo fmt --all -- --check` | exit 0 |
 | Lint | `cargo clippy … -D warnings` | exit 0 |
 | Tests | `cargo test -p pgokf …` | all pass, incl. `api_stability` |
+| In-database | `RUST_TEST_THREADS=1 cargo pgrx test pg18 …`, once plain and once with `PGOKF_TEST_PRELOAD=pg_textsearch,pg_search` | all pass; the provider tests run (not skip) in the preloaded run |
 | Supply chain | `cargo deny check`, `cargo audit` | no denials/advisories |
 | Schema | `cargo pgrx schema pg18` | builds; comments present |
 | Live smoke | `CREATE EXTENSION` on each major 15–19 | functions work |

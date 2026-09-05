@@ -60,8 +60,9 @@ beyond `pgokf` are required, so it works on every supported server (PostgreSQL
 - ranking is `ts_rank_cd(body_tsv, query)`,
 - the snippet is `ts_headline(<config>, title ‖ description ‖ body_text, query)`.
 
-The **same function** can instead dispatch to a ParadeDB `pg_search` BM25
-backend when the durable `search_backend` policy key is set to `bm25` - the
+The **same function** can instead dispatch to an external BM25 provider
+(Tiger Data `pg_textsearch` or ParadeDB `pg_search`) when the durable
+`search_backend` policy key is set to `bm25` - the
 signature, result columns, and role checks are identical, so nothing in your
 queries changes. See [Enabling the BM25 backend](#enabling-the-bm25-backend).
 
@@ -267,7 +268,12 @@ with no duplicates and no skips even when many hits share the same rank** - the
 `(bundle_id, concept_id)` tiebreak keeps tied ranks in a deterministic sequence.
 The cursor is opaque: copy it verbatim; a malformed cursor raises `22023` rather
 than silently restarting from the first page. `NULL` (the default) is the first
-page. Pagination works identically under the native and BM25 backends.
+page. Pagination works identically under the native and BM25 backends, with
+one bounded exception on the `pg_textsearch` provider: it reads the tie band
+at a page boundary up to 256 rows deep, so pages tile exactly unless more
+than 256 concepts share the boundary score, in which case the server emits a
+`WARNING` and paging across that band is approximate (see
+[Enabling the BM25 backend](#enabling-the-bm25-backend)).
 
 ### Faceted result counts
 
@@ -522,7 +528,9 @@ SELECT pgokf.set_config('default_text_search_config', '"pg_catalog.simple"'::jso
 > rows - they keep the vectors built under the old configuration, and a query
 > parsed under the new one may mismatch them. Set
 > `default_text_search_config` **before the first `register_bundle`**; to change
-> it on an existing catalog, re-index by re-registering the affected bundles.
+> it on an existing catalog, re-index by re-registering the affected bundles,
+> and rebuild a `pg_textsearch` BM25 index with `rebuild_search_index()` (it
+> bakes the configuration in at build time).
 > Full detail - including the value's validation against
 > `pg_catalog.pg_ts_config` - is in
 > [configuration](configuration.md#which-keys-the-current-engine-consults).
@@ -536,65 +544,70 @@ right choice for selective queries and moderate corpora. For **broad,
 relevance-ranked** queries - where a common term matches millions of rows and
 native ranking scales linearly (see
 [Selective vs. broad queries](#selective-vs-broad-queries)) - `pgokf` can
-instead run **BM25 top-k** over a ParadeDB `pg_search` index. Block-Max WAND
-pruning keeps broad queries roughly **flat** where native grows linearly, while
-native stays the winner for selective ones. The `pg_search` version matrix and
-the `search_backend` key are covered in
+instead run **BM25 top-k** over an external provider's `bm25` index, which
+keeps broad queries roughly **flat** where native grows linearly, while native
+stays the winner for selective ones. The `search_backend` and `bm25_provider`
+keys are covered in
 [configuration](configuration.md#search-backend-search_backend); native's
 measured numbers are in [benchmarks](benchmarks.md).
 
 The BM25 backend is **opt-in** and rides on an external extension, so it is off
 until you enable it deliberately.
 
-### Honesty first - the dependency
+### Honesty first - the dependency, and which provider
 
 `native` is the default precisely because it needs nothing beyond `pgokf`. BM25
-requires **ParadeDB `pg_search`**, which:
+requires one of two **provider extensions**, selected by the `bm25_provider`
+policy key (`auto`, the default, prefers `pg_textsearch` when it is installed):
 
-- is licensed **AGPL-3.0** (Community edition) - evaluate that against your
-  distribution model before adopting it;
-- must be added to **`shared_preload_libraries`** (a server restart), and
-  requires **`pgvector`** installed alongside it;
-- targets PostgreSQL **15–18** and is **not** available on every managed
-  PostgreSQL service.
+| | Tiger Data `pg_textsearch` | ParadeDB `pg_search` |
+| --- | --- | --- |
+| License | **PostgreSQL license** | **AGPL-3.0** (community edition) - evaluate that against your distribution model before adopting it |
+| PostgreSQL | 17, 18 | 15-18 |
+| Preload | `shared_preload_libraries` (a restart) | `shared_preload_libraries` (a restart), plus `pgvector` installed alongside |
+| Index | one `bm25` index over an expression concatenating title, description, and body, built with the catalog's text-search configuration (baked in: rebuild after changing it) | one `bm25` index over `id`, `title`, `description`, `body_text`, and `type` |
+| How a page is served | an index-ordered top-k scan (`ORDER BY <expr> <@> to_bm25query(...) LIMIT n`) returns the page's candidates best-first with every filter, the keyset predicate, and RLS applied to the scan; they are then ordered `rank DESC, bundle_id, concept_id` in SQL. Rows that tie the page's last rank are read past the page so pages tile exactly, up to 256 tied rows per boundary (beyond that a `WARNING` and approximate paging). Deep keyset pages cost one scoring call per skipped row. | one `@@@` hit query in the `bm25_hits` helper, ordered and cut in SQL |
+| Query syntax | plain terms: the text is tokenized and any term matches; `-term`, quoted phrases, `OR`, `field:term` are not interpreted | plain terms, likewise (the text goes through `paradedb.match`, not ParadeDB's query language) |
+| Under row-level security | ordinary index access method; runs inline with invoker rights | cannot plan the RLS predicate, so the hit query runs through the `SECURITY DEFINER` helper `pgokf.bm25_hits` (since 0.1.14), which applies the same `pgokf.tenant` predicate the policies enforce |
 
-`pgokf` itself never links `pg_search`: `CREATE EXTENSION pgokf` succeeds with or
-without it, and the code reaches every `pg_search` object only through runtime
-SQL. If you cannot take that dependency, stay on `native` - nothing else in
-`pgokf` needs it.
-
-Because row-level security wraps the catalog tables for every session that is
-not their owner in a shape `pg_search` cannot plan, the BM25 hit query runs
-through the `SECURITY DEFINER` helper `pgokf.bm25_hits` (since 0.1.14), which
-applies the same `pgokf.tenant` predicate the policies enforce. Readers keep
-calling `concept_search`; the helper is an implementation detail with the same
-reader-level access rule.
+Both register an index access method named `bm25`, so **at most one can be
+created per database** - choose one. Neither is available on every managed
+PostgreSQL service. `pgokf` itself never links either: `CREATE EXTENSION pgokf`
+succeeds with or without them, and the code reaches every provider object only
+through runtime SQL. If you cannot take the dependency, stay on `native` -
+nothing else in `pgokf` needs it. Readers keep calling `concept_search`
+whichever provider is active; the provider is an implementation detail with
+the same reader-level access rule.
 
 ### Steps
 
-1. **Install `pg_search` (and `pgvector`) at the cluster level.** The official
-   `ghcr.io/logicocean/pgokf` image already ships both (and creates them when
-   preloaded - see [compose-deployment.md](compose-deployment.md#bm25-ranking-with-pg_search)),
+1. **Install the provider at the cluster level.** The official
+   `ghcr.io/logicocean/pgokf` image ships `pg_textsearch` on its PostgreSQL 17
+   and 18 tags (and creates it when preloaded - see
+   [compose-deployment.md](compose-deployment.md#bm25-ranking-with-pg_textsearch)),
    so on the image this step is only the preload. Elsewhere, install the
-   packages, then add `pg_search` to `shared_preload_libraries` in
+   package, then add the provider to `shared_preload_libraries` in
    `postgresql.conf` and restart:
 
    ```conf
    # postgresql.conf
-   shared_preload_libraries = 'pg_search'
+   shared_preload_libraries = 'pg_textsearch'     # or 'pg_search'
    ```
 
-   Then, in the database that holds the catalog, create the extensions
-   (`CASCADE` pulls in `vector`):
+   Then, in the database that holds the catalog, create the extension (for
+   `pg_search`, `CASCADE` pulls in `vector`):
 
    ```sql
-   CREATE EXTENSION IF NOT EXISTS pg_search CASCADE;
+   CREATE EXTENSION IF NOT EXISTS pg_textsearch;
+   -- or: CREATE EXTENSION IF NOT EXISTS pg_search CASCADE;
    ```
 
-2. **Switch the backend** (admin only):
+2. **Switch the backend** (admin only). `bm25_provider` may stay at `auto`, or
+   be pinned to the provider you installed:
 
    ```sql
    SELECT pgokf.set_config('search_backend', '"bm25"'::jsonb);
+   SELECT pgokf.set_config('bm25_provider', '"pg_textsearch"'::jsonb);   -- optional
    ```
 
 3. **Build the index** with the admin-only function (captured live):
@@ -604,17 +617,21 @@ reader-level access rule.
    -- t
    ```
 
-   `rebuild_search_index()` (re)creates a `bm25` index on `pgokf.concepts` over
-   `id` (the key field), `title`, `description`, `body_text`, and `type`. It is
-   idempotent - safe to re-run - and returns `false` with a `NOTICE` when
-   `pg_search` is not installed (a no-op). Once the index exists, ordinary
+   `rebuild_search_index()` (re)creates the resolved provider's `bm25` index on
+   `pgokf.concepts` (see the table above for what each covers). It is
+   idempotent - safe to re-run - and returns `false` with a `NOTICE` when no
+   usable provider is installed (a no-op). Once the index exists, ordinary
    incremental sync (`register_bundle` / `refresh_bundle`) maintains it
    automatically; re-run `rebuild_search_index()` only if you want it rebuilt
-   from scratch.
+   from scratch, after changing `bm25_provider` (an index built by the other
+   provider is dropped first), or after changing `default_text_search_config`
+   on `pg_textsearch` (its index bakes the configuration in).
 
 That's it - `pgokf.concept_search('database')` now returns BM25-ranked results
-with `paradedb.score` in the `rank` column, still carrying a `ts_headline`
-snippet so the `headline` column is unchanged.
+with the provider's score in the `rank` column (always positive, higher is
+better), still carrying a `ts_headline` snippet so the `headline` column is
+unchanged. `search_index_status()` reports which provider resolved under
+`bm25.provider`.
 
 ### Graceful fallback
 
@@ -623,29 +640,35 @@ not error** - it falls back to native and logs a `WARNING`, so a half-finished
 setup degrades instead of breaking:
 
 ```sql
--- search_backend = 'bm25', but pg_search is not installed:
+-- search_backend = 'bm25', but no provider extension is installed:
 SELECT concept_id FROM pgokf.concept_search('database');
--- WARNING:  pgokf: search_backend is 'bm25' but the pg_search extension is not
---           installed; falling back to native full-text search. ...
+-- WARNING:  pgokf: search_backend is 'bm25' but no BM25 provider is installed
+--           for bm25_provider = 'auto' (pg_textsearch or pg_search); falling
+--           back to native full-text search. Install a provider or set
+--           search_backend to 'native' to silence this warning.
 --  (native results follow)
 ```
 
-The same fallback (with a "no bm25 index" warning) happens when `pg_search` is
-installed but `rebuild_search_index()` has not been run yet. To silence the
+The same fallback (with a "no bm25 index" warning) happens when a provider is
+installed but `rebuild_search_index()` has not been run yet, and when
+`bm25_provider` names a provider that is not installed. To silence the
 warning, either finish the setup or set `search_backend` back to `native`. To
 see at a glance which step is missing, call
 [`pgokf.search_index_status()`](#index-health-pgokfsearch_index_status).
 
 ### Tokenizer differences to expect
 
-The two backends tokenize differently, so a query can rank - or match - slightly
+The backends tokenize differently, so a query can rank - or match - slightly
 differently between them. Native FTS applies the `default_text_search_config`
 dictionary (English stemming by default), so `postgres` stems to match
-`PostgreSQL`. The BM25 index uses `pg_search`'s default tokenizer, which
-lowercases but does not apply that stemmer, so the literal term `postgres` will
-**not** match `postgresql`; search for the term as it appears in the text
-(`database`, `failover`, …). This is expected, not a bug: BM25 is tuned for
-broad relevance ranking, native for dictionary-faithful matching.
+`PostgreSQL`. `pg_textsearch` builds its index with the same text-search
+configuration (`text_config`), so its stemming matches native's, but it
+interprets the query as plain terms - `websearch_to_tsquery` operators (`-`,
+quoted phrases, `OR`) are not applied. `pg_search` uses its own default
+tokenizer, which lowercases but does not stem, so the literal term `postgres`
+will **not** match `postgresql` there; search for the term as it appears in
+the text (`database`, `failover`, …). This is expected, not a bug: BM25 is
+tuned for broad relevance ranking, native for dictionary-faithful matching.
 
 Keep broad queries fast on native, when you are not on BM25, with the
 [pre-filter-then-rank pattern](#the-pattern-pre-filter-then-rank) above.
@@ -762,8 +785,9 @@ cannot tell whether the BM25 index or the embedding index is installed, built,
 and current with the concept set. Reader-level `pgokf.search_index_status()`
 reports exactly that in one `jsonb` document: the configured `search_backend`,
 `native: true` (native FTS is always available), a `bm25` object (`available` =
-`pg_search` installed, `index_exists`, `indexed_rows`, `total_rows`,
-`coverage_pct`) and an `embedding` object (`pgvector_available`, `index_exists`,
+a usable provider installed, `provider` = the resolved provider or `null`,
+`provider_setting` = the `bm25_provider` policy value, `index_exists`,
+`indexed_rows`, `total_rows`, `coverage_pct`) and an `embedding` object (`pgvector_available`, `index_exists`,
 `embedded_rows`, `total_concepts`, `coverage_pct`, `dim`):
 
 ```sql
@@ -786,6 +810,7 @@ tenant's rows.
   ceilings (`pgokf.max_graph_hops`, and more).
 - [Benchmarks](benchmarks.md) - measured FTS / filter / graph performance.
 - [Configuration](configuration.md#search-backend-search_backend) - the
-  `search_backend` key and the `pg_search` version matrix for the BM25 backend.
+  `search_backend` and `bm25_provider` keys and the provider matrix for the
+  BM25 backend.
 - Example queries: [`examples/queries/search.sql`](https://github.com/LogicOcean/pgokf/blob/main/examples/queries/search.sql),
   [`examples/queries/graph.sql`](https://github.com/LogicOcean/pgokf/blob/main/examples/queries/graph.sql).

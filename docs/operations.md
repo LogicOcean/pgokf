@@ -216,7 +216,8 @@ SELECT jsonb_pretty(pgokf.search_index_status());
 {
   "search_backend": "native",
   "native": true,
-  "bm25":      { "available": false, "index_exists": false,
+  "bm25":      { "available": false, "provider": null, "provider_setting": "auto",
+                 "index_exists": false,
                  "indexed_rows": 0, "total_rows": 44000, "coverage_pct": 0.0 },
   "embedding": { "pgvector_available": true, "index_exists": true,
                  "embedded_rows": 41800, "total_concepts": 44000,
@@ -234,7 +235,7 @@ are no concepts to cover.
 When `search_backend = bm25` but `index_exists` is `false`, searches fall back
 to native FTS with a warning until the admin-only `pgokf.rebuild_search_index()`
 creates (or rebuilds) the bm25 index; it is a clean no-op returning `false` when
-`pg_search` is not installed.
+no BM25 provider extension is installed (`provider` is then `null`).
 
 ### Search-index residency
 
@@ -391,8 +392,9 @@ The Docker image bundles this procedure as `pgokf-backup` (one command that
 writes a verified custom-format archive, a `pg_dumpall --roles-only` file, and
 checksums, with retention) and `pgokf-restore` (a single-transaction,
 stop-on-first-error restore that skips the archive entries a database this
-image initialized cannot replay: pg_search's unowned `paradedb` schema and,
-for a differently named target database, pg_cron's objects) - see
+image initialized cannot replay: ParadeDB pg_search's unowned `paradedb`
+schema, when that provider was used, and, for a differently named target
+database, pg_cron's objects) - see
 [compose-deployment.md](compose-deployment.md#backups-and-restore).
 
 Notes:
@@ -451,7 +453,7 @@ SELECT pgokf.version();   -- the loaded library's version
 
 `pgokf` ships an explicit migration chain, so PostgreSQL can walk intermediate
 steps for you: the packaged scripts step one minor at a time from `0.1.0`
-through `0.1.14` (`0.1.0 -> 0.1.1 -> ... -> 0.1.13 -> 0.1.14`), alongside a full
+through `0.1.15` (`0.1.0 -> 0.1.1 -> ... -> 0.1.14 -> 0.1.15`), alongside a full
 base install for the current version. `ALTER EXTENSION pgokf UPDATE` applies the
 necessary steps in order.
 
@@ -561,7 +563,7 @@ size hardware and set expectations; do not extrapolate other numbers from them.
 | ----------- | -------- |
 | Selective / point / tag / type recall | Sub-millisecond to roughly ~10 ms, holding up to ~10M concepts (index-backed). |
 | Broad "rank everything" FTS | Scales **linearly** with corpus size: ≈322 ms @ 1M → ≈2.4 s @ 10M → ≈29 s @ 50M. |
-| Broad query on the optional `bm25` backend | Block-Max WAND top-k pruning keeps broad queries roughly flat instead of scaling linearly; requires ParadeDB `pg_search` installed by the operator. |
+| Broad query on the optional `bm25` backend | BM25 top-k pruning keeps broad queries roughly flat instead of scaling linearly; requires a provider extension (Tiger Data `pg_textsearch` or ParadeDB `pg_search`) installed by the operator. |
 
 Reading these:
 
@@ -576,11 +578,13 @@ Reading these:
   `body_tsv` GIN index resident in RAM (below).
 - **BM25 is a shipped *optional* backend, not a standalone function.** Setting
   the durable `search_backend` key to `bm25` routes the same
-  `pgokf.concept_search` through a ParadeDB `pg_search` index at runtime; it
+  `pgokf.concept_search` through a provider's `bm25` index at runtime (Tiger
+  Data `pg_textsearch` or ParadeDB `pg_search`, chosen by `bm25_provider`); it
   keeps broad top-k queries roughly flat where native ranking grows linearly.
-  It requires the operator to install `pg_search` separately - `pgokf` takes no
-  hard dependency on it - and search **falls back to native FTS with a warning**
-  when `pg_search` or its index is absent. There is no `bm25()` function; it is a
+  It requires the operator to install the provider separately - `pgokf` takes
+  no hard dependency on it - and search **falls back to native FTS with a
+  warning** when the provider or its index is absent. There is no `bm25()`
+  function; it is a
   backend mode selected by configuration. See
   [Enabling the BM25 backend](search-guide.md#enabling-the-bm25-backend) and the
   [`search_backend` key](configuration.md#search-backend-search_backend).

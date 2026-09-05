@@ -101,6 +101,7 @@ admin-only).
 | `default_exclude` | array of strings | `[]` | each pattern non-empty and NUL-free |
 | `store_source` | boolean | `false` | must be a boolean |
 | `search_backend` | string | `"native"` | one of `"native"`, `"bm25"` |
+| `bm25_provider` | string | `"auto"` | one of `"auto"`, `"pg_textsearch"`, `"pg_search"` |
 | `notify_channel` | string | `""` | empty (disabled) or a safe channel identifier (letters, digits, underscore; leading letter/underscore; ≤ 63 bytes) |
 | `okf_version_policy` | string | `"warn"` | one of `"warn"`, `"reject"` |
 | `embedding_dim` | integer | `1536` | between `1` and `16000` |
@@ -112,7 +113,7 @@ admin-only).
 Accuracy matters here. As of this release the engine consults **every** key:
 it **enforces `allowed_roots`**, **applies `default_text_search_config`** to
 both indexing and querying, **honors `store_source`**, `search_backend`,
-`default_strict`, and `default_exclude`, and **activates
+`bm25_provider`, `default_strict`, and `default_exclude`, and **activates
 `sync_log_retention_days`**, `notify_channel`, `okf_version_policy`,
 `embedding_dim`, `track_history`, and `history_retention_days`:
 
@@ -121,7 +122,8 @@ both indexing and querying, **honors `store_source`**, `search_backend`,
 | `allowed_roots` | **Enforced.** When non-empty, a registered bundle path must resolve inside one of the roots (symlink-escape safe), else `22023`. |
 | `default_text_search_config` | **Applied.** Used as the `regconfig` for `to_tsvector` when building each concept's `body_tsv` at index time, and for `websearch_to_tsquery`/`ts_headline` at query time, so query parsing matches the configuration that indexed the rows. See the caveat below. |
 | `store_source` | **Honored.** When `true`, sync stores each concept's verbatim source bytes in `pgokf.concept_source`; when `false` (default) it stores none. See the storage-tiers section below. |
-| `search_backend` | **Applied.** Selects the ranked-search backend `pgokf.concept_search` dispatches to: `native` PostgreSQL FTS (default) or `bm25` (ParadeDB `pg_search`). When `bm25` but `pg_search` or its index is absent, search falls back to native with a warning. See the search-backend section below. |
+| `search_backend` | **Applied.** Selects the ranked-search backend `pgokf.concept_search` dispatches to: `native` PostgreSQL FTS (default) or `bm25` (an external BM25 provider extension). When `bm25` but the provider or its index is absent, search falls back to native with a warning. See the search-backend section below. |
+| `bm25_provider` | **Applied (new in 0.1.15).** Which BM25 provider the `bm25` backend runs on: `auto` (default: Tiger Data `pg_textsearch` when installed, else ParadeDB `pg_search`), or one of the two by name. `rebuild_search_index()` builds the resolved provider's index. See the search-backend section below. |
 | `sync_log_retention_days` | **Applied (new in 0.1.5).** After each successful sync appends its `pgokf_private.sync_log` audit row, history older than `now() - this many days` is pruned in the same transaction. `0` (or no older rows) keeps history indefinitely. See the audit-log section below. |
 | `notify_channel` | **Applied (new in 0.1.5).** When non-empty, a successful sync emits `pg_notify(<channel>, <json>)`; empty (default) disables it with zero overhead. See the change-notification section below. |
 | `okf_version_policy` | **Applied (new in 0.1.5).** Governs how sync treats a bundle that declares an unsupported OKF `okf_version`: `warn` (default) logs a `WARNING` and indexes anyway, `reject` aborts with `22023`. See the version-policy section below. |
@@ -174,7 +176,8 @@ exactly as one built without the feature.
 > whole corpus is indexed under one configuration. To move an already-registered
 > bundle to a new configuration, re-register it - `unregister_bundle` followed by
 > `register_bundle` - which is currently the only way to rebuild every `body_tsv`
-> under the new config.
+> under the new config. A `pg_textsearch` BM25 index bakes the configuration in
+> at build time too, so after the change also run `rebuild_search_index()`.
 
 ### Search backend - `search_backend`
 
@@ -185,25 +188,37 @@ fixed signature and result shape:
   (`websearch_to_tsquery` + `ts_rank_cd` + `ts_headline` over the weighted
   `body_tsv` GIN index). It works on every supported server (PG 15–19) with no
   extra extension, and remains the right choice for selective queries.
-- **`bm25`** - Block-Max WAND top-k over a ParadeDB `pg_search` index, which is
-  dramatically faster for broad, relevance-ranked queries. It requires the
-  external `pg_search` extension (see below).
+- **`bm25`** - BM25 top-k over an external provider's `bm25` index, which is
+  dramatically faster for broad, relevance-ranked queries. It requires one of
+  two provider extensions (see below).
 
-`pgokf` never links `pg_search` at build time - `CREATE EXTENSION pgokf`
-succeeds whether or not `pg_search` is installed. When `search_backend` is
-`bm25` but `pg_search` is not installed, or no `bm25` index exists on
-`pgokf.concepts`, `concept_search` **falls back to native with a `WARNING`**
-instead of erroring. Build the index with the admin-only
-`pgokf.rebuild_search_index()`, and see [`search-guide.md`](search-guide.md) for
-the full enable-BM25 walkthrough, the honesty notes about the `pg_search`
-dependency (AGPL-3.0, `shared_preload_libraries`, PG-version constraints), and
-the tokenizer differences between the two backends.
+### BM25 provider - `bm25_provider`
+
+`bm25_provider` (new in 0.1.15) selects which extension the `bm25` backend
+runs on. Both register an index access method named `bm25`, so at most one
+can be created in a database, and the resolution is unambiguous:
+
+| Value | Provider | License | PostgreSQL |
+| ----- | -------- | ------- | ---------- |
+| `auto` (default) | `pg_textsearch` when installed, else `pg_search` | - | - |
+| `pg_textsearch` | [Tiger Data `pg_textsearch`](https://github.com/timescale/pg_textsearch) | PostgreSQL license | 17, 18 |
+| `pg_search` | [ParadeDB `pg_search`](https://github.com/paradedb/paradedb) | AGPL-3.0 (community edition) | 15-18 |
+
+`pgokf` never links either provider at build time - `CREATE EXTENSION pgokf`
+succeeds whether or not one is installed. When `search_backend` is `bm25` but
+the resolved provider is not installed (or a named provider is absent), or no
+`bm25` index exists on `pgokf.concepts`, `concept_search` **falls back to
+native with a `WARNING`** instead of erroring. Build the index with the
+admin-only `pgokf.rebuild_search_index()`, which builds the resolved
+provider's index, and see [`search-guide.md`](search-guide.md) for the full
+enable-BM25 walkthrough, the provider comparison (query syntax, tokenizers,
+`shared_preload_libraries`, PG-version constraints), and the licensing note.
 
 > **Honesty note - `bm25` needs an external extension.** `native` is the
 > default precisely because it has no dependencies. `bm25` is opt-in and pulls
-> in ParadeDB `pg_search` (which itself requires `pgvector` and a
-> `shared_preload_libraries` entry). If you cannot or do not want that
-> dependency, stay on `native`.
+> in a provider extension that must be added to `shared_preload_libraries`
+> (and, for `pg_search`, requires `pgvector` too). If you cannot or do not
+> want that dependency, stay on `native`.
 
 ### Embedding dimension - `embedding_dim`
 
@@ -340,6 +355,7 @@ SELECT jsonb_pretty(pgokf.get_config());
 --     "store_source": false,
 --     "track_history": false,
 --     "search_backend": "native",
+--     "bm25_provider": "auto",
 --     "default_strict": true,
 --     "default_exclude": [],
 --     "okf_version_policy": "warn",
@@ -371,9 +387,12 @@ SELECT pgokf.set_config('default_text_search_config', '"pg_catalog.simple"'::jso
 -- the store_source retroactivity warning above.
 SELECT pgokf.set_config('store_source', 'true'::jsonb);
 
--- Switch ranked search to ParadeDB pg_search BM25 (then run rebuild_search_index).
--- Falls back to native, with a warning, if pg_search or its index is absent.
+-- Switch ranked search to BM25 (then run rebuild_search_index). Falls back to
+-- native, with a warning, if the provider extension or its index is absent.
 SELECT pgokf.set_config('search_backend', '"bm25"'::jsonb);
+
+-- Pin the BM25 provider (new in 0.1.15); 'auto' prefers pg_textsearch.
+SELECT pgokf.set_config('bm25_provider', '"pg_textsearch"'::jsonb);
 
 -- Audit-log retention (new in 0.1.5): keep 14 days of sync history; 0 = forever.
 SELECT pgokf.set_config('sync_log_retention_days', '14'::jsonb);
@@ -426,7 +445,8 @@ SELECT pgokf.reset_config();                 -- reset every key to its default
   They are cluster-wide, reload-only, and cannot be relaxed from SQL.
 - Use **durable policy** for catalog behavior an administrator tunes through SQL
   and that must survive restarts: where bundles may live (`allowed_roots`), how
-  search runs (`search_backend`, `default_text_search_config`, `embedding_dim`),
+  search runs (`search_backend`, `bm25_provider`, `default_text_search_config`,
+  `embedding_dim`),
   what the catalog stores (`store_source`, `track_history`), how sync reacts and
   announces (`okf_version_policy`, `notify_channel`), and how long audit and
   history are kept (`sync_log_retention_days`, `history_retention_days`).

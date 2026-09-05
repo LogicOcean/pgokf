@@ -1,0 +1,15 @@
+# SHA256 checksums for the Tiger Data pg_textsearch release packages that
+# packaging/docker/install-optional-extensions.sh installs into the image.
+#
+# pg_textsearch publishes one .deb per (PostgreSQL major, architecture) inside
+# a zip archive on its GitHub release (PostgreSQL 17 and 18 only). The
+# installer downloads the zip, extracts the .deb, and refuses to install it
+# unless its SHA256 matches the entry here. Regenerate with:
+#
+#   packaging/docker/update-pg-textsearch-checksums.sh <pg_textsearch version>
+#
+# Generated for pg_textsearch 1.4.0 (amd64, arm64).
+02588b8103ed9c95e4f2d175241361e0a8d8d40431761782e6cc1a84edb56e4a  pg-textsearch-postgresql-17_1.4.0-1_amd64.deb
+c43010f253e88f9867e6d6b210a0b3659af69a7cb83996b64792993238635de7  pg-textsearch-postgresql-17_1.4.0-1_arm64.deb
+7fffdca1327b63245e72eec1d04fc1e45c73e447006131670eb721ab3bc08307  pg-textsearch-postgresql-18_1.4.0-1_amd64.deb
+d4bb42c1a6b7e3d0169399fe37285a44ab6e5170cc95dc6dabadf857ddeca9bf  pg-textsearch-postgresql-18_1.4.0-1_arm64.deb

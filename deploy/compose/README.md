@@ -3,7 +3,7 @@
 A production-shaped deployment of a pgokf catalog on one Docker host:
 
 - **db** - the pgokf server image (PostgreSQL 18 + pgokf + pgvector +
-  pg_cron + pg_search), extensions preloaded, GUC ceilings set, bundles
+  pg_cron + pg_textsearch), extensions preloaded, GUC ceilings set, bundles
   bind-mounted read-only at `/bundles`, least-privilege login roles and the
   catalog policy applied on first init.
 - **embed** - `pgokf-embed --watch`, embedding every concept that lacks a

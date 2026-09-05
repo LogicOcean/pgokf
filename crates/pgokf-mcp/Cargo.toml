@@ -22,8 +22,8 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive", "env"] }
-pgokf-companion = { version = "=0.1.14", path = "../pgokf-companion" }
-pgokf-pgconn = { version = "=0.1.14", path = "../pgokf-pgconn" }
+pgokf-companion = { version = "=0.1.15", path = "../pgokf-companion" }
+pgokf-pgconn = { version = "=0.1.15", path = "../pgokf-pgconn" }
 serde.workspace = true
 serde_json.workspace = true
 tokio = { version = "1.40", features = [

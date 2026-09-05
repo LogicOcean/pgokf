@@ -60,7 +60,7 @@ the database. Complete comment coverage is a release gate (see
 | `pgokf.get_concept_source(bigint, text)` | `pgokf_reader` | Return one concept's stored source bytes as `bytea` (no filesystem write) |
 | `pgokf.export_parquet(bigint, text)` | `pgokf_admin` | Export a bundle projection to Parquet files |
 | `pgokf.export_sources(bigint, text)` | `pgokf_admin` | Reconstruct a bundle's stored source files on disk, hash-verified |
-| `pgokf.rebuild_search_index()` | `pgokf_admin` | (Re)build the optional pg_search BM25 index; a no-op with a notice when pg_search is not installed |
+| `pgokf.rebuild_search_index()` | `pgokf_admin` | (Re)build the optional BM25 index for the provider `bm25_provider` resolves to (pg_textsearch or pg_search); a no-op with a notice when none is installed |
 | `pgokf.schedule_refresh(bigint, text)` | `pgokf_admin` | Schedule periodic `refresh_bundle` via pg_cron (raises when pg_cron is absent) |
 | `pgokf.unschedule_refresh(bigint)` | `pgokf_admin` | Remove a bundle's scheduled refresh |
 | `pgokf.version()` | `pgokf_reader` | Loaded shared-library version |

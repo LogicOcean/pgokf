@@ -24,7 +24,8 @@ instead of a pull request - we can often implement it independently.
 - Rust 1.96 (see `rust-toolchain.toml`), `cargo-pgrx` 0.19.2.
 - Install a PostgreSQL 15–19 dev environment: `cargo pgrx init --pgNN=…`.
 - Optional runtime extensions the seams probe for: `pgvector` (semantic search),
-  ParadeDB `pg_search` (BM25), `pg_cron` (scheduled refresh) - all optional.
+  Tiger Data `pg_textsearch` or ParadeDB `pg_search` (BM25), `pg_cron`
+  (scheduled refresh) - all optional.
 
 ## Before you open a PR
 
@@ -42,6 +43,21 @@ RUST_TEST_THREADS=1 cargo pgrx test pg18 --no-default-features --features pg18  
 > wraps each `#[pg_test]` in one long transaction, so tests that touch the
 > singleton config row can deadlock under the parallel harness. This is a
 > test-harness artifact, not a production concern.
+
+The tests that cover a **preloaded BM25 provider** (`pg_textsearch`,
+`pg_search`) skip themselves with a `NOTICE` unless the provider is installed
+in the cluster's library directory *and* preloaded. pgrx starts its own
+throwaway instance, so preload them explicitly to turn those tests on
+(install the provider for the local `pg_config` first):
+
+```sh
+PGOKF_TEST_PRELOAD=pg_textsearch,pg_search RUST_TEST_THREADS=1 \
+  cargo pgrx test pg18 --no-default-features --features pg18
+```
+
+With `PGOKF_TEST_PRELOAD` set, a provider that turns out to be unusable fails
+its test instead of skipping, so a provider run can never pass vacuously. The
+release gate runs the suite both ways.
 
 ## Conventions
 

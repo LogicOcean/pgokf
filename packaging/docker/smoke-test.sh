@@ -5,7 +5,8 @@
 # Starts the image the way the shipped compose stack does (every optional
 # extension preloaded, env-driven roles and policy), then asserts:
 #   * the pgokf extension is created at the expected version
-#   * pgvector, pg_cron, and pg_search were created by the first-init hook
+#   * pgvector, pg_cron, and the BM25 provider (pg_textsearch on 17/18) were
+#     created by the first-init hook
 #   * the three env-driven login roles exist with the right tier membership
 #   * the PGOKF_POLICY JSON was applied (embedding_dim / allowed_roots)
 #   * the sample bundle registers and materializes concept rows
@@ -50,8 +51,9 @@ assert_eq() { # actual expected description
 preload="pgokf"
 # shellcheck disable=SC2016  # ${PG_MAJOR} is expanded by the container's shell, on purpose
 carried="$(${DOCKER} run --rm --entrypoint sh "${IMAGE}" \
-  -c 'cd "/usr/share/postgresql/${PG_MAJOR}/extension" && ls pg_cron.control pg_search.control 2>/dev/null' || true)"
+  -c 'cd "/usr/share/postgresql/${PG_MAJOR}/extension" && ls pg_cron.control pg_search.control pg_textsearch.control 2>/dev/null' || true)"
 case "${carried}" in *pg_cron.control*) preload="${preload},pg_cron" ;; esac
+case "${carried}" in *pg_textsearch.control*) preload="${preload},pg_textsearch" ;; esac
 case "${carried}" in *pg_search.control*) preload="${preload},pg_search" ;; esac
 
 log "starting ${IMAGE} (shared_preload_libraries=${preload})"
@@ -92,11 +94,29 @@ assert_eq "$(sql "SELECT pgokf.get_config() -> 'allowed_roots'")" '["/bundles"]'
 
 # Every optional extension the image carries must have been created by the init
 # hook (an image built with some WITH_* off simply carries fewer).
-available="$(sql "SELECT string_agg(name, ',' ORDER BY name) FROM pg_available_extensions WHERE name IN ('pg_cron','pg_search','vector')")"
-assert_eq "$(sql "SELECT string_agg(extname, ',' ORDER BY extname) FROM pg_extension WHERE extname IN ('pg_cron','pg_search','vector')")" \
+available="$(sql "SELECT string_agg(name, ',' ORDER BY name) FROM pg_available_extensions WHERE name IN ('pg_cron','pg_search','pg_textsearch','vector')")"
+assert_eq "$(sql "SELECT string_agg(extname, ',' ORDER BY extname) FROM pg_extension WHERE extname IN ('pg_cron','pg_search','pg_textsearch','vector')")" \
   "${available}" "optional extensions created by the init hook (${available:-none})"
 if [ "${WITH_OPTIONAL}" = 1 ]; then
-  assert_eq "${available}" "pg_cron,pg_search,vector" "image carries pgvector, pg_cron, and pg_search"
+  case "${available}" in
+    *vector*) log "ok: image carries pgvector" ;;
+    *) fail "image does not carry pgvector" ;;
+  esac
+  case "${available}" in
+    *pg_cron*) log "ok: image carries pg_cron" ;;
+    *) fail "image does not carry pg_cron" ;;
+  esac
+  # A BM25 provider ships for 17 and 18; an image of those majors without one
+  # is a broken build (stale checksum table, skipped download), not a variant.
+  server_major="$(sql "SELECT pg_catalog.current_setting('server_version_num')::int / 10000")"
+  case "${server_major}" in
+    17|18)
+      case ",${available}," in
+        *,pg_textsearch,*|*,pg_search,*) log "ok: image carries a BM25 provider" ;;
+        *) fail "PostgreSQL ${server_major} image carries no BM25 provider (pg_textsearch ships for 17 and 18)" ;;
+      esac
+      ;;
+  esac
 fi
 
 assert_eq "$(sql "SELECT string_agg(r.rolname || ':' || t.rolname, ',' ORDER BY r.rolname)
@@ -118,13 +138,14 @@ log "ok: ${concepts} concept row(s) materialized"
 assert_eq "$(sql "SELECT pgokf.health() ->> 'ok'")" "true" "pgokf.health() reports ok"
 
 # BM25 must work for a non-superuser reader (the production case) when the
-# image carries pg_search: switch the backend, build the index, search as the
+# image carries a provider: switch the backend, build the index, search as the
 # env-created reader role. Superusers bypass row-level security, so only a
-# non-owner session proves the helper the backend runs through.
+# non-owner session proves the provider path.
 case ",${available}," in
-  *,pg_search,*)
+  *,pg_search,*|*,pg_textsearch,*)
     sql "SELECT pgokf.set_config('search_backend', '\"bm25\"'::jsonb)" >/dev/null
     assert_eq "$(sql "SELECT pgokf.rebuild_search_index()")" "t" "bm25 index built"
+    log "ok: bm25 provider resolved to $(sql "SELECT pgokf.search_index_status() -> 'bm25' ->> 'provider'")"
     bm25_hit="$(${DOCKER} exec "${NAME}" psql -h 127.0.0.1 -U okf_reader -d postgres -v ON_ERROR_STOP=1 -tA \
       -c "SELECT concept_id FROM pgokf.concept_search('failover', NULL, 1)")" \
       || fail "bm25 concept_search failed for the non-superuser reader"

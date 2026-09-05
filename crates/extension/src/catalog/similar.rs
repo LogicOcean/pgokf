@@ -20,11 +20,12 @@
 //!
 //! - **native** - the seed's salient terms are matched with
 //!   `websearch_to_tsquery` / `ts_rank_cd` over `body_tsv`.
-//! - **bm25** - the same salient terms run through the `ParadeDB` `pg_search`
-//!   `bm25` index (Block-Max WAND top-k) when it is present; this realizes a
-//!   BM25 more-like-this over the seed's salient content, and falls back to the
-//!   native path (with a warning) when `pg_search` or its index is absent - the
-//!   fallback already lives in [`crate::catalog::search_backend::Bm25Backend`].
+//! - **bm25** - the same salient terms run through the BM25 provider's
+//!   `bm25` index (Tiger Data `pg_textsearch` or `ParadeDB` `pg_search`,
+//!   chosen by `bm25_provider`) when it is present; this realizes a BM25
+//!   more-like-this over the seed's salient content, and falls back to the
+//!   native path (with a warning) when the provider or its index is absent -
+//!   the fallback already lives in [`crate::catalog::search_backend::Bm25Backend`].
 //!
 //! # Identity
 //!
@@ -217,7 +218,9 @@ mod pgokf {
     /// `1..=500` (SQLSTATE `22023`). When `bundle_id` is omitted and the concept
     /// id exists in more than one bundle, the call fails with SQLSTATE `22023`;
     /// pass `bundle_id` to disambiguate. Searches enabled bundles only.
-    #[pg_extern(stable, parallel_safe, requires = ["catalog_tables"])]
+    // PARALLEL RESTRICTED for the same reason as `concept_search`: the ranked
+    // search it dispatches may run the bm25 provider's scoring through SPI.
+    #[pg_extern(stable, parallel_restricted, requires = ["catalog_tables"])]
     fn find_similar(
         concept_id: &str,
         bundle_id: default!(Option<i64>, "NULL"),

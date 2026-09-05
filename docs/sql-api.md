@@ -109,7 +109,7 @@ to confirm the installed SQL and the loaded module agree after an upgrade.
 SELECT pgokf.version();
 --  version
 -- ---------
---  0.1.14
+--  0.1.15
 ```
 
 ### `pgokf.register_bundle(path text, name text DEFAULT NULL, options jsonb DEFAULT '{}') → pgokf.bundle_sync_result`
@@ -441,7 +441,9 @@ RLS), **requires `pgokf_reader`**.
   "search_backend": "native",       // configured backend
   "native": true,                   // always available
   "bm25": {
-    "available": false,             // pg_search installed?
+    "available": false,             // a usable BM25 provider installed?
+    "provider": null,               // resolved provider: "pg_textsearch" | "pg_search" | null
+    "provider_setting": "auto",     // the bm25_provider policy value
     "index_exists": false,          // a bm25 index on pgokf.concepts?
     "indexed_rows": 0, "total_rows": 7, "coverage_pct": 0.0
   },
@@ -544,12 +546,27 @@ FROM pgokf.concept_search_hybrid('database failover',
 ### `pgokf.bm25_hits(...)` (internal)
 
 `SECURITY DEFINER` helper behind `concept_search` when `search_backend = bm25`
-(since 0.1.14); reader-level, not part of the stable API. It runs the ParadeDB
-`pg_search` hit query with the owner's privileges - row-level security wraps
-the catalog tables for non-owners in a shape `pg_search` cannot plan - while
+resolves to the ParadeDB `pg_search` provider (since 0.1.14; the
+`pg_textsearch` provider runs inline with invoker rights and does not use it);
+reader-level, not part of the stable API. It runs the ParadeDB `pg_search` hit
+query with the owner's privileges - row-level security wraps the catalog
+tables for non-owners in a shape `pg_search` cannot plan - while
 applying the same `pgokf.tenant` scoping the policies enforce, over active
 bundles, with `concept_search`'s filters, keyset cursor, and limit. Call
 `concept_search`, not this.
+
+### `pgokf.rebuild_search_index() → boolean`
+
+(Re)build the BM25 index on `pgokf.concepts` for the provider the
+`bm25_provider` policy key resolves to (Tiger Data `pg_textsearch`, or ParadeDB
+`pg_search`; since 0.1.15). `STRICT`, `SECURITY DEFINER`, **requires
+`pgokf_admin`**. Drops an existing `bm25` index first, whichever provider built
+it, then creates the resolved provider's, and returns `true`; returns `false`
+(with a `NOTICE`) when no usable provider is installed. Idempotent. Run it
+after enabling the `bm25` backend, after changing `bm25_provider` or
+`default_text_search_config`, and after a restore (indexes on extension-owned
+tables are not part of a `pg_dump` archive). Incremental sync maintains the
+index once it exists.
 
 ### `pgokf.rebuild_embedding_index() → boolean`
 
@@ -567,7 +584,7 @@ Run it after enabling pgvector, after bulk-loading embeddings, or after changing
 
 Register a recurring `refresh_bundle` on the external
 [`pg_cron`](https://github.com/citusdata/pg_cron) scheduler. Like the pgvector and
-`pg_search` surfaces, the coupling is **runtime-only**: `CREATE EXTENSION pgokf`
+BM25-provider surfaces, the coupling is **runtime-only**: `CREATE EXTENSION pgokf`
 succeeds without `pg_cron`, and every `cron.*` object is reached only at call time.
 Full scheduling requires `pg_cron` in `shared_preload_libraries`.
 
@@ -769,7 +786,9 @@ Set one durable configuration key from a validated, coerced `jsonb` value.
 
 `value` shape per key: an array of strings for `allowed_roots` /
 `default_exclude`, a boolean for `default_strict`, an integer for
-`sync_log_retention_days`, a string for `default_text_search_config`. Unknown
+`sync_log_retention_days`, a string for `default_text_search_config`,
+`search_backend` (`native` / `bm25`), and `bm25_provider` (`auto` /
+`pg_textsearch` / `pg_search`). Unknown
 keys and wrong-shaped or out-of-domain values raise `22023`. A
 `default_text_search_config` must name an installed configuration in
 `pg_catalog.pg_ts_config`.
@@ -803,6 +822,7 @@ SELECT jsonb_pretty(pgokf.get_config());
 --     "default_strict": true,
 --     "default_exclude": [],
 --     "search_backend": "native",
+--     "bm25_provider": "auto",
 --     "okf_version_policy": "warn",
 --     "embedding_dim": 1536,
 --     "history_retention_days": 0,
@@ -943,8 +963,9 @@ SELECT jsonb_pretty(pgokf.health());
 ```
 
 `ok` is `roles_ok AND config_ok`; `in_recovery` (`pg_is_in_recovery()`) supports
-replica/readiness routing; `bm25_ready` reports whether the ParadeDB `pg_search`
-extension and a `bm25` index on `pgokf.concepts` are both present.
+replica/readiness routing; `bm25_ready` reports whether a BM25 provider
+extension (`pg_textsearch` or `pg_search`) and a `bm25` index on
+`pgokf.concepts` are both present.
 
 ### `pgokf.stale_concepts(bundle_id bigint DEFAULT NULL, as_of timestamptz DEFAULT NULL) → SETOF pgokf.stale_concept`
 
@@ -1560,6 +1581,7 @@ Cluster-persistent policy: a single row, managed only through `set_config` /
 | `default_exclude` | `text[]` | `'{}'` |
 | `store_source` | `boolean` | `false` |
 | `search_backend` | `text` | `'native'` (`CHECK IN ('native','bm25')`) |
+| `bm25_provider` | `text` | `'auto'` (`CHECK IN ('auto','pg_search','pg_textsearch')`; since 0.1.15) |
 | `notify_channel` | `text` | `''` (empty disables) |
 | `okf_version_policy` | `text` | `'warn'` (`CHECK IN ('warn','reject')`) |
 | `embedding_dim` | `integer` | `1536` (`CHECK BETWEEN 1 AND 16000`) |
