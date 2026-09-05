@@ -45,11 +45,16 @@ jobs:
       - name: Stage repo-root changelog into docs/
         # MkDocs cannot include files above docs_dir, so surface CHANGELOG.md as
         # docs/changelog.md (referenced by the nav) just before the build. The
-        # changelog lives at the repo root, so its root-relative "docs/…" links
-        # must be rebased to be docs_dir-relative once the file is relocated
+        # changelog lives at the repo root, so (1) links to other repo-root
+        # documents (licenses, security policy, ...) that are not part of the
+        # site become absolute GitHub links, and (2) its root-relative "docs/…"
+        # links are rebased to be docs_dir-relative once the file is relocated
         # into docs/ - otherwise `--strict` rejects them as broken links.
         run: |
-          sed -E 's#\]\((\./)?docs/#](#g' CHANGELOG.md > docs/changelog.md
+          sed -E \
+            -e 's#\]\((\./)?(LICENSE|LICENSING\.md|COMM-LICENSE\.md|SECURITY\.md|CONTRIBUTING\.md|CODE_OF_CONDUCT\.md|README\.md|THIRD-PARTY-NOTICES\.txt)\)#](https://github.com/LogicOcean/pgokf/blob/main/\2)#g' \
+            -e 's#\]\((\./)?docs/#](#g' \
+            CHANGELOG.md > docs/changelog.md
 
       - name: Build site (strict)
         run: mkdocs build --strict
