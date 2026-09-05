@@ -285,6 +285,12 @@ installed SQL version ([operations.md](operations.md#upgrades)).
 5. Confirm `SELECT extversion FROM pg_extension WHERE extname='pgokf'` and
    `SELECT pgokf.version()` match.
 
+Between steps 3 and 4 the new library is loaded while the SQL objects are
+still the old version, so a companion that calls the catalog in that window
+(the `embed` daemon's first watch pass, typically) logs one failed pass such
+as `column "bm25_provider" does not exist` and retries on its next interval;
+it recovers by itself once step 4 has run.
+
 A PostgreSQL **major** upgrade (e.g. `-pg18` to a future `-pg19`) is a
 `pg_dump` / restore or `pg_upgrade` exercise as with any PostgreSQL; the
 `PGDATA` path also changes per major.
