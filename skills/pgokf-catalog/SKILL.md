@@ -319,6 +319,7 @@ through the config functions (no direct DML). Valid keys and value shapes:
 | `store_source` | `true`/`false` | Store verbatim source bytes (section 6) |
 | `search_backend` | `"native"`/`"bm25"` | Search strategy for `concept_search` (section 3) |
 | `bm25_provider` | `"auto"`/`"pg_textsearch"`/`"pg_search"` | Which BM25 provider the `bm25` backend uses (`auto` prefers `pg_textsearch`) |
+| `require_tenant` | `true`/`false` | Deny an unscoped session (no `pgokf.tenant`) instead of see-all; `pgokf.tenant_required()` reports it |
 | `notify_channel` | `"channel"` (`""` disables) | `pg_notify` channel for sync change notifications |
 | `okf_version_policy` | `"warn"`/`"reject"` | How a declared-but-unsupported bundle `okf_version` is handled |
 | `embedding_dim` | integer | Required embedding vector length (section 3) |
@@ -342,7 +343,7 @@ limits use `SIGHUP` context - set only in `postgresql.conf` + reload, never via
 SQL `SET`; `log_level` uses `SUSET` (a superuser can change it at runtime). A
 sixth GUC, `pgokf.tenant`, is different in kind: a `USERSET` per-session tenant
 selector for the opt-in multi-tenant row-level-security policies (empty, the
-default, sees every row). It is a policy selector any session may set, not a
+default, sees every row unless the `require_tenant` policy key is on). It is a policy selector any session may set, not a
 hard security boundary against arbitrary SQL; see `docs/multi-tenancy.md`.
 
 | GUC | Default | Purpose |
@@ -375,7 +376,7 @@ SHOW pgokf.max_graph_hops;
 
 ## 9. The wider surface (pointers)
 
-The full API is 39 functions; beyond the ones shown above, know that these
+The full API is 40 functions; beyond the ones shown above, know that these
 exist and where they are documented:
 
 - **Observability (reader):** `catalog_stats()`, `health()`,

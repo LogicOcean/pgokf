@@ -17,14 +17,17 @@ Every projection table carries a denormalized `tenant_id text NOT NULL DEFAULT
 has an RLS policy whose predicate is:
 
 ```sql
-current_setting('pgokf.tenant', true) IS NULL
-   OR current_setting('pgokf.tenant', true) = ''
-   OR tenant_id = current_setting('pgokf.tenant', true)
+(   (current_setting('pgokf.tenant', true) IS NULL
+     OR current_setting('pgokf.tenant', true) = '')
+    AND NOT (SELECT pgokf.tenant_required()))
+OR tenant_id = current_setting('pgokf.tenant', true)
 ```
 
 So a session that has **not** set `pgokf.tenant` (the value is unset or empty)
-matches every row - the pre-multi-tenancy behavior - while a session that **has**
-set it matches only that tenant's rows. Writes stamp the row's `tenant_id` from
+matches every row - the pre-multi-tenancy behavior - unless the catalog has
+turned on [`require_tenant`](#requiring-a-tenant-require_tenant), in which
+case it matches none; a session that **has** set it matches only that
+tenant's rows. Writes stamp the row's `tenant_id` from
 the same GUC, and a bundle is single-tenant: all of its concepts, links,
 provenance, embeddings, and stored source inherit the bundle's tenant.
 
@@ -68,7 +71,10 @@ filter their audit rows, `health`'s
 `bundle_count` / `concept_count` are tenant-scoped, and `get_concept_source`
 filters both its source read and its concept-existence probe (so a scoped session
 cannot probe another tenant's concepts through the "no source stored" vs "no such
-concept" distinction). All of them still see everything for an unset session.
+concept" distinction). All of them still see everything for an unset session
+while `require_tenant` is off; with it on they apply the same deny (empty
+results, and for `get_concept_source` the same not-found error a foreign
+tenant gets).
 
 ## Writes: stamped from the session
 
@@ -101,7 +107,8 @@ Each of those functions therefore applies an explicit guard the moment the
 - when `pgokf.tenant` is **unset or empty**, nothing is restricted: the session is
   cross-tenant by design, exactly as the read policy's "unset = see all". This is
   the trusted operator/superuser path, and it preserves the pre-multi-tenancy
-  behavior.
+  behavior - unless [`require_tenant`](#requiring-a-tenant-require_tenant) is
+  on, which refuses the unscoped call with SQLSTATE `42501` instead.
 
 The guard is ordinary code, not RLS, so it holds even for a superuser or the
 extension owner - precisely the callers RLS lets through. Write confinement thus
@@ -163,7 +170,9 @@ GUC is simply the wrong anchor for a boundary the adversary can move.
 
 Also note the **fail-open default**: unset (or empty) `pgokf.tenant` means *see
 every row*. A tenant-facing connection that is not forced to carry a tenant, and
-forgets to set one, sees the whole catalog.
+forgets to set one, sees the whole catalog - unless the catalog has opted into
+[`require_tenant`](#requiring-a-tenant-require_tenant), which turns that
+default into deny.
 
 ### Getting a *hard* boundary
 
@@ -184,6 +193,65 @@ Use one of:
 Without one of these, treat `pgokf.tenant` as convenience scoping among *trusted*
 callers, not as isolation against a hostile one.
 
+## Requiring a tenant (`require_tenant`)
+
+Since 0.1.16 the durable policy key `require_tenant` (default `false`) flips
+the fail-open default to **deny-by-default** for the whole catalog:
+
+```sql
+SELECT pgokf.set_config('require_tenant', 'true'::jsonb);   -- admin only
+SELECT pgokf.tenant_required();                             -- reader-level: true
+```
+
+With it on, a session that has **not** set `pgokf.tenant` (unset or empty):
+
+- **sees no rows.** Every row-level-security policy consults
+  `pgokf.tenant_required()` (one evaluation per statement, never per row), so
+  the tables, `list_bundles`, `concept_search` and the other invoker-rights
+  readers, and the `SECURITY DEFINER` readers that apply the rule explicitly
+  (`health()` counts, `list_sync_log`, `list_sync_changes`,
+  `list_access_log`, the ParadeDB `bm25_hits` path) all come back empty.
+  `get_concept_source` raises the same `22023` "no such concept" a scoped
+  session gets for another tenant's concept. Otherwise reads do not error:
+  RLS cannot raise, and the empty result is the same thing a scoped session
+  sees for a tenant that owns nothing.
+- **cannot ingest or mutate.** `register_bundle`, `register_bundle_content`,
+  and every other `pgokf_writer` entry point, plus the bundle-addressed
+  writers and exports (`refresh_bundle`, `unregister_bundle`,
+  `set_bundle_enabled`, `retire_bundle`, `set_concept_embedding`,
+  `schedule_refresh`, `export_*`, ...), refuse with SQLSTATE `42501` and a
+  message naming the fix. Nothing can be stamped with the implicit `'default'`
+  tenant any more.
+- **can still administer.** `set_config` / `reset_config` never need a
+  tenant, so the policy can always be turned back off, and `health()` reports
+  `"tenant_required": true` so a probe can tell why its counts are zero.
+  `purge_retired()` is refused for an unscoped admin like every other
+  mutation (`42501`): run it per tenant.
+- **scheduled refreshes keep working - if they carry a tenant.** A pg_cron
+  job runs in a session of its own, with no `pgokf.tenant`. Since 0.1.16
+  `schedule_refresh` pins the bundle's tenant into the job command
+  (`set_config('pgokf.tenant', ...)` before `refresh_bundle`), so jobs
+  scheduled on 0.1.16 or later are unaffected; a job scheduled by an earlier
+  release still runs the bare `refresh_bundle` call and starts failing with
+  `42501` once the policy is on. Re-schedule such jobs (`schedule_refresh`
+  updates the job in place) or pin the job role's tenant with
+  `ALTER ROLE ... SET pgokf.tenant`.
+
+A session that **has** set `pgokf.tenant` is unaffected: it sees and writes
+its own tenant exactly as before. A superuser, the table owner, or a
+`BYPASSRLS` role is not subject to the policies at all (as before), so such a
+session still reads the tables in full while the `SECURITY DEFINER` readers
+and `health()` counts apply the rule - one more reason tenant-facing
+connections must be ordinary roles. The trust model above is unchanged - the
+key removes the *accidental* unscoped session, not a hostile one that can
+run its own `SET`; combine it with a hard boundary for that.
+
+Companions take their scope from `--tenant` / `OKF_TENANT` (`pgokf-embed`,
+`pgokf-ingest`, `pgokf-mcp`); once the policy is on, run one embed daemon and
+one ingest service per tenant. The compose stack passes `OKF_EMBED_TENANT`,
+`OKF_INGEST_TENANT`, and `OKF_MCP_TENANT` through, and `PGOKF_POLICY` can
+carry `"require_tenant": true` so a new deployment starts hardened.
+
 ## Operational hardening (for the cooperating-client model)
 
 Even within the cooperating-client model above, these reduce accidental
@@ -194,7 +262,9 @@ cross-tenant exposure:
   This stops an honest client from *accidentally* running unscoped; it does not
   stop one that deliberately issues its own `SET` (see the trust model above).
 - **Never leave `pgokf.tenant` unset for a tenant-facing connection.** Reserve the
-  unset (see-all) session for a trusted operator/admin.
+  unset (see-all) session for a trusted operator/admin - or turn on
+  [`require_tenant`](#requiring-a-tenant-require_tenant) so an unset session
+  is denied rather than trusted.
 - **Reads run as a non-superuser.** RLS is bypassed by superusers and the table
   owner. A tenant application must connect as an ordinary login role that is a
   member of `pgokf_reader` (or `pgokf_writer`), not as a superuser and not as the
@@ -214,9 +284,11 @@ Multi-tenancy arrived in the 0.1.7 upgrade step, so a plain
 updating any pre-0.1.7 catalog: it adds the `tenant_id` column to every
 projection table (backfilling all existing rows to `'default'`), swaps the
 bundles key to `UNIQUE (tenant_id, path)`, and enables the RLS policies. Because
-the policy is a no-op for a session that sets no tenant, **the upgraded catalog
-behaves identically to before** until a session opts in by setting
-`pgokf.tenant`. No data is moved or lost.
+the policy is a no-op for a session that sets no tenant (while
+`require_tenant` is off, its default), **the upgraded catalog behaves
+identically to before** until a session opts in by setting `pgokf.tenant`. No
+data is moved or lost. The 0.1.16 step rewrites the thirteen policies in
+place to consult `pgokf.tenant_required()`, again without touching data.
 
 ## Limits and non-goals
 

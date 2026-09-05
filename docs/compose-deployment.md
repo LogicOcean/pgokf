@@ -47,8 +47,8 @@ attach to it.
   architecture; see [packaging/docker/README.md](https://github.com/LogicOcean/pgokf/blob/main/packaging/docker/README.md)):
 
   ```bash
-  docker build -f packaging/docker/Dockerfile --build-arg PG_MAJOR=18 -t pgokf:0.1.15-pg18 .
-  docker build -f packaging/docker/Dockerfile.companions -t pgokf-companions:0.1.15 .
+  docker build -f packaging/docker/Dockerfile --build-arg PG_MAJOR=18 -t pgokf:0.1.16-pg18 .
+  docker build -f packaging/docker/Dockerfile.companions -t pgokf-companions:0.1.16 .
   ```
 
 - An OpenAI-compatible embeddings endpoint if you want semantic / hybrid
@@ -86,6 +86,7 @@ the ones that matter most:
 | `PGOKF_PRELOAD` | `shared_preload_libraries` for the server; default `pgokf,pg_cron,pg_textsearch` fits the PostgreSQL 17/18 images. Set `pgokf,pg_cron` for a 15/16/19 image (no BM25 provider ships there) or `pgokf,pg_cron,pg_search` for an image built with ParadeDB; a preloaded library the image lacks stops the server at startup. |
 | `PGOKF_BIND_ADDR`, `PGOKF_PORT` | Interface and port to publish PostgreSQL on. **Loopback by default**; use a private or VPN address to reach it from other hosts. Never a public interface without TLS and a firewall (see [Exposure](#exposure-and-tls)). |
 | `POSTGRES_PASSWORD`, `PGOKF_ADMIN_PASSWORD`, `PGOKF_WRITER_PASSWORD`, `PGOKF_READER_PASSWORD` | The superuser and the three tier accounts. Generate with `openssl rand -hex 24`: hex is URL-safe (the companions embed these in connection URLs) and contains no `$` (which compose interpolates; a literal one is `$$`). The `PGOKF_*` passwords may also be supplied as files through `PGOKF_*_PASSWORD_FILE` (compose secrets). |
+| `OKF_EMBED_TENANT`, `OKF_INGEST_TENANT`, `OKF_MCP_TENANT` | Optional `pgokf.tenant` scope for each companion's session (see [multi-tenancy](multi-tenancy.md#requiring-a-tenant-require_tenant)); required once the catalog policy `require_tenant` is on. |
 | `PGOKF_POLICY` | JSON applied through `pgokf.set_config` on first init. **`embedding_dim` must equal your model's output dimension** (1024 for `Qwen3-Embedding-0.6B`, 768 for `nomic-embed-text`, 1536 for `text-embedding-3-small`); `store_source: true` keeps the source bytes in PostgreSQL so one dump is a complete backup; `allowed_roots: ["/bundles"]` confines registration to the mount; `search_backend` is `native` or `bm25`. |
 | `OKF_EMBED_ENDPOINT`, `OKF_EMBED_MODEL`, `OKF_EMBED_API_KEY` | Base URL (without `/v1/embeddings`), model name, optional bearer token. |
 | `PGOKF_SHARED_BUFFERS`, `PGOKF_EFFECTIVE_CACHE_SIZE`, `PGOKF_MAINTENANCE_WORK_MEM`, `PGOKF_WORK_MEM`, `PGOKF_SHM_SIZE` | Memory sizing. A common starting point is 25 % of RAM for `shared_buffers` and 50-75 % for `effective_cache_size`; the BM25 index and ANN index builds like a generous `maintenance_work_mem`. |
@@ -295,9 +296,9 @@ A PostgreSQL **major** upgrade (e.g. `-pg18` to a future `-pg19`) is a
 `pg_dump` / restore or `pg_upgrade` exercise as with any PostgreSQL; the
 `PGDATA` path also changes per major.
 
-### Upgrading from 0.1.14 (ParadeDB pg_search) to 0.1.15 (pg_textsearch)
+### Upgrading from 0.1.14 (ParadeDB pg_search) to 0.1.15 or later (pg_textsearch)
 
-The 0.1.15 image carries `pg_textsearch` instead of `pg_search`, and the two
+The 0.1.15 and later images carry `pg_textsearch` instead of `pg_search`, and the two
 cannot coexist in one database (both define the `bm25` index access method).
 A 0.1.14 stack has `pg_search` created in `okf` by its init hook, so remove
 it **before** switching images - while its library is still loadable - then
@@ -310,12 +311,12 @@ throughout; only the BM25 index is dropped and rebuilt:
 docker compose exec db psql -U postgres -d okf -c "SELECT pgokf.set_config('search_backend', '\"native\"'::jsonb);"
 docker compose exec db psql -U postgres -d okf -c "DROP EXTENSION pg_search CASCADE;"
 
-# 2. Take the compose file from the 0.1.15 tag (its shared_preload_libraries
-#    names pg_textsearch), point PGOKF_IMAGE / PGOKF_COMPANIONS_IMAGE at 0.1.15,
+# 2. Take the compose file from the target release's tag (its shared_preload_libraries
+#    names pg_textsearch), point PGOKF_IMAGE / PGOKF_COMPANIONS_IMAGE at it,
 #    then pull and restart as in the numbered steps above, including
 #    ALTER EXTENSION pgokf UPDATE.
 
-# 3. On the 0.1.15 image: create the new provider (the init hook only runs on
+# 3. On the new image: create the new provider (the init hook only runs on
 #    an empty data directory), switch back to bm25, and rebuild the index.
 docker compose exec db psql -U postgres -d okf -c "CREATE EXTENSION pg_textsearch;"
 docker compose exec db psql -U postgres -d okf -c "SELECT pgokf.set_config('search_backend', '\"bm25\"'::jsonb);"
@@ -324,7 +325,7 @@ docker compose exec db psql -U postgres -d okf -c "SELECT pgokf.search_index_sta
 ```
 
 `bm25_provider` can stay at its default `auto`, which resolves to
-`pg_textsearch` once it is created. Starting the 0.1.15 image with an old
+`pg_textsearch` once it is created. Starting a 0.1.15-or-later image with an old
 compose file that still preloads `pg_search` fails outright (the library is
 not in the image), which is the safe failure: nothing has touched the data
 directory yet. To keep ParadeDB instead, build the image with

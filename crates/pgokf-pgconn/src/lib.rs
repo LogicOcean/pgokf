@@ -5,7 +5,8 @@
 //! single `tokio-postgres` connection and drive its protocol future on a
 //! background task. Historically each hard-coded `NoTls`, so an operator who
 //! required an encrypted link (`sslmode=require`) could not connect at all. This
-//! crate centralizes the connect step and adds **optional** TLS:
+//! crate centralizes the connect step, adds **optional** TLS, and owns the one
+//! tenant-scoping step every companion applies ([`set_tenant`]):
 //!
 //! - **`NoTls` stays the default** - a local Unix-socket or trusted-network
 //!   deployment is unchanged and links in plaintext, negotiating no TLS.
@@ -30,6 +31,26 @@ use tokio_postgres::config::SslMode;
 use tokio_postgres::tls::{MakeTlsConnect, TlsConnect};
 use tokio_postgres::{Client, Config, NoTls, Socket};
 use tokio_postgres_rustls::MakeRustlsConnect;
+
+/// Scope the session to one pgokf tenant: sets the `pgokf.tenant` GUC for the
+/// connection (session-wide, not transaction-local), so every later catalog
+/// call sees and touches only that tenant's rows through row-level security,
+/// and satisfies a catalog whose `require_tenant` policy is on. Every
+/// companion applies its `--tenant` / `OKF_TENANT` through this one helper.
+///
+/// # Errors
+///
+/// Returns an error if the `set_config` call fails.
+pub async fn set_tenant(client: &Client, tenant: &str) -> Result<()> {
+    client
+        .execute(
+            "SELECT pg_catalog.set_config('pgokf.tenant', $1, false)",
+            &[&tenant],
+        )
+        .await
+        .context("failed to set pgokf.tenant")?;
+    Ok(())
+}
 
 /// Connect to PostgreSQL, returning the [`Client`] and the [`JoinHandle`] of the
 /// background task driving the connection's protocol future.

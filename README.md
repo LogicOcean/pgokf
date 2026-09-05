@@ -20,7 +20,7 @@ An OKF **bundle** is just a directory of UTF-8 Markdown "concept" documents with
 
 - 🔎 **Search, four ways.** Native PostgreSQL full-text ranking out of the box; optional **BM25** (via Tiger Data `pg_textsearch` or ParadeDB `pg_search`) and **semantic** + **hybrid RRF** search (via `pgvector`) behind the same seam - none of them a hard dependency. Structured filters (`type`/`tags`/`status`/`trust_tier`), keyset pagination, faceted counts, and `find_similar` more-like-this.
 - 🕸️ **Link graph.** Markdown cross-links and OKF *Attested Computation* references become resolved edges; `concept_neighbors` walks them (bounded, cycle-safe, BFS).
-- 🏢 **Multi-tenant.** Opt-in row-level-security isolation keyed on a session tenant, backward-compatible (unset = see-all) - read *and* write confined.
+- 🏢 **Multi-tenant.** Opt-in row-level-security isolation keyed on a session tenant, backward-compatible (unset = see-all, or deny-by-default with `require_tenant`) - read *and* write confined.
 - 🕰️ **Version history.** Opt-in point-in-time trail: `concept_history` and `concept_as_of('… last Tuesday')`.
 - 🧾 **Audit & lifecycle.** A durable sync log + per-sync change manifest, an exfiltration/access log, reversible **retire**/**purge**, and cross-bundle **dedup**.
 - 📥 **Two ingestion paths.** From a **filesystem** path, or **mountless** - bytes streamed from an S3-compatible object store, with the extension performing zero network I/O.

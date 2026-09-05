@@ -203,7 +203,7 @@ async fn run_pass(cli: &Cli) -> Result<usize> {
 /// [`run_pass`] stays linear. Returns the number of embeddings stored.
 async fn embed_all(cli: &Cli, pg_client: &tokio_postgres::Client) -> Result<usize> {
     if let Some(tenant) = &cli.tenant {
-        db::set_tenant(pg_client, tenant).await?;
+        pgokf_pgconn::set_tenant(pg_client, tenant).await?;
     }
 
     let dim = match cli.dim {

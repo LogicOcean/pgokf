@@ -143,7 +143,7 @@ The OKF format for naming an actor in `generated.by` / `verified[].by`:
 The optional isolation scope for a shared catalog. Every projection row carries
 a denormalized `tenant_id` (default `'default'`), and opt-in row-level security
 keyed on the [`pgokf.tenant`](#gucs-run-time-parameters) session GUC filters
-reads to the session's tenant; a session that never sets the GUC sees every row
+reads to the session's tenant; a session that never sets the GUC sees every row (unless `require_tenant` is on)
 (backward compatible). Writes are stamped from the session tenant and confined
 to it. The GUC is a **scoping selector, not a hard security boundary** against
 arbitrary SQL; see [Multi-tenancy](multi-tenancy.md).
@@ -274,12 +274,13 @@ retention window.
 
 ### Functions
 
-The 39 SQL functions in the `pgokf` schema, grouped by tier (`reader` <
+The 40 SQL functions in the `pgokf` schema, grouped by tier (`reader` <
 `writer` < `admin`, each inheriting the tier below):
 
 | Function | Role | Purpose |
 | -------- | ---- | ------- |
 | `version()` | reader | Report the loaded shared-library version. |
+| `tenant_required()` | any role with `USAGE` on `pgokf` | Whether the `require_tenant` policy is on. |
 | `list_bundles()` | reader | List registered bundles (retired ones excluded). |
 | `bundle_info(bundle_id)` | reader | One bundle's administrative view. |
 | `concept_search(query, bundle_id, limit_count, concept_type, tags, status, trust_tier, after_cursor)` | reader | Ranked full-text search with structured filters and keyset pagination. `limit_count` ∈ `1..=500` else `22023`. |
@@ -393,7 +394,7 @@ Session/server parameters in the `pgokf.*` namespace (see
 | `pgokf.max_frontmatter_bytes` | Ceiling for a concept's YAML frontmatter, in bytes. |
 | `pgokf.max_graph_hops` | Upper bound for `concept_neighbors` traversal depth. |
 | `pgokf.log_level` | Logging threshold (default `warning`). |
-| `pgokf.tenant` | Per-session tenant selector (`USERSET`, empty default = see all rows). A scoping selector, not a hard security boundary; see [Multi-tenancy](multi-tenancy.md). |
+| `pgokf.tenant` | Per-session tenant selector (`USERSET`, empty default = see all rows unless `require_tenant` is on). A scoping selector, not a hard security boundary; see [Multi-tenancy](multi-tenancy.md). |
 
 > **GUC vs. configuration key.** GUCs are PostgreSQL run-time parameters
 > (per-session or per-server). Configuration keys are durable, cluster-persistent
@@ -415,6 +416,7 @@ Durable policy in `pgokf_private.config`, managed via `set_config` /
 | `store_source` | Whether sync stores verbatim source bytes in `concept_source`. See [`store_source`](#store_source). |
 | `search_backend` | `native` (built-in FTS, the default) or `bm25` (route `concept_search` through a BM25 provider - Tiger Data `pg_textsearch` or ParadeDB `pg_search` - when installed). |
 | `bm25_provider` | Which BM25 provider the `bm25` backend uses: `auto` (default: `pg_textsearch` when installed, else `pg_search`), `pg_textsearch`, or `pg_search`. |
+| `require_tenant` | When `true`, a session with no `pgokf.tenant` sees nothing and cannot ingest (deny-by-default); `false` (default) keeps the see-all behavior for an unset session. |
 | `embedding_dim` | Expected embedding length for `set_concept_embedding` and the HNSW index typmod (default 1536). |
 | `notify_channel` | When set, a successful sync emits `pg_notify(<channel>, ...)` with the change summary; empty (default) disables it. |
 | `okf_version_policy` | `warn` (default) or `reject` for bundles declaring an unsupported OKF `okf_version`. |

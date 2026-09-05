@@ -36,7 +36,7 @@ body:
     attributes:
       label: pgokf version
       description: Output of `SELECT pgokf.version();` (or the git tag/commit).
-      placeholder: "0.1.15"
+      placeholder: "0.1.16"
     validations:
       required: true
   - type: dropdown

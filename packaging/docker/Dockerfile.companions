@@ -14,7 +14,7 @@
 #   docker run --rm ghcr.io/logicocean/pgokf-companions:<version> pgokf-embed --help
 #
 # Build from the repository root (.dockerignore keeps target/ and .git out):
-#   docker build -f packaging/docker/Dockerfile.companions -t pgokf-companions:0.1.15 .
+#   docker build -f packaging/docker/Dockerfile.companions -t pgokf-companions:0.1.16 .
 #
 # CI builds it natively on amd64 and arm64 and publishes a multi-architecture
 # manifest to ghcr.io/logicocean/pgokf-companions:<version> on version tags.

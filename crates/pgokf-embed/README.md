@@ -74,7 +74,7 @@ Every flag has an environment-variable equivalent:
 | `--dim` | `OKF_EMBED_DIM` | Override the target dimension (default: `embedding_dim`) |
 | `--batch-size` | `OKF_EMBED_BATCH` | Concepts per HTTP request (default 32) |
 | `--max-chars` | `OKF_EMBED_MAX_CHARS` | Per-concept input character bound (default 8000) |
-| `--tenant` | `OKF_TENANT` | Apply a `pgokf.tenant` scope for the session |
+| `--tenant` | `OKF_TENANT` | Apply a `pgokf.tenant` scope for the session (required once the catalog's `require_tenant` policy is on; run one daemon per tenant then) |
 | `--tls` | `OKF_PG_TLS` | Require a TLS-encrypted link to PostgreSQL (default off) |
 | `--watch` | `OKF_WATCH` | Run as a daemon: re-check for concepts without a vector every `--interval` seconds (default off) |
 | `--interval` | `OKF_WATCH_INTERVAL` | Seconds between watch passes, minimum 1 (default 60) |

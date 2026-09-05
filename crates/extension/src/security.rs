@@ -291,7 +291,14 @@ pub fn authorize_current_user(
     operation: Operation,
     bundle_relative_path: &Path,
 ) -> Result<(), CatalogError> {
-    authorize(operation, &PostgresRoleMembership, bundle_relative_path)
+    authorize(operation, &PostgresRoleMembership, bundle_relative_path)?;
+    // The ingestion tier stamps rows with the session's tenant, so under the
+    // require_tenant policy an unscoped session is refused here, before any
+    // side effect; see enforce_active_tenant for why the admin tier is not.
+    if operation == Operation::Ingest {
+        enforce_active_tenant()?;
+    }
+    Ok(())
 }
 
 /// The SQLSTATE `22023` error every bundle-addressed entry point already raises
@@ -310,32 +317,72 @@ fn unknown_bundle_error(bundle_id: i64) -> CatalogError {
     )
 }
 
-/// Decide whether a session may act on a bundle, given the session's *raw*
-/// `pgokf.tenant` setting and the target bundle's stored `tenant_id`.
+/// The SQLSTATE `42501` error raised when the catalog's `require_tenant`
+/// policy is on and the session has not set `pgokf.tenant`.
+///
+/// Deliberately distinct from [`unknown_bundle_error`]: an unscoped session is
+/// not probing another tenant's ids, it is misconfigured, and the message says
+/// how to fix it.
+fn tenant_required_error() -> CatalogError {
+    CatalogError::insufficient_privilege(
+        "an active tenant is required: the catalog policy require_tenant is on and \
+         pgokf.tenant is not set for this session (SET pgokf.tenant = '<tenant>', or \
+         pin it with ALTER ROLE ... SET pgokf.tenant)",
+        Path::new(""),
+    )
+}
+
+/// How the tenant rules see a session: its *raw* `pgokf.tenant` and whether
+/// the catalog policy requires one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TenantContext<'a> {
+    /// `current_setting('pgokf.tenant', true)`: `None` when unset, `Some("")`
+    /// when explicitly cleared, otherwise the active tenant.
+    pub session_tenant: Option<&'a str>,
+    /// The durable `require_tenant` policy value.
+    pub tenant_required: bool,
+}
+
+impl TenantContext<'_> {
+    /// Whether the session is unscoped (no tenant, or an empty one).
+    fn is_unscoped(self) -> bool {
+        matches!(self.session_tenant, None | Some(""))
+    }
+
+    /// Whether an unscoped session is refused outright by the policy.
+    fn is_denied(self) -> bool {
+        self.is_unscoped() && self.tenant_required
+    }
+}
+
+/// Decide whether a session may act on a bundle, given the session's tenant
+/// context and the target bundle's stored `tenant_id`.
 ///
 /// This is the write-side mirror of the read-side row-level-security predicate
-/// (`current_setting('pgokf.tenant', true) IS NULL OR = '' OR tenant_id =
-/// current_setting(...)`), factored out as a pure function so the decision is
-/// unit-testable without a running `PostgreSQL` server:
+/// (`(tenant unset AND NOT tenant_required()) OR tenant_id = tenant`), factored
+/// out as a pure function so the decision is unit-testable without a running
+/// `PostgreSQL` server:
 ///
 /// - a session with **no** tenant set (`None`) or an **empty** tenant (`""`) is
 ///   cross-tenant *by design* - the backward-compatible see-all default that
 ///   also lets a trusted operator/superuser operate on any bundle, exactly as
-///   the read policy's "unset = all" - so it is always permitted;
+///   the read policy's "unset = all" - so it is permitted **unless** the
+///   catalog's `require_tenant` policy is on, in which case it is refused
+///   (the read policy then shows it nothing, too);
 /// - a session **with** a tenant is confined to it: the bundle must exist
 ///   (`bundle_tenant` is `Some`) and its tenant must equal the session's.
 ///
 /// A missing bundle (`bundle_tenant == None`) is therefore rejected identically
 /// to a cross-tenant one, which is what makes the two indistinguishable.
-fn tenant_permits(session_tenant: Option<&str>, bundle_tenant: Option<&str>) -> bool {
-    match session_tenant {
-        None | Some("") => true,
+fn tenant_permits(context: TenantContext<'_>, bundle_tenant: Option<&str>) -> bool {
+    match context.session_tenant {
+        None | Some("") => !context.tenant_required,
         Some(active) => bundle_tenant == Some(active),
     }
 }
 
-/// Read the raw session tenant and the target bundle's owner in a single
-/// read-only SPI round-trip.
+/// Read the raw session tenant, the `require_tenant` policy, and the target
+/// bundle's owner in a single read-only SPI round-trip.
 ///
 /// The session tenant is read with `current_setting('pgokf.tenant', true)` (the
 /// missing-ok form), which is `NULL` when unset and `''` when explicitly
@@ -351,18 +398,20 @@ fn tenant_permits(session_tenant: Option<&str>, bundle_tenant: Option<&str>) -> 
 /// that bypass RLS.
 fn read_bundle_tenant_context(
     bundle_id: i64,
-) -> Result<(Option<String>, Option<String>), CatalogError> {
+) -> Result<(Option<String>, bool, Option<String>), CatalogError> {
     pgrx::Spi::connect(|client| {
         let table = client.select(
             "SELECT pg_catalog.current_setting('pgokf.tenant', true),
+                    (SELECT require_tenant FROM pgokf_private.config WHERE singleton),
                     (SELECT b.tenant_id FROM pgokf.bundles b WHERE b.id = $1)",
             Some(1),
             &[bundle_id.into()],
         )?;
         let row = table.first();
         let session_tenant = row.get::<String>(1)?;
-        let bundle_tenant = row.get::<String>(2)?;
-        Ok((session_tenant, bundle_tenant))
+        let tenant_required = row.get::<bool>(2)?.unwrap_or(false);
+        let bundle_tenant = row.get::<String>(3)?;
+        Ok((session_tenant, tenant_required, bundle_tenant))
     })
     .map_err(|error: pgrx::spi::Error| {
         CatalogError::internal(
@@ -370,6 +419,53 @@ fn read_bundle_tenant_context(
             Path::new(""),
         )
     })
+}
+
+/// Read the session's tenant context alone (no bundle): the raw
+/// `pgokf.tenant` and the `require_tenant` policy, with owner rights.
+fn read_tenant_context() -> Result<(Option<String>, bool), CatalogError> {
+    pgrx::Spi::connect(|client| {
+        let table = client.select(
+            "SELECT pg_catalog.current_setting('pgokf.tenant', true),
+                    (SELECT require_tenant FROM pgokf_private.config WHERE singleton)",
+            Some(1),
+            &[],
+        )?;
+        let row = table.first();
+        Ok((row.get::<String>(1)?, row.get::<bool>(2)?.unwrap_or(false)))
+    })
+    .map_err(|error: pgrx::spi::Error| {
+        CatalogError::internal(
+            format!("failed to resolve the session tenant context: {error}"),
+            Path::new(""),
+        )
+    })
+}
+
+/// Refuse an unscoped session when the catalog's `require_tenant` policy is
+/// on. Applied to the ingestion tier (`register_bundle`,
+/// `register_bundle_content`, and the other `pgokf_writer` entry points) by
+/// [`authorize_current_user`], so a bundle can never be stamped with the
+/// implicit `'default'` tenant in a catalog that has opted out of it. The
+/// admin tier is exempt on purpose: `set_config` must stay callable to turn
+/// the policy on and off, and the bundle-addressed admin functions are
+/// confined by [`enforce_bundle_tenant`] instead.
+///
+/// # Errors
+///
+/// Returns an [`crate::errors::ErrorKind::InsufficientPrivilege`] error
+/// (SQLSTATE `42501`) when a tenant is required and none is set.
+pub fn enforce_active_tenant() -> Result<(), CatalogError> {
+    let (session_tenant, tenant_required) = read_tenant_context()?;
+    let context = TenantContext {
+        session_tenant: session_tenant.as_deref(),
+        tenant_required,
+    };
+    if context.is_denied() {
+        Err(tenant_required_error())
+    } else {
+        Ok(())
+    }
 }
 
 /// Confine a bundle-addressed mutation or export to the session's active tenant.
@@ -384,7 +480,9 @@ fn read_bundle_tenant_context(
 ///
 /// The rule mirrors [`tenant_permits`] exactly: when `pgokf.tenant` is unset or
 /// empty the caller is cross-tenant by design (backward compatible; the trusted
-/// operator/superuser path), so nothing is restricted; when a tenant is set, a
+/// operator/superuser path), so nothing is restricted - unless the catalog's
+/// `require_tenant` policy is on, which refuses the unscoped call with SQLSTATE
+/// `42501` ([`tenant_required_error`]); when a tenant is set, a
 /// bundle owned by any other tenant - or one that does not exist - is rejected
 /// with the same [`unknown_bundle_error`] (`22023`) the entry points already
 /// raise for a bad id, so a cross-tenant id cannot be used to probe another
@@ -401,8 +499,14 @@ fn read_bundle_tenant_context(
 /// tenant or is unregistered, or an [`crate::errors::ErrorKind::Internal`] error
 /// if the read-only tenant lookup itself fails.
 pub fn enforce_bundle_tenant(bundle_id: i64) -> Result<(), CatalogError> {
-    let (session_tenant, bundle_tenant) = read_bundle_tenant_context(bundle_id)?;
-    if tenant_permits(session_tenant.as_deref(), bundle_tenant.as_deref()) {
+    let (session_tenant, tenant_required, bundle_tenant) = read_bundle_tenant_context(bundle_id)?;
+    let context = TenantContext {
+        session_tenant: session_tenant.as_deref(),
+        tenant_required,
+    };
+    if context.is_denied() {
+        Err(tenant_required_error())
+    } else if tenant_permits(context, bundle_tenant.as_deref()) {
         Ok(())
     } else {
         Err(unknown_bundle_error(bundle_id))
@@ -662,29 +766,56 @@ mod tests {
         assert_eq!(error.sqlstate(), "42501");
     }
 
+    fn context(session_tenant: Option<&str>, tenant_required: bool) -> TenantContext<'_> {
+        TenantContext {
+            session_tenant,
+            tenant_required,
+        }
+    }
+
     #[test]
     fn tenant_permits_allows_an_unset_session_on_any_bundle() {
-        // Arrange: no pgokf.tenant set (the backward-compatible see-all default).
+        // Arrange: no pgokf.tenant set (the backward-compatible see-all default)
+        // and the policy not requiring one.
         // Act & Assert: permitted for a matching, a foreign, and a missing bundle.
-        assert!(tenant_permits(None, Some("acme")));
-        assert!(tenant_permits(None, Some("globex")));
-        assert!(tenant_permits(None, None));
+        assert!(tenant_permits(context(None, false), Some("acme")));
+        assert!(tenant_permits(context(None, false), Some("globex")));
+        assert!(tenant_permits(context(None, false), None));
     }
 
     #[test]
     fn tenant_permits_treats_an_empty_tenant_as_unset() {
         // Arrange: pgokf.tenant explicitly cleared to '' behaves as unset.
         // Act & Assert
-        assert!(tenant_permits(Some(""), Some("globex")));
-        assert!(tenant_permits(Some(""), None));
+        assert!(tenant_permits(context(Some(""), false), Some("globex")));
+        assert!(tenant_permits(context(Some(""), false), None));
+    }
+
+    #[test]
+    fn tenant_permits_refuses_an_unset_session_when_a_tenant_is_required() {
+        // Arrange: the require_tenant policy is on and the session is unscoped
+        // (unset or cleared).
+        // Act & Assert: refused for every bundle, existing or not.
+        assert!(!tenant_permits(context(None, true), Some("acme")));
+        assert!(!tenant_permits(context(Some(""), true), Some("acme")));
+        assert!(!tenant_permits(context(None, true), None));
     }
 
     #[test]
     fn tenant_permits_confines_a_scoped_session_to_its_own_tenant() {
-        // Arrange: a session scoped to acme.
+        // Arrange: a session scoped to acme, with and without the policy on
+        // (the policy only concerns unscoped sessions).
         // Act & Assert: only acme's own bundle is permitted.
-        assert!(tenant_permits(Some("acme"), Some("acme")));
-        assert!(!tenant_permits(Some("acme"), Some("globex")));
+        for required in [false, true] {
+            assert!(tenant_permits(
+                context(Some("acme"), required),
+                Some("acme")
+            ));
+            assert!(!tenant_permits(
+                context(Some("acme"), required),
+                Some("globex")
+            ));
+        }
     }
 
     #[test]
@@ -693,7 +824,27 @@ mod tests {
         // rejected identically to a cross-tenant one so the two are
         // indistinguishable.
         // Act & Assert
-        assert!(!tenant_permits(Some("acme"), None));
+        assert!(!tenant_permits(context(Some("acme"), false), None));
+    }
+
+    #[test]
+    fn tenant_context_is_denied_only_when_unscoped_and_required() {
+        // Arrange & Act & Assert: the four combinations.
+        assert!(context(None, true).is_denied());
+        assert!(context(Some(""), true).is_denied());
+        assert!(!context(None, false).is_denied());
+        assert!(!context(Some("acme"), true).is_denied());
+    }
+
+    #[test]
+    fn tenant_required_error_is_a_42501_with_the_fix_in_the_message() {
+        // Arrange & Act
+        let error = tenant_required_error();
+
+        // Assert
+        assert_eq!(error.sqlstate(), "42501");
+        assert!(error.to_string().contains("require_tenant"));
+        assert!(error.to_string().contains("SET pgokf.tenant"));
     }
 
     #[test]

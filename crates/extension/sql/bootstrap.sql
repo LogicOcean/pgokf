@@ -38,6 +38,33 @@ GRANT USAGE ON SCHEMA pgokf_private TO pgokf_admin;
 GRANT pgokf_reader TO pgokf_writer;
 GRANT pgokf_writer TO pgokf_admin;
 
+-- Whether the catalog policy requires an active tenant (`require_tenant`).
+-- Declared here, before any table, because every row-level-security policy
+-- references it (as an uncorrelated sub-select, so PostgreSQL evaluates it
+-- once per statement as an InitPlan, never per row); plpgsql so the body's
+-- reference to pgokf_private.config - created later in the install - resolves
+-- at call time rather than at definition time. SECURITY DEFINER because the
+-- policies run with the querying role's privileges and a reader has no access
+-- to pgokf_private. Executable by PUBLIC - the one deliberate exception to the
+-- REVOKE-then-GRANT-to-tier convention - because a policy dependency must be
+-- callable by every role that can query the tables, including a role granted
+-- SELECT directly rather than through pgokf_reader; it reveals only the
+-- boolean policy value, and USAGE on schema pgokf still gates it.
+CREATE FUNCTION pgokf.tenant_required() RETURNS boolean
+    LANGUAGE plpgsql
+    STABLE
+    PARALLEL SAFE
+    SECURITY DEFINER
+    SET search_path = pg_catalog, pg_temp
+    AS $fn$
+BEGIN
+    RETURN (SELECT require_tenant FROM pgokf_private.config WHERE singleton);
+END
+$fn$;
+GRANT EXECUTE ON FUNCTION pgokf.tenant_required() TO PUBLIC;
+COMMENT ON FUNCTION pgokf.tenant_required() IS
+    'Whether the durable policy key require_tenant is on: when true, a session that has not set pgokf.tenant sees no catalog rows (every row-level-security policy consults this, and the SECURITY DEFINER readers apply the same rule: empty results, or for get_concept_source the same not-found error a foreign tenant gets) and the ingestion and bundle-addressed write functions refuse to run for it (SQLSTATE 42501); when false (the default) an unset session is cross-tenant, the backward-compatible see-all behavior. STABLE, executable by any role with USAGE on schema pgokf (the policies depend on it); a client can call it to decide whether it must scope its session before reading.';
+
 -- Document the three public API roles. Roles are cluster-wide shared objects,
 -- so these comments live in pg_shdescription and persist independently of the
 -- extension; setting them here keeps the whole public surface self-describing.

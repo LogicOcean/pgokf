@@ -18,7 +18,7 @@
 # installed where its publisher ships a package - pg_textsearch on 17 and 18):
 #   docker build -f packaging/docker/Dockerfile \
 #     --build-arg PG_MAJOR=18 \
-#     -t pgokf:0.1.15-pg18 .
+#     -t pgokf:0.1.16-pg18 .
 #
 # The build context MUST be the repository root (it copies the source tree;
 # .dockerignore keeps target/ and .git out). The build is DRY: it delegates the

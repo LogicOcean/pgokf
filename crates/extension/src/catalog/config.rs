@@ -26,6 +26,8 @@
 //! for `default_strict`/`store_source`, an integer for
 //! `sync_log_retention_days`, and a string for `default_text_search_config`,
 //! `search_backend`, `bm25_provider` (`auto`/`pg_textsearch`/`pg_search`),
+//! a boolean for `require_tenant` (deny an unscoped session instead of the
+//! see-all default),
 //! `notify_channel` (a `LISTEN`/`NOTIFY` channel, or empty to disable), and
 //! `okf_version_policy` (`warn`/`reject`). Every value is
 //! validated and coerced per key ([`coerce`]); an unknown key or a value of the
@@ -84,6 +86,9 @@ enum ConfigKey {
     /// `0` keeps history indefinitely.
     HistoryRetentionDays,
     Bm25Provider,
+    /// Whether a session must set `pgokf.tenant` to see or write anything
+    /// (`true`), or an unset session is cross-tenant (`false`, the default).
+    RequireTenant,
 }
 
 impl ConfigKey {
@@ -103,6 +108,7 @@ impl ConfigKey {
             Self::TrackHistory => "track_history",
             Self::HistoryRetentionDays => "history_retention_days",
             Self::Bm25Provider => "bm25_provider",
+            Self::RequireTenant => "require_tenant",
         }
     }
 
@@ -123,6 +129,7 @@ impl ConfigKey {
             "track_history" => Ok(Self::TrackHistory),
             "history_retention_days" => Ok(Self::HistoryRetentionDays),
             "bm25_provider" => Ok(Self::Bm25Provider),
+            "require_tenant" => Ok(Self::RequireTenant),
             other => Err(CatalogError::invalid_parameter(
                 format!("unknown configuration key: {other}"),
                 Path::new(""),
@@ -147,6 +154,7 @@ enum ConfigValue {
     TrackHistory(bool),
     HistoryRetentionDays(i32),
     Bm25Provider(String),
+    RequireTenant(bool),
 }
 
 /// The two accepted values of the `okf_version_policy` key.
@@ -493,6 +501,7 @@ fn coerce(key: ConfigKey, value: pgrx::JsonB) -> Result<ConfigValue, CatalogErro
             validate_bm25_provider,
             ConfigValue::Bm25Provider,
         ),
+        ConfigKey::RequireTenant => coerce_bool(value, key, ConfigValue::RequireTenant),
     }
 }
 
@@ -596,6 +605,10 @@ fn persist(value: &ConfigValue) -> Result<(), CatalogError> {
             "UPDATE pgokf_private.config SET bm25_provider = $1 WHERE singleton",
             &[name.as_str().into()],
         ),
+        ConfigValue::RequireTenant(flag) => Spi::run_with_args(
+            "UPDATE pgokf_private.config SET require_tenant = $1 WHERE singleton",
+            &[(*flag).into()],
+        ),
     }
     .map_err(|error| spi_error("failed to persist configuration", &error))
 }
@@ -642,6 +655,9 @@ fn reset_key(key: ConfigKey) -> Result<(), CatalogError> {
         ConfigKey::Bm25Provider => {
             "UPDATE pgokf_private.config SET bm25_provider = DEFAULT WHERE singleton"
         }
+        ConfigKey::RequireTenant => {
+            "UPDATE pgokf_private.config SET require_tenant = DEFAULT WHERE singleton"
+        }
     };
     Spi::run(statement).map_err(|error| spi_error("failed to reset configuration key", &error))
 }
@@ -662,7 +678,8 @@ fn reset_all() -> Result<(), CatalogError> {
              embedding_dim = DEFAULT, \
              track_history = DEFAULT, \
              history_retention_days = DEFAULT, \
-             bm25_provider = DEFAULT \
+             bm25_provider = DEFAULT, \
+             require_tenant = DEFAULT \
          WHERE singleton",
     )
     .map_err(|error| spi_error("failed to reset configuration", &error))
@@ -702,7 +719,8 @@ fn get_config_impl() -> Result<pgrx::JsonB, CatalogError> {
              'embedding_dim', pg_catalog.to_jsonb(embedding_dim),
              'track_history', pg_catalog.to_jsonb(track_history),
              'history_retention_days', pg_catalog.to_jsonb(history_retention_days),
-             'bm25_provider', pg_catalog.to_jsonb(bm25_provider))
+             'bm25_provider', pg_catalog.to_jsonb(bm25_provider),
+             'require_tenant', pg_catalog.to_jsonb(require_tenant))
          FROM pgokf_private.config
          WHERE singleton",
     )
@@ -930,6 +948,9 @@ CREATE TABLE pgokf_private.config (
     -- bm25_provider is appended last for the same reason (see
     -- sql/pgokf--0.1.14--0.1.15.sql).
     bm25_provider              text    NOT NULL DEFAULT 'auto',
+    -- require_tenant is appended last for the same reason (see
+    -- sql/pgokf--0.1.15--0.1.16.sql).
+    require_tenant             boolean NOT NULL DEFAULT false,
     CONSTRAINT config_singleton_chk CHECK (singleton),
     CONSTRAINT config_retention_nonneg_chk CHECK (sync_log_retention_days >= 0),
     CONSTRAINT config_search_backend_chk CHECK (search_backend IN ('native', 'bm25')),
@@ -1008,6 +1029,8 @@ COMMENT ON COLUMN pgokf_private.config.embedding_dim IS
     'Expected dimension (1..=16000) of the caller-computed concept embeddings streamed in via pgokf.set_concept_embedding: the setter rejects any real[] whose length differs, and pgokf.rebuild_embedding_index builds its pgvector HNSW index with this typmod (vector(embedding_dim)). Default 1536. The extension never computes embeddings; a change is not retroactive to already-stored rows and should be followed by re-ingestion and pgokf.rebuild_embedding_index. HNSW indexing applies only up to pgvector''s 2000-dimension index limit; above it semantic search still works via an exact scan.';
 COMMENT ON COLUMN pgokf_private.config.track_history IS
     'Whether a register/refresh/content sync records an append-only SCD-2 version trail of each changed concept into pgokf.concept_history (true = keep point-in-time history; storage/retention tradeoff) or records nothing (false, the default). Off by default so an existing install, and any bundle synced with history disabled, behaves exactly as before with zero extra storage. Not retroactive: enabling it starts recording at the next sync; a concept first versioned after it was enabled begins at version 1 with the change_kind of that sync.';
+COMMENT ON COLUMN pgokf_private.config.require_tenant IS
+    'Whether the catalog requires an active tenant: when true, a session that has not set pgokf.tenant sees no rows through the row-level-security policies and every reader surface built on them, the SECURITY DEFINER readers apply the same rule (empty results; get_concept_source raises the same not-found error a foreign tenant gets), and the ingestion-tier and bundle-addressed write functions refuse it with SQLSTATE 42501 - including a pg_cron refresh job whose session carries no tenant, which is why schedule_refresh pins the bundle''s tenant into the job command; when false (the default) an unset session is cross-tenant - the backward-compatible see-all behavior. Read by pgokf.tenant_required(). Admin configuration (set_config/reset_config) never needs a tenant, so the policy can always be turned back off.';
 COMMENT ON COLUMN pgokf_private.config.bm25_provider IS
     'Which BM25 provider extension the bm25 search backend uses: ''auto'' (the default: pg_textsearch when installed, else pg_search), ''pg_textsearch'' (Tiger Data, PostgreSQL license, PostgreSQL 17 and 18), or ''pg_search'' (ParadeDB, AGPL-3.0). Both providers name their index access method bm25 and cannot coexist in one database. A named provider that is not installed makes bm25 search fall back to native with a warning; rebuild_search_index builds the resolved provider''s index.';
 COMMENT ON COLUMN pgokf_private.config.history_retention_days IS
@@ -1032,7 +1055,8 @@ mod pgokf {
     /// `sync_log_retention_days`, and a string for
     /// `default_text_search_config` (any installed configuration),
     /// `search_backend` (`native` or `bm25`), `bm25_provider` (`auto`,
-    /// `pg_textsearch`, or `pg_search`), `notify_channel` (a safe
+    /// `pg_textsearch`, or `pg_search`), a boolean for `require_tenant`,
+    /// `notify_channel` (a safe
     /// `LISTEN`/`NOTIFY` identifier, or empty to disable),
     /// `okf_version_policy` (`warn` or `reject`), a boolean for
     /// `track_history`, and an integer for `sync_log_retention_days`,
@@ -1116,6 +1140,7 @@ mod tests {
             ("store_source", ConfigKey::StoreSource),
             ("search_backend", ConfigKey::SearchBackend),
             ("bm25_provider", ConfigKey::Bm25Provider),
+            ("require_tenant", ConfigKey::RequireTenant),
             ("notify_channel", ConfigKey::NotifyChannel),
             ("okf_version_policy", ConfigKey::OkfVersionPolicy),
             ("embedding_dim", ConfigKey::EmbeddingDim),

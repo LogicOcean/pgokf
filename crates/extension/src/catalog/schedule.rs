@@ -15,11 +15,17 @@
 //!
 //! # Injection safety
 //!
-//! The scheduled command is a fixed `SELECT pgokf.refresh_bundle(<id>)`. The
-//! `<id>` is the `bigint` `bundle_id` the caller passed, formatted as an integer
-//! literal that this code controls - a validated `i64` can only render as digits,
-//! so no caller text ever enters the command. The cron schedule and the
-//! deterministic job name both bind as parameters to `cron.schedule` (never
+//! The scheduled command is `SELECT pg_catalog.set_config('pgokf.tenant', <tenant>,
+//! false); SELECT pgokf.refresh_bundle(<id>)`. The `<id>` is the `bigint`
+//! `bundle_id` the caller passed, formatted as an integer literal that this code
+//! controls - a validated `i64` can only render as digits - and `<tenant>` is
+//! the bundle's stored `tenant_id`, quoted by `PostgreSQL`'s own `format('%L')`
+//! inside the scheduling statement rather than by Rust string handling, so no
+//! caller text ever enters the command unquoted. Pinning the tenant makes the
+//! cron worker's own, tenant-less session satisfy the tenant rules (it refreshes
+//! exactly the bundle's tenant, and passes the `require_tenant` policy). The
+//! cron schedule and the deterministic job name both bind as parameters to
+//! `cron.schedule` (never
 //! interpolated). Full scheduling requires `pg_cron` in
 //! `shared_preload_libraries`.
 
@@ -128,15 +134,25 @@ fn schedule_refresh_impl(bundle_id: i64, schedule: &str) -> Result<String, Catal
     let name = job_name(bundle_id);
     let command = refresh_command(bundle_id);
     // cron.schedule(job_name, schedule, command) upserts by name, so re-scheduling
-    // the same bundle updates the one job in place. The name, schedule, and
-    // command all bind as parameters; the command's bundle id is the trusted i64
-    // literal built above.
+    // the same bundle updates the one job in place. The name, schedule, and the
+    // refresh call all bind as parameters; the job command pins the bundle's
+    // own tenant first (read with owner rights - enforce_bundle_tenant already
+    // confirmed the caller may act on this bundle), quoted by format('%L') so
+    // the cron session, which carries no pgokf.tenant of its own, refreshes
+    // under exactly that tenant and satisfies the require_tenant policy.
     Spi::get_one_with_args::<i64>(
-        "SELECT cron.schedule($1, $2, $3)",
+        "SELECT cron.schedule(
+             $1,
+             $2,
+             pg_catalog.format(
+                 'SELECT pg_catalog.set_config(''pgokf.tenant'', %L, false); %s',
+                 (SELECT b.tenant_id FROM pgokf.bundles b WHERE b.id = $4),
+                 $3))",
         &[
             name.as_str().into(),
             schedule.into(),
             command.as_str().into(),
+            bundle_id.into(),
         ],
     )
     .map_err(spi_error("failed to register the pg_cron refresh job"))?;
@@ -187,7 +203,8 @@ mod pgokf {
     ///
     /// Requires membership in `pgokf_admin`. When `pg_cron` is installed, this
     /// registers (or re-schedules, idempotently) a cron job named
-    /// `pgokf_refresh_<bundle_id>` that runs `SELECT pgokf.refresh_bundle(<id>)`
+    /// `pgokf_refresh_<bundle_id>` that pins the bundle's tenant and runs
+    /// `SELECT pgokf.refresh_bundle(<id>)`
     /// on the given cron `schedule` (a 5-field cron expression or a `pg_cron`
     /// interval phrase such as `'30 minutes'`), returning the job name. **Requires
     /// pg_cron**: raises SQLSTATE `22023` naming the missing dependency when it is
@@ -220,7 +237,7 @@ REVOKE ALL ON FUNCTION pgokf.unschedule_refresh(bigint) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pgokf.schedule_refresh(bigint, text) TO pgokf_admin;
 GRANT EXECUTE ON FUNCTION pgokf.unschedule_refresh(bigint) TO pgokf_admin;
 COMMENT ON FUNCTION pgokf.schedule_refresh(bigint, text) IS
-    'Schedule a recurring pgokf.refresh_bundle(<bundle_id>) via pg_cron under the deterministic job name pgokf_refresh_<bundle_id> (idempotent/re-schedulable), returning the job name. Admin-only, SECURITY DEFINER, tenant-confined. The scheduled command is a fixed SELECT pgokf.refresh_bundle(<id>) with the id as a trusted integer literal; the schedule and job name bind as parameters. Requires pg_cron: raises 22023 naming the missing dependency when it is not installed (no silent success), and 22023 for an unknown/cross-tenant bundle_id or an empty/oversized schedule. Full scheduling requires pg_cron in shared_preload_libraries.';
+    'Schedule a recurring pgokf.refresh_bundle(<bundle_id>) via pg_cron under the deterministic job name pgokf_refresh_<bundle_id> (idempotent/re-schedulable), returning the job name. Admin-only, SECURITY DEFINER, tenant-confined. The scheduled command pins the bundle''s tenant (set_config(''pgokf.tenant'', <tenant_id>, false), quoted by format(%L)) and then runs SELECT pgokf.refresh_bundle(<id>) with the id as a trusted integer literal, so the cron worker''s own session satisfies the tenant rules and the require_tenant policy; the schedule and job name bind as parameters. Requires pg_cron: raises 22023 naming the missing dependency when it is not installed (no silent success), and 22023 for an unknown/cross-tenant bundle_id or an empty/oversized schedule. Full scheduling requires pg_cron in shared_preload_libraries.';
 COMMENT ON FUNCTION pgokf.unschedule_refresh(bigint) IS
     'Remove the pgokf_refresh_<bundle_id> pg_cron refresh job when present (returns true); a clean no-op returning false (with a NOTICE) when pg_cron is not installed or no such job exists. Admin-only, SECURITY DEFINER, tenant-confined; raises 22023 for an unknown/cross-tenant bundle_id.';
 ",

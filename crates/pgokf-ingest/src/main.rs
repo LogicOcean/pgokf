@@ -86,6 +86,12 @@ struct Cli {
     #[arg(long, env = "OKF_BUNDLE_NAME")]
     bundle_name: String,
 
+    /// Optional multi-tenant scope applied as `pgokf.tenant` for the session:
+    /// the bundle is registered under this tenant. Required once the catalog's
+    /// `require_tenant` policy is on; an empty value means unset.
+    #[arg(long, env = "OKF_TENANT")]
+    tenant: Option<String>,
+
     /// Maximum number of objects downloaded concurrently.
     #[arg(long, env = "OKF_DOWNLOAD_CONCURRENCY", default_value_t = 8)]
     concurrency: usize,
@@ -127,6 +133,7 @@ impl Cli {
     /// so an empty endpoint or static key never overrides the AWS defaults.
     fn normalized(mut self) -> Self {
         self.endpoint = pgokf_companion::cli::non_empty(self.endpoint);
+        self.tenant = pgokf_companion::cli::non_empty(self.tenant);
         self.access_key_id = pgokf_companion::cli::non_empty(self.access_key_id);
         self.secret_access_key = pgokf_companion::cli::non_empty(self.secret_access_key);
         self
@@ -415,6 +422,9 @@ async fn register_content(cli: &Cli, objects: Vec<BundleObject>) -> Result<()> {
     let (client, connection_handle) = pgokf_pgconn::connect(&cli.database_url, cli.tls)
         .await
         .context("connecting to PostgreSQL")?;
+    if let Some(tenant) = &cli.tenant {
+        pgokf_pgconn::set_tenant(&client, tenant).await?;
+    }
 
     let row = client
         .query_one(
@@ -448,7 +458,47 @@ async fn register_content(cli: &Cli, objects: Vec<BundleObject>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BundleObject, hash_objects, normalize_prefix, relative_path};
+    use super::{BundleObject, Cli, hash_objects, normalize_prefix, relative_path};
+    use clap::Parser;
+
+    /// Parse the CLI with the required arguments supplied and `extra` appended.
+    fn parse(extra: &[&str]) -> Cli {
+        let mut args = vec![
+            "pgokf-ingest",
+            "--bucket",
+            "okf-bundles",
+            "--database-url",
+            "postgresql://ingest@localhost/app",
+            "--bundle-name",
+            "handbook",
+        ];
+        args.extend_from_slice(extra);
+        Cli::parse_from(args)
+    }
+
+    #[test]
+    fn normalized_treats_an_empty_tenant_as_unset() {
+        // Arrange: the shape the compose stack produces for an unset OKF_TENANT.
+        let cli = parse(&["--tenant", ""]);
+
+        // Act
+        let cli = cli.normalized();
+
+        // Assert
+        assert_eq!(cli.tenant, None);
+    }
+
+    #[test]
+    fn normalized_keeps_a_set_tenant() {
+        // Arrange
+        let cli = parse(&["--tenant", "acme"]);
+
+        // Act
+        let cli = cli.normalized();
+
+        // Assert
+        assert_eq!(cli.tenant.as_deref(), Some("acme"));
+    }
 
     fn object(path: &str, bytes: &[u8]) -> BundleObject {
         BundleObject {

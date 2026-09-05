@@ -135,6 +135,20 @@ sql "SELECT * FROM pgokf.register_bundle('/bundles/sample', 'sample')" >/dev/nul
 concepts="$(sql "SELECT count(*) FROM pgokf.concepts")"
 [ "${concepts}" -gt 0 ] || fail "no concept rows materialized from the sample bundle"
 log "ok: ${concepts} concept row(s) materialized"
+
+# Scheduled refresh (pg_cron is created in this database, cron.database_name):
+# the job command must pin the bundle's tenant before the refresh call, so
+# the cron worker's own session satisfies the tenant rules.
+case ",${available}," in
+  *,pg_cron,*)
+    bundle_id="$(sql "SELECT min(id) FROM pgokf.bundles")"
+    sql "SELECT pgokf.schedule_refresh(${bundle_id}, '0 3 * * *')" >/dev/null
+    assert_eq "$(sql "SELECT command FROM cron.job WHERE jobname = 'pgokf_refresh_${bundle_id}'")" \
+      "SELECT pg_catalog.set_config('pgokf.tenant', 'default', false); SELECT pgokf.refresh_bundle(${bundle_id})" \
+      "scheduled refresh pins the bundle's tenant"
+    assert_eq "$(sql "SELECT pgokf.unschedule_refresh(${bundle_id})")" "t" "scheduled refresh removed"
+    ;;
+esac
 assert_eq "$(sql "SELECT pgokf.health() ->> 'ok'")" "true" "pgokf.health() reports ok"
 
 # BM25 must work for a non-superuser reader (the production case) when the

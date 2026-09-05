@@ -976,6 +976,11 @@ DECLARE
     -- exactly what the Unsupported-query-shape error was about). Empty = unset.
     v_tenant text := NULLIF(pg_catalog.current_setting('pgokf.tenant', true), '');
 BEGIN
+    -- The policies' rule, applied here because this body bypasses them: an
+    -- unscoped session sees nothing when the catalog requires a tenant.
+    IF v_tenant IS NULL AND pgokf.tenant_required() THEN
+        RETURN;
+    END IF;
     RETURN QUERY
     SELECT hits.bundle_id,
            hits.concept_id,

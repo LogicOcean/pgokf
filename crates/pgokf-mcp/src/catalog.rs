@@ -45,10 +45,7 @@ impl Catalog {
             .context("connecting to PostgreSQL")?;
 
         if let Some(tenant) = tenant {
-            client
-                .execute("SELECT set_config('pgokf.tenant', $1, false)", &[&tenant])
-                .await
-                .context("failed to set pgokf.tenant")?;
+            pgokf_pgconn::set_tenant(&client, tenant).await?;
         }
 
         Ok(Self { client })

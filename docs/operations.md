@@ -30,7 +30,7 @@ replica.
 SELECT jsonb_pretty(pgokf.health());
 -- { "ok": true, "roles_ok": true, "config_ok": true, "bm25_ready": false,
 --   "in_recovery": false, "bundle_count": 1, "concept_count": 4,
---   "search_backend": "native" }
+--   "search_backend": "native", "tenant_required": false }
 ```
 
 `pgokf.catalog_stats()` is the per-bundle dashboard query. It folds the counts
@@ -453,7 +453,7 @@ SELECT pgokf.version();   -- the loaded library's version
 
 `pgokf` ships an explicit migration chain, so PostgreSQL can walk intermediate
 steps for you: the packaged scripts step one minor at a time from `0.1.0`
-through `0.1.15` (`0.1.0 -> 0.1.1 -> ... -> 0.1.14 -> 0.1.15`), alongside a full
+through `0.1.16` (`0.1.0 -> 0.1.1 -> ... -> 0.1.15 -> 0.1.16`), alongside a full
 base install for the current version. `ALTER EXTENSION pgokf UPDATE` applies the
 necessary steps in order.
 

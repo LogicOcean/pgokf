@@ -4647,6 +4647,33 @@ The anchor concept never changes across the runbook's revisions.\n";
         );
         assert_eq!(unrelated, 0, "rows that do not match are not returned");
         assert_eq!(foreign_hits, 0, "a foreign tenant sees none of the rows");
+
+        // Act 2 / Assert 2: with require_tenant on, the same unscoped reader
+        // gets nothing from the provider's index scan (the policy qual is an
+        // InitPlan on that scan), and a scoped reader still gets its hit.
+        Spi::run("SELECT pgokf.set_config('require_tenant', 'true'::jsonb)")
+            .expect("policy is settable");
+        Spi::run("SET ROLE pgokf_textsearch_reader").expect("role switch succeeds");
+        let denied = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concept_search('peregrine', $1, 5)",
+            &[bundle_id.into()],
+        )
+        .expect("unscoped search executes")
+        .expect("count is not null");
+        Spi::run("SELECT set_config('pgokf.tenant', 'default', true)")
+            .expect("tenant scope is settable");
+        let allowed = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concept_search('peregrine', $1, 5)",
+            &[bundle_id.into()],
+        )
+        .expect("scoped search executes")
+        .expect("count is not null");
+        Spi::run("RESET ROLE").expect("role resets");
+        assert_eq!(
+            denied, 0,
+            "require_tenant hides every row from an unscoped reader on pg_textsearch"
+        );
+        assert_eq!(allowed, 1, "the scoped reader keeps its pg_textsearch hit");
     }
 
     /// Whether the BM25 provider extension `name` is usable in this test
@@ -4828,6 +4855,238 @@ The anchor concept never changes across the runbook's revisions.\n";
         );
     }
 
+    /// `require_tenant` is a durable boolean policy key: defaults to false,
+    /// round-trips, rejects a non-boolean with 22023, and resets.
+    #[pg_test]
+    fn require_tenant_policy_round_trips_and_rejects_non_boolean() {
+        // Arrange: the default, reported by the key and by the reader function.
+        let initial =
+            Spi::get_one::<bool>("SELECT (pgokf.get_config() ->> 'require_tenant')::bool")
+                .expect("get_config executes")
+                .expect("key is present");
+        let function_initial = Spi::get_one::<bool>("SELECT pgokf.tenant_required()")
+            .expect("tenant_required executes")
+            .expect("it is not null");
+        Spi::run(
+            "CREATE FUNCTION pg_temp.pgokf_require_sqlstate() RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.set_config('require_tenant', '\"yes\"'::jsonb);
+                 RETURN 'not-rejected';
+             EXCEPTION WHEN invalid_parameter_value THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("rejection probe function is creatable");
+
+        // Act
+        Spi::run("SELECT pgokf.set_config('require_tenant', 'true'::jsonb)")
+            .expect("true is accepted");
+        let set = Spi::get_one::<bool>("SELECT pgokf.tenant_required()")
+            .expect("tenant_required executes")
+            .expect("it is not null");
+        let rejected = Spi::get_one::<String>("SELECT pg_temp.pgokf_require_sqlstate()")
+            .expect("rejection probe executes")
+            .expect("the probe reports a SQLSTATE");
+        Spi::run("SELECT pgokf.reset_config('require_tenant')").expect("reset executes");
+        let reset = Spi::get_one::<bool>("SELECT pgokf.tenant_required()")
+            .expect("tenant_required executes")
+            .expect("it is not null");
+
+        // Assert
+        assert!(
+            !initial && !function_initial,
+            "require_tenant defaults to false"
+        );
+        assert!(
+            set,
+            "set_config('require_tenant', true) is visible through tenant_required()"
+        );
+        assert_eq!(rejected, "22023", "a non-boolean value must raise 22023");
+        assert!(!reset, "reset_config restores the default");
+    }
+
+    /// With `require_tenant` on, a non-superuser reader that has not set
+    /// `pgokf.tenant` sees nothing through every reader surface - the
+    /// row-level-security policies, the RLS-backed readers, and the
+    /// `SECURITY DEFINER` readers that apply the rule explicitly - while a
+    /// scoped reader sees its own tenant exactly as before.
+    #[pg_test]
+    fn require_tenant_hides_every_row_from_an_unscoped_reader() {
+        // Arrange: one bundle owned by acme (with its source stored, so a
+        // scoped get_concept_source succeeds and the unscoped one is a real
+        // refusal rather than "no source stored"), the policy on, and a
+        // reader probe.
+        let bundle = FixtureBundle::create();
+        Spi::run("SELECT pgokf.set_config('store_source', 'true'::jsonb)")
+            .expect("store_source is settable");
+        Spi::run("SET pgokf.tenant = 'acme'").expect("pgokf.tenant is settable");
+        let _acme_id = register_fixture(&bundle);
+        Spi::run("SET pgokf.tenant = ''").expect("pgokf.tenant is resettable");
+        Spi::run("SELECT pgokf.set_config('require_tenant', 'true'::jsonb)")
+            .expect("policy is settable");
+        Spi::run("CREATE ROLE pgokf_req_reader").expect("reader role is creatable");
+        Spi::run("GRANT pgokf_reader TO pgokf_req_reader").expect("reader role is grantable");
+        Spi::run(
+            "CREATE FUNCTION pg_temp.req_reader_counts(
+                 sync_id bigint, bundle bigint,
+                 OUT bundles bigint, OUT concepts bigint, OUT listed bigint,
+                 OUT searched bigint, OUT logs bigint, OUT changes bigint,
+                 OUT health_bundles bigint, OUT source_state text,
+                 OUT required boolean)
+             LANGUAGE plpgsql
+             SET role TO pgokf_req_reader
+             AS $probe$
+             BEGIN
+                 bundles  := (SELECT count(*) FROM pgokf.bundles);
+                 concepts := (SELECT count(*) FROM pgokf.concepts);
+                 listed   := (SELECT count(*) FROM pgokf.list_bundles());
+                 searched := (SELECT count(*) FROM pgokf.concept_search('peregrine'));
+                 logs     := (SELECT count(*) FROM pgokf.list_sync_log());
+                 changes  := (SELECT count(*) FROM pgokf.list_sync_changes(sync_id));
+                 health_bundles := (pgokf.health() ->> 'bundle_count')::bigint;
+                 BEGIN
+                     PERFORM pgokf.get_concept_source(bundle, 'alpha');
+                     source_state := 'ok';
+                 EXCEPTION WHEN OTHERS THEN
+                     source_state := SQLSTATE;
+                 END;
+                 required := pgokf.tenant_required();
+             END
+             $probe$;",
+        )
+        .expect("reader probe is creatable");
+        let sync_id = Spi::get_one::<i64>("SELECT max(id) FROM pgokf_private.sync_log")
+            .expect("sync log is readable by the superuser")
+            .expect("acme's registration was logged");
+
+        // Act: unscoped, then scoped to acme.
+        let probe = |label: &str| {
+            Spi::get_one_with_args::<pgrx::JsonB>(
+                "SELECT pg_catalog.to_jsonb(r) FROM pg_temp.req_reader_counts($1, $2) r",
+                &[sync_id.into(), _acme_id.into()],
+            )
+            .unwrap_or_else(|error| panic!("{label} probe executes: {error}"))
+            .expect("probe row")
+            .0
+        };
+        let unscoped = probe("unscoped");
+        Spi::run("SET pgokf.tenant = 'acme'").expect("pgokf.tenant is settable");
+        let scoped = probe("scoped");
+
+        // Assert
+        for surface in [
+            "bundles",
+            "concepts",
+            "listed",
+            "searched",
+            "logs",
+            "changes",
+            "health_bundles",
+        ] {
+            assert_eq!(
+                unscoped[surface].as_i64(),
+                Some(0),
+                "an unscoped reader must see nothing through {surface} when a tenant is required"
+            );
+        }
+        assert_eq!(
+            unscoped["source_state"].as_str(),
+            Some("22023"),
+            "get_concept_source reports the same not-found error a foreign tenant gets"
+        );
+        assert_eq!(unscoped["required"].as_bool(), Some(true));
+        assert_eq!(
+            scoped["changes"].as_i64(),
+            Some(2),
+            "the scoped reader sees its sync's changes"
+        );
+        assert_eq!(scoped["source_state"].as_str(), Some("ok"));
+        assert_eq!(
+            scoped["bundles"].as_i64(),
+            Some(1),
+            "the scoped reader still sees its bundle"
+        );
+        assert_eq!(scoped["concepts"].as_i64(), Some(2));
+        assert_eq!(scoped["listed"].as_i64(), Some(1));
+        assert_eq!(scoped["searched"].as_i64(), Some(1));
+        assert_eq!(scoped["logs"].as_i64(), Some(1));
+        assert_eq!(scoped["health_bundles"].as_i64(), Some(1));
+    }
+
+    /// With `require_tenant` on, the ingestion tier and the bundle-addressed
+    /// writers refuse an unscoped session with 42501, admin configuration
+    /// stays callable (so the policy can be turned off again), and a scoped
+    /// session works as before.
+    #[pg_test]
+    fn require_tenant_refuses_unscoped_ingestion_but_not_admin_configuration() {
+        // Arrange: acme's bundle exists; the policy is on; probes report the
+        // SQLSTATE of each call made without a tenant.
+        let bundle = FixtureBundle::create();
+        let refresh_fixture = FixtureBundle::create();
+        Spi::run("SET pgokf.tenant = 'acme'").expect("pgokf.tenant is settable");
+        let acme_id = register_fixture(&bundle);
+        Spi::run("SET pgokf.tenant = ''").expect("pgokf.tenant is resettable");
+        Spi::run("SELECT pgokf.set_config('require_tenant', 'true'::jsonb)")
+            .expect("policy is settable");
+        Spi::run(
+            "CREATE FUNCTION pg_temp.req_sqlstate(stmt text) RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             BEGIN
+                 EXECUTE stmt;
+                 RETURN 'ok';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("sqlstate probe is creatable");
+        let sqlstate = |stmt: &str| {
+            Spi::get_one_with_args::<String>("SELECT pg_temp.req_sqlstate($1)", &[stmt.into()])
+                .expect("probe executes")
+                .expect("probe reports")
+        };
+        let register_stmt = format!(
+            "SELECT pgokf.register_bundle('{}')",
+            refresh_fixture.path().replace('\'', "''")
+        );
+
+        // Act: unscoped calls.
+        let register = sqlstate(&register_stmt);
+        let refresh = sqlstate(&format!("SELECT pgokf.refresh_bundle({acme_id})"));
+        let disable = sqlstate(&format!(
+            "SELECT pgokf.set_bundle_enabled({acme_id}, false)"
+        ));
+        let purge = sqlstate("SELECT pgokf.purge_retired('1 day')");
+        let admin = sqlstate("SELECT pgokf.set_config('default_strict', 'true'::jsonb)");
+        // Then scoped: refresh succeeds for acme's own bundle.
+        Spi::run("SET pgokf.tenant = 'acme'").expect("pgokf.tenant is settable");
+        let scoped_refresh = sqlstate(&format!("SELECT pgokf.refresh_bundle({acme_id})"));
+        Spi::run("SET pgokf.tenant = ''").expect("pgokf.tenant is resettable");
+        // And turning the policy back off restores the unscoped session.
+        Spi::run("SELECT pgokf.set_config('require_tenant', 'false'::jsonb)")
+            .expect("policy is settable");
+        let unscoped_after = sqlstate(&format!("SELECT pgokf.refresh_bundle({acme_id})"));
+
+        // Assert
+        assert_eq!(register, "42501", "unscoped register_bundle is refused");
+        assert_eq!(refresh, "42501", "unscoped refresh_bundle is refused");
+        assert_eq!(disable, "42501", "unscoped set_bundle_enabled is refused");
+        assert_eq!(
+            purge, "42501",
+            "unscoped purge_retired is refused rather than purging nothing"
+        );
+        assert_eq!(admin, "ok", "admin configuration never needs a tenant");
+        assert_eq!(scoped_refresh, "ok", "the scoped session works as before");
+        assert_eq!(
+            unscoped_after, "ok",
+            "turning the policy off restores the see-all default"
+        );
+    }
+
     /// The bm25 backend must serve a non-superuser reader. Row-level security
     /// wraps the catalog tables for non-owners in a security-barrier subquery
     /// that pg_search cannot plan its custom scan over, so the backend runs its
@@ -4898,6 +5157,23 @@ The anchor concept never changes across the runbook's revisions.\n";
             "concept_search and bm25_hits agree for the reader"
         );
         assert_eq!(foreign_hits, 0, "a foreign tenant sees none of the rows");
+
+        // Act 2 / Assert 2: with require_tenant on, the definer helper applies
+        // the same rule and the unscoped reader gets nothing.
+        Spi::run("SELECT pgokf.set_config('require_tenant', 'true'::jsonb)")
+            .expect("policy is settable");
+        Spi::run("SET ROLE pgokf_bm25_reader").expect("role switch succeeds");
+        let denied = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concept_search('peregrine', $1, 5)",
+            &[bundle_id.into()],
+        )
+        .expect("unscoped search executes")
+        .expect("count is not null");
+        Spi::run("RESET ROLE").expect("role resets");
+        assert_eq!(
+            denied, 0,
+            "require_tenant hides every row from an unscoped reader on pg_search"
+        );
     }
 
     // ---------------------------------------------------------------------

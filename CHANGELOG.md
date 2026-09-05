@@ -12,6 +12,48 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 Nothing yet.
 
+## [0.1.16] - 2026-09-05
+
+**Deny-by-default tenancy, on demand.** The new durable policy key
+`require_tenant` (default `false`) makes a session that has not set
+`pgokf.tenant` see nothing and refuse to ingest, instead of the see-all
+behavior every earlier release had. Nothing changes until an administrator
+turns it on; `ALTER EXTENSION pgokf UPDATE TO '0.1.16'` adds one column and
+rewrites the thirteen tenant-isolation policies in place.
+
+### Added
+
+- **`require_tenant` policy key** and the reader-level
+  `pgokf.tenant_required()` function every row-level-security policy consults
+  (as an uncorrelated sub-select: one evaluation per statement, never a
+  per-row call). With the policy on, an unscoped session sees no rows through
+  the policies and every reader built on them, the `SECURITY DEFINER` readers
+  apply the same rule (`health()` counts, `list_sync_log`, `list_sync_changes`,
+  `list_access_log`, and the ParadeDB `bm25_hits` path come back empty;
+  `get_concept_source` raises the same not-found `22023` a foreign tenant
+  gets), and the ingestion tier, the bundle-addressed writers and exports, and
+  `purge_retired` refuse it with SQLSTATE `42501`. `set_config` / `reset_config` never need a
+  tenant, so the policy can always be turned off again. `health()` gains
+  `tenant_required`. The function is executable by any role with `USAGE` on
+  schema `pgokf`, because the policies depend on it.
+- **Companions:** `pgokf-ingest` accepts `--tenant` / `OKF_TENANT` like
+  `pgokf-embed` and `pgokf-mcp`; all three apply it through one shared
+  `pgokf-pgconn` helper. The compose stack passes `OKF_EMBED_TENANT` and
+  `OKF_INGEST_TENANT` through (next to the existing `OKF_MCP_TENANT`).
+
+### Changed
+
+- **`schedule_refresh` pins the bundle's tenant into the pg_cron job command**
+  (`set_config('pgokf.tenant', ...)` before `refresh_bundle`), so the cron
+  worker's own, tenant-less session satisfies the tenant rules. Jobs
+  scheduled by earlier releases run the bare call; re-schedule them
+  (`schedule_refresh` updates a job in place) before turning `require_tenant`
+  on, or pin the job role's tenant with `ALTER ROLE ... SET pgokf.tenant`.
+- The write-side tenant rule (`enforce_bundle_tenant`) now also refuses an
+  unscoped session when a tenant is required, with a distinct `42501` message
+  naming the fix, rather than the unknown-bundle `22023` used for cross-tenant
+  ids.
+
 ## [0.1.15] - 2026-09-05
 
 **A PostgreSQL-licensed BM25 backend.** The `bm25` search backend now runs on
@@ -946,7 +988,8 @@ queries, native full-text search, and link-graph traversal.
 - The `pgokf_private` schema and its `config` table are readable and writable
   only by the extension owner and `pgokf_admin`; readers cannot see policy.
 
-[Unreleased]: https://github.com/LogicOcean/pgokf/compare/v0.1.15...HEAD
+[Unreleased]: https://github.com/LogicOcean/pgokf/compare/v0.1.16...HEAD
+[0.1.16]: https://github.com/LogicOcean/pgokf/compare/v0.1.15...v0.1.16
 [0.1.15]: https://github.com/LogicOcean/pgokf/compare/v0.1.14...v0.1.15
 [0.1.14]: https://github.com/LogicOcean/pgokf/compare/v0.1.13...v0.1.14
 [0.1.13]: https://github.com/LogicOcean/pgokf/compare/v0.1.12...v0.1.13

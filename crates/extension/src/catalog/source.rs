@@ -96,11 +96,13 @@ CREATE TABLE pgokf.concept_source (
 -- it to persist a single-tenant bundle's source bytes.
 ALTER TABLE pgokf.concept_source ENABLE ROW LEVEL SECURITY;
 CREATE POLICY concept_source_tenant_isolation ON pgokf.concept_source
-    USING (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
-        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+    USING (((pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+             OR pg_catalog.current_setting('pgokf.tenant', true) = '')
+            AND NOT (SELECT pgokf.tenant_required()))
         OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true))
-    WITH CHECK (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
-        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+    WITH CHECK (((pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+                  OR pg_catalog.current_setting('pgokf.tenant', true) = '')
+                 AND NOT (SELECT pgokf.tenant_required()))
         OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true));
 
 -- Prefer lz4 compression for the source bytes when this PostgreSQL build ships
@@ -203,8 +205,9 @@ fn concept_exists(bundle_id: i64, concept_id: &str) -> Result<bool, CatalogError
     Spi::get_one_with_args::<bool>(
         "SELECT EXISTS (SELECT 1 FROM pgokf.concepts
          WHERE bundle_id = $1 AND id = $2
-           AND (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
-             OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+           AND (((pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+                  OR pg_catalog.current_setting('pgokf.tenant', true) = '')
+                 AND NOT (SELECT pgokf.tenant_required()))
              OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true)))",
         &[bundle_id.into(), concept_id.into()],
     )
@@ -231,8 +234,9 @@ fn get_concept_source_impl(bundle_id: i64, concept_id: &str) -> Result<Vec<u8>, 
         let table = client.select(
             "SELECT raw_content FROM pgokf.concept_source
              WHERE bundle_id = $1 AND concept_id = $2
-               AND (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
-                 OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+               AND (((pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+                   OR pg_catalog.current_setting('pgokf.tenant', true) = '')
+                  AND NOT (SELECT pgokf.tenant_required()))
                  OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true))",
             Some(1),
             &[bundle_id.into(), concept_id.into()],

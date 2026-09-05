@@ -172,21 +172,26 @@ fn catalog_stats_impl() -> Result<Vec<CatalogStat>, CatalogError> {
 /// `SECURITY DEFINER` at the SQL layer, so it may read `pgokf_private.config`. Because `SECURITY DEFINER` bypasses row-level
 /// security, the bundle and concept counts apply the same opt-in tenant filter
 /// explicitly: a session that set `pgokf.tenant` sees only its own counts, while
-/// an unset session counts every row (backward compatible). The role and config
-/// checks are cluster-global, not tenant data, so they are never scoped.
+/// an unset session counts every row (backward compatible) - or none when the
+/// `require_tenant` policy is on, which the document also reports as
+/// `tenant_required`. The role and config checks are cluster-global, not
+/// tenant data, so they are never scoped.
 const HEALTH_QUERY: &str = "
     WITH h AS (
         SELECT
             (SELECT pg_catalog.count(*) = 3 FROM pg_catalog.pg_roles
              WHERE rolname IN ('pgokf_reader', 'pgokf_writer', 'pgokf_admin')) AS roles_ok,
             (SELECT pg_catalog.count(*) = 1 FROM pgokf_private.config) AS config_ok,
+            (SELECT require_tenant FROM pgokf_private.config WHERE singleton) AS tenant_required,
             (SELECT pg_catalog.count(*) FROM pgokf.bundles
-             WHERE pg_catalog.current_setting('pgokf.tenant', true) IS NULL
-                OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+             WHERE ((pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+                     OR pg_catalog.current_setting('pgokf.tenant', true) = '')
+                    AND NOT (SELECT require_tenant FROM pgokf_private.config WHERE singleton))
                 OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true)) AS bundle_count,
             (SELECT pg_catalog.count(*) FROM pgokf.concepts
-             WHERE pg_catalog.current_setting('pgokf.tenant', true) IS NULL
-                OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+             WHERE ((pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+                     OR pg_catalog.current_setting('pgokf.tenant', true) = '')
+                    AND NOT (SELECT require_tenant FROM pgokf_private.config WHERE singleton))
                 OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true)) AS concept_count,
             (SELECT search_backend FROM pgokf_private.config WHERE singleton) AS search_backend,
             $1::pg_catalog.bool AS bm25_ready,
@@ -198,6 +203,7 @@ const HEALTH_QUERY: &str = "
         'concept_count', concept_count,
         'search_backend', search_backend,
         'bm25_ready', bm25_ready,
+        'tenant_required', tenant_required,
         'in_recovery', in_recovery,
         'roles_ok', roles_ok,
         'config_ok', config_ok)
@@ -407,7 +413,7 @@ GRANT EXECUTE ON FUNCTION pgokf.stale_concepts(bigint, timestamptz) TO pgokf_rea
 COMMENT ON FUNCTION pgokf.catalog_stats() IS
     'Per-bundle operational statistics (indexed-concept/link/resolved-link counts, sync recency, 24h staleness flag) as pgokf.catalog_stat. Reader-level, STABLE, invoker rights over reader-granted tables.';
 COMMENT ON FUNCTION pgokf.health() IS
-    'Catalog health document (jsonb) for liveness/readiness probes: ok, bundle_count, concept_count, search_backend, bm25_ready, in_recovery, roles_ok, config_ok. Reader-level, STABLE, SECURITY DEFINER (reads the admin-only config).';
+    'Catalog health document (jsonb) for liveness/readiness probes: ok, bundle_count, concept_count, search_backend, bm25_ready, tenant_required (the require_tenant policy; the two counts are empty for an unscoped session when it is on), in_recovery, roles_ok, config_ok. Reader-level, STABLE, SECURITY DEFINER (reads the admin-only config).';
 COMMENT ON FUNCTION pgokf.stale_concepts(bigint, timestamptz) IS
     'List concepts whose OKF stale_after instant has passed as of the given time (or now()), as pgokf.stale_concept, optionally scoped to one bundle. Reader-level, STABLE, invoker rights over reader-granted tables.';
 ",

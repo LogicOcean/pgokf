@@ -75,11 +75,13 @@ CREATE INDEX links_target_idx ON pgokf.links (bundle_id, target_id);
 -- it to project a single-tenant bundle's edges.
 ALTER TABLE pgokf.links ENABLE ROW LEVEL SECURITY;
 CREATE POLICY links_tenant_isolation ON pgokf.links
-    USING (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
-        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+    USING (((pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+             OR pg_catalog.current_setting('pgokf.tenant', true) = '')
+            AND NOT (SELECT pgokf.tenant_required()))
         OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true))
-    WITH CHECK (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
-        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+    WITH CHECK (((pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+                  OR pg_catalog.current_setting('pgokf.tenant', true) = '')
+                 AND NOT (SELECT pgokf.tenant_required()))
         OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true));
 
 COMMENT ON TABLE pgokf.links IS

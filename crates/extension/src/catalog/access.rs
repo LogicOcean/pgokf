@@ -75,11 +75,13 @@ CREATE INDEX access_log_bundle_id_idx ON pgokf_private.access_log (bundle_id);
 -- tenant filter explicitly.
 ALTER TABLE pgokf_private.access_log ENABLE ROW LEVEL SECURITY;
 CREATE POLICY access_log_tenant_isolation ON pgokf_private.access_log
-    USING (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
-        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+    USING (((pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+             OR pg_catalog.current_setting('pgokf.tenant', true) = '')
+            AND NOT (SELECT pgokf.tenant_required()))
         OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true))
-    WITH CHECK (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
-        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+    WITH CHECK (((pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+                  OR pg_catalog.current_setting('pgokf.tenant', true) = '')
+                 AND NOT (SELECT pgokf.tenant_required()))
         OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true));
 
 REVOKE ALL ON pgokf_private.access_log FROM PUBLIC;
@@ -226,8 +228,9 @@ fn list_access_log_impl(
         SELECT id, actor, at, op, bundle_id, concept_id, detail
         FROM pgokf_private.access_log
         WHERE ($1::bigint IS NULL OR bundle_id = $1)
-          AND (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
-            OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+          AND (((pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+              OR pg_catalog.current_setting('pgokf.tenant', true) = '')
+             AND NOT (SELECT pgokf.tenant_required()))
             OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true))
         ORDER BY at DESC, id DESC
         LIMIT $2";

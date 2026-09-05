@@ -363,7 +363,8 @@ Guidance:
 from one catalog. Every projection table carries a denormalized `tenant_id`, and
 an RLS policy keyed on the per-session `pgokf.tenant` GUC scopes what a session
 sees: a session that sets no tenant sees all rows (the backward-compatible
-default), while a session that sets one sees only that tenant's rows. There is
+default; `require_tenant` turns it into deny), while a session that sets one
+sees only that tenant's rows. There is
 nothing to build; you enable it by using it.
 
 ```sql
@@ -410,7 +411,9 @@ Weigh the trust model before relying on it:
   [multi-tenancy.md](multi-tenancy.md).
 - **The unset default is fail-open.** An unset or empty `pgokf.tenant` sees every
   row, so reserve the unset session for a trusted operator and make sure
-  tenant-facing connections always carry a tenant.
+  tenant-facing connections always carry a tenant - or set the
+  [`require_tenant`](multi-tenancy.md#requiring-a-tenant-require_tenant)
+  policy so an unset session is denied.
 
 For a **hard** boundary against a tenant who can submit arbitrary SQL, either
 front PostgreSQL with a constrained layer (a pooler or restricted API that pins

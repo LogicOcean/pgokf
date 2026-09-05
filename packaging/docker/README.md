@@ -14,7 +14,7 @@ builds each architecture natively on its own runner, smoke-tests it there
 with the scripts in this directory, and on a version tag re-exports the same
 cached build by digest and merges the two into one manifest per tag - so the
 same tag runs on x86 servers, arm64 servers, and Apple Silicon. Between releases there is nothing new to pull; build
-locally as below. `0.1.15` in the examples is the extension version, read from
+locally as below. `0.1.16` in the examples is the extension version, read from
 `crates/extension/pgokf.control` - the single source of truth CI and
 `packaging/deb/build-deb.sh` both resolve at build time.
 
@@ -30,11 +30,11 @@ One image per PostgreSQL major (15-19), selected at build time via `PG_MAJOR`:
 
 | Tag             | PostgreSQL                    |
 | --------------- | ----------------------------- |
-| `0.1.15-pg15`   | 15 (no BM25 provider: `pg_textsearch` ships for 17 and 18 only) |
-| `0.1.15-pg16`   | 16 (no BM25 provider)         |
-| `0.1.15-pg17`   | 17 (+ `pg_textsearch`)        |
-| `0.1.15-pg18`   | 18 (+ `pg_textsearch`; the `PG_MAJOR` default) |
-| `0.1.15-pg19`   | 19 (once PGDG ships packages; no BM25 provider until Tiger Data publishes a pg19 package) |
+| `0.1.16-pg15`   | 15 (no BM25 provider: `pg_textsearch` ships for 17 and 18 only) |
+| `0.1.16-pg16`   | 16 (no BM25 provider)         |
+| `0.1.16-pg17`   | 17 (+ `pg_textsearch`)        |
+| `0.1.16-pg18`   | 18 (+ `pg_textsearch`; the `PG_MAJOR` default) |
+| `0.1.16-pg19`   | 19 (once PGDG ships packages; no BM25 provider until Tiger Data publishes a pg19 package) |
 
 ### Build
 
@@ -42,7 +42,7 @@ One image per PostgreSQL major (15-19), selected at build time via `PG_MAJOR`:
 docker build -f packaging/docker/Dockerfile \
   --build-arg PG_MAJOR=18 \
   --build-arg PGOKF_VERSION="$(sed -n "s/^default_version *= *'\([^']*\)'.*/\1/p" crates/extension/pgokf.control)" \
-  -t pgokf:0.1.15-pg18 .
+  -t pgokf:0.1.16-pg18 .
 ```
 
 The build runs natively for the daemon's architecture. To build for an arm64
@@ -104,7 +104,7 @@ packaging/docker/update-pg-search-checksums.sh 0.25.6
 
 ```bash
 docker run --rm -e POSTGRES_PASSWORD=postgres \
-  pgokf:0.1.15-pg18 \
+  pgokf:0.1.16-pg18 \
   postgres -c shared_preload_libraries=pgokf,pg_cron,pg_textsearch
 ```
 
@@ -169,10 +169,10 @@ and pg_cron's objects when the target is not `cron.database_name`). Both use the
 # on the server's network (here the compose network), as the superuser
 docker run --rm --network pgokf-net \
   -e PGHOST=pgokf-db -e PGUSER=postgres -e PGPASSWORD=... -e PGDATABASE=okf \
-  -v /srv/pgokf/backups:/backups pgokf:0.1.15-pg18 pgokf-backup
+  -v /srv/pgokf/backups:/backups pgokf:0.1.16-pg18 pgokf-backup
 docker run --rm --network pgokf-net \
   -e PGHOST=pgokf-db -e PGUSER=postgres -e PGPASSWORD=... -e PGDATABASE=okf \
-  -v /srv/pgokf/backups:/backups pgokf:0.1.15-pg18 pgokf-restore /backups/okf-<stamp>.dump
+  -v /srv/pgokf/backups:/backups pgokf:0.1.16-pg18 pgokf-restore /backups/okf-<stamp>.dump
 ```
 
 Dump as a superuser (or a role with `pg_read_all_data` and `BYPASSRLS`); the
@@ -189,8 +189,8 @@ The same script CI runs, usable against any daemon (the sample bundle is
 copied in with `docker cp`, so no daemon-side path is needed):
 
 ```bash
-packaging/docker/smoke-test.sh pgokf:0.1.15-pg18            # local daemon
-DOCKER="docker --context <remote>" packaging/docker/smoke-test.sh pgokf:0.1.15-pg18
+packaging/docker/smoke-test.sh pgokf:0.1.16-pg18            # local daemon
+DOCKER="docker --context <remote>" packaging/docker/smoke-test.sh pgokf:0.1.16-pg18
 ```
 
 It preloads every optional extension, applies env-driven roles and policy,
@@ -201,9 +201,9 @@ a second fresh container with `pgokf-restore`.
 ## Companions image
 
 ```bash
-docker build -f packaging/docker/Dockerfile.companions -t pgokf-companions:0.1.15 .
-docker run --rm pgokf-companions:0.1.15 pgokf-embed --help
-packaging/docker/smoke-test-companions.sh pgokf-companions:0.1.15
+docker build -f packaging/docker/Dockerfile.companions -t pgokf-companions:0.1.16 .
+docker run --rm pgokf-companions:0.1.16 pgokf-embed --help
+packaging/docker/smoke-test-companions.sh pgokf-companions:0.1.16
 ```
 
 The image has no entrypoint: name the binary as the command. It runs as an
@@ -219,7 +219,7 @@ The minimal shape (the full stack is in [`deploy/compose/`](../../deploy/compose
 ```yaml
 services:
   db:
-    image: ghcr.io/logicocean/pgokf:0.1.15-pg18
+    image: ghcr.io/logicocean/pgokf:0.1.16-pg18
     command: ["postgres", "-c", "shared_preload_libraries=pgokf,pg_cron,pg_textsearch"]
     environment:
       POSTGRES_PASSWORD: postgres

@@ -52,21 +52,6 @@ impl PendingConcept {
     }
 }
 
-/// Apply an optional multi-tenant scope to the session, so the reader/writer
-/// calls see and touch only that tenant's rows (mirrors `pgokf.tenant`
-/// row-level security).
-///
-/// # Errors
-///
-/// Returns an error if the `set_config` call fails.
-pub async fn set_tenant(client: &Client, tenant: &str) -> Result<()> {
-    client
-        .execute("SELECT set_config('pgokf.tenant', $1, false)", &[&tenant])
-        .await
-        .context("failed to set pgokf.tenant")?;
-    Ok(())
-}
-
 /// Read the durable `embedding_dim` configuration key through `pgokf.get_config`.
 ///
 /// # Errors

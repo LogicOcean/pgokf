@@ -38,7 +38,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The 39 stable public functions, as `(name, argument-type list)`. The pair
+/// The 40 stable public functions, as `(name, argument-type list)`. The pair
 /// renders to the exact `COMMENT ON FUNCTION pgokf.<name>(<args>)` prefix that
 /// the hardening blocks emit.
 const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
@@ -87,6 +87,7 @@ const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
     ("export_sources", "bigint, text"),
     ("rebuild_search_index", ""),
     ("version", ""),
+    ("tenant_required", ""),
 ];
 
 /// The 14 stable public composite types.
@@ -133,10 +134,13 @@ const CATALOG_TABLES: &[&str] = &[
 /// (`pgokf_reader` < `pgokf_writer` < `pgokf_admin`).
 const API_ROLES: &[&str] = &["pgokf_reader", "pgokf_writer", "pgokf_admin"];
 
-/// The number of `#[pg_extern]` functions defined under `src/catalog/`. The
-/// last public function, `pgokf.version()`, is declared in `src/lib.rs`, so
-/// the catalog count is one less than [`PUBLIC_FUNCTIONS`].
-const CATALOG_PG_EXTERN_COUNT: usize = PUBLIC_FUNCTIONS.len() - 1;
+/// The number of `#[pg_extern]` functions defined under `src/catalog/`. Two
+/// public functions are not `#[pg_extern]`s there: `pgokf.version()` is
+/// declared in `src/lib.rs`, and `pgokf.tenant_required()` is plain SQL in
+/// `sql/bootstrap.sql` (every row-level-security policy references it, so it
+/// must exist before any table), so the catalog count is two less than
+/// [`PUBLIC_FUNCTIONS`].
+const CATALOG_PG_EXTERN_COUNT: usize = PUBLIC_FUNCTIONS.len() - 2;
 
 /// SQL keywords that must never appear in an executable upgrade statement,
 /// because they would break the no-data-loss guarantee.

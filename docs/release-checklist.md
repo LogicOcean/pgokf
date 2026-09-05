@@ -88,7 +88,7 @@ FROM pg_roles r WHERE r.rolname LIKE 'pgokf_%' ORDER BY 1;
 ```
 
 Each of the first three queries must return **no rows**. As a positive check,
-this confirms full coverage (expect `39/39`, `14/14`, `15/15`: 39 functions, 14
+this confirms full coverage (expect `40/40`, `14/14`, `15/15`: 40 functions, 14
 composite types, and 15 catalog tables = the 11 public `pgokf` tables plus the 4
 `pgokf_private` tables `config` / `sync_log` / `sync_log_change` / `access_log`):
 
@@ -119,7 +119,7 @@ The extension ships forward-compatible upgrade scripts named
 script as `pgokf--<crate-version>.sql` and copies every upgrade script
 alongside it, so the update path is available without any manual step. The
 shipped chain runs one script per step from `0.1.0 → 0.1.1` through
-`0.1.14 → 0.1.15` (the current `default_version`).
+`0.1.15 → 0.1.16` (the current `default_version`).
 
 > **0.1.3 was a breaking pre-release re-model.** The `pgokf.concept_provenance`
 > shape changed to conform to OKF v0.2 (see [CHANGELOG.md](https://github.com/LogicOcean/pgokf/blob/main/CHANGELOG.md)).

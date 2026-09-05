@@ -32,7 +32,7 @@ threshold uses **`SUSET`**, so a superuser can adjust it at runtime.
 | `pgokf.max_frontmatter_bytes` | integer | `262144` (256 KiB) | `1 .. 2147483647` | `SIGHUP` | Maximum bytes parsed as YAML frontmatter in one document. |
 | `pgokf.max_graph_hops` | integer | `5` | `1 .. 1000` | `SIGHUP` | Hard ceiling for graph traversal depth; `concept_neighbors(max_hops)` is capped to this. |
 | `pgokf.log_level` | string | `warning` | - | `SUSET` | Logging threshold used by `pgokf`. |
-| `pgokf.tenant` | string | `''` (empty = see all) | - | `USERSET` | Active tenant for multi-tenant row-level isolation. A policy selector, not a ceiling: any session may set it. |
+| `pgokf.tenant` | string | `''` (empty = see all, unless `require_tenant` is on) | - | `USERSET` | Active tenant for multi-tenant row-level isolation. A policy selector, not a ceiling: any session may set it. |
 
 ### Reading and setting GUCs
 
@@ -70,12 +70,13 @@ Unlike the ceilings above, `pgokf.tenant` is a `USERSET` policy selector, not a
 safety limit. It chooses the tenant a session reads and writes under for
 multi-tenant row-level isolation. Its empty default preserves the
 pre-multi-tenancy see-all behavior, so an install that never sets it is
-unaffected. Set it per session, per role, or per connection:
+unaffected (the [`require_tenant`](#which-keys-the-current-engine-consults)
+policy key can turn that default into deny). Set it per session, per role, or per connection:
 
 ```sql
 SET pgokf.tenant = 'acme';                    -- this session
 ALTER ROLE acme_app SET pgokf.tenant = 'acme'; -- every connection as this role
-RESET pgokf.tenant;                            -- back to see-all
+RESET pgokf.tenant;                            -- back to see-all (or deny, with require_tenant)
 ```
 
 See [multi-tenancy.md](multi-tenancy.md) for the full model, including the
@@ -102,6 +103,7 @@ admin-only).
 | `store_source` | boolean | `false` | must be a boolean |
 | `search_backend` | string | `"native"` | one of `"native"`, `"bm25"` |
 | `bm25_provider` | string | `"auto"` | one of `"auto"`, `"pg_textsearch"`, `"pg_search"` |
+| `require_tenant` | boolean | `false` | must be a boolean |
 | `notify_channel` | string | `""` | empty (disabled) or a safe channel identifier (letters, digits, underscore; leading letter/underscore; ≤ 63 bytes) |
 | `okf_version_policy` | string | `"warn"` | one of `"warn"`, `"reject"` |
 | `embedding_dim` | integer | `1536` | between `1` and `16000` |
@@ -113,7 +115,7 @@ admin-only).
 Accuracy matters here. As of this release the engine consults **every** key:
 it **enforces `allowed_roots`**, **applies `default_text_search_config`** to
 both indexing and querying, **honors `store_source`**, `search_backend`,
-`bm25_provider`, `default_strict`, and `default_exclude`, and **activates
+`bm25_provider`, `require_tenant`, `default_strict`, and `default_exclude`, and **activates
 `sync_log_retention_days`**, `notify_channel`, `okf_version_policy`,
 `embedding_dim`, `track_history`, and `history_retention_days`:
 
@@ -123,6 +125,7 @@ both indexing and querying, **honors `store_source`**, `search_backend`,
 | `default_text_search_config` | **Applied.** Used as the `regconfig` for `to_tsvector` when building each concept's `body_tsv` at index time, and for `websearch_to_tsquery`/`ts_headline` at query time, so query parsing matches the configuration that indexed the rows. See the caveat below. |
 | `store_source` | **Honored.** When `true`, sync stores each concept's verbatim source bytes in `pgokf.concept_source`; when `false` (default) it stores none. See the storage-tiers section below. |
 | `search_backend` | **Applied.** Selects the ranked-search backend `pgokf.concept_search` dispatches to: `native` PostgreSQL FTS (default) or `bm25` (an external BM25 provider extension). When `bm25` but the provider or its index is absent, search falls back to native with a warning. See the search-backend section below. |
+| `require_tenant` | **Applied (new in 0.1.16).** When `true`, a session that has not set `pgokf.tenant` sees no rows (every row-level-security policy and every reader built on them; the `SECURITY DEFINER` readers apply the same rule, `get_concept_source` raising the same not-found error a foreign tenant gets), and the ingestion-tier and bundle-addressed write functions refuse it with SQLSTATE `42501`. When `false` (default) an unset session is cross-tenant, the see-all behavior every earlier release had. See [multi-tenancy](multi-tenancy.md#requiring-a-tenant-require_tenant). |
 | `bm25_provider` | **Applied (new in 0.1.15).** Which BM25 provider the `bm25` backend runs on: `auto` (default: Tiger Data `pg_textsearch` when installed, else ParadeDB `pg_search`), or one of the two by name. `rebuild_search_index()` builds the resolved provider's index. See the search-backend section below. |
 | `sync_log_retention_days` | **Applied (new in 0.1.5).** After each successful sync appends its `pgokf_private.sync_log` audit row, history older than `now() - this many days` is pruned in the same transaction. `0` (or no older rows) keeps history indefinitely. See the audit-log section below. |
 | `notify_channel` | **Applied (new in 0.1.5).** When non-empty, a successful sync emits `pg_notify(<channel>, <json>)`; empty (default) disables it with zero overhead. See the change-notification section below. |
@@ -356,6 +359,7 @@ SELECT jsonb_pretty(pgokf.get_config());
 --     "track_history": false,
 --     "search_backend": "native",
 --     "bm25_provider": "auto",
+--     "require_tenant": false,
 --     "default_strict": true,
 --     "default_exclude": [],
 --     "okf_version_policy": "warn",
@@ -393,6 +397,10 @@ SELECT pgokf.set_config('search_backend', '"bm25"'::jsonb);
 
 -- Pin the BM25 provider (new in 0.1.15); 'auto' prefers pg_textsearch.
 SELECT pgokf.set_config('bm25_provider', '"pg_textsearch"'::jsonb);
+
+-- Deny-by-default tenancy (new in 0.1.16): a session with no pgokf.tenant
+-- sees nothing and cannot ingest. Admin configuration never needs a tenant.
+SELECT pgokf.set_config('require_tenant', 'true'::jsonb);
 
 -- Audit-log retention (new in 0.1.5): keep 14 days of sync history; 0 = forever.
 SELECT pgokf.set_config('sync_log_retention_days', '14'::jsonb);
@@ -446,7 +454,7 @@ SELECT pgokf.reset_config();                 -- reset every key to its default
 - Use **durable policy** for catalog behavior an administrator tunes through SQL
   and that must survive restarts: where bundles may live (`allowed_roots`), how
   search runs (`search_backend`, `bm25_provider`, `default_text_search_config`,
-  `embedding_dim`),
+  `embedding_dim`), whether a session must be tenant-scoped (`require_tenant`),
   what the catalog stores (`store_source`, `track_history`), how sync reacts and
   announces (`okf_version_policy`, `notify_channel`), and how long audit and
   history are kept (`sync_log_retention_days`, `history_retention_days`).

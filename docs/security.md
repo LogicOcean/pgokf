@@ -55,8 +55,11 @@ exists), so re-installing the extension never disturbs an existing hierarchy.
 `PUBLIC` is stripped: `REVOKE ALL ON SCHEMA pgokf FROM PUBLIC` and
 `REVOKE ALL ON SCHEMA pgokf_private FROM PUBLIC` run first, and every function
 does `REVOKE ALL … FROM PUBLIC` before granting `EXECUTE` to exactly the role
-that needs it. The one deliberate exception is `pgokf.version()`, which exposes
-only the crate version string and is left executable by everyone.
+that needs it. The two deliberate exceptions are `pgokf.version()`, which
+exposes only the crate version string, and `pgokf.tenant_required()`, which
+exposes only the boolean `require_tenant` policy and must be callable by any
+role that can query the tables because every row-level-security policy depends
+on it; both are left executable by everyone (schema `USAGE` still gates them).
 
 Because the tiers are separable, an analytics user can be granted read-only
 search access (`pgokf_reader`) without ever being able to ingest a bundle; an
@@ -297,7 +300,8 @@ any statement runs, so an unknown key or wrong-shaped value is rejected with
 
 Every projection table carries a denormalized `tenant_id` and an **opt-in**
 row-level-security policy keyed on the per-session `pgokf.tenant` GUC: a session
-that sets no tenant sees all rows (unchanged behavior), while a session that sets
+that sets no tenant sees all rows (unchanged behavior; the `require_tenant`
+policy turns that into deny), while a session that sets
 one sees only that tenant's rows. RLS is *enabled but not forced*, so the
 `SECURITY DEFINER` write/admin functions (running as the table owner) bypass it.
 That bypass is closed explicitly, not left open: every definer function that
@@ -326,7 +330,8 @@ Be precise about the trust boundary. `pgokf.tenant` is a `USERSET` GUC: it is a
 arbitrary SQL.** Any session that can execute `SET` / `RESET` / `set_config()`
 can change its own `pgokf.tenant` at will - including to another tenant's value,
 or to empty, which the policy treats as *see-all* (the fail-open, backward-
-compatible default). Pinning the value with `ALTER ROLE … SET pgokf.tenant` does
+compatible default; [`require_tenant`](multi-tenancy.md#requiring-a-tenant-require_tenant)
+flips it to deny). Pinning the value with `ALTER ROLE … SET pgokf.tenant` does
 not close this: an `ALTER ROLE` default is only a session default and a plain
 `SET pgokf.tenant = '…'` in the same session overrides it. So GUC-based tenancy
 contains an *honest, cooperating* client that never issues its own `SET`; it does
@@ -343,7 +348,7 @@ A **hard** boundary therefore requires one of:
 Treat the see-all default the same way: because unset means *every row*, a
 tenant-facing connection that is not forced through such a layer (and forgets to
 set `pgokf.tenant`) sees the whole catalog. Reserve the unset session for a
-trusted operator. This is inherent to any GUC-based scoping and is not a defect
+trusted operator, or turn on `require_tenant` so an unset session is denied. This is inherent to any GUC-based scoping and is not a defect
 in the RLS policies themselves - the policies are correct; the GUC is simply the
 wrong place to anchor a boundary against an adversary who can change it.
 

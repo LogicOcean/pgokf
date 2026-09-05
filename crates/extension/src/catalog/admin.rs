@@ -364,7 +364,8 @@ fn unretire_bundle_impl(bundle_id: i64) -> Result<BundleInfo, CatalogError> {
 /// The tenant predicate mirrors the row-level-security policy inline (this runs
 /// on the `SECURITY DEFINER` purge path, which bypasses RLS): an unset/empty
 /// `pgokf.tenant` sees every retired bundle (the backward-compatible
-/// operator/superuser default), while a scoped session sees only its own.
+/// operator/superuser default; under `require_tenant` the caller was already
+/// refused before reaching this), while a scoped session sees only its own.
 fn select_purgeable_bundles(older_than: Interval) -> Result<Vec<(i64, String)>, CatalogError> {
     Spi::connect(|client| {
         let table = client
@@ -373,8 +374,9 @@ fn select_purgeable_bundles(older_than: Interval) -> Result<Vec<(i64, String)>, 
                  FROM pgokf.bundles
                  WHERE retired_at IS NOT NULL
                    AND retired_at < pg_catalog.now() - $1
-                   AND (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
-                     OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+                   AND (((pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+                       OR pg_catalog.current_setting('pgokf.tenant', true) = '')
+                      AND NOT (SELECT pgokf.tenant_required()))
                      OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true))
                  ORDER BY id",
                 None,
@@ -438,6 +440,11 @@ fn delete_bundle_row_if_eligible(
 /// remains a separate immediate hard delete.
 fn purge_retired_impl(older_than: Interval) -> Result<i64, CatalogError> {
     security::authorize_current_user(security::Operation::Register, Path::new(""))?;
+    // A bulk mutation with no bundle id: under the require_tenant policy an
+    // unscoped session is refused (42501) like every other writer, rather than
+    // silently purging nothing - a nightly purge job must fail loudly, not
+    // stop working unnoticed.
+    security::enforce_active_tenant()?;
     let retention_days = crate::catalog::config::sync_log_retention_days()?;
     let candidates = select_purgeable_bundles(older_than)?;
 

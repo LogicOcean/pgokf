@@ -32,6 +32,7 @@ exercised against a live PostgreSQL 18 cluster.
 | Function | Returns | Volatility | Security | Required role |
 | -------- | ------- | ---------- | -------- | ------------- |
 | `version()` | `text` | IMMUTABLE | invoker | `pgokf_reader` |
+| `tenant_required()` | `boolean` | STABLE | DEFINER | any role with `USAGE` on `pgokf` |
 | `register_bundle(path, name, options)` | `bundle_sync_result` | VOLATILE | DEFINER | `pgokf_writer` |
 | `register_bundle_content(name, paths, contents, options)` | `bundle_sync_result` | VOLATILE | DEFINER | `pgokf_writer` |
 | `refresh_bundle(bundle_id)` | `bundle_sync_result` | VOLATILE | DEFINER | `pgokf_writer` |
@@ -109,7 +110,7 @@ to confirm the installed SQL and the loaded module agree after an upgrade.
 SELECT pgokf.version();
 --  version
 -- ---------
---  0.1.15
+--  0.1.16
 ```
 
 ### `pgokf.register_bundle(path text, name text DEFAULT NULL, options jsonb DEFAULT '{}') → pgokf.bundle_sync_result`
@@ -280,7 +281,8 @@ metadata, and every feature projection cascade - and one `unregister` audit row 
 written per purged bundle. A bundle retired *within* the window stays recoverable
 via `unretire_bundle`; `unregister_bundle` remains a separate immediate hard
 delete. Tenant-scoped: a session that set `pgokf.tenant` purges only its own
-tenant's retired bundles.
+tenant's retired bundles; with `require_tenant` on, an unscoped session is
+refused with `42501`.
 
 ```sql
 SELECT pgokf.purge_retired();               -- purge bundles retired > 7 days ago
@@ -583,7 +585,11 @@ Run it after enabling pgvector, after bulk-loading embeddings, or after changing
 ## Scheduled refresh (optional, pg_cron)
 
 Register a recurring `refresh_bundle` on the external
-[`pg_cron`](https://github.com/citusdata/pg_cron) scheduler. Like the pgvector and
+[`pg_cron`](https://github.com/citusdata/pg_cron) scheduler. The job command
+pins the bundle's tenant (`set_config('pgokf.tenant', ...)` before the call)
+since 0.1.16, so the cron worker's own session satisfies the tenant rules;
+jobs scheduled by earlier releases run the bare call and must be
+re-scheduled once `require_tenant` is on. Like the pgvector and
 BM25-provider surfaces, the coupling is **runtime-only**: `CREATE EXTENSION pgokf`
 succeeds without `pg_cron`, and every `cron.*` object is reached only at call time.
 Full scheduling requires `pg_cron` in `shared_preload_libraries`.
@@ -787,8 +793,8 @@ Set one durable configuration key from a validated, coerced `jsonb` value.
 `value` shape per key: an array of strings for `allowed_roots` /
 `default_exclude`, a boolean for `default_strict`, an integer for
 `sync_log_retention_days`, a string for `default_text_search_config`,
-`search_backend` (`native` / `bm25`), and `bm25_provider` (`auto` /
-`pg_textsearch` / `pg_search`). Unknown
+`search_backend` (`native` / `bm25`), `bm25_provider` (`auto` /
+`pg_textsearch` / `pg_search`), and a boolean for `require_tenant`. Unknown
 keys and wrong-shaped or out-of-domain values raise `22023`. A
 `default_text_search_config` must name an installed configuration in
 `pg_catalog.pg_ts_config`.
@@ -823,6 +829,7 @@ SELECT jsonb_pretty(pgokf.get_config());
 --     "default_exclude": [],
 --     "search_backend": "native",
 --     "bm25_provider": "auto",
+--     "require_tenant": false,
 --     "okf_version_policy": "warn",
 --     "embedding_dim": 1536,
 --     "history_retention_days": 0,
@@ -958,14 +965,28 @@ SELECT jsonb_pretty(pgokf.health());
 --     "in_recovery": false,
 --     "bundle_count": 1,
 --     "concept_count": 4,
---     "search_backend": "native"
+--     "search_backend": "native",
+--     "tenant_required": false
 -- }
 ```
 
 `ok` is `roles_ok AND config_ok`; `in_recovery` (`pg_is_in_recovery()`) supports
 replica/readiness routing; `bm25_ready` reports whether a BM25 provider
 extension (`pg_textsearch` or `pg_search`) and a `bm25` index on
-`pgokf.concepts` are both present.
+`pgokf.concepts` are both present; `tenant_required` echoes the
+`require_tenant` policy (when it is on, the two counts are `0` for a session
+that has not set `pgokf.tenant`).
+
+### `pgokf.tenant_required() → boolean`
+
+Whether the durable `require_tenant` policy is on (since 0.1.16). `STABLE`,
+`SECURITY DEFINER` (reads the admin-only config), executable by **any role
+with `USAGE` on schema `pgokf`** because every row-level-security policy
+depends on it.
+Every row-level-security policy consults it through an uncorrelated
+sub-select, so the cost is one evaluation per statement. A client can call it
+before reading to learn whether it must scope its session with
+`SET pgokf.tenant`; see [multi-tenancy](multi-tenancy.md#requiring-a-tenant-require_tenant).
 
 ### `pgokf.stale_concepts(bundle_id bigint DEFAULT NULL, as_of timestamptz DEFAULT NULL) → SETOF pgokf.stale_concept`
 
@@ -1582,6 +1603,7 @@ Cluster-persistent policy: a single row, managed only through `set_config` /
 | `store_source` | `boolean` | `false` |
 | `search_backend` | `text` | `'native'` (`CHECK IN ('native','bm25')`) |
 | `bm25_provider` | `text` | `'auto'` (`CHECK IN ('auto','pg_search','pg_textsearch')`; since 0.1.15) |
+| `require_tenant` | `boolean` | `false` (since 0.1.16; `true` denies an unscoped session) |
 | `notify_channel` | `text` | `''` (empty disables) |
 | `okf_version_policy` | `text` | `'warn'` (`CHECK IN ('warn','reject')`) |
 | `embedding_dim` | `integer` | `1536` (`CHECK BETWEEN 1 AND 16000`) |
@@ -1685,7 +1707,7 @@ Full detail in [configuration.md](configuration.md).
 | `pgokf.max_frontmatter_bytes` | integer | `262144` (256 KiB) | `1 .. 2147483647` | `SIGHUP` |
 | `pgokf.max_graph_hops` | integer | `5` | `1 .. 1000` | `SIGHUP` |
 | `pgokf.log_level` | string | `warning` | - | `SUSET` |
-| `pgokf.tenant` | string | `''` (empty = see all) | n/a | `USERSET` |
+| `pgokf.tenant` | string | `''` (empty = see all, unless `require_tenant` is on) | n/a | `USERSET` |
 
 ```sql
 SHOW pgokf.max_graph_hops;

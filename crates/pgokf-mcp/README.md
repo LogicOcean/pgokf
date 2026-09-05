@@ -27,7 +27,7 @@ JSON array of rows exactly as the SQL function produced them.
 | Flag | Env | Meaning |
 | --- | --- | --- |
 | `--database-url` | `OKF_PG_URL` | PostgreSQL URL for a `pgokf_reader`-capable role (required) |
-| `--tenant` | `OKF_TENANT` | Apply a `pgokf.tenant` scope for the session (multi-tenant isolation) |
+| `--tenant` | `OKF_TENANT` | Apply a `pgokf.tenant` scope for the session (multi-tenant isolation; required once the catalog's `require_tenant` policy is on) |
 | `--tls` | `OKF_PG_TLS` | Require a TLS-encrypted link to PostgreSQL (default off) |
 
 ### PostgreSQL transport (TLS)

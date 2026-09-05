@@ -342,7 +342,8 @@ Yes: **opt-in row-level security keyed on the `pgokf.tenant` session GUC**,
 shipped since 0.1.7 and backward compatible by construction:
 
 - A session that never sets `pgokf.tenant` (the default) sees every row and
-  behaves exactly as before multi-tenancy existed; a session that sets it
+  behaves exactly as before multi-tenancy existed (unless the `require_tenant`
+  policy is on, which denies it); a session that sets it
   (`SET pgokf.tenant = 'acme'`, per role via `ALTER ROLE`, or as a connection
   option) reads only that tenant's rows.
 - Writes are stamped and confined: `register_bundle` /
@@ -355,7 +356,8 @@ shipped since 0.1.7 and backward compatible by construction:
 
 One honest caveat: `pgokf.tenant` is a `USERSET` GUC, so it is a **scoping
 selector, not a hard security boundary** against a tenant who can run arbitrary
-SQL: any session can `SET` or `RESET` it, and the unset default sees all rows.
+SQL: any session can `SET` or `RESET` it, and the unset default sees all rows
+(unless `require_tenant` is on).
 A hard boundary requires a constrained access layer that pins the GUC, or a
 per-tenant-role / per-database model. See [Multi-tenancy](multi-tenancy.md) and
 [Security](security.md#multi-tenant-row-level-security).

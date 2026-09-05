@@ -24,7 +24,7 @@ x-pg-url: &writer-url "postgresql://${PGOKF_WRITER_ROLE:-okf_writer}:${PGOKF_WRI
 
 services:
   db:
-    image: ${PGOKF_IMAGE:?PGOKF_IMAGE is required (e.g. ghcr.io/logicocean/pgokf:0.1.15-pg18 or a locally built tag)}
+    image: ${PGOKF_IMAGE:?PGOKF_IMAGE is required (e.g. ghcr.io/logicocean/pgokf:0.1.16-pg18 or a locally built tag)}
     container_name: pgokf-db
     restart: always
     # PostgreSQL parallel workers and the BM25 index build share memory through
@@ -98,7 +98,7 @@ services:
         max-file: "5"
 
   embed:
-    image: ${PGOKF_COMPANIONS_IMAGE:?PGOKF_COMPANIONS_IMAGE is required (e.g. ghcr.io/logicocean/pgokf-companions:0.1.15 or a locally built tag)}
+    image: ${PGOKF_COMPANIONS_IMAGE:?PGOKF_COMPANIONS_IMAGE is required (e.g. ghcr.io/logicocean/pgokf-companions:0.1.16 or a locally built tag)}
     container_name: pgokf-embed
     restart: always
     depends_on:
@@ -117,6 +117,9 @@ services:
       OKF_EMBED_BATCH: ${OKF_EMBED_BATCH:-32}
       OKF_EMBED_MAX_CHARS: ${OKF_EMBED_MAX_CHARS:-8000}
       OKF_WATCH_INTERVAL: ${OKF_EMBED_INTERVAL:-60}
+      # Tenant scope for the daemon's session (required once the catalog's
+      # require_tenant policy is on; run one daemon per tenant then).
+      OKF_TENANT: ${OKF_EMBED_TENANT:-}
     networks:
       - pgokf-net
     logging:
@@ -163,6 +166,8 @@ services:
       AWS_REGION: ${AWS_REGION:-us-east-1}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      # Tenant the bundle is registered under (required once require_tenant is on).
+      OKF_TENANT: ${OKF_INGEST_TENANT:-}
       OKF_BUNDLE_NAME: ${OKF_BUNDLE_NAME:-}
       OKF_WATCH_INTERVAL: ${OKF_INGEST_INTERVAL:-60}
     networks:

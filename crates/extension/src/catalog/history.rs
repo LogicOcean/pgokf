@@ -122,11 +122,13 @@ CREATE INDEX concept_history_lookup_idx
 -- functions honor the caller's own pgokf.tenant.
 ALTER TABLE pgokf.concept_history ENABLE ROW LEVEL SECURITY;
 CREATE POLICY concept_history_tenant_isolation ON pgokf.concept_history
-    USING (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
-        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+    USING (((pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+             OR pg_catalog.current_setting('pgokf.tenant', true) = '')
+            AND NOT (SELECT pgokf.tenant_required()))
         OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true))
-    WITH CHECK (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
-        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+    WITH CHECK (((pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+                  OR pg_catalog.current_setting('pgokf.tenant', true) = '')
+                 AND NOT (SELECT pgokf.tenant_required()))
         OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true));
 
 COMMENT ON TABLE pgokf.concept_history IS

@@ -137,11 +137,13 @@ CREATE INDEX sync_log_change_sync_id_idx ON pgokf_private.sync_log_change (sync_
 -- table) applies the same opt-in tenant filter explicitly.
 ALTER TABLE pgokf_private.sync_log_change ENABLE ROW LEVEL SECURITY;
 CREATE POLICY sync_log_change_tenant_isolation ON pgokf_private.sync_log_change
-    USING (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
-        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+    USING (((pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+             OR pg_catalog.current_setting('pgokf.tenant', true) = '')
+            AND NOT (SELECT pgokf.tenant_required()))
         OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true))
-    WITH CHECK (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
-        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+    WITH CHECK (((pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+                  OR pg_catalog.current_setting('pgokf.tenant', true) = '')
+                 AND NOT (SELECT pgokf.tenant_required()))
         OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true));
 
 REVOKE ALL ON pgokf_private.sync_log_change FROM PUBLIC;
@@ -403,8 +405,9 @@ fn list_sync_log_impl(
         "SELECT {SYNC_LOG_ENTRY_COLUMNS}
          FROM pgokf_private.sync_log
          WHERE ($1::bigint IS NULL OR bundle_id = $1)
-           AND (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
-             OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+           AND (((pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+               OR pg_catalog.current_setting('pgokf.tenant', true) = '')
+              AND NOT (SELECT pgokf.tenant_required()))
              OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true))
          ORDER BY synced_at DESC, id DESC
          LIMIT $2"
@@ -475,8 +478,9 @@ fn list_sync_changes_impl(
         SELECT sync_id, bundle_id, concept_id, change_kind
         FROM pgokf_private.sync_log_change
         WHERE sync_id = $1
-          AND (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
-            OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+          AND (((pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+              OR pg_catalog.current_setting('pgokf.tenant', true) = '')
+             AND NOT (SELECT pgokf.tenant_required()))
             OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true))
         ORDER BY change_kind, concept_id
         LIMIT $2";

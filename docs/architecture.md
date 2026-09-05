@@ -83,7 +83,7 @@ OKF bundle directory                     object store (S3-compatible)
     + sync audit log, change manifest, NOTIFY    (pgokf_private.sync_log[_change])
           |
           v
-SQL API under schema pgokf (39 functions; exact signatures in sql-api.md):
+SQL API under schema pgokf (40 functions; exact signatures in sql-api.md):
   ingestion   register_bundle / register_bundle_content / refresh_bundle /
               unregister_bundle / set_bundle_enabled / retire_bundle /
               unretire_bundle / set_concept_embedding      (writer tier)
@@ -112,7 +112,7 @@ table. A `bootstrap` SQL block creates the `pgokf` and `pgokf_private` schemas
 and the `pgokf_reader` < `pgokf_writer` < `pgokf_admin` role tier, and hardens
 schema access, before the feature SQL blocks run. Public entry points are
 schema-qualified everywhere in documentation and examples. See
-[sql-api.md](sql-api.md) for exact signatures: 39 public functions, 11 public
+[sql-api.md](sql-api.md) for exact signatures: 40 public functions, 11 public
 and 4 private tables, and 14 composite types, locked by the stable-API
 guardrail tests in `crates/extension/tests/api_stability.rs` (see
 [api-stability.md](api-stability.md)).
@@ -394,7 +394,8 @@ Every projection table carries a denormalized `tenant_id` (default `'default'`)
 and enables, but does not force, PostgreSQL row-level security with one shared
 predicate keyed on the `pgokf.tenant` session GUC: a session that has not set
 `pgokf.tenant` (NULL or empty, which is every pre-multi-tenancy install) sees
-all rows unchanged, while a session that has set it sees only that tenant's
+all rows unchanged (or none, once the `require_tenant` policy is on), while a
+session that has set it sees only that tenant's
 rows, and the matching `WITH CHECK` confines invoker-side writes to the active
 tenant. Because RLS is not forced, the `SECURITY DEFINER` write and admin
 functions (which run as the table owner) bypass it, which is correct because

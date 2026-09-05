@@ -93,37 +93,46 @@ CREATE INDEX concepts_tenant_id_idx ON pgokf.concepts (tenant_id);
 -- Multi-tenant isolation. Every projection table carries a denormalized
 -- tenant_id and enables row-level security with the identical opt-in-by-usage
 -- predicate: a session that has NOT set pgokf.tenant (NULL or empty - every
--- pre-multi-tenancy install) sees ALL rows unchanged, while a session that HAS
--- set it sees only that tenant's rows. RLS is NOT forced, so the SECURITY DEFINER
+-- pre-multi-tenancy install) sees ALL rows unchanged - unless the durable
+-- policy key require_tenant is on, in which case it sees NONE (the
+-- pgokf.tenant_required() sub-select is uncorrelated, so it is one InitPlan
+-- per statement, never a per-row call) - while a session that HAS set it sees
+-- only that tenant's rows. RLS is NOT forced, so the SECURITY DEFINER
 -- write/admin functions (which run as the table owner) bypass it and may stamp
 -- and read across tenants - correct because each operates strictly within one
 -- single-tenant bundle. The matching WITH CHECK constrains any future
 -- invoker-side write to the active tenant.
 ALTER TABLE pgokf.bundles ENABLE ROW LEVEL SECURITY;
 CREATE POLICY bundles_tenant_isolation ON pgokf.bundles
-    USING (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
-        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+    USING (((pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+             OR pg_catalog.current_setting('pgokf.tenant', true) = '')
+            AND NOT (SELECT pgokf.tenant_required()))
         OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true))
-    WITH CHECK (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
-        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+    WITH CHECK (((pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+                  OR pg_catalog.current_setting('pgokf.tenant', true) = '')
+                 AND NOT (SELECT pgokf.tenant_required()))
         OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true));
 
 ALTER TABLE pgokf.concepts ENABLE ROW LEVEL SECURITY;
 CREATE POLICY concepts_tenant_isolation ON pgokf.concepts
-    USING (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
-        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+    USING (((pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+             OR pg_catalog.current_setting('pgokf.tenant', true) = '')
+            AND NOT (SELECT pgokf.tenant_required()))
         OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true))
-    WITH CHECK (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
-        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+    WITH CHECK (((pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+                  OR pg_catalog.current_setting('pgokf.tenant', true) = '')
+                 AND NOT (SELECT pgokf.tenant_required()))
         OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true));
 
 ALTER TABLE pgokf.concept_metadata ENABLE ROW LEVEL SECURITY;
 CREATE POLICY concept_metadata_tenant_isolation ON pgokf.concept_metadata
-    USING (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
-        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+    USING (((pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+             OR pg_catalog.current_setting('pgokf.tenant', true) = '')
+            AND NOT (SELECT pgokf.tenant_required()))
         OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true))
-    WITH CHECK (pg_catalog.current_setting('pgokf.tenant', true) IS NULL
-        OR pg_catalog.current_setting('pgokf.tenant', true) = ''
+    WITH CHECK (((pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+                  OR pg_catalog.current_setting('pgokf.tenant', true) = '')
+                 AND NOT (SELECT pgokf.tenant_required()))
         OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true));
 
 CREATE TYPE pgokf.bundle_sync_result AS (

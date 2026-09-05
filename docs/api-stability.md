@@ -21,7 +21,7 @@ the database. Complete comment coverage is a release gate (see
 
 ## The stable surface
 
-### Functions (39)
+### Functions (40)
 
 | Function | Role required | Purpose |
 | -------- | ------------- | ------- |
@@ -64,6 +64,7 @@ the database. Complete comment coverage is a release gate (see
 | `pgokf.schedule_refresh(bigint, text)` | `pgokf_admin` | Schedule periodic `refresh_bundle` via pg_cron (raises when pg_cron is absent) |
 | `pgokf.unschedule_refresh(bigint)` | `pgokf_admin` | Remove a bundle's scheduled refresh |
 | `pgokf.version()` | `pgokf_reader` | Loaded shared-library version |
+| `pgokf.tenant_required()` | any role with `USAGE` on `pgokf` | Whether the `require_tenant` policy is on (consulted by every RLS policy) |
 
 The function **name, schema, argument types, argument order, and result shape**
 are all part of the contract. Default values that let callers omit trailing

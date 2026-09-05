@@ -66,6 +66,7 @@ Every flag has an environment-variable equivalent:
 | `--secret-access-key` | `AWS_SECRET_ACCESS_KEY` | Static secret (prefer env / instance profile) |
 | `--database-url` | `OKF_PG_URL` | PostgreSQL connection string for a `pgokf_writer` role (required) |
 | `--bundle-name` | `OKF_BUNDLE_NAME` | Bundle name; keyed as `content:<name>` (required) |
+| `--tenant` | `OKF_TENANT` | Apply a `pgokf.tenant` scope for the session: the bundle is registered under this tenant (required once the catalog's `require_tenant` policy is on) |
 | `--concurrency` | `OKF_DOWNLOAD_CONCURRENCY` | Max concurrent object downloads (default 8) |
 | `--watch` | `OKF_WATCH` | Run as a daemon: re-list every `--interval` seconds and re-ingest on change (default off) |
 | `--interval` | `OKF_WATCH_INTERVAL` | Poll interval in seconds between watch passes, minimum 1 (default 60) |

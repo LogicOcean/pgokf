@@ -33,7 +33,7 @@ Name:           %{sname}_%{pgmajorversion}
 # single source of truth for the extension version. build-deb.sh and the Docker
 # job read that file directly; a spec is parsed before Source0 is unpacked, so
 # this one cannot -- bump it by hand with every release.
-Version:        0.1.15
+Version:        0.1.16
 Release:        1%{?dist}
 Summary:        Materialized PostgreSQL catalog for Open Knowledge Format bundles
 
@@ -101,6 +101,11 @@ cp -a target/release/%{sname}-pg%{pgmajorversion}/. %{buildroot}/
 %{pginstdir}/share/extension/%{sname}--*--*.sql
 
 %changelog
+* Sat Sep 05 2026 David Saroka <david.saroka@gmail.com> - 0.1.16-1
+- Release 0.1.16: require_tenant policy key (deny-by-default tenancy on
+  demand), pgokf.tenant_required(), tenant scope for every companion.
+  Upgrade script pgokf--0.1.15--0.1.16.sql rewrites the RLS policies in place.
+
 * Sat Sep 05 2026 David Saroka <david.saroka@gmail.com> - 0.1.15-1
 - Release 0.1.15: BM25 provider selection (bm25_provider policy key) adds Tiger
   Data pg_textsearch as a PostgreSQL-licensed BM25 provider on PostgreSQL 17
