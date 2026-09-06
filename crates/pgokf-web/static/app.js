@@ -50,7 +50,10 @@
 
   // ---- selects that submit their form on change (a button stays for no-JS)
   document.querySelectorAll('select[data-autosubmit]').forEach(function (select) {
-    select.addEventListener('change', function () { if (select.form) select.form.requestSubmit(); });
+    select.addEventListener('change', function () {
+      // A form another script drives live (the 3D graph) is left to it.
+      if (select.form && !select.form.hasAttribute('data-live')) select.form.requestSubmit();
+    });
   });
 
   // ---- tabs (ARIA tabs pattern; the hash names the tab as #tab-<name>) ----

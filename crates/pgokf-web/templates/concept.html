@@ -1,4 +1,8 @@
 {% extends "base.html" %}
+{% block scripts %}
+<script src="/static/3d-force-graph.min.js?v={{ shell.asset_version }}" defer></script>
+<script src="/static/graph.js?v={{ shell.asset_version }}" defer></script>
+{% endblock %}
 {% block content %}
 <nav class="crumbs" aria-label="Breadcrumb"><a href="/bundles">Bundles</a> <span>/</span> <a href="/bundles/{{ c.bundle_id }}">{{ c.bundle_name }}</a> <span>/</span> <span>{{ c.path }}</span></nav>
 <section class="hero concept-hero">
@@ -38,11 +42,13 @@
       <dt>Identity</dt><dd><code>({{ c.bundle_id }}, {{ c.concept_id }})</code></dd>
       <dt>Path</dt><dd><code>{{ c.path }}</code></dd>
       <dt>File hash</dt><dd><code class="hash">{{ c.file_hash }}</code></dd>
-      <dt>Indexed</dt><dd>{{ c.indexed_at|datetime }}{% if let Some(m) = c.modified_at %} · modified {{ m|datetime }}{% endif %}</dd>
+      <dt title="OKF generated: who produced the current content, and when">Created</dt><dd>{% if let Some(at) = prov.created_at %}{{ at|datetime }}{% endif %}{% if let Some(by) = prov.created_by %}{% if prov.created_at.is_some() %} by{% else %}by{% endif %} <code>{{ by }}</code>{% endif %}{% if let Some(m) = prov.model %} <span class="muted">· model {{ m }}</span>{% endif %}{% if prov.created_at.is_none() && prov.created_by.is_none() %}<span class="muted">not declared</span>{% endif %}</dd>
+      {% if let Some(a) = prov.author %}<dt title="author: who publishes or owns the concept">Author</dt><dd><code>{{ a }}</code></dd>{% endif %}
+      {% if let Some(o) = prov.owner %}<dt>Owner</dt><dd>{{ o }}</dd>{% endif %}
+      <dt>Indexed</dt><dd>{{ c.indexed_at|datetime }}{% if let Some(m) = c.modified_at %} <span class="muted">· file modified {{ m|datetime }}</span>{% endif %}</dd>
       <dt>Tenant</dt><dd>{{ c.tenant_id }}</dd>
       {% if let Some(r) = c.resource %}<dt>Resource</dt><dd>{{ r|linkify|safe }}</dd>{% endif %}
       {% if let Some(p) = c.provenance %}
-        <dt>Generated</dt><dd>{{ p.generated_by.as_deref().unwrap_or("—") }}{% if let Some(at) = p.generated_at %} at {{ at|datetime }}{% endif %}</dd>
         <dt>Trust tier</dt><dd>{{ p.trust_tier.as_deref().unwrap_or("—") }}</dd>
         <dt>Status</dt><dd>{{ p.status.as_deref().unwrap_or("—") }}{% if let Some(s) = p.stale_after %} · stale after {{ s|datetime }}{% endif %}</dd>
         {% if p.usage_window_from.is_some() || p.usage_window_to.is_some() %}<dt>Usage window</dt><dd>{{ p.usage_window_from.as_deref().unwrap_or("…")|datetime }} → {{ p.usage_window_to.as_deref().unwrap_or("…")|datetime }}</dd>{% endif %}
@@ -66,11 +72,25 @@
     <h2 class="nojs">Links &amp; graph</h2>
     <div class="graph-layout">
       <div class="graph-wrap">
-        {% if neighbors.is_empty() %}<p class="empty">No resolved links within {{ hops }} hop{{ hops|pluralize }}.</p>{% else %}{{ graph_svg|safe }}{% endif %}
-        <form method="get" action="{{ self_href }}#tab-links" class="inline-form">
+        <div class="graph3d" id="pgokf-graph" data-graph-url="{{ graph_url }}" data-hops="{{ hops }}" hidden>
+          <div class="graph3d-canvas"></div>
+          <div class="graph3d-labels" aria-hidden="true"></div>
+          <div class="graph3d-legend" aria-label="Legend"><span><i class="h0"></i>this concept</span><span><i class="h1"></i>1 hop</span><span><i class="h2"></i>2 hops</span><span><i class="h3"></i>3+ hops</span></div>
+          <div class="graph3d-card" hidden></div>
+          <div class="graph3d-tip" role="tooltip" hidden></div>
+          <p class="graph3d-status muted" hidden></p>
+        </div>
+        <div class="graph-fallback">
+          {% if neighbors.is_empty() %}<p class="empty">No resolved links within {{ hops }} hop{{ hops|pluralize }}.</p>{% else %}{{ graph_svg|safe }}{% endif %}
+        </div>
+        <form method="get" action="{{ self_href }}#tab-links" class="inline-form graph-toolbar">
           <label for="hops">Hops</label>
           <select id="hops" name="hops" data-autosubmit>{% for opt in hops_options %}<option value="{{ opt.0 }}" {% if opt.1 %}selected{% endif %}>{{ opt.0 }}</option>{% endfor %}</select>
           <button type="submit" class="btn small nojs">Redraw</button>
+          <button type="button" class="btn small js-only" data-graph-fit hidden>Fit</button>
+          <button type="button" class="btn small js-only" data-graph-dims hidden>2D</button>
+          <button type="button" class="btn small js-only" data-graph-reset hidden>Back to this concept</button>
+          <span class="muted small js-only graph-hint" hidden>Drag to rotate, scroll to zoom. Click a node for details, double-click to open it.</span>
         </form>
       </div>
       <div>

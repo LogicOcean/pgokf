@@ -15,8 +15,9 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 - **`pgokf-web`, a web UI and JSON API companion.** Search (lexical on the
   configured backend, plus semantic and hybrid when an embeddings endpoint is
   configured) with facets and keyset paging, bundle browsing, concept pages
-  with rendered Markdown, provenance, metadata, links with a link graph,
-  similar concepts and history, and an operations page over `health()`,
+  with rendered Markdown, provenance, metadata, links with an interactive
+  3D link graph (server-rendered SVG without WebGL), similar concepts and
+  history, and an operations page over `health()`,
   `search_index_status()`, `get_config()`, stale and duplicate concepts, and
   the sync log. Filters without query text browse the matching concepts, so
   tag, type, status, and bundle links list directly. Read-only through

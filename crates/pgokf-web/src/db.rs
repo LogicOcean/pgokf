@@ -234,6 +234,33 @@ pub(crate) struct Neighbor {
     pub path: Vec<String>,
 }
 
+/// A node of the neighborhood graph: the seed (`hops` 0) or a reachable
+/// concept, with what the picture labels it by.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct GraphNode {
+    pub id: String,
+    pub title: Option<String>,
+    pub concept_type: Option<String>,
+    pub path: String,
+    pub hops: i32,
+}
+
+/// A directed edge between two graph nodes, folded over parallel links.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct GraphLink {
+    pub source: String,
+    pub target: String,
+    pub count: i64,
+    pub relations: Vec<String>,
+}
+
+/// The neighborhood of one concept as nodes and edges.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct Graph {
+    pub nodes: Vec<GraphNode>,
+    pub links: Vec<GraphLink>,
+}
+
 /// One row of `pgokf.concept_history()`.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct Version {
@@ -946,6 +973,73 @@ impl Db {
             },
         )
         .await
+    }
+
+    /// The neighborhood graph of one concept: the seed plus every concept
+    /// `pgokf.concept_neighbors()` reaches within `max_hops`, and the
+    /// resolved links among that set (self-links, which are in-page
+    /// anchors, excluded). Empty when the seed is not visible.
+    pub(crate) async fn graph(
+        &self,
+        bundle_id: i64,
+        concept_id: &str,
+        max_hops: i32,
+    ) -> Result<Graph> {
+        let nodes = self
+            .query_map(
+                "WITH n AS (
+                     SELECT $1::text AS id, 0 AS hops
+                     UNION ALL
+                     SELECT neighbor_id, hops FROM pgokf.concept_neighbors($1, $2, $3)
+                 )
+                 SELECT c.id, c.title, c.type, c.path, min(n.hops)::int
+                 FROM n JOIN pgokf.concepts c ON c.bundle_id = $3 AND c.id = n.id
+                 GROUP BY c.id, c.title, c.type, c.path
+                 ORDER BY 5, c.id",
+                &[&concept_id, &max_hops, &bundle_id],
+                |r| {
+                    Ok(GraphNode {
+                        id: col(r, 0)?,
+                        title: col(r, 1)?,
+                        concept_type: col(r, 2)?,
+                        path: col(r, 3)?,
+                        hops: col(r, 4)?,
+                    })
+                },
+            )
+            .await?;
+        if nodes.is_empty() {
+            return Ok(Graph {
+                nodes,
+                links: Vec::new(),
+            });
+        }
+        let ids: Vec<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
+        let links = self
+            .query_map(
+                "SELECT l.source_id, l.target_id, count(*)::bigint,
+                        array_agg(DISTINCT l.link_relation ORDER BY l.link_relation)
+                 FROM pgokf.links l
+                 WHERE l.bundle_id = $1 AND l.resolved
+                   AND l.source_id = ANY($2) AND l.target_id = ANY($2)
+                   AND l.source_id <> l.target_id
+                 GROUP BY 1, 2 ORDER BY 1, 2",
+                &[&bundle_id, &ids],
+                |r| {
+                    Ok(GraphLink {
+                        source: col(r, 0)?,
+                        target: col(r, 1)?,
+                        count: col(r, 2)?,
+                        relations: col::<Option<Vec<Option<String>>>>(r, 3)?
+                            .unwrap_or_default()
+                            .into_iter()
+                            .flatten()
+                            .collect(),
+                    })
+                },
+            )
+            .await?;
+        Ok(Graph { nodes, links })
     }
 
     /// `pgokf.find_similar(concept_id, bundle_id, limit)`.

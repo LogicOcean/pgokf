@@ -26,8 +26,8 @@ use tower::limit::ConcurrencyLimitLayer;
 
 use crate::db::{
     BundleInfo, BundleLogEntry, BundleStat, ConceptDetail, ConceptSummary, Cursor, Db,
-    DuplicateGroup, Facet, Failure, Hit, Link, Neighbor, SearchQuery, StaleConcept, SyncLogEntry,
-    Version,
+    DuplicateGroup, Facet, Failure, Graph, Hit, Link, Neighbor, SearchQuery, StaleConcept,
+    SyncLogEntry, Version,
 };
 use crate::graph::{GraphEdge, GraphNode};
 use crate::links::Resolver;
@@ -59,6 +59,7 @@ pub(crate) fn router(app: Shared) -> Router {
         .route("/bundles", get(api_bundles))
         .route("/search", get(api_search))
         .route("/concepts/{bundle_id}/{*concept_id}", get(api_concept))
+        .route("/graph/{bundle_id}/{*concept_id}", get(api_graph))
         .fallback(not_found);
     // Layers wrap inside-out: the concurrency limit sits inside the request
     // timeout so time spent waiting for a slot counts against the bound,
@@ -87,18 +88,29 @@ pub(crate) fn router(app: Shared) -> Router {
 // Middleware
 // ---------------------------------------------------------------------------
 
-/// Response headers every page carries. The policy admits only same-origin
-/// scripts, styles, and images (plus inline `data:` images), so an escape
-/// from the sanitizer would still have nowhere to run or report to.
+/// The Content-Security-Policy every page carries. Only same-origin
+/// scripts, styles, and images (plus inline `data:` images for the favicon)
+/// are admitted, so an escape from the sanitizer would still have nowhere
+/// to run or report to. The first three style hashes are the stylesheets
+/// the vendored `3d-force-graph.min.js` 1.80.0 injects at load (cursor and
+/// nav-info rules); the last, with `'unsafe-hashes'`, is the hash of the
+/// empty string, for the empty `style` text its unused tooltip assigns.
+/// They must be refreshed when that file is upgraded.
+const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; img-src 'self' data:; \
+    style-src 'self' 'sha256-9xjtvxMT1ApHlgn9ohbh2FNfvK5Tqtzy94BjfXBeMSY=' \
+    'sha256-0/4q5IwejFb2zgHlQwwtwmGHS8ZbXE1kmz/TkRFlZ7M=' \
+    'sha256-yfc2FhpkFR0EAy3T+zDsaAFGXSP9B3ELNvaJKDzNhkk=' \
+    'unsafe-hashes' 'sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU='; \
+    script-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; \
+    frame-ancestors 'none'";
+
+/// Response headers every page carries.
 async fn security_headers(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(
-            "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; \
-             object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'",
-        ),
+        HeaderValue::from_static(CONTENT_SECURITY_POLICY),
     );
     headers.insert(
         header::REFERRER_POLICY,
@@ -270,7 +282,7 @@ fn html<T: Template>(template: &T) -> PageResult {
 /// contents, so a deploy never pairs new templates with a cached old script.
 static ASSET_VERSION: LazyLock<String> = LazyLock::new(|| {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for chunk in [APP_CSS, APP_JS, BOOT_JS, HTMX_JS] {
+    for chunk in [APP_CSS, APP_JS, BOOT_JS, GRAPH_JS, HTMX_JS, FORCE_GRAPH_JS] {
         for byte in chunk.bytes() {
             hash ^= u64::from(byte);
             hash = hash.wrapping_mul(0x0100_0000_01b3);
@@ -551,6 +563,50 @@ fn facet_options(buckets: Vec<Facet>, current: &str) -> Vec<FacetOption> {
     options
 }
 
+/// The provenance tab's identity rows, read across the OKF provenance
+/// families: `generated` (who produced the current content, and when; a
+/// human as readily as an agent) is shown as "Created", and the pgokf
+/// `author` / `owner` metadata keys as themselves when declared.
+pub(crate) struct ProvenanceView {
+    pub created_by: Option<String>,
+    pub created_at: Option<String>,
+    /// `generated.model`, when the producer recorded one.
+    pub model: Option<String>,
+    pub author: Option<String>,
+    pub owner: Option<String>,
+}
+
+impl ProvenanceView {
+    fn from_concept(c: &ConceptDetail) -> Self {
+        let generated = c.provenance.as_ref().map(|p| &p.details["generated"]);
+        Self {
+            created_by: c.provenance.as_ref().and_then(|p| p.generated_by.clone()),
+            created_at: c.provenance.as_ref().and_then(|p| p.generated_at.clone()),
+            model: generated
+                .and_then(|g| g["model"].as_str())
+                .map(str::to_owned),
+            author: c.metadata.get("author").and_then(actor_display),
+            owner: c.metadata.get("owner").and_then(actor_display),
+        }
+    }
+}
+
+/// An actor field as text: the string itself, or for the mapping form the
+/// spec allows ("display metadata around the same actor string") its
+/// `id`, `actor`, or `name`, else the compact JSON.
+fn actor_display(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) => Some(s.clone()),
+        Value::Object(map) => ["id", "actor", "name"]
+            .iter()
+            .find_map(|key| map.get(*key).and_then(Value::as_str))
+            .map(str::to_owned)
+            .or_else(|| Some(value.to_string())),
+        Value::Null => None,
+        other => Some(other.to_string()),
+    }
+}
+
 /// One custom-metadata row, value pretty-printed.
 pub(crate) struct MetadataRow {
     pub key: String,
@@ -754,6 +810,9 @@ struct ConceptPage {
     hops: i32,
     hops_options: Vec<(i32, bool)>,
     self_href: String,
+    /// JSON endpoint of the interactive graph for this concept.
+    graph_url: String,
+    prov: ProvenanceView,
     similar: Vec<HitView>,
     history: Vec<Version>,
 }
@@ -1389,17 +1448,22 @@ struct ConceptParams {
     hops: String,
 }
 
+const DEFAULT_HOPS: i32 = 2;
+const MAX_HOPS: i32 = 4;
+
+fn parse_hops(raw: &str) -> i32 {
+    raw.parse::<i32>()
+        .ok()
+        .filter(|h| (1..=MAX_HOPS).contains(h))
+        .unwrap_or(DEFAULT_HOPS)
+}
+
 async fn concept_page(
     State(app): State<Shared>,
     Path((bundle_id, concept_id)): Path<(i64, String)>,
     Query(params): Query<ConceptParams>,
 ) -> PageResult {
-    let hops = params
-        .hops
-        .parse::<i32>()
-        .ok()
-        .filter(|h| (1..=4).contains(h))
-        .unwrap_or(2);
+    let hops = parse_hops(&params.hops);
     let c = app
         .db
         .concept(bundle_id, &concept_id)
@@ -1432,6 +1496,8 @@ async fn concept_page(
     html(&ConceptPage {
         shell: Shell::new(&app, &title, "bundles"),
         self_href: concept_href(bundle_id, &concept_id),
+        graph_url: graph_href(bundle_id, &concept_id),
+        prov: ProvenanceView::from_concept(&c),
         c,
         body_html,
         metadata,
@@ -1440,7 +1506,7 @@ async fn concept_page(
         neighbors,
         graph_svg,
         hops,
-        hops_options: (1..=4).map(|n| (n, n == hops)).collect(),
+        hops_options: (1..=MAX_HOPS).map(|n| (n, n == hops)).collect(),
         similar,
         history,
     })
@@ -1476,6 +1542,40 @@ fn render_body(c: &ConceptDetail, outgoing: &[Link]) -> String {
 
 fn concept_href(bundle_id: i64, concept_id: &str) -> String {
     format!("/concepts/{bundle_id}/{}", filters::encode_path(concept_id))
+}
+
+fn graph_href(bundle_id: i64, concept_id: &str) -> String {
+    format!(
+        "/api/graph/{bundle_id}/{}",
+        filters::encode_path(concept_id)
+    )
+}
+
+/// The neighborhood graph as the client draws it: nodes carry their page
+/// and graph endpoints so the client never builds URLs from ids.
+fn graph_json(bundle_id: i64, seed: &str, hops: i32, graph: &Graph) -> Value {
+    let nodes: Vec<Value> = graph
+        .nodes
+        .iter()
+        .map(|n| {
+            serde_json::json!({
+                "id": n.id,
+                "title": n.title.as_deref().unwrap_or(&n.id),
+                "type": n.concept_type,
+                "path": n.path,
+                "hops": n.hops,
+                "href": concept_href(bundle_id, &n.id),
+                "graph_href": graph_href(bundle_id, &n.id),
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "bundle_id": bundle_id,
+        "seed": seed,
+        "hops": hops,
+        "nodes": nodes,
+        "links": graph.links,
+    })
 }
 
 /// Each neighbor's `path` is the chain of concept ids from the seed, so its
@@ -1651,6 +1751,19 @@ async fn api_search(
     })))
 }
 
+async fn api_graph(
+    State(app): State<Shared>,
+    Path((bundle_id, concept_id)): Path<(i64, String)>,
+    Query(params): Query<ConceptParams>,
+) -> Result<Json<Value>, AppError> {
+    let hops = parse_hops(&params.hops);
+    let graph = app.db.graph(bundle_id, &concept_id, hops).await?;
+    if graph.nodes.is_empty() {
+        return Err(AppError::not_found("This concept"));
+    }
+    Ok(Json(graph_json(bundle_id, &concept_id, hops, &graph)))
+}
+
 async fn api_concept(
     State(app): State<Shared>,
     Path((bundle_id, concept_id)): Path<(i64, String)>,
@@ -1674,6 +1787,8 @@ const APP_CSS: &str = include_str!("../static/app.css");
 const APP_JS: &str = include_str!("../static/app.js");
 const BOOT_JS: &str = include_str!("../static/boot.js");
 const HTMX_JS: &str = include_str!("../static/vendor/htmx.min.js");
+const GRAPH_JS: &str = include_str!("../static/graph.js");
+const FORCE_GRAPH_JS: &str = include_str!("../static/vendor/3d-force-graph.min.js");
 
 async fn static_asset(Path(file): Path<String>) -> PageResult {
     let (content_type, body) = match file.as_str() {
@@ -1681,6 +1796,8 @@ async fn static_asset(Path(file): Path<String>) -> PageResult {
         "app.js" => ("text/javascript; charset=utf-8", APP_JS),
         "boot.js" => ("text/javascript; charset=utf-8", BOOT_JS),
         "htmx.min.js" => ("text/javascript; charset=utf-8", HTMX_JS),
+        "graph.js" => ("text/javascript; charset=utf-8", GRAPH_JS),
+        "3d-force-graph.min.js" => ("text/javascript; charset=utf-8", FORCE_GRAPH_JS),
         _ => return Err(AppError::not_found("This file")),
     };
     Ok((
@@ -2035,6 +2152,32 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn actor_display_reads_strings_and_the_mapping_form() {
+        // Arrange
+        let plain = serde_json::json!("human:alice");
+        let mapping = serde_json::json!({"id": "agent:reviewer", "display": "Reviewer"});
+        let opaque = serde_json::json!({"team": "platform"});
+
+        // Act & Assert
+        assert_eq!(actor_display(&plain).as_deref(), Some("human:alice"));
+        assert_eq!(actor_display(&mapping).as_deref(), Some("agent:reviewer"));
+        assert_eq!(
+            actor_display(&opaque).as_deref(),
+            Some("{\"team\":\"platform\"}")
+        );
+        assert_eq!(actor_display(&Value::Null), None);
+    }
+
+    #[test]
+    fn parse_hops_clamps_to_the_supported_range() {
+        // Arrange & Act & Assert
+        assert_eq!(parse_hops("3"), 3);
+        assert_eq!(parse_hops("0"), DEFAULT_HOPS);
+        assert_eq!(parse_hops("9"), DEFAULT_HOPS);
+        assert_eq!(parse_hops("x"), DEFAULT_HOPS);
     }
 
     #[test]
