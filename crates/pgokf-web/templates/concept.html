@@ -79,6 +79,14 @@
           <div class="graph3d-card" hidden></div>
           <div class="graph3d-tip" role="tooltip" hidden></div>
           <p class="graph3d-status muted" hidden></p>
+          <div class="graph3d-controls" role="group" aria-label="View controls">
+            <button type="button" class="btn small" data-graph-zoom="in" title="Zoom in" aria-label="Zoom in">+</button>
+            <button type="button" class="btn small" data-graph-zoom="out" title="Zoom out" aria-label="Zoom out">−</button>
+            <button type="button" class="btn small" data-graph-fit title="Center and fit">Center</button>
+            <button type="button" class="btn small" data-graph-dims title="Switch between 2D and 3D">2D</button>
+            <button type="button" class="btn small" data-graph-fullscreen title="Full screen">⤢</button>
+            <a class="btn small" href="/graph?seed={{ c.bundle_id }}:{{ c.concept_id|urlencode }}&hops={{ hops }}" title="Open in the graph explorer">Explorer</a>
+          </div>
         </div>
         <div class="graph-fallback">
           {% if neighbors.is_empty() %}<p class="empty">No resolved links within {{ hops }} hop{{ hops|pluralize }}.</p>{% else %}{{ graph_svg|safe }}{% endif %}
@@ -87,10 +95,8 @@
           <label for="hops">Hops</label>
           <select id="hops" name="hops" data-autosubmit>{% for opt in hops_options %}<option value="{{ opt.0 }}" {% if opt.1 %}selected{% endif %}>{{ opt.0 }}</option>{% endfor %}</select>
           <button type="submit" class="btn small nojs">Redraw</button>
-          <button type="button" class="btn small js-only" data-graph-fit hidden>Fit</button>
-          <button type="button" class="btn small js-only" data-graph-dims hidden>2D</button>
           <button type="button" class="btn small js-only" data-graph-reset hidden>Back to this concept</button>
-          <span class="muted small js-only graph-hint" hidden>Drag to rotate, scroll to zoom. Click a node for details, double-click to open it.</span>
+          <span class="muted small js-only graph-hint" hidden>Drag to rotate, scroll or use the buttons to zoom. Click a node or an edge for details, double-click a node to open it.</span>
         </form>
       </div>
       <div>

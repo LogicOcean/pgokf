@@ -28,6 +28,23 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
   every request. Ships in the companions image and as the compose stack's
   `ui` profile (`PGOKF_UI_BIND`, `PGOKF_UI_PORT`, `PGOKF_UI_TITLE`,
   `OKF_UI_TENANT`).
+- **`pgokf-workspace`, the workspace injector of spec §21 as a library**,
+  and the two fronts over it: the web UI's **Plugins** page and the MCP
+  server's `build_workspace_plugin` / `list_plugin_targets` tools. A
+  catalog selection (bundle, query, types, tags, ids, trust, limit)
+  becomes an Agent Skills package (`SKILL.md` plus one reference file per
+  concept) for Claude Code, Codex, Hermes Agent, Kimi, Gemini CLI, Cursor,
+  or the shared `.agents/skills/` directory, an `AGENTS.md` instruction
+  file, an Ollama prompt bundle (Modelfile and system prompt), or a generic
+  tree, always with `okf-workspace.yaml` and `okf-workspace.lock`. Every
+  target layout was read from the harness's documentation and is recorded
+  with its source; unknown targets are refused. Builds are byte-identical
+  for an unchanged catalog.
+- **Graph explorer** (`/graph`): the catalog-wide link graph (best-connected
+  concepts of the catalog or one bundle, coloured by bundle or type) or a
+  concept's neighborhood, with clickable nodes and edges (edge cards show
+  the link texts), zoom, center, 2D/3D, and full-screen controls, a finder,
+  and "explore from here". `/api/graph` serves the same document.
 - The OpenAI-compatible embeddings client moved from `pgokf-embed` into
   `pgokf-companion` (feature `embeddings`), shared with `pgokf-web`;
   `pgokf-pgconn` exposes `parse_config` and `rustls_connector` for pool

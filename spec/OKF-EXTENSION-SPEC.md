@@ -1608,7 +1608,7 @@ Scan results and findings use the mandatory §11.1 schema, status/severity vocab
 
 ## 21. Workspace injection (agent plugin)
 
-An agent workspace is preloaded from the catalog through a manifest, the static counterpart of the MCP server's on-demand access. The injector is a companion, `pgokf-workspace`, in the companions image on the shared runtime; it holds no catalogue semantics and no credentials beyond a reader connection.
+An agent workspace is preloaded from the catalog through a manifest, the static counterpart of the MCP server's on-demand access. The injector is a companion, `pgokf-workspace`, in the companions image on the shared runtime; it holds no catalogue semantics and no credentials beyond a reader connection. The same builder is exposed interactively by `pgokf-web` (the Plugins page: select, preview, download a zip to unpack at the workspace root) and to agents by `pgokf-mcp` (`list_plugin_targets`, `build_workspace_plugin`, which writes the tree into a workspace directory or returns it inline); the three fronts share one library so a selection yields the same tree wherever it is built.
 
 ### 21.1 Manifest
 

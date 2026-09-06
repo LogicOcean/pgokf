@@ -6,7 +6,10 @@
 //! `jsonb_agg(to_jsonb(...))`, so the server hands MCP a faithful JSON view of
 //! exactly what the SQL functions return, with no per-column marshalling.
 
+use std::path::Path;
+
 use anyhow::{Context, Result, anyhow, bail};
+use pgokf_workspace::{BuildOptions, Profile, Selection, Target};
 use serde_json::{Value, json};
 use tokio_postgres::Client;
 use tokio_postgres::types::ToSql;
@@ -17,10 +20,15 @@ const DEFAULT_SEARCH_LIMIT: i32 = 20;
 const DEFAULT_SIMILAR_LIMIT: i32 = 10;
 /// Default `max_hops` for `concept_neighbors` when the caller omits it.
 const DEFAULT_MAX_HOPS: i32 = 2;
+/// Largest plugin whose file contents are returned inline (bytes); above
+/// it the caller is told to pass `output_dir` instead.
+const INLINE_PLUGIN_BYTES: usize = 1_048_576;
 
 /// A live catalog connection, optionally scoped to one tenant.
 pub struct Catalog {
     client: Client,
+    /// The database name, shown in plugin indexes as the catalog name.
+    catalog_name: String,
 }
 
 impl Catalog {
@@ -47,8 +55,16 @@ impl Catalog {
         if let Some(tenant) = tenant {
             pgokf_pgconn::set_tenant(&client, tenant).await?;
         }
+        let catalog_name: String = client
+            .query_one("SELECT current_database()", &[])
+            .await
+            .context("reading the database name")?
+            .try_get(0)?;
 
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            catalog_name,
+        })
     }
 
     /// The MCP `tools/list` payload: the catalog tools this server exposes,
@@ -110,6 +126,34 @@ impl Catalog {
                     },
                     "required": ["concept_id"]
                 }
+            },
+            {
+                "name": "list_plugin_targets",
+                "description": "List the agent harnesses a workspace plugin can be built for (claude-code, codex, hermes-agent, kimi, gemini-cli, cursor, agents, agents-md, ollama, generic) with the documented directory each one reads.",
+                "inputSchema": {"type": "object", "properties": {}}
+            },
+            {
+                "name": "build_workspace_plugin",
+                "description": "Build an agent plugin from a catalog selection: an Agent Skills package (SKILL.md plus one reference file per concept), an AGENTS.md instruction file, an Ollama prompt bundle, or a generic index-plus-files tree, always with okf-workspace.yaml (the selection) and okf-workspace.lock (catalog snapshot and content hashes). Pass output_dir to write the tree into a workspace; otherwise the files come back inline.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "target": {"type": "string", "description": "A target id from list_plugin_targets."},
+                        "name": {"type": "string", "description": "Package name (lowercase letters, digits, hyphens; default okf-knowledge)."},
+                        "title": {"type": "string", "description": "Display title for the index (defaults to the name)."},
+                        "bundle_ids": {"type": "array", "items": {"type": "integer"}, "description": "Restrict to these bundle ids."},
+                        "concept_ids": {"type": "array", "items": {"type": "string"}, "description": "Include exactly these concept ids (within the selected bundles)."},
+                        "tags": {"type": "array", "items": {"type": "string"}, "description": "All-of tag containment filter."},
+                        "types": {"type": "array", "items": {"type": "string"}, "description": "Any-of concept type filter."},
+                        "query": {"type": "string", "description": "Full-text query (websearch syntax); results are ranked."},
+                        "verified_only": {"type": "boolean", "description": "Only human-reviewed or machine-confirmed concepts."},
+                        "limit": {"type": "integer", "description": "Maximum concepts (1..=500, default 100)."},
+                        "base_model": {"type": "string", "description": "Ollama only: the Modelfile FROM line (default llama3.1)."},
+                        "output_dir": {"type": "string", "description": "Write the tree under this workspace directory instead of returning contents."},
+                        "overwrite": {"type": "boolean", "description": "With output_dir: replace files that already exist, including an existing AGENTS.md (default false; symbolic links are never followed)."}
+                    },
+                    "required": ["target"]
+                }
             }
         ])
     }
@@ -128,6 +172,8 @@ impl Catalog {
             "find_similar" => self.find_similar(arguments).await,
             "concept_neighbors" => self.concept_neighbors(arguments).await,
             "get_concept" => self.get_concept(arguments).await,
+            "list_plugin_targets" => Ok(Self::list_plugin_targets()),
+            "build_workspace_plugin" => self.build_workspace_plugin(arguments).await,
             other => bail!("unknown tool '{other}'"),
         }
     }
@@ -200,6 +246,121 @@ impl Catalog {
         .await
     }
 
+    fn list_plugin_targets() -> Value {
+        Value::Array(
+            Profile::all()
+                .iter()
+                .map(|p| {
+                    json!({
+                        "id": p.id,
+                        "label": p.label,
+                        "shape": format!("{:?}", p.shape),
+                        "root": p.root,
+                        "documented_at": p.source,
+                        "verified": p.verified,
+                        "notes": p.notes,
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    async fn build_workspace_plugin(&self, args: &Value) -> Result<Value> {
+        let target_id = require_str(args, "target")?;
+        let target = Target::parse(target_id).ok_or_else(|| {
+            anyhow!("unknown target '{target_id}'; list_plugin_targets names the supported ones")
+        })?;
+        let selection = Selection {
+            bundle_ids: opt_i64_vec(args, "bundle_ids")?.unwrap_or_default(),
+            concept_ids: opt_string_vec(args, "concept_ids")?.unwrap_or_default(),
+            tags: opt_string_vec(args, "tags")?.unwrap_or_default(),
+            types: opt_string_vec(args, "types")?.unwrap_or_default(),
+            query: opt_str(args, "query").map(str::to_owned),
+            verified_only: args
+                .get("verified_only")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            limit: match opt_i64(args, "limit")? {
+                None => None,
+                Some(n)
+                    if usize::try_from(n)
+                        .is_ok_and(|n| (1..=pgokf_workspace::MAX_CONCEPTS).contains(&n)) =>
+                {
+                    usize::try_from(n).ok()
+                }
+                Some(_) => bail!(
+                    "argument 'limit' must be between 1 and {}",
+                    pgokf_workspace::MAX_CONCEPTS
+                ),
+            },
+        };
+        let options = BuildOptions {
+            target,
+            name: opt_str(args, "name").unwrap_or("okf-knowledge").to_owned(),
+            title: opt_str(args, "title").map(str::to_owned),
+            catalog_name: self.catalog_name.clone(),
+            base_model: opt_str(args, "base_model").map(str::to_owned),
+        };
+        let plugin = pgokf_workspace::build(&self.client, &options, &selection).await?;
+
+        let mut result = json!({
+            "target": plugin.target,
+            "name": plugin.name,
+            "root": plugin.root,
+            "concept_count": plugin.concept_count,
+            "size_bytes": plugin.size(),
+            "concepts": plugin.concepts.iter().map(|c| json!({
+                "bundle_id": c.bundle_id,
+                "concept_id": c.concept_id,
+                "title": c.title,
+                "type": c.concept_type,
+                "trust_tier": c.trust_tier,
+                "exact_source": c.exact,
+            })).collect::<Vec<_>>(),
+            "files": plugin.files.iter().map(|f| json!({
+                "path": f.path,
+                "bytes": f.bytes.len(),
+                "sha256": f.sha256,
+            })).collect::<Vec<_>>(),
+        });
+        match opt_str(args, "output_dir") {
+            Some(dir) => {
+                let overwrite = args
+                    .get("overwrite")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let written = pgokf_workspace::write_to_dir(&plugin, Path::new(dir), overwrite)?;
+                result["written"] = Value::Array(
+                    written
+                        .iter()
+                        .map(|p| Value::String(p.display().to_string()))
+                        .collect(),
+                );
+            }
+            None if plugin.size() <= INLINE_PLUGIN_BYTES => {
+                result["contents"] = Value::Object(
+                    plugin
+                        .files
+                        .iter()
+                        .map(|f| {
+                            (
+                                f.path.clone(),
+                                Value::String(String::from_utf8_lossy(&f.bytes).into_owned()),
+                            )
+                        })
+                        .collect(),
+                );
+            }
+            None => {
+                result["note"] = Value::String(format!(
+                    "the tree is {} bytes; pass output_dir to write it instead of returning it inline",
+                    plugin.size()
+                ));
+            }
+        }
+        Ok(result)
+    }
+
     /// Run a query whose single row / single column is a `jsonb` aggregate, and
     /// return it as a `serde_json::Value`.
     async fn fetch_json(&self, sql: &str, params: &[&(dyn ToSql + Sync)]) -> Result<Value> {
@@ -240,6 +401,22 @@ fn opt_i32(args: &Value, key: &str) -> Result<Option<i32>> {
         Some(value) => i32::try_from(value)
             .map(Some)
             .map_err(|_| anyhow!("argument '{key}' is out of range for a 32-bit integer")),
+    }
+}
+
+/// Read an optional array-of-integers argument.
+fn opt_i64_vec(args: &Value, key: &str) -> Result<Option<Vec<i64>>> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| {
+                item.as_i64()
+                    .ok_or_else(|| anyhow!("argument '{key}' must be an array of integers"))
+            })
+            .collect::<Result<Vec<_>>>()
+            .map(Some),
+        Some(_) => Err(anyhow!("argument '{key}' must be an array of integers")),
     }
 }
 
@@ -319,7 +496,43 @@ mod tests {
     }
 
     #[test]
-    fn tool_definitions_lists_the_four_catalog_tools() {
+    fn opt_i64_vec_reads_integers_and_rejects_strings() {
+        // Arrange
+        let ok = json!({"bundle_ids": [1, 2]});
+        let bad = json!({"bundle_ids": ["1"]});
+
+        // Act & Assert
+        assert_eq!(
+            opt_i64_vec(&ok, "bundle_ids").expect("valid"),
+            Some(vec![1, 2])
+        );
+        assert!(opt_i64_vec(&bad, "bundle_ids").is_err());
+    }
+
+    #[test]
+    fn list_plugin_targets_names_every_documented_profile() {
+        // Arrange & Act
+        let targets = Catalog::list_plugin_targets();
+
+        // Assert
+        let ids: Vec<&str> = targets
+            .as_array()
+            .expect("array")
+            .iter()
+            .filter_map(|t| t["id"].as_str())
+            .collect();
+        assert!(
+            ids.contains(&"claude-code") && ids.contains(&"agents-md") && ids.contains(&"ollama")
+        );
+        assert!(
+            targets[0]["documented_at"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("https://"))
+        );
+    }
+
+    #[test]
+    fn tool_definitions_lists_the_catalog_and_plugin_tools() {
         // Arrange & Act
         let tools = Catalog::tool_definitions();
 
@@ -336,7 +549,9 @@ mod tests {
                 "concept_search",
                 "find_similar",
                 "concept_neighbors",
-                "get_concept"
+                "get_concept",
+                "list_plugin_targets",
+                "build_workspace_plugin",
             ],
         );
     }

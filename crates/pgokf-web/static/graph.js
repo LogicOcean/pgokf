@@ -1,11 +1,12 @@
-// Interactive 3D neighborhood graph for the concept page.
+// Interactive 3D graph: the concept page's neighborhood and the catalog-wide
+// explorer share this script.
 //
-// Progressive enhancement over the server-rendered SVG: when WebGL and the
-// vendored 3d-force-graph bundle are available, the graph JSON endpoint is
-// drawn as a force-directed scene (d3 engine; no dynamic code, so it runs
-// under the page's Content-Security-Policy). Labels are ordinary HTML
-// positioned over the canvas each frame, so they stay crisp, theme-aware,
-// and clickable. Without any of this the SVG and the hops form still work.
+// Progressive enhancement over the server-rendered SVG (concept page) or a
+// plain note (explorer): when WebGL and the vendored 3d-force-graph bundle
+// are available, the graph JSON endpoint is drawn as a force-directed scene
+// (d3 engine; no dynamic code, so it runs under the page's
+// Content-Security-Policy). Labels and cards are ordinary HTML positioned
+// over the canvas, so they stay crisp, theme-aware, and clickable.
 (function () {
   'use strict';
 
@@ -17,13 +18,18 @@
   var card = root.querySelector('.graph3d-card');
   var tip = root.querySelector('.graph3d-tip');
   var status = root.querySelector('.graph3d-status');
-  var fallback = root.parentElement.querySelector('.graph-fallback');
-  var form = root.parentElement.querySelector('form.graph-toolbar');
+  var legendBox = root.querySelector('.graph3d-legend');
+  var explorer = root.hasAttribute('data-explorer');
+  var section = root.parentElement;
+  var fallback = section.querySelector('.graph-fallback');
+  var form = section.querySelector('form.graph-toolbar');
   var hopsSelect = form ? form.querySelector('select[name=hops]') : null;
-  var fitButton = form ? form.querySelector('[data-graph-fit]') : null;
-  var dimsButton = form ? form.querySelector('[data-graph-dims]') : null;
   var resetButton = form ? form.querySelector('[data-graph-reset]') : null;
   var hint = form ? form.querySelector('.graph-hint') : null;
+  var legendList = document.querySelector('[data-graph-legend]');
+  var stats = document.querySelector('[data-graph-stats]');
+  var finder = document.querySelector('[data-graph-find]');
+  var matches = document.querySelector('[data-graph-matches]');
 
   var pageSeedUrl = root.getAttribute('data-graph-url');
   var seedUrl = pageSeedUrl;
@@ -35,10 +41,10 @@
   var frame = null;
   var started = false;
   var fitPending = false;
+  var groupColors = new Map();
+  var selected = null;
 
-  function fit() {
-    if (graph) graph.zoomToFit(500, 48);
-  }
+  var PALETTE = ['#2f6fed', '#e0762e', '#3aa76d', '#c2409a', '#8b6bd6', '#d7b12a', '#2fb5c9', '#b04a4a', '#6b8e23', '#9c7c5c'];
 
   function escapeHtml(text) {
     return String(text).replace(/[&<>"']/g, function (c) {
@@ -65,7 +71,52 @@
   }
 
   function colorFor(node, colors) {
+    if (data && data.color_by !== 'hops') {
+      return groupColors.get(node.group) || colors.hops[3];
+    }
     return colors.hops[Math.min(node.hops, colors.hops.length - 1)];
+  }
+
+  function assignGroupColors() {
+    groupColors = new Map();
+    if (!data || data.color_by === 'hops') return;
+    (data.legend || []).forEach(function (group, i) {
+      groupColors.set(group, PALETTE[i % PALETTE.length]);
+    });
+  }
+
+  function renderLegend() {
+    if (!data) return;
+    var byHops = data.color_by === 'hops';
+    if (legendBox) legendBox.hidden = !byHops;
+    if (!legendList) return;
+    legendList.textContent = '';
+    if (byHops) {
+      var colors = palette();
+      [['this concept', colors.hops[0]], ['1 hop', colors.hops[1]], ['2 hops', colors.hops[2]], ['3+ hops', colors.hops[3]]].forEach(function (entry) {
+        legendList.appendChild(legendItem(entry[0], entry[1]));
+      });
+    } else {
+      (data.legend || []).forEach(function (group) {
+        legendList.appendChild(legendItem((data.color_by === 'bundle' ? 'bundle ' : '') + group, groupColors.get(group)));
+      });
+    }
+  }
+
+  function legendItem(label, color) {
+    var li = document.createElement('li');
+    var dot = document.createElement('i');
+    dot.style.background = color;
+    li.appendChild(dot);
+    li.appendChild(document.createTextNode(label));
+    return li;
+  }
+
+  function renderStats() {
+    if (!stats || !data) return;
+    var text = data.nodes.length + ' concept' + (data.nodes.length === 1 ? '' : 's') + ', ' + data.links.length + ' link' + (data.links.length === 1 ? '' : 's') + ' drawn';
+    if (data.total > data.nodes.length) text += ' (of ' + data.total + ' visible; the best connected are shown)';
+    stats.textContent = text + '.';
   }
 
   function showStatus(message) {
@@ -78,8 +129,12 @@
     root.hidden = !on;
     if (fallback) fallback.hidden = on;
     if (form) form.toggleAttribute('data-live', on);
-    [fitButton, dimsButton, hint].forEach(function (el) { if (el) el.hidden = !on; });
+    if (hint) hint.hidden = !on;
     if (resetButton) resetButton.hidden = !on || seedUrl === pageSeedUrl;
+  }
+
+  function fit() {
+    if (graph) graph.zoomToFit(500, 48);
   }
 
   // ---- projection of world positions to overlay pixels --------------------
@@ -95,17 +150,15 @@
     var cz = p[2] * vx + p[6] * vy + p[10] * vz + p[14] * vw;
     var cw = p[3] * vx + p[7] * vy + p[11] * vz + p[15] * vw;
     if (cw <= 0) return null;
-    return {
-      x: (cx / cw * 0.5 + 0.5) * width,
-      y: (-cy / cw * 0.5 + 0.5) * height,
-      depth: cz / cw,
-    };
+    return { x: (cx / cw * 0.5 + 0.5) * width, y: (-cy / cw * 0.5 + 0.5) * height, depth: cz / cw };
   }
 
   function labelledNodes(nodes) {
-    // Every node when the picture is small; otherwise the seed and its
-    // direct neighbors (the rest are reachable by hovering).
-    return nodes.length <= 36 ? nodes : nodes.filter(function (n) { return n.hops <= 1; });
+    // Every node when the picture is small; otherwise the seed and its direct
+    // neighbors, or in the explorer the best connected (the rest by hover).
+    if (nodes.length <= 36) return nodes;
+    if (data.color_by === 'hops') return nodes.filter(function (n) { return n.hops <= 1; });
+    return nodes.slice().sort(function (a, b) { return b.degree - a.degree; }).slice(0, 36);
   }
 
   function rebuildLabels() {
@@ -114,14 +167,11 @@
     if (!data) return;
     labelledNodes(data.nodes).forEach(function (node) {
       var el = document.createElement('a');
-      el.className = 'graph3d-label' + (node.hops === 0 ? ' seed' : '');
+      el.className = 'graph3d-label' + (data.seed === node.id ? ' seed' : '');
       el.href = node.href;
       el.textContent = node.title;
       el.title = node.path;
-      el.addEventListener('click', function (event) {
-        event.preventDefault();
-        select(node, true);
-      });
+      el.addEventListener('click', function (event) { event.preventDefault(); selectNode(node, true); });
       labelHost.appendChild(el);
       labels.set(node.id, el);
     });
@@ -137,10 +187,7 @@
       var node = nodeById(id);
       if (!node || node.x === undefined) { el.style.display = 'none'; return; }
       var pos = project(camera, node.x, node.y, dims === 3 ? node.z : 0, width, height);
-      if (!pos || pos.x < -80 || pos.x > width + 80 || pos.y < -40 || pos.y > height + 40) {
-        el.style.display = 'none';
-        return;
-      }
+      if (!pos || pos.x < -80 || pos.x > width + 80 || pos.y < -40 || pos.y > height + 40) { el.style.display = 'none'; return; }
       el.style.display = '';
       el.style.transform = 'translate(' + pos.x.toFixed(1) + 'px,' + (pos.y - 10).toFixed(1) + 'px) translate(-50%, -100%)';
       el.style.opacity = String(Math.max(0.35, Math.min(1, 1.6 - pos.depth)));
@@ -153,6 +200,7 @@
     for (var i = 0; i < data.nodes.length; i++) if (data.nodes[i].id === id) return data.nodes[i];
     return null;
   }
+  function endId(end) { return typeof end === 'object' ? end.id : end; }
 
   // ---- hover tooltip (own element: the bundle's tooltip positions itself
   // with inline style text, which the page's Content-Security-Policy blocks)
@@ -164,8 +212,7 @@
     if (!tip.hidden) placeTip();
   });
   function placeTip() {
-    var width = root.clientWidth;
-    var flip = pointer.x > width * 0.6;
+    var flip = pointer.x > root.clientWidth * 0.6;
     tip.style.left = (flip ? pointer.x - 12 : pointer.x + 12) + 'px';
     tip.style.top = (pointer.y + 14) + 'px';
     tip.style.transform = flip ? 'translateX(-100%)' : '';
@@ -176,11 +223,10 @@
     tip.hidden = false;
     placeTip();
   }
-  function endId(end) { return typeof end === 'object' ? end.id : end; }
   function nodeTip(n) {
     return '<strong>' + escapeHtml(n.title) + '</strong>' +
       (n.type ? ' <span class="pill type">' + escapeHtml(n.type) + '</span>' : '') +
-      '<div class="muted small">' + escapeHtml(n.path) + '</div>';
+      '<div class="muted small">' + escapeHtml(n.bundle_name + ' / ' + n.path) + '</div>';
   }
   function linkTip(l) {
     var from = nodeById(endId(l.source));
@@ -188,37 +234,63 @@
     var rel = (l.relations || []).filter(function (r) { return r !== 'reference'; });
     return '<div class="small">' + escapeHtml(from ? from.title : endId(l.source)) + ' → ' +
       escapeHtml(to ? to.title : endId(l.target)) + '</div>' +
-      '<div class="muted small">' + escapeHtml((rel.length ? rel.join(', ') + ' · ' : '') +
-      l.count + ' link' + (l.count === 1 ? '' : 's')) + '</div>';
+      '<div class="muted small">' + escapeHtml((rel.length ? rel.join(', ') + ' · ' : '') + l.count + ' link' + (l.count === 1 ? '' : 's') + ' · click to inspect') + '</div>';
   }
 
-  // ---- selection card ------------------------------------------------------
-  function select(node, focus) {
+  // ---- selection cards -----------------------------------------------------
+  function actions(node) {
+    return '<div class="graph3d-actions">' +
+      '<a class="btn small" href="' + escapeHtml(node.href) + '">Open</a>' +
+      (data.seed === node.id ? '' : '<button type="button" class="btn small ghost" data-explore="' + escapeHtml(node.graph_href) + '">Explore from here</button>') +
+      '</div>';
+  }
+
+  function selectNode(node, focus) {
     if (!node) { card.hidden = true; return; }
-    var degree = data.links.filter(function (l) {
-      return endId(l.source) === node.id || endId(l.target) === node.id;
-    }).length;
+    selected = node;
+    var degree = data.links.filter(function (l) { return endId(l.source) === node.id || endId(l.target) === node.id; }).length;
     card.innerHTML =
       '<strong>' + escapeHtml(node.title) + '</strong>' +
       (node.type ? ' <span class="pill type">' + escapeHtml(node.type) + '</span>' : '') +
-      '<div class="muted small">' + escapeHtml(node.path) + ' · ' +
-      (node.hops === 0 ? 'this concept' : node.hops + ' hop' + (node.hops === 1 ? '' : 's') + ' away') +
-      ' · ' + degree + ' link' + (degree === 1 ? '' : 's') + '</div>' +
+      '<div class="muted small">' + escapeHtml(node.bundle_name + ' / ' + node.path) + ' · ' +
+      (data.color_by === 'hops' ? (node.hops === 0 ? 'this concept' : node.hops + ' hop' + (node.hops === 1 ? '' : 's') + ' away') : node.degree + ' link' + (node.degree === 1 ? '' : 's') + ' in the catalog') +
+      ' · ' + degree + ' drawn</div>' + actions(node);
+    card.hidden = false;
+    if (focus) focusOn(node);
+  }
+
+  function selectLink(link) {
+    if (!link) { card.hidden = true; return; }
+    var from = nodeById(endId(link.source));
+    var to = nodeById(endId(link.target));
+    if (!from || !to) return;
+    selected = null;
+    var rel = (link.relations || []).filter(function (r) { return r !== 'reference'; });
+    var texts = (link.texts || []).map(function (t) { return '<li>' + escapeHtml(t) + '</li>'; }).join('');
+    card.innerHTML =
+      '<strong>' + escapeHtml(from.title) + '</strong> → <strong>' + escapeHtml(to.title) + '</strong>' +
+      '<div class="muted small">' + escapeHtml(link.count + ' link' + (link.count === 1 ? '' : 's') + (rel.length ? ' · ' + rel.join(', ') : '')) + '</div>' +
+      (texts ? '<div class="muted small">Link text:</div><ul class="edge-texts">' + texts + '</ul>' : '') +
       '<div class="graph3d-actions">' +
-      '<a class="btn small" href="' + escapeHtml(node.href) + '">Open</a>' +
-      (node.hops === 0 ? '' : '<button type="button" class="btn small ghost" data-explore="' + escapeHtml(node.graph_href) + '">Explore from here</button>') +
+      '<a class="btn small" href="' + escapeHtml(from.href) + '#tab-links">Open source</a>' +
+      '<a class="btn small" href="' + escapeHtml(to.href) + '">Open target</a>' +
+      '<button type="button" class="btn small ghost" data-explore="' + escapeHtml(to.graph_href) + '">Explore the target</button>' +
       '</div>';
     card.hidden = false;
-    if (focus && graph && node.x !== undefined) {
-      var distance = 140;
-      var length = Math.hypot(node.x, node.y, node.z || 0) || 1;
-      var ratio = 1 + distance / length;
-      graph.cameraPosition(
-        dims === 3 ? { x: node.x * ratio, y: node.y * ratio, z: node.z * ratio } : { x: node.x, y: node.y, z: 400 },
-        node,
-        700
-      );
-    }
+    var mid = { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2, z: ((from.z || 0) + (to.z || 0)) / 2 };
+    focusOn(mid);
+  }
+
+  function focusOn(point) {
+    if (!graph || point.x === undefined) return;
+    var distance = 140;
+    var length = Math.hypot(point.x, point.y, point.z || 0) || 1;
+    var ratio = 1 + distance / length;
+    graph.cameraPosition(
+      dims === 3 ? { x: point.x * ratio, y: point.y * ratio, z: (point.z || 0) * ratio } : { x: point.x, y: point.y, z: 400 },
+      point,
+      700
+    );
   }
 
   card.addEventListener('click', function (event) {
@@ -228,30 +300,97 @@
     load();
   });
 
+  // ---- zoom, center, full screen -------------------------------------------
+  function zoom(factor) {
+    if (!graph) return;
+    var pos = graph.cameraPosition();
+    var target = graph.controls().target;
+    var next = {
+      x: target.x + (pos.x - target.x) * factor,
+      y: target.y + (pos.y - target.y) * factor,
+      z: target.z + (pos.z - target.z) * factor,
+    };
+    graph.cameraPosition(next, target, 300);
+  }
+  root.querySelectorAll('[data-graph-zoom]').forEach(function (button) {
+    button.addEventListener('click', function () { zoom(button.getAttribute('data-graph-zoom') === 'in' ? 0.7 : 1.45); });
+  });
+  root.querySelectorAll('[data-graph-fit]').forEach(function (button) { button.addEventListener('click', fit); });
+  root.querySelectorAll('[data-graph-dims]').forEach(function (button) {
+    button.addEventListener('click', function () {
+      if (!graph) return;
+      dims = dims === 3 ? 2 : 3;
+      graph.numDimensions(dims);
+      button.textContent = dims === 3 ? '2D' : '3D';
+      fitPending = true;
+      setTimeout(fit, 700);
+    });
+  });
+  root.querySelectorAll('[data-graph-fullscreen]').forEach(function (button) {
+    button.addEventListener('click', function () {
+      if (document.fullscreenElement === root) { document.exitFullscreen(); return; }
+      if (root.requestFullscreen) root.requestFullscreen().catch(function () { root.classList.toggle('fullscreen'); });
+      else root.classList.toggle('fullscreen');
+    });
+  });
+  document.addEventListener('fullscreenchange', function () { setTimeout(fit, 400); });
+  document.addEventListener('keydown', function (event) {
+    if (root.hidden || root.offsetParent === null) return;
+    var tag = event.target && event.target.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    if (event.key === '+' || event.key === '=') zoom(0.7);
+    else if (event.key === '-') zoom(1.45);
+    else if (event.key === 'Escape') { card.hidden = true; }
+  });
+
+  // ---- finder (explorer) ----------------------------------------------------
+  if (finder && matches) {
+    finder.addEventListener('input', function () {
+      var needle = finder.value.trim().toLowerCase();
+      matches.textContent = '';
+      if (!data || needle.length < 2) return;
+      data.nodes.filter(function (n) {
+        return n.title.toLowerCase().indexOf(needle) !== -1 || n.concept_id.toLowerCase().indexOf(needle) !== -1;
+      }).slice(0, 12).forEach(function (n) {
+        var li = document.createElement('li');
+        li.textContent = n.title;
+        li.title = n.bundle_name + ' / ' + n.path;
+        li.addEventListener('click', function () { selectNode(n, true); });
+        matches.appendChild(li);
+      });
+    });
+  }
+
   // ---- data ----------------------------------------------------------------
   function load() {
     showStatus('Loading the graph…');
     card.hidden = true;
-    return fetch(seedUrl + '?hops=' + hops, { headers: { Accept: 'application/json' } })
+    var url = seedUrl + (seedUrl.indexOf('?') === -1 ? '?' : '&') + 'hops=' + hops;
+    return fetch(url, { headers: { Accept: 'application/json' } })
       .then(function (response) {
         if (!response.ok) throw new Error('HTTP ' + response.status);
         return response.json();
       })
       .then(function (json) {
         data = json;
+        assignGroupColors();
         if (!graph) build();
+        var colors = palette();
+        graph.nodeColor(function (n) { return colorFor(n, colors); });
         graph.graphData({ nodes: data.nodes, links: data.links });
         rebuildLabels();
+        renderLegend();
+        renderStats();
         setLive(true);
-        showStatus(data.nodes.length <= 1 ? 'No resolved links within ' + hops + ' hop' + (hops === 1 ? '' : 's') + '.' : '');
+        showStatus(data.nodes.length <= 1 ? 'No resolved links to draw.' : '');
         if (!frame) frame = requestAnimationFrame(placeLabels);
         fitPending = true;
-        // Small pictures settle before the engine reports it; fit early too.
         setTimeout(fit, 700);
+        // Disconnected components keep drifting apart for a while.
+        if (explorer) setTimeout(fit, 2500);
       })
       .catch(function (error) {
         if (!graph) {
-          // Nothing drawn yet: leave the server-rendered picture in place.
           root.hidden = true;
           if (fallback) fallback.hidden = false;
         } else {
@@ -271,7 +410,10 @@
       .onNodeHover(function (node) { showTip(node ? nodeTip(node) : ''); })
       .onLinkHover(function (link) { showTip(link ? linkTip(link) : ''); })
       .nodeColor(function (n) { return colorFor(n, colors); })
-      .nodeVal(function (n) { return n.hops === 0 ? 12 : n.hops === 1 ? 5 : 2.5; })
+      .nodeVal(function (n) {
+        if (data && data.color_by !== 'hops') return 2 + Math.min(10, n.degree * 0.6);
+        return n.hops === 0 ? 12 : n.hops === 1 ? 5 : 2.5;
+      })
       .nodeResolution(16)
       .nodeOpacity(0.95)
       .linkColor(function () { return colors.link; })
@@ -280,20 +422,19 @@
       .linkDirectionalArrowLength(4)
       .linkDirectionalArrowRelPos(1)
       .linkLabel(function () { return ''; })
-      .onNodeClick(function (node) { select(node, true); })
+      .onNodeClick(function (node) { selectNode(node, true); })
+      .onLinkClick(function (link) { selectLink(link); })
       .onNodeRightClick(function (node) { window.location.href = node.href; })
       .onBackgroundClick(function () { card.hidden = true; })
       .warmupTicks(60)
       .cooldownTicks(200)
-      .onEngineStop(function () {
-        if (fitPending) { fitPending = false; fit(); }
-      });
-    graph.d3Force('charge').strength(-140);
+      .onEngineStop(function () { if (fitPending) { fitPending = false; fit(); } });
+    // Repulsion with a reach limit keeps disconnected bundles from pushing
+    // each other out of frame in the catalog-wide picture.
+    graph.d3Force('charge').strength(explorer ? -90 : -140).distanceMax(explorer ? 220 : 400);
     graph.d3Force('link').distance(function (l) { return 40 + Math.min(40, l.count * 4); });
     canvasHost.addEventListener('dblclick', function () {
-      // The last clicked node is the card's subject; double-click opens it.
-      var open = card.querySelector('a.btn');
-      if (open && !card.hidden) window.location.href = open.getAttribute('href');
+      if (selected && !card.hidden) window.location.href = selected.href;
     });
 
     new ResizeObserver(function () {
@@ -306,6 +447,7 @@
       graph.backgroundColor(next.background);
       graph.nodeColor(function (n) { return colorFor(n, next); });
       graph.linkColor(function () { return next.link; });
+      renderLegend();
     }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
   }
 
@@ -317,19 +459,10 @@
       load();
     });
   }
-  if (fitButton) fitButton.addEventListener('click', fit);
-  if (dimsButton) dimsButton.addEventListener('click', function () {
-    if (!graph) return;
-    dims = dims === 3 ? 2 : 3;
-    graph.numDimensions(dims);
-    dimsButton.textContent = dims === 3 ? '2D' : '3D';
-    fitPending = true;
-    setTimeout(fit, 700);
-  });
   if (resetButton) resetButton.addEventListener('click', function () { seedUrl = pageSeedUrl; load(); });
 
-  // ---- start when the panel is first visible --------------------------------
-  function visible() { return root.parentElement.offsetParent !== null; }
+  // ---- start when the container is first visible ----------------------------
+  function visible() { return section.offsetParent !== null; }
   function start() {
     if (started) return;
     started = true;

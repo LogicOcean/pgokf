@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero">
+  <div>
+    <h1>Plugin builder</h1>
+    <p class="lede">Package catalog knowledge for an agent: pick a target, choose what to include, preview the tree, download the zip, and unpack it at the workspace root. The same build is one MCP call away for agents.</p>
+  </div>
+</section>
+<div class="search-layout builder-layout">
+  <aside class="filters">
+    <form id="pgokf-plugin-form" method="get" action="/plugins" data-target="{{ form.target }}"
+          hx-get="/plugins/preview" hx-target="#pgokf-plugin-preview" hx-trigger="change, submit, keyup changed delay:400ms from:.live" hx-include="#pgokf-plugin-form">
+      <fieldset class="targets">
+        <legend>Target</legend>
+        {% for t in targets %}
+        <label class="target-card{% if t.selected %} selected{% endif %}">
+          <input type="radio" name="target" value="{{ t.id }}" {% if t.selected %}checked{% endif %}>
+          <span class="target-label">{{ t.label }}</span>
+          <span class="muted small">{{ t.shape }} · <code>{{ t.root }}</code></span>
+          <span class="muted small">{{ t.notes }}</span>
+        </label>
+        {% endfor %}
+      </fieldset>
+      <div class="field">
+        <label for="p-name">Package name</label>
+        <input id="p-name" type="text" class="live" name="name" value="{{ form.name }}" placeholder="okf-knowledge" pattern="[A-Za-z0-9 _-]+">
+        <p class="hint">Lowercase letters, digits, and hyphens after slugging; it names the skill directory.</p>
+      </div>
+      <div class="field">
+        <label for="p-title">Title <span class="muted">(optional)</span></label>
+        <input id="p-title" type="text" class="live" name="title" value="{{ form.title }}" placeholder="Shown at the top of the index">
+      </div>
+      <fieldset>
+        <legend>What to include</legend>
+        <div class="field">
+          <label for="p-bundle">Bundle</label>
+          <select id="p-bundle" name="bundle">
+            <option value="">Any bundle</option>
+            {% for b in bundles %}<option value="{{ b.id }}" {% if form.bundle.as_str() == b.id.to_string().as_str() %}selected{% endif %}>{{ b.name }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="field">
+          <label for="p-q">Query <span class="muted">(ranked)</span></label>
+          <input id="p-q" type="search" class="live" name="q" value="{{ form.q }}" placeholder="e.g. failover OR backup">
+        </div>
+        <div class="field">
+          <label for="p-types">Types <span class="muted">(any of, comma-separated)</span></label>
+          <input id="p-types" type="text" class="live" name="types" value="{{ form.types }}" placeholder="Runbook, Guide">
+        </div>
+        <div class="field">
+          <label for="p-tags">Tags <span class="muted">(all of)</span></label>
+          <input id="p-tags" type="text" class="live" name="tags" value="{{ form.tags }}" placeholder="postgresql, operations">
+        </div>
+        <div class="field">
+          <label for="p-ids">Concept ids <span class="muted">(one per line)</span></label>
+          <textarea id="p-ids" class="live" name="ids" rows="3" placeholder="runbooks/database-failover">{{ form.ids }}</textarea>
+        </div>
+        <div class="field check">
+          <label><input type="checkbox" name="verified" value="1" {% if form.verified %}checked{% endif %}> Verified concepts only <span class="muted">(human-reviewed or machine-confirmed)</span></label>
+        </div>
+        <div class="field">
+          <label for="p-limit">Most concepts</label>
+          <input id="p-limit" type="number" class="live" name="limit" value="{{ form.limit }}" min="1" max="500" placeholder="100">
+        </div>
+        <div class="field" data-only-target="ollama">
+          <label for="p-model">Base model <span class="muted">(Ollama)</span></label>
+          <input id="p-model" type="text" class="live" name="base_model" value="{{ form.base_model }}" placeholder="llama3.1">
+        </div>
+      </fieldset>
+      <button type="submit" class="btn">Preview</button>
+    </form>
+  </aside>
+  <section class="results-col">
+    <div id="pgokf-plugin-preview" aria-live="polite">{% include "partials/plugin-preview.html" %}</div>
+  </section>
+</div>
+{% endblock %}

@@ -215,8 +215,10 @@ docker compose --profile ui up -d
 `pgokf-web` serves the catalog at `http://127.0.0.1:8080` (change
 `PGOKF_UI_BIND` / `PGOKF_UI_PORT` in `.env`): search with facets and paging
 on the configured backend, bundle browsing, concept pages with the rendered
-source, provenance, metadata, a link graph, similar concepts and history, and
-an operations page. It connects as the reader role only, so it can never
+source, provenance, metadata, an interactive 3D link graph, similar concepts
+and history, a catalog-wide graph explorer, a plugin builder that packages
+catalog knowledge for agent harnesses (Claude Code, Codex, Hermes Agent,
+Kimi, Gemini CLI, Cursor, `AGENTS.md`, Ollama), and an operations page. It connects as the reader role only, so it can never
 write, and it has no login of its own: keep it on loopback or a private
 network and put a TLS-terminating, authenticating reverse proxy in front of
 it before exposing it. When the stack's embedding endpoint is configured the

@@ -20,6 +20,7 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use pgokf_companion::embeddings::EmbeddingsClient;
+use pgokf_workspace::{BuildOptions, ConceptRecord, Profile, Selection, Target};
 use serde::Deserialize;
 use serde_json::Value;
 use tower::limit::ConcurrencyLimitLayer;
@@ -59,6 +60,7 @@ pub(crate) fn router(app: Shared) -> Router {
         .route("/bundles", get(api_bundles))
         .route("/search", get(api_search))
         .route("/concepts/{bundle_id}/{*concept_id}", get(api_concept))
+        .route("/graph", get(api_catalog_graph))
         .route("/graph/{bundle_id}/{*concept_id}", get(api_graph))
         .fallback(not_found);
     // Layers wrap inside-out: the concurrency limit sits inside the request
@@ -74,6 +76,10 @@ pub(crate) fn router(app: Shared) -> Router {
         .route("/status", get(status_page))
         .route("/concepts/{bundle_id}/{*concept_id}", get(concept_page))
         .route("/source/{bundle_id}/{*concept_id}", get(concept_source))
+        .route("/graph", get(graph_page))
+        .route("/plugins", get(plugins_page))
+        .route("/plugins/preview", get(plugins_preview))
+        .route("/plugins/build.zip", get(plugins_zip))
         .route("/static/{file}", get(static_asset))
         .nest("/api", api)
         .fallback(not_found)
@@ -607,6 +613,50 @@ fn actor_display(value: &Value) -> Option<String> {
     }
 }
 
+/// A target profile as the builder page lists it.
+pub(crate) struct TargetView {
+    pub id: String,
+    pub label: String,
+    pub root: String,
+    pub notes: String,
+    pub shape: String,
+    pub selected: bool,
+}
+
+/// The builder form's state, echoed back into the fields.
+#[derive(Debug, Clone)]
+pub(crate) struct PluginForm {
+    pub target: String,
+    pub name: String,
+    pub title: String,
+    pub bundle: String,
+    pub types: String,
+    pub tags: String,
+    pub ids: String,
+    pub q: String,
+    pub verified: bool,
+    pub limit: String,
+    pub base_model: String,
+    /// `true` once any selector is set.
+    pub has_selection: bool,
+    /// The same request as a query string, for the download link and the
+    /// preview partial.
+    pub query_string: String,
+}
+
+/// What a selection resolves to, before anything is downloaded.
+pub(crate) struct PluginPreview {
+    pub description: String,
+    pub concepts: Vec<ConceptRecord>,
+    pub truncated: bool,
+    pub root: String,
+    pub index_file: String,
+    pub file_paths: Vec<String>,
+    pub manifest_hint: String,
+    pub mcp_call: String,
+    pub download_url: String,
+}
+
 /// One custom-metadata row, value pretty-printed.
 pub(crate) struct MetadataRow {
     pub key: String,
@@ -815,6 +865,39 @@ struct ConceptPage {
     prov: ProvenanceView,
     similar: Vec<HitView>,
     history: Vec<Version>,
+}
+
+#[derive(Template)]
+#[template(path = "graph.html")]
+struct GraphPage {
+    shell: Shell,
+    bundles: Vec<BundleInfo>,
+    /// Query-string state echoed into the sidebar.
+    bundle: String,
+    limit_options: Vec<(i32, bool)>,
+    /// The JSON endpoint the client draws (the client appends `hops`).
+    graph_url: String,
+    hops: i32,
+    seed_label: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "plugins.html")]
+struct PluginsPage {
+    shell: Shell,
+    form: PluginForm,
+    targets: Vec<TargetView>,
+    bundles: Vec<BundleInfo>,
+    preview: Option<PluginPreview>,
+    error: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "partials/plugin-preview.html")]
+struct PluginPreviewPartial {
+    form: PluginForm,
+    preview: Option<PluginPreview>,
+    error: Option<String>,
 }
 
 #[derive(Template)]
@@ -1551,30 +1634,80 @@ fn graph_href(bundle_id: i64, concept_id: &str) -> String {
     )
 }
 
-/// The neighborhood graph as the client draws it: nodes carry their page
-/// and graph endpoints so the client never builds URLs from ids.
-fn graph_json(bundle_id: i64, seed: &str, hops: i32, graph: &Graph) -> Value {
+/// How the client colours a picture: by distance from a seed, or by a
+/// group (bundle, or type inside one bundle) with a legend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColorBy {
+    Hops,
+    Bundle,
+    Type,
+}
+
+/// A graph as the client draws it. Node ids are `bundle_id:concept_id`,
+/// unique across bundles; nodes carry their page and graph endpoints so the
+/// client never builds URLs from ids; links reference node ids.
+fn graph_json(seed: Option<(i64, &str)>, hops: i32, graph: &Graph, color_by: ColorBy) -> Value {
+    let node_id = |bundle_id: i64, id: &str| format!("{bundle_id}:{id}");
+    let group = |n: &crate::db::GraphNode| match color_by {
+        ColorBy::Hops => n.hops.to_string(),
+        ColorBy::Bundle => n.bundle_name.clone(),
+        ColorBy::Type => n
+            .concept_type
+            .clone()
+            .unwrap_or_else(|| "untyped".to_owned()),
+    };
+    let mut legend: Vec<String> = Vec::new();
     let nodes: Vec<Value> = graph
         .nodes
         .iter()
         .map(|n| {
+            let g = group(n);
+            if color_by != ColorBy::Hops && !legend.contains(&g) {
+                legend.push(g.clone());
+            }
             serde_json::json!({
-                "id": n.id,
+                "id": node_id(n.bundle_id, &n.id),
+                "bundle_id": n.bundle_id,
+                "bundle_name": n.bundle_name,
+                "concept_id": n.id,
                 "title": n.title.as_deref().unwrap_or(&n.id),
                 "type": n.concept_type,
                 "path": n.path,
                 "hops": n.hops,
-                "href": concept_href(bundle_id, &n.id),
-                "graph_href": graph_href(bundle_id, &n.id),
+                "degree": n.degree,
+                "group": g,
+                "href": concept_href(n.bundle_id, &n.id),
+                "graph_href": graph_href(n.bundle_id, &n.id),
             })
         })
         .collect();
+    let links: Vec<Value> = graph
+        .links
+        .iter()
+        .map(|l| {
+            serde_json::json!({
+                "source": node_id(l.bundle_id, &l.source),
+                "target": node_id(l.bundle_id, &l.target),
+                "count": l.count,
+                "relations": l.relations,
+                "texts": l.texts,
+            })
+        })
+        .collect();
+    legend.sort();
     serde_json::json!({
-        "bundle_id": bundle_id,
-        "seed": seed,
+        "seed": seed.map(|(b, id)| node_id(b, id)),
         "hops": hops,
+        "color_by": match color_by {
+            ColorBy::Hops => "hops",
+            ColorBy::Bundle => "bundle",
+            ColorBy::Type => "type",
+        },
+        "legend": legend,
+        "total": graph.total,
+        "shown": graph.nodes.len(),
         "nodes": nodes,
-        "links": graph.links,
+        "links": links,
     })
 }
 
@@ -1761,7 +1894,501 @@ async fn api_graph(
     if graph.nodes.is_empty() {
         return Err(AppError::not_found("This concept"));
     }
-    Ok(Json(graph_json(bundle_id, &concept_id, hops, &graph)))
+    Ok(Json(graph_json(
+        Some((bundle_id, &concept_id)),
+        hops,
+        &graph,
+        ColorBy::Hops,
+    )))
+}
+
+/// Nodes drawn by the catalog-wide explorer at most, and by default.
+const GRAPH_MAX_NODES: i32 = 2000;
+const GRAPH_DEFAULT_NODES: i32 = 300;
+const GRAPH_NODE_OPTIONS: [i32; 5] = [100, 300, 600, 1000, 2000];
+
+#[derive(Debug, Default, Deserialize)]
+struct CatalogGraphParams {
+    #[serde(default)]
+    bundle: String,
+    #[serde(default)]
+    limit: String,
+    /// `bundle_id:concept_id` to draw a neighborhood instead.
+    #[serde(default)]
+    seed: String,
+    #[serde(default)]
+    hops: String,
+}
+
+impl CatalogGraphParams {
+    fn bundle_id(&self) -> Result<Option<i64>, AppError> {
+        match non_empty(&self.bundle) {
+            None => Ok(None),
+            Some(raw) => raw
+                .parse::<i64>()
+                .map(Some)
+                .map_err(|_| AppError::bad_request("bundle must be an integer id")),
+        }
+    }
+
+    fn limit(&self) -> i32 {
+        self.limit
+            .parse::<i32>()
+            .ok()
+            .filter(|n| (1..=GRAPH_MAX_NODES).contains(n))
+            .unwrap_or(GRAPH_DEFAULT_NODES)
+    }
+
+    fn seed(&self) -> Result<Option<(i64, String)>, AppError> {
+        match non_empty(&self.seed) {
+            None => Ok(None),
+            Some(raw) => match raw.split_once(':') {
+                Some((b, id)) if !id.is_empty() => Ok(Some((
+                    b.parse::<i64>()
+                        .map_err(|_| AppError::bad_request("seed must be bundle_id:concept_id"))?,
+                    id.to_owned(),
+                ))),
+                _ => Err(AppError::bad_request("seed must be bundle_id:concept_id")),
+            },
+        }
+    }
+}
+
+/// The catalog-wide graph (or a seeded neighborhood) for the explorer.
+async fn api_catalog_graph(
+    State(app): State<Shared>,
+    Query(params): Query<CatalogGraphParams>,
+) -> Result<Json<Value>, AppError> {
+    let bundle_id = params.bundle_id()?;
+    if let Some((seed_bundle, seed_id)) = params.seed()? {
+        let hops = parse_hops(&params.hops);
+        let graph = app.db.graph(seed_bundle, &seed_id, hops).await?;
+        if graph.nodes.is_empty() {
+            return Err(AppError::not_found("This concept"));
+        }
+        return Ok(Json(graph_json(
+            Some((seed_bundle, &seed_id)),
+            hops,
+            &graph,
+            ColorBy::Hops,
+        )));
+    }
+    let graph = app
+        .db
+        .catalog_graph(bundle_id, i64::from(params.limit()))
+        .await?;
+    let color_by = if bundle_id.is_some() {
+        ColorBy::Type
+    } else {
+        ColorBy::Bundle
+    };
+    Ok(Json(graph_json(None, 0, &graph, color_by)))
+}
+
+async fn graph_page(
+    State(app): State<Shared>,
+    Query(params): Query<CatalogGraphParams>,
+) -> PageResult {
+    let bundle_id = params.bundle_id()?;
+    let seed = params.seed()?;
+    let limit = params.limit();
+    let bundles = app.db.bundles().await?;
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    if let Some(b) = bundle_id {
+        pairs.push(("bundle".to_owned(), b.to_string()));
+    }
+    pairs.push(("limit".to_owned(), limit.to_string()));
+    let hops = parse_hops(&params.hops);
+    let seed_label = match &seed {
+        Some((b, id)) => {
+            pairs.push(("seed".to_owned(), format!("{b}:{id}")));
+            Some(
+                app.db
+                    .concept(*b, id)
+                    .await?
+                    .and_then(|c| c.title)
+                    .unwrap_or_else(|| id.clone()),
+            )
+        }
+        None => None,
+    };
+    let query: Vec<String> = pairs
+        .iter()
+        .map(|(k, v)| format!("{k}={}", filters::percent_encode(v)))
+        .collect();
+    html(&GraphPage {
+        shell: Shell::new(&app, "Graph", "graph"),
+        bundles,
+        bundle: bundle_id.map(|b| b.to_string()).unwrap_or_default(),
+        limit_options: GRAPH_NODE_OPTIONS
+            .iter()
+            .map(|n| (*n, *n == limit))
+            .collect(),
+        graph_url: format!("/api/graph?{}", query.join("&")),
+        hops,
+        seed_label,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Plugin builder
+// ---------------------------------------------------------------------------
+
+/// Raw query-string parameters of the builder page, its preview, and the
+/// download.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct PluginParams {
+    #[serde(default)]
+    target: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    bundle: String,
+    #[serde(default)]
+    types: String,
+    #[serde(default)]
+    tags: String,
+    #[serde(default)]
+    ids: String,
+    #[serde(default)]
+    q: String,
+    #[serde(default)]
+    verified: String,
+    #[serde(default)]
+    limit: String,
+    #[serde(default)]
+    base_model: String,
+}
+
+const DEFAULT_PLUGIN_NAME: &str = "okf-knowledge";
+
+fn split_list(raw: &str) -> Vec<String> {
+    raw.split([',', '\n'])
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+impl PluginParams {
+    /// Validate into the builder's inputs plus the echoed form state.
+    fn normalize(&self) -> Result<(PluginForm, Target, Selection, Option<String>), AppError> {
+        let target_id = non_empty(&self.target).unwrap_or_else(|| "claude-code".to_owned());
+        let target = Target::parse(&target_id)
+            .ok_or_else(|| AppError::bad_request(format!("unknown target {target_id}")))?;
+        let bundle_id = match non_empty(&self.bundle) {
+            None => None,
+            Some(raw) => Some(
+                raw.parse::<i64>()
+                    .map_err(|_| AppError::bad_request("bundle must be an integer id"))?,
+            ),
+        };
+        let limit = match non_empty(&self.limit) {
+            None => None,
+            Some(raw) => Some(
+                raw.parse::<usize>()
+                    .ok()
+                    .filter(|n| (1..=pgokf_workspace::MAX_CONCEPTS).contains(n))
+                    .ok_or_else(|| {
+                        AppError::bad_request(format!(
+                            "limit must be between 1 and {}",
+                            pgokf_workspace::MAX_CONCEPTS
+                        ))
+                    })?,
+            ),
+        };
+        let verified = matches!(self.verified.as_str(), "1" | "true" | "on");
+        let selection = Selection {
+            bundle_ids: bundle_id.into_iter().collect(),
+            concept_ids: split_list(&self.ids),
+            tags: split_list(&self.tags),
+            types: split_list(&self.types),
+            query: non_empty(&self.q),
+            verified_only: verified,
+            limit,
+        };
+        let name = non_empty(&self.name).unwrap_or_else(|| DEFAULT_PLUGIN_NAME.to_owned());
+        let pairs: Vec<(&str, String)> = vec![
+            ("target", target_id.clone()),
+            ("name", name.clone()),
+            ("title", self.title.trim().to_owned()),
+            (
+                "bundle",
+                bundle_id.map(|b| b.to_string()).unwrap_or_default(),
+            ),
+            ("types", selection.types.join(", ")),
+            ("tags", selection.tags.join(", ")),
+            ("ids", selection.concept_ids.join(", ")),
+            ("q", selection.query.clone().unwrap_or_default()),
+            (
+                "verified",
+                if verified {
+                    "1".to_owned()
+                } else {
+                    String::new()
+                },
+            ),
+            ("limit", limit.map(|n| n.to_string()).unwrap_or_default()),
+            ("base_model", self.base_model.trim().to_owned()),
+        ];
+        let query_string = pairs
+            .iter()
+            .filter(|(_, v)| !v.is_empty())
+            .map(|(k, v)| format!("{k}={}", filters::percent_encode(v)))
+            .collect::<Vec<_>>()
+            .join("&");
+        let form = PluginForm {
+            target: target_id,
+            name,
+            title: self.title.trim().to_owned(),
+            bundle: bundle_id.map(|b| b.to_string()).unwrap_or_default(),
+            types: selection.types.join(", "),
+            tags: selection.tags.join(", "),
+            ids: selection.concept_ids.join("\n"),
+            q: selection.query.clone().unwrap_or_default(),
+            verified,
+            limit: limit.map(|n| n.to_string()).unwrap_or_default(),
+            base_model: self.base_model.trim().to_owned(),
+            has_selection: !selection.is_empty(),
+            query_string,
+        };
+        Ok((form, target, selection, non_empty(&self.base_model)))
+    }
+}
+
+/// A human label for a profile's shape.
+trait ShapeLabel {
+    fn shape_label(&self) -> &'static str;
+}
+
+impl ShapeLabel for Profile {
+    fn shape_label(&self) -> &'static str {
+        match self.shape {
+            pgokf_workspace::Shape::Skills => "Agent Skills package",
+            pgokf_workspace::Shape::InstructionFile => "instruction file",
+            pgokf_workspace::Shape::PromptBundle => "prompt bundle",
+            pgokf_workspace::Shape::Generic => "index plus files",
+        }
+    }
+}
+
+fn target_views(selected: &str) -> Vec<TargetView> {
+    Profile::all()
+        .iter()
+        .map(|p| TargetView {
+            id: p.id.to_owned(),
+            label: p.label.to_owned(),
+            root: if p.root.is_empty() {
+                "workspace root".to_owned()
+            } else {
+                format!("{}/", p.root)
+            },
+            notes: p.notes.to_owned(),
+            shape: p.shape_label().to_owned(),
+            selected: p.id == selected,
+        })
+        .collect()
+}
+
+fn build_options(
+    app: &App,
+    form: &PluginForm,
+    target: Target,
+    base_model: Option<String>,
+) -> BuildOptions {
+    BuildOptions {
+        target,
+        name: form.name.clone(),
+        title: non_empty(&form.title),
+        catalog_name: app.catalog_name.clone(),
+        base_model,
+    }
+}
+
+/// A builder failure as the page reports it: a catalog failure keeps its
+/// classification; anything else (an empty or unmatched selection, a bad
+/// name, a colliding path) is the caller's input.
+fn workspace_error(error: anyhow::Error) -> AppError {
+    if error
+        .chain()
+        .any(|cause| cause.downcast_ref::<tokio_postgres::Error>().is_some())
+        || crate::db::classify(&error) != Failure::Other
+    {
+        error.into()
+    } else {
+        AppError::bad_request(format!("{error:#}"))
+    }
+}
+
+/// Resolve the selection (no sources read) and describe the tree it would
+/// produce.
+async fn plugin_preview(
+    app: &App,
+    form: &PluginForm,
+    target: Target,
+    selection: &Selection,
+    base_model: Option<String>,
+) -> Result<PluginPreview, AppError> {
+    let mut client = app.db.checkout().await?;
+    let mut concepts = pgokf_workspace::resolve(client.client(), selection)
+        .await
+        .map_err(workspace_error)?;
+    client.finish();
+    let truncated = concepts.len() >= selection.effective_limit();
+    // Placeholder content: the layout is what the preview shows; sources
+    // are only read (and audited) by the download.
+    for c in &mut concepts {
+        c.bytes = vec![b'\n'];
+    }
+    let options = build_options(app, form, target, base_model);
+    let snapshot = pgokf_workspace::Snapshot {
+        version: app.version.clone(),
+        sql_version: String::new(),
+        bundles: Vec::new(),
+    };
+    let plugin = if concepts.is_empty() {
+        None
+    } else {
+        Some(
+            pgokf_workspace::assemble(&options, selection, &snapshot, &concepts)
+                .map_err(workspace_error)?,
+        )
+    };
+    for c in &mut concepts {
+        c.bytes.clear();
+    }
+    let profile = Profile::of(target);
+    let mcp_args = serde_json::json!({
+        "target": target.id(),
+        "name": pgokf_workspace::slug(&form.name),
+        "bundle_ids": selection.bundle_ids,
+        "types": selection.types,
+        "tags": selection.tags,
+        "concept_ids": selection.concept_ids,
+        "query": selection.query,
+        "verified_only": selection.verified_only,
+        "limit": selection.effective_limit(),
+        "output_dir": "/path/to/your/workspace",
+    });
+    let mcp_args = match mcp_args {
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .filter(|(_, v)| {
+                    !matches!(v, Value::Null)
+                        && !v.as_array().is_some_and(Vec::is_empty)
+                        && v != &Value::Bool(false)
+                })
+                .collect(),
+        ),
+        other => other,
+    };
+    Ok(PluginPreview {
+        description: selection.describe(),
+        truncated,
+        root: plugin.as_ref().map(|p| p.root.clone()).unwrap_or_default(),
+        index_file: plugin
+            .as_ref()
+            .and_then(|p| p.files.first().map(|f| f.path.clone()))
+            .unwrap_or_default(),
+        file_paths: plugin
+            .as_ref()
+            .map(|p| p.files.iter().map(|f| f.path.clone()).collect())
+            .unwrap_or_default(),
+        manifest_hint: format!("{}: {}", profile.label, profile.notes),
+        mcp_call: serde_json::to_string_pretty(&serde_json::json!({
+            "name": "build_workspace_plugin",
+            "arguments": mcp_args,
+        }))
+        .unwrap_or_default(),
+        download_url: format!("/plugins/build.zip?{}", form.query_string),
+        concepts,
+    })
+}
+
+/// The preview, or the message to show in its place; a selection that is
+/// not set yet shows neither.
+async fn preview_or_message(
+    app: &App,
+    form: &PluginForm,
+    target: Target,
+    selection: &Selection,
+    base_model: Option<String>,
+) -> (Option<PluginPreview>, Option<String>) {
+    if !form.has_selection {
+        return (None, None);
+    }
+    match plugin_preview(app, form, target, selection, base_model).await {
+        Ok(preview) => (Some(preview), None),
+        Err(error) => (None, Some(error.message)),
+    }
+}
+
+async fn plugins_page(State(app): State<Shared>, Query(params): Query<PluginParams>) -> PageResult {
+    let (form, target, selection, base_model) = params.normalize()?;
+    let bundles = app.db.bundles().await?;
+    let (preview, error) = preview_or_message(&app, &form, target, &selection, base_model).await;
+    html(&PluginsPage {
+        shell: Shell::new(&app, "Plugin builder", "plugins"),
+        targets: target_views(&form.target),
+        form,
+        bundles,
+        preview,
+        error,
+    })
+}
+
+async fn plugins_preview(
+    State(app): State<Shared>,
+    Query(params): Query<PluginParams>,
+) -> PageResult {
+    let (form, target, selection, base_model) = params.normalize()?;
+    let (preview, error) = preview_or_message(&app, &form, target, &selection, base_model).await;
+    let push_url = format!("/plugins?{}", form.query_string);
+    let mut response = html(&PluginPreviewPartial {
+        form,
+        preview,
+        error,
+    })?;
+    if let Ok(value) = HeaderValue::from_str(&push_url) {
+        response.headers_mut().insert("HX-Push-Url", value);
+    }
+    Ok(response)
+}
+
+/// Build the tree (sources read through the audited `get_concept_source`)
+/// and send it as a zip to unpack at the workspace root.
+async fn plugins_zip(State(app): State<Shared>, Query(params): Query<PluginParams>) -> PageResult {
+    let (form, target, selection, base_model) = params.normalize()?;
+    if selection.is_empty() {
+        return Err(AppError::bad_request(
+            "give a query, a bundle, a type, a tag, or concept ids to build a plugin",
+        ));
+    }
+    let mut client = app.db.checkout().await?;
+    let options = build_options(&app, &form, target, base_model);
+    let plugin = pgokf_workspace::build(client.client(), &options, &selection)
+        .await
+        .map_err(workspace_error)?;
+    client.finish();
+    let bytes = pgokf_workspace::zip(&plugin)?;
+    let filename = format!("{}-{}.zip", plugin.name, plugin.target);
+    Ok((
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/zip"),
+            ),
+            (
+                header::CONTENT_DISPOSITION,
+                HeaderValue::from_str(&format!("attachment; filename=\"{filename}\""))
+                    .unwrap_or_else(|_| HeaderValue::from_static("attachment")),
+            ),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 async fn api_concept(
@@ -2169,6 +2796,105 @@ mod tests {
             Some("{\"team\":\"platform\"}")
         );
         assert_eq!(actor_display(&Value::Null), None);
+    }
+
+    #[test]
+    fn plugin_params_split_lists_and_build_a_stable_query_string() {
+        // Arrange
+        let params = PluginParams {
+            target: "codex".to_owned(),
+            name: "Ops".to_owned(),
+            tags: "a, b".to_owned(),
+            ids: "x\ny".to_owned(),
+            verified: "on".to_owned(),
+            ..PluginParams::default()
+        };
+
+        // Act
+        let (form, target, selection, _) = params.normalize().ok().expect("valid");
+
+        // Assert
+        assert_eq!(target, Target::Codex);
+        assert_eq!(selection.tags, vec!["a", "b"]);
+        assert_eq!(selection.concept_ids, vec!["x", "y"]);
+        assert!(selection.verified_only);
+        assert_eq!(
+            form.query_string,
+            "target=codex&name=Ops&tags=a%2C%20b&ids=x%2C%20y&verified=1"
+        );
+        assert!(
+            PluginParams {
+                target: "nope".to_owned(),
+                ..PluginParams::default()
+            }
+            .normalize()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn graph_json_uses_composite_node_ids_and_a_group_legend() {
+        // Arrange
+        let node =
+            |bundle_id: i64, name: &str, title: Option<&str>, degree: i64| crate::db::GraphNode {
+                bundle_id,
+                bundle_name: name.to_owned(),
+                id: "a/b".to_owned(),
+                title: title.map(str::to_owned),
+                concept_type: Some("Guide".to_owned()),
+                path: "a/b.md".to_owned(),
+                hops: 0,
+                degree,
+            };
+        let graph = Graph {
+            nodes: vec![
+                node(2, "docs", None, 1),
+                node(1, "sample", Some("Other"), 0),
+            ],
+            links: vec![crate::db::GraphLink {
+                bundle_id: 2,
+                source: "a/b".to_owned(),
+                target: "a/b".to_owned(),
+                count: 1,
+                relations: vec![],
+                texts: vec![],
+            }],
+            total: 2,
+        };
+
+        // Act
+        let value = graph_json(None, 0, &graph, ColorBy::Bundle);
+
+        // Assert
+        assert_eq!(value["nodes"][0]["id"], "2:a/b");
+        assert_eq!(value["nodes"][1]["id"], "1:a/b");
+        assert_eq!(value["nodes"][0]["title"], "a/b");
+        assert_eq!(value["nodes"][0]["href"], "/concepts/2/a/b");
+        assert_eq!(value["links"][0]["source"], "2:a/b");
+        assert_eq!(value["legend"], serde_json::json!(["docs", "sample"]));
+        assert_eq!(value["color_by"], "bundle");
+    }
+
+    #[test]
+    fn catalog_graph_params_parse_the_seed_and_bound_the_limit() {
+        // Arrange
+        let good = CatalogGraphParams {
+            seed: "2:runbooks/a".to_owned(),
+            limit: "5000".to_owned(),
+            ..CatalogGraphParams::default()
+        };
+        let bad = CatalogGraphParams {
+            seed: "runbooks/a".to_owned(),
+            ..CatalogGraphParams::default()
+        };
+
+        // Act & Assert
+        assert_eq!(
+            good.seed().ok().flatten(),
+            Some((2, "runbooks/a".to_owned()))
+        );
+        assert_eq!(good.limit(), GRAPH_DEFAULT_NODES);
+        assert!(bad.seed().is_err());
     }
 
     #[test]

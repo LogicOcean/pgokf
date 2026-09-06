@@ -265,3 +265,39 @@ html:not([data-js]) .tabs [role=tabpanel] { margin-bottom: 1.5rem; }
 /* The bundle's own tooltip is unused (empty labels) and stays out of the way. */
 .scene-container .scene-tooltip, .scene-container .float-tooltip-kap { display: none !important; }
 @media (max-width: 900px) { .graph3d { height: 420px; } }
+
+/* ---- graph explorer page and view controls ------------------------------ */
+.explorer { display: grid; grid-template-columns: 300px 1fr; gap: 1.25rem; align-items: start; }
+.explorer-graph { height: calc(100vh - 8.5rem); min-height: 480px; }
+.graph3d-controls { position: absolute; right: .6rem; bottom: .6rem; display: flex; gap: .3rem; }
+.graph3d-controls .btn { min-width: 2.1rem; justify-content: center; }
+.graph3d.fullscreen, .graph3d:fullscreen { height: 100vh; border-radius: 0; }
+.graph3d-card { z-index: 3; }
+.graph3d-card .edge-texts { margin: .4rem 0 0; padding-left: 1rem; }
+.graph3d-card .edge-texts li { font-size: .8rem; }
+.graph3d-label.dim { opacity: .25 !important; }
+[data-graph-matches] li { cursor: pointer; }
+[data-graph-matches] li:hover { text-decoration: underline; }
+[data-graph-legend] li i { display: inline-block; width: .6rem; height: .6rem; border-radius: 50%; margin-right: .4rem; vertical-align: middle; }
+@media (max-width: 900px) { .explorer { grid-template-columns: 1fr; } .explorer-graph { height: 60vh; } }
+
+/* ---- plugin builder ----------------------------------------------------- */
+.builder-layout { grid-template-columns: 360px 1fr; }
+.targets { display: grid; gap: .4rem; border: 0; padding: 0; margin: 0 0 1rem; }
+.targets legend, .filters fieldset legend { font-weight: 600; font-size: .85rem; color: var(--muted); margin-bottom: .4rem; }
+.filters fieldset { border: 0; padding: 0; margin: 0 0 .5rem; }
+.target-card { display: grid; gap: .1rem; padding: .5rem .65rem; border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; background: var(--surface); }
+.target-card:hover { border-color: var(--accent); }
+.target-card.selected, .target-card:has(input:checked) { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent); }
+.target-card input { position: absolute; opacity: 0; pointer-events: none; }
+.target-label { font-weight: 600; }
+.field.check label { display: flex; gap: .4rem; align-items: baseline; font-weight: 400; }
+.field textarea { width: 100%; font: inherit; padding: .45rem .6rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); resize: vertical; }
+.builder-actions { display: flex; gap: .8rem; align-items: center; flex-wrap: wrap; margin: .5rem 0 1rem; }
+.tree-list { list-style: none; padding: 0; margin: 0; font-size: .85rem; max-height: 420px; overflow: auto; }
+.tree-list li { padding: .15rem 0; border-bottom: 1px dashed var(--border); }
+.hits.compact .hit { padding: .5rem .7rem; }
+.notice.bad { border-color: var(--bad); }
+[data-only-target] { display: none; }
+form[data-target="ollama"] [data-only-target="ollama"] { display: block; }
+@media (max-width: 900px) { .builder-layout { grid-template-columns: 1fr; } }

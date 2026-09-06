@@ -18,6 +18,8 @@ so it adds nothing new to the workspace's `cargo deny` surface.
 | `find_similar` | `concept_id` (required), `bundle_id?`, `limit?` | `pgokf.find_similar` |
 | `concept_neighbors` | `concept_id` (required), `max_hops?`, `bundle_id?` | `pgokf.concept_neighbors` |
 | `get_concept` | `concept_id` (required), `bundle_id?` | `pgokf.concepts` projection |
+| `list_plugin_targets` | none | the `pgokf-workspace` target registry: each harness's documented skills directory |
+| `build_workspace_plugin` | `target` (required), `name?`, `title?`, `bundle_ids?`, `concept_ids?`, `tags?`, `types?`, `query?`, `verified_only?`, `limit?`, `base_model?`, `output_dir?`, `overwrite?` | `pgokf-workspace`: an Agent Skills package (`SKILL.md` + `references/`), an `AGENTS.md` instruction file, an Ollama prompt bundle, or a generic tree, with `okf-workspace.yaml` and `okf-workspace.lock`; with `output_dir` the tree is written into the workspace, otherwise the files are returned inline (up to 1 MiB) |
 
 Each tool returns an MCP tool result whose single text content block holds the
 JSON array of rows exactly as the SQL function produced them.

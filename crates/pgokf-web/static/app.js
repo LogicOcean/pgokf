@@ -56,6 +56,20 @@
     });
   });
 
+  // ---- plugin builder: the chosen target drives which fields show -------
+  var builder = document.getElementById('pgokf-plugin-form');
+  if (builder) {
+    var syncTarget = function () {
+      var picked = builder.querySelector('input[name=target]:checked');
+      builder.setAttribute('data-target', picked ? picked.value : '');
+      builder.querySelectorAll('.target-card').forEach(function (cardEl) {
+        cardEl.classList.toggle('selected', cardEl.contains(picked));
+      });
+    };
+    builder.addEventListener('change', syncTarget);
+    syncTarget();
+  }
+
   // ---- tabs (ARIA tabs pattern; the hash names the tab as #tab-<name>) ----
   var TAB_PREFIX = 'tab-';
   function initTabs(container) {

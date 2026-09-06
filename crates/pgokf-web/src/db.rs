@@ -234,32 +234,46 @@ pub(crate) struct Neighbor {
     pub path: Vec<String>,
 }
 
-/// A node of the neighborhood graph: the seed (`hops` 0) or a reachable
-/// concept, with what the picture labels it by.
+/// A node of a graph picture: a concept with what the picture labels it by.
+/// `hops` is the distance from the seed in a neighborhood graph and 0 in the
+/// catalog-wide graph; `degree` is the number of resolved links it takes
+/// part in.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct GraphNode {
+    pub bundle_id: i64,
+    pub bundle_name: String,
     pub id: String,
     pub title: Option<String>,
     pub concept_type: Option<String>,
     pub path: String,
     pub hops: i32,
+    pub degree: i64,
 }
 
-/// A directed edge between two graph nodes, folded over parallel links.
+/// A directed edge between two graph nodes of one bundle, folded over
+/// parallel links, keeping the distinct link texts (a few) for inspection.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct GraphLink {
+    pub bundle_id: i64,
     pub source: String,
     pub target: String,
     pub count: i64,
     pub relations: Vec<String>,
+    pub texts: Vec<String>,
 }
 
-/// The neighborhood of one concept as nodes and edges.
+/// A graph picture as nodes and edges.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct Graph {
     pub nodes: Vec<GraphNode>,
     pub links: Vec<GraphLink>,
+    /// Visible concepts that could have been drawn (the catalog-wide graph
+    /// shows the best-connected `limit` of them).
+    pub total: i64,
 }
+
+/// How many distinct link texts an edge carries into the picture.
+const EDGE_TEXTS: usize = 5;
 
 /// One row of `pgokf.concept_history()`.
 #[derive(Debug, Clone, Serialize)]
@@ -425,6 +439,14 @@ impl Db {
             .build()
             .context("building the PostgreSQL connection pool")?;
         Ok(Self { pool })
+    }
+
+    /// A pooled connection for the plugin builder, which runs its own
+    /// statements through the reader role. The guard closes the connection
+    /// instead of recycling it when the build is abandoned mid-flight
+    /// (request timeout, client gone); call `finish` when it completed.
+    pub(crate) async fn checkout(&self) -> Result<Borrowed> {
+        self.client().await
     }
 
     async fn client(&self) -> Result<Borrowed> {
@@ -977,69 +999,128 @@ impl Db {
 
     /// The neighborhood graph of one concept: the seed plus every concept
     /// `pgokf.concept_neighbors()` reaches within `max_hops`, and the
-    /// resolved links among that set (self-links, which are in-page
-    /// anchors, excluded). Empty when the seed is not visible.
+    /// resolved links among that set. Empty when the seed is not visible.
     pub(crate) async fn graph(
         &self,
         bundle_id: i64,
         concept_id: &str,
         max_hops: i32,
     ) -> Result<Graph> {
+        let sql = format!(
+            "WITH n AS (
+                 SELECT $1::text AS id, 0 AS hops
+                 UNION ALL
+                 SELECT neighbor_id, hops FROM pgokf.concept_neighbors($1, $2, $3)
+             )
+             SELECT c.bundle_id, {}, c.id, c.title, c.type, c.path, min(n.hops)::int,
+                    (SELECT count(*) FROM pgokf.links l
+                      WHERE l.bundle_id = c.bundle_id AND l.resolved AND l.source_id <> l.target_id
+                        AND (l.source_id = c.id OR l.target_id = c.id))
+             FROM n
+             JOIN pgokf.concepts c ON c.bundle_id = $3 AND c.id = n.id
+             JOIN pgokf.bundles b ON b.id = c.bundle_id
+             GROUP BY c.bundle_id, b.name, b.path, c.id, c.title, c.type, c.path
+             ORDER BY 7, c.id",
+            display_name("b")
+        );
         let nodes = self
-            .query_map(
-                "WITH n AS (
-                     SELECT $1::text AS id, 0 AS hops
-                     UNION ALL
-                     SELECT neighbor_id, hops FROM pgokf.concept_neighbors($1, $2, $3)
-                 )
-                 SELECT c.id, c.title, c.type, c.path, min(n.hops)::int
-                 FROM n JOIN pgokf.concepts c ON c.bundle_id = $3 AND c.id = n.id
-                 GROUP BY c.id, c.title, c.type, c.path
-                 ORDER BY 5, c.id",
-                &[&concept_id, &max_hops, &bundle_id],
-                |r| {
-                    Ok(GraphNode {
-                        id: col(r, 0)?,
-                        title: col(r, 1)?,
-                        concept_type: col(r, 2)?,
-                        path: col(r, 3)?,
-                        hops: col(r, 4)?,
-                    })
-                },
-            )
+            .query_map(&sql, &[&concept_id, &max_hops, &bundle_id], graph_node)
             .await?;
+        let total = i64::try_from(nodes.len()).unwrap_or(i64::MAX);
+        let links = self.links_among(&nodes).await?;
+        Ok(Graph {
+            nodes,
+            links,
+            total,
+        })
+    }
+
+    /// The catalog-wide graph: the `limit` best-connected visible concepts
+    /// (of one bundle, or all) and the resolved links among them. Degrees
+    /// come from one aggregate over the links, not a probe per concept.
+    pub(crate) async fn catalog_graph(&self, bundle_id: Option<i64>, limit: i64) -> Result<Graph> {
+        let sql = format!(
+            "WITH ends AS (
+                 SELECT l.bundle_id, l.source_id AS id FROM pgokf.links l
+                  WHERE l.resolved AND l.source_id <> l.target_id
+                    AND ($1::bigint IS NULL OR l.bundle_id = $1)
+                 UNION ALL
+                 SELECT l.bundle_id, l.target_id FROM pgokf.links l
+                  WHERE l.resolved AND l.source_id <> l.target_id
+                    AND ($1::bigint IS NULL OR l.bundle_id = $1)
+             ), deg AS (
+                 SELECT bundle_id, id, count(*)::bigint AS degree FROM ends GROUP BY 1, 2
+             ), visible AS (
+                 SELECT c.bundle_id, c.id, c.title, c.type, c.path, {} AS bundle_name,
+                        coalesce(deg.degree, 0) AS degree
+                 FROM pgokf.concepts c
+                 JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled AND b.retired_at IS NULL
+                 LEFT JOIN deg ON deg.bundle_id = c.bundle_id AND deg.id = c.id
+                 WHERE ($1::bigint IS NULL OR c.bundle_id = $1)
+             )
+             SELECT bundle_id, bundle_name, id, title, type, path, 0::int, degree,
+                    count(*) OVER ()
+             FROM visible
+             ORDER BY degree DESC, bundle_id, id
+             LIMIT $2",
+            display_name("b")
+        );
+        let rows = self.query(&sql, &[&bundle_id, &limit]).await?;
+        let total = rows
+            .first()
+            .map(|r| col::<i64>(r, 8))
+            .transpose()?
+            .unwrap_or(0);
+        let nodes = rows.iter().map(graph_node).collect::<Result<Vec<_>>>()?;
+        let links = self.links_among(&nodes).await?;
+        Ok(Graph {
+            nodes,
+            links,
+            total,
+        })
+    }
+
+    /// The resolved links whose both ends are in `nodes` (self-links, which
+    /// are in-page anchors, excluded), folded per pair.
+    async fn links_among(&self, nodes: &[GraphNode]) -> Result<Vec<GraphLink>> {
         if nodes.is_empty() {
-            return Ok(Graph {
-                nodes,
-                links: Vec::new(),
-            });
+            return Ok(Vec::new());
         }
+        let bundles: Vec<i64> = nodes.iter().map(|n| n.bundle_id).collect();
         let ids: Vec<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
-        let links = self
-            .query_map(
-                "SELECT l.source_id, l.target_id, count(*)::bigint,
-                        array_agg(DISTINCT l.link_relation ORDER BY l.link_relation)
-                 FROM pgokf.links l
-                 WHERE l.bundle_id = $1 AND l.resolved
-                   AND l.source_id = ANY($2) AND l.target_id = ANY($2)
-                   AND l.source_id <> l.target_id
-                 GROUP BY 1, 2 ORDER BY 1, 2",
-                &[&bundle_id, &ids],
-                |r| {
-                    Ok(GraphLink {
-                        source: col(r, 0)?,
-                        target: col(r, 1)?,
-                        count: col(r, 2)?,
-                        relations: col::<Option<Vec<Option<String>>>>(r, 3)?
-                            .unwrap_or_default()
-                            .into_iter()
-                            .flatten()
-                            .collect(),
-                    })
-                },
-            )
-            .await?;
-        Ok(Graph { nodes, links })
+        self.query_map(
+            "WITH n AS (SELECT * FROM ROWS FROM (unnest($1::bigint[]), unnest($2::text[])) AS t(bundle_id, id))
+             SELECT l.bundle_id, l.source_id, l.target_id, count(*)::bigint,
+                    array_agg(DISTINCT l.link_relation ORDER BY l.link_relation),
+                    array_agg(DISTINCT l.link_text ORDER BY l.link_text)
+             FROM pgokf.links l
+             JOIN n s ON s.bundle_id = l.bundle_id AND s.id = l.source_id
+             JOIN n t ON t.bundle_id = l.bundle_id AND t.id = l.target_id
+             WHERE l.resolved AND l.source_id <> l.target_id
+             GROUP BY 1, 2, 3 ORDER BY 1, 2, 3",
+            &[&bundles, &ids],
+            |r| {
+                Ok(GraphLink {
+                    bundle_id: col(r, 0)?,
+                    source: col(r, 1)?,
+                    target: col(r, 2)?,
+                    count: col(r, 3)?,
+                    relations: col::<Option<Vec<Option<String>>>>(r, 4)?
+                        .unwrap_or_default()
+                        .into_iter()
+                        .flatten()
+                        .collect(),
+                    texts: col::<Option<Vec<Option<String>>>>(r, 5)?
+                        .unwrap_or_default()
+                        .into_iter()
+                        .flatten()
+                        .filter(|t| !t.trim().is_empty())
+                        .take(EDGE_TEXTS)
+                        .collect(),
+                })
+            },
+        )
+        .await
     }
 
     /// `pgokf.find_similar(concept_id, bundle_id, limit)`.
@@ -1144,7 +1225,7 @@ impl Db {
 /// mid-flight (the request timed out or the client went away) takes the
 /// connection out of the pool and closes it instead, so the server aborts
 /// the statement and no later request queues behind it.
-struct Borrowed {
+pub(crate) struct Borrowed {
     object: Option<Object>,
     done: bool,
 }
@@ -1156,7 +1237,13 @@ impl Borrowed {
             .expect("a borrowed connection is present until finish or drop")
     }
 
-    fn finish(&mut self) {
+    /// The underlying client, for callers that run their own statements.
+    pub(crate) fn client(&self) -> &tokio_postgres::Client {
+        self.get()
+    }
+
+    /// Mark the work complete so the connection returns to the pool.
+    pub(crate) fn finish(&mut self) {
         self.done = true;
     }
 }
@@ -1171,6 +1258,19 @@ impl Drop for Borrowed {
             drop(Object::take(object));
         }
     }
+}
+
+fn graph_node(r: &Row) -> Result<GraphNode> {
+    Ok(GraphNode {
+        bundle_id: col(r, 0)?,
+        bundle_name: col(r, 1)?,
+        id: col(r, 2)?,
+        title: col(r, 3)?,
+        concept_type: col(r, 4)?,
+        path: col(r, 5)?,
+        hops: col(r, 6)?,
+        degree: col(r, 7)?,
+    })
 }
 
 fn bundle_info(r: &Row) -> Result<BundleInfo> {

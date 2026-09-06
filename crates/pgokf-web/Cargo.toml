@@ -31,6 +31,7 @@ deadpool-postgres = "0.14"
 okf-parser = { version = "=0.1.16", path = "../okf-parser" }
 pgokf-companion = { version = "=0.1.16", path = "../pgokf-companion", features = ["embeddings"] }
 pgokf-pgconn = { version = "=0.1.16", path = "../pgokf-pgconn" }
+pgokf-workspace = { version = "=0.1.16", path = "../pgokf-workspace" }
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 serde.workspace = true
 serde_json.workspace = true

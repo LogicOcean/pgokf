@@ -13,8 +13,10 @@ visibility decision is the database's.
 | **Search** (`/search`) | `concept_search()` (lexical, on the configured backend), `concept_search_semantic()` / `concept_search_hybrid()` when an embeddings endpoint is configured, `search_facets()` for the type, tag, bundle, status, and trust-tier facets, keyset pagination ("Load more"). With filters but no query text it **browses**: every visible concept matching the filters, so a tag, type, status, or bundle link lists concepts directly. |
 | **Bundles** (`/bundles`, `/bundles/{id}`) | `catalog_stats()`, `list_bundles()`, the bundle's concepts grouped by directory, `list_sync_log()`, `list_bundle_log()` |
 | **Concept** (`/concepts/{bundle_id}/{concept_id}`) | the concept row with its rendered Markdown (the stored source when `store_source` is on, otherwise the search text; body links to other concepts are resolved through `pgokf.links`, headings get anchor ids), custom metadata, provenance / verification / sources, outgoing and incoming links (folded per counterpart) with an interactive 3D link graph over `concept_neighbors()` and `pgokf.links` (rotate, zoom, click a node for details, explore onward from any node; a server-rendered SVG stands in without WebGL or JavaScript), `find_similar()`, `concept_history()`, and a source download through `get_concept_source()` |
+| **Graph** (`/graph`) | the catalog-wide link graph: the best-connected concepts of the catalog or one bundle (coloured by bundle or type) or, seeded from a concept, its neighborhood; nodes and edges open detail cards, zoom, center, 2D/3D, and full-screen controls, a finder, and "explore from here" |
+| **Plugins** (`/plugins`) | the agent plugin builder over the `pgokf-workspace` crate: choose a target (Claude Code, Codex, Hermes Agent, Kimi, Gemini CLI, Cursor, the shared `.agents/skills/` directory, an `AGENTS.md` instruction file, an Ollama prompt bundle, or a generic tree), select concepts by bundle, query, type, tags, ids, and trust, preview the concepts and the file tree, download the zip; the page shows the equivalent `build_workspace_plugin` MCP call |
 | **Operations** (`/status`) | `health()`, `search_index_status()`, `get_config()`, `stale_concepts()`, `duplicate_concepts()`, the sync log |
-| **JSON API** (`/api/health`, `/api/bundles`, `/api/search`, `/api/concepts/{bundle_id}/{concept_id}`, `/api/graph/{bundle_id}/{concept_id}?hops=N`) | the same data layer, for scripts and dashboards; the graph document is what the 3D view draws |
+| **JSON API** (`/api/health`, `/api/bundles`, `/api/search`, `/api/concepts/{bundle_id}/{concept_id}`, `/api/graph?bundle=&limit=` and `/api/graph/{bundle_id}/{concept_id}?hops=N`) | the same data layer, for scripts and dashboards; the graph documents are what the 3D views draw |
 
 Search results carry the database's `ts_headline` snippet (sanitized to its
 highlight markup), the rank, the bundle, and the path. Facets, the result
@@ -49,8 +51,9 @@ every variable unconditionally.
   projection tables. Tenant scope, visibility, `require_tenant`, and the
   non-disclosure rules are enforced by the database on the pooled role.
   Rendering a concept reads the stored source from the projection table;
-  only the **Download source** button goes through `get_concept_source()`,
-  so the extension's access log records downloads, not page views.
+  only the **Download source** button and a plugin download go through
+  `get_concept_source()`, so the extension's access log records exports,
+  not page views. A plugin preview reads no sources at all.
 - No login of its own: it is the reader role's view of the catalog. Bind it
   to loopback (the default) and expose it through a reverse proxy that
   terminates TLS and authenticates users, or keep it on a private network.
