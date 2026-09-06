@@ -1,10 +1,11 @@
 # pgokf Code Catalogue Extension Specification
 
 **Status:** Proposed implementation specification  
-**Target:** `pgokf` PostgreSQL extension  
+**Target:** `pgokf` PostgreSQL extension, release **0.2.0** (a SemVer minor under the api-stability policy: it adds tables, composite types, and functions)  
+**Baseline:** pgokf 0.1.16 (`bm25_provider`, `require_tenant`, `pg_extension_config_dump` registration)  
 **OKF compatibility:** Open Knowledge Format v0.2  
 **Template protocol:** CTL1  
-**Document version:** 0.2.1
+**Document version:** 0.2.1 (the version of this specification and of the CTL1 profile, not of the extension)
 
 ## 1. Overview
 
@@ -24,6 +25,8 @@ The extension SHALL preserve the existing generic projection:
 - provenance, links, trust, lifecycle, history, tenancy, and bundle synchronization;
 - round-trippable source bytes when `store_source=true`;
 - distribution through filesystem or content bundle synchronization.
+
+The five types are shipped incrementally, each as its own pgokf minor release with its own upgrade script (§12); "0.2.0" names the first release that ships any of them.
 
 The extension SHALL add type-specific projections rather than overloading the core `pgokf.concepts` row with many nullable columns. A concept remains addressable by the existing composite identity `(bundle_id, id)`, where `id` is the normalized bundle-relative path without `.md`. A declared frontmatter `id` remains advisory metadata (`declared_id`) and MUST NOT replace the path-derived identity.
 
@@ -88,7 +91,11 @@ language: python
 tags: [retry, async, resilience]
 visibility: internal
 author: human:alice
-source:
+owner: team-platform
+generated:
+  by: human:alice
+  at: 2026-08-30T10:00:00Z
+origin:
   kind: github
   url: https://github.com/acme/platform/blob/2dd9c90/lib/retry.py
   revision: 2dd9c90
@@ -123,16 +130,16 @@ The generic OKF fields retain their OKF meanings. Extension-specific fields are:
 | `language` | string | yes | Lowercase canonical language identifier. See §3.3. |
 | `tags` | array of strings | recommended | Stored in `pgokf.concepts.tags`; tags are case-sensitive at storage and SHOULD be lowercase slugs. |
 | `visibility` | string | yes | One of `public`, `internal`, `private`; defaults to `internal` only in API-generated documents. File-authored documents MUST be explicit. |
-| `author` | string or mapping | yes | Prefer the OKF actor convention (`human:<id>`, `team:<id>`, `agent:<id>`, `process:<id>`). A mapping MAY add display metadata. |
-| `source` | string or mapping | recommended | Origin of this exact snippet. Mapping form is canonical. This is distinct from OKF `sources`, which records derivation/provenance. |
+| `author` | string or mapping | yes | The publisher or owner of the concept, in the OKF actor convention exactly: `human:<id>` for a person, `process:<id>` for a pipeline, `<producer>/<version>` for an agent or tool. No other prefix is defined; a team is expressed with owner-style custom metadata (for example `owner: team-platform`), never as an actor. A mapping MAY add display metadata around the same actor string. `author` does not replace OKF `generated`, which records who produced the *current* content and is REQUIRED on typed concepts (the `human:` prefix there drives the derived trust tier). |
+| `origin` | string or mapping | recommended | Where this exact payload came from. Mapping form is canonical. This is distinct from OKF `sources`, which records the materials the content was derived from; the two MUST NOT be collapsed, and the name `origin` is chosen so they cannot be confused. |
 | `resource` | URI or JSON value | optional | Canonical underlying asset using normal OKF semantics. |
 | `license` | string | recommended for imported public code | SPDX identifier or `LicenseRef-*`. |
 | `filename` | string | optional | Suggested filename, never an automatic write target. |
 
-Canonical `source` mappings:
+Canonical `origin` mappings:
 
 ```yaml
-source:
+origin:
   kind: github              # github | git | filesystem | database | api | generated
   url: https://github.com/acme/repo/blob/<commit>/src/file.rs
   repository: https://github.com/acme/repo.git
@@ -145,7 +152,7 @@ source:
 For a local origin:
 
 ```yaml
-source:
+origin:
   kind: filesystem
   path: snippets/retry.py
 ```
@@ -153,20 +160,20 @@ source:
 For database/content insertion:
 
 ```yaml
-source:
+origin:
   kind: database
   system: code-catalogue
   record_id: snip_01J...
   revision: 7
 ```
 
-A mutable branch URL MAY be recorded for navigation, but reproducible imports SHOULD also record an immutable revision. Credentials, access tokens, DSNs, and private headers MUST NOT appear in `source`.
+A mutable branch URL MAY be recorded for navigation, but reproducible imports SHOULD also record an immutable revision. Credentials, access tokens, DSNs, and private headers MUST NOT appear in `origin`.
 
-`author` describes who authored or published the concept. `source` describes where this payload came from. OKF `sources` describes materials from which claims were derived. Implementations MUST NOT collapse these fields.
+`author` describes who publishes or owns the concept. OKF `generated` describes who produced the current content and when. `origin` describes where this payload came from. OKF `sources` describes materials from which claims were derived. Implementations MUST NOT collapse these fields. Every field this specification adds is ordinary producer metadata under OKF v0.2 (it lands in `pgokf.concept_metadata` like any custom key) and is additionally validated and projected; none of them redefines one of OKF's modeled fields (`type`, `title`, `description`, `tags`, `resource`) or provenance families.
 
 ### 3.3 Language identifiers
 
-`language` MUST match `^[a-z][a-z0-9_+.#-]{0,63}$`. The implementation SHALL maintain an alias normalization table at ingestion/API boundaries, for example `py → python`, `js → javascript`, `ts → typescript`, `rs → rust`, `sh → shell`, and `postgresql → sql`. Stored metadata and search filters use the canonical value. Unknown but syntactically valid languages are accepted.
+`language` MUST match `^[a-z][a-z0-9_+.#-]{0,63}$`. The implementation SHALL maintain an alias normalization table at ingestion/API boundaries, for example `py → python`, `js → javascript`, `ts → typescript`, `rs → rust`, `sh → shell`, and `postgresql → sql`. The `sh` alias is governed by the single rule in §16.2: it maps to `shell` unless local policy has verified Bash semantics. Stored metadata and search filters use the canonical value. Unknown but syntactically valid languages are accepted.
 
 The canonical fenced block SHOULD use the same language identifier. A mismatch between frontmatter `language` and the canonical block's info string is a typed validation error. An empty fence info string MAY inherit the frontmatter language.
 
@@ -202,7 +209,7 @@ A `Code Snippet` is valid for typed projection only if:
 3. the `# Schema` section and canonical fence are unambiguous;
 4. the document, fence info string, and payload are valid UTF-8;
 5. the payload and document are within pgokf's configured file limits;
-6. source metadata contains no recognized secret-bearing keys (`token`, `password`, `secret`, `authorization`, `private_key`);
+6. `origin` metadata contains no recognized secret-bearing keys (`token`, `password`, `secret`, `authorization`, `private_key`);
 7. if `license` is present, it is a string and not empty.
 
 Typed strictness is controlled by a new bundle option:
@@ -230,7 +237,11 @@ title: Rust command-line application
 description: A minimal Cargo CLI with optional GitHub Actions.
 tags: [rust, cli, cargo]
 visibility: internal
-author: team:developer-experience
+author: human:dx-lead
+owner: team-developer-experience
+generated:
+  by: human:dx-lead
+  at: 2026-08-30T10:00:00Z
 template_engine: CTL1
 template_protocol_version: 1
 output_format: zip
@@ -285,11 +296,11 @@ on: [push]
 | `tags` | array of strings | recommended | Generic OKF tags. |
 | `visibility` | string | yes | `public`, `internal`, or `private`. |
 | `author` | string or mapping | yes | Same rules as Code Snippet. |
-| `source` | string or mapping | optional | Same origin mapping as Code Snippet. |
+| `origin` | string or mapping | optional | Same origin mapping as Code Snippet. |
 | `template_engine` | string | yes | Exact value `CTL1`; matching is case-sensitive. |
 | `template_protocol_version` | integer | yes | Exact value `1` for this specification; unsupported values are never downgraded. |
 | `parameters` | mapping | yes | CTL1 variable schema described in §4.4. |
-| `output_format` | string | yes | `zip` for extension version 0.2.1. `directory`, if seen in a migrated document, is descriptive only and cannot be returned by `render_scaffold_zip`. |
+| `output_format` | string | yes | `zip` for specification profile 0.2.1. `directory`, if seen in a migrated document, is descriptive only and cannot be returned by `render_scaffold_zip`. |
 | `builtin` | boolean | optional | Distribution hint only; does not confer trust. Defaults false. |
 | `renderer_min_version` | string | optional | SemVer floor for compatible renderer. |
 
@@ -331,7 +342,7 @@ Attributes MAY appear in any order. Unknown or duplicate attributes, single-quot
 
 This Markdown envelope is the OKF transport representation of standalone scaffold file descriptors. It intentionally does not rely on arbitrary non-Markdown files being discovered by the current pgokf sync pipeline. A future protocol version MAY add referenced template files, but it must define byte discovery, hashing, and portability before doing so.
 
-Extension version 0.2.1 supports text scaffold files only. Binary pass-through files from the standalone catalogue are deferred because embedding opaque binary payloads into OKF Markdown would weaken readability and exact-byte handling. A future extension MAY add content-addressed binary resources; it MUST preserve the standalone rule that binary files cannot be CTL templates and are copied byte-for-byte.
+Specification profile 0.2.1 supports text scaffold files only. Binary pass-through files from the standalone catalogue are deferred because embedding opaque binary payloads into OKF Markdown would weaken readability and exact-byte handling. A future extension MAY add content-addressed binary resources; it MUST preserve the standalone rule that binary files cannot be CTL templates and are copied byte-for-byte.
 
 ### 4.4 Parameter schema
 
@@ -469,7 +480,7 @@ All five types have mandatory projections. `body_text` is never an exact-payload
 CREATE TABLE pgokf.code_snippets (
   bundle_id bigint NOT NULL, concept_id text NOT NULL, language text NOT NULL,
   visibility text NOT NULL CHECK (visibility IN ('public','internal','private')),
-  author jsonb NOT NULL, source jsonb, license text, filename text,
+  author jsonb NOT NULL, origin jsonb, license text, filename text,
   code_text text NOT NULL, examples_text text NOT NULL DEFAULT '', code_tsv tsvector,
   source_file_hash text NOT NULL, tenant_id text NOT NULL,
   PRIMARY KEY (bundle_id, concept_id),
@@ -478,7 +489,7 @@ CREATE TABLE pgokf.code_snippets (
 CREATE TABLE pgokf.scaffold_templates (
   bundle_id bigint NOT NULL, concept_id text NOT NULL,
   visibility text NOT NULL CHECK (visibility IN ('public','internal','private')),
-  author jsonb NOT NULL, source jsonb, template_engine text NOT NULL CHECK (template_engine='CTL1'),
+  author jsonb NOT NULL, origin jsonb, template_engine text NOT NULL CHECK (template_engine='CTL1'),
   template_protocol_version integer NOT NULL CHECK (template_protocol_version=1),
   output_format text NOT NULL CHECK (output_format='zip'), parameters jsonb NOT NULL,
   template_manifest jsonb NOT NULL, template_source bytea NOT NULL,
@@ -497,17 +508,17 @@ CREATE TABLE pgokf.skills (
 CREATE TABLE pgokf.scripts (
   bundle_id bigint NOT NULL, concept_id text NOT NULL, language text NOT NULL,
   visibility text NOT NULL CHECK (visibility IN ('public','internal','private')),
-  author jsonb, source jsonb, license text, runtime jsonb, arguments jsonb,
+  author jsonb, origin jsonb, license text, runtime jsonb, arguments jsonb,
   exit_codes jsonb, exact_bytes bytea NOT NULL, byte_size bigint NOT NULL,
   executable_sha256 text NOT NULL, source_path text NOT NULL, package_concept_id text,
   source_file_hash text NOT NULL, script_tsv tsvector, tenant_id text NOT NULL,
   PRIMARY KEY (bundle_id, concept_id),
   FOREIGN KEY (bundle_id, concept_id) REFERENCES pgokf.concepts(bundle_id,id) ON DELETE CASCADE
 );
-CREATE TABLE pgokf.references (
+CREATE TABLE pgokf.reference_documents (
   bundle_id bigint NOT NULL, concept_id text NOT NULL,
   visibility text NOT NULL CHECK (visibility IN ('public','internal','private')),
-  format text NOT NULL, media_type text NOT NULL, author jsonb, source jsonb,
+  format text NOT NULL, media_type text NOT NULL, author jsonb, origin jsonb,
   license text, exact_bytes bytea NOT NULL, byte_size bigint NOT NULL,
   content_sha256 text NOT NULL, text_body text, extracted_text text,
   extraction jsonb, source_path text NOT NULL, package_concept_id text,
@@ -517,9 +528,11 @@ CREATE TABLE pgokf.references (
 );
 ```
 
-`source_file_hash` equals the parent `concepts.file_hash`. For virtual resources, that parent hash is the BLAKE3 digest of exact resource bytes plus canonical virtual metadata; `executable_sha256`/`content_sha256` are SHA-256 of exact returned bytes. `scripts.exact_bytes` is mandatory even when UTF-8; converting through `body_text`, newline normalization, or a database text encoding is forbidden. `skills.skill_md` preserves exact `SKILL.md` source and `agent_skill` preserves the complete parsed frontmatter; no additional typed payload table is required. `references.exact_bytes` is mandatory for text and binary References; extraction is derived, bounded, labeled with extractor/version, and never replaces exact bytes.
+`source_file_hash` equals the parent `concepts.file_hash`. For virtual resources, that parent hash is the BLAKE3 digest of exact resource bytes plus canonical virtual metadata; `executable_sha256`/`content_sha256` are SHA-256 of exact returned bytes. `scripts.exact_bytes` is mandatory even when UTF-8; converting through `body_text`, newline normalization, or a database text encoding is forbidden. `skills.skill_md` preserves exact `SKILL.md` source and `agent_skill` preserves the complete parsed frontmatter; no additional typed payload table is required. `reference_documents.exact_bytes` is mandatory for text and binary References (the table is not named `references`, a reserved word that would force quoting in every statement); extraction is derived, bounded, labeled with extractor/version, and never replaces exact bytes.
 
 Every projection carries `tenant_id`, enables and forces the authorization model in §7.4, cascades on concept deletion, is transactionally maintained, and is not directly writable by application roles. Rebuild uses retained `concept_source`, `skills.skill_md`, or the mandatory exact type/resource stores; it MUST report an unrebuildable source rather than use `body_text`.
+
+**Backups.** `pg_dump` skips the rows of an extension-owned table unless the extension registers it. Every table and sequence this specification adds (the projections above, §5.5 diagnostics, §8.6 history payloads, §11.1 scan tables) MUST be registered with `pg_extension_config_dump`; pgokf does this through `pgokf_private.register_dump_relations()`, which a fresh install runs last and which **every upgrade script MUST call as its last statement** (the rule since pgokf 0.1.14). A logical restore therefore rehydrates the typed projections and exact payloads from the dump; `rebuild_code_catalogue_projection` (§8.7) is for a projection that is missing or stale, never the only way back after a restore.
 
 ### 5.4 Raw staging, classification, and projection pipeline
 
@@ -576,13 +589,13 @@ CREATE TABLE pgokf.concept_diagnostics (
   message text NOT NULL, remediation text, details jsonb NOT NULL DEFAULT '{}',
   created_at timestamptz NOT NULL DEFAULT now(),
   diagnostic_key text GENERATED ALWAYS AS
-    (encode(digest(concat_ws(E'\x1f', code, path, concept_identity::text,
-      coalesce(byte_start,-1)::text, coalesce(byte_end,-1)::text), 'sha256'),'hex')) STORED,
+    (encode(sha256(convert_to(concat_ws(E'\x1f', code, path, concept_identity::text,
+      coalesce(byte_start,-1)::text, coalesce(byte_end,-1)::text), 'UTF8')),'hex')) STORED,
   UNIQUE (bundle_id, snapshot_hash, validator_version, policy_version, diagnostic_key)
 );
 ```
 
-Ranges are half-open UTF-8 byte offsets. Diagnostics are a projection of one snapshot and policy: a successful reconciliation atomically replaces diagnostics for touched concepts/packages and deletes stale rows for fixed/deleted artifacts. `fatal` always aborts; `error` aborts strict mode and is retained in warn mode only when a safe generic projection exists; `warning` and `info` never mutate source. Scanner finding details are stored in the restricted scan tables below and generic diagnostics contain only redacted summaries.
+`sha256(bytea)` is the built-in function available on every supported PostgreSQL major; pgokf takes no dependency on pgcrypto. Ranges are half-open UTF-8 byte offsets. Diagnostics are a projection of one snapshot and policy: a successful reconciliation atomically replaces diagnostics for touched concepts/packages and deletes stale rows for fixed/deleted artifacts. `fatal` always aborts; `error` aborts strict mode and is retained in warn mode only when a safe generic projection exists; `warning` and `info` never mutate source. Scanner finding details are stored in the restricted scan tables below and generic diagnostics contain only redacted summaries.
 
 `pgokf.get_concept_diagnostics(bundle_id, concept_id, include_info boolean DEFAULT false)` is a `STABLE SECURITY DEFINER` visibility-aware function. It returns code, severity, phase, path/range, message, remediation, validator/policy versions, and redacted details. Unknown and unauthorized identities return the same `22023` result. Search returns only authorized counts by severity.
 
@@ -606,7 +619,7 @@ CREATE UNIQUE INDEX links_logical_edge_idx ON pgokf.links
    coalesce(target_id, normalized_target_key));
 ```
 
-`target_bundle_id` plus `target_id` is resolved concept identity; same-bundle legacy rows backfill `target_bundle_id=bundle_id` when `resolved`. Exact `raw_target` cannot be reconstructed from legacy rows and is backfilled by reparsing retained source when available, otherwise NULL with `derivation:[{"kind":"legacy"}]`. `link_relation` stores canonical uppercase `USES`, `REFERENCES`, `INSTANTIATES`, `DEMONSTRATES`, `REQUIRES`, `RELATED_TO`, or generic `REFERENCE`; legacy values are normalized during migration. The existing positional primary key remains a compatibility key. `normalized_target_key` is populated by the projector with the exact once-decoded, fragment-free, normalized unresolved/external target; it is NULL only for resolved concept targets. The unique index above is the logical edge key. During migration, `link_relation` default changes from lowercase `reference` to uppercase `REFERENCE`; all existing values are uppercased, unknown legacy values remain uppercase generic relationships, and all new writes use canonical values. `resolved` is maintained as `(resolution_status='resolved')`, `is_external` as `(resolution_status='external')`, `target_path` as the normalized internal path when present, and `link_kind` continues to record Markdown syntax kind (`reference` for explicit/package edges). A deferred consistency trigger rejects disagreement among legacy and new columns. Backfill runs under the bundle lock, reparses retained sources, then bundle-wide re-resolves before the unique index is validated.
+`target_bundle_id` plus `target_id` is resolved concept identity; same-bundle legacy rows backfill `target_bundle_id=bundle_id` when `resolved`. Exact `raw_target` cannot be reconstructed from legacy rows and is backfilled by reparsing retained source when available, otherwise NULL with `derivation:[{"kind":"legacy"}]`. `link_relation` stores canonical uppercase `USES`, `REFERENCES`, `INSTANTIATES`, `DEMONSTRATES`, `REQUIRES`, `RELATED_TO`, or generic `REFERENCE`; legacy values are normalized during migration. The existing positional primary key remains a compatibility key. `normalized_target_key` is populated by the projector with the exact once-decoded, fragment-free, normalized unresolved/external target; it is NULL only for resolved concept targets. The unique index above is the logical edge key. During migration, `link_relation` default changes from lowercase `reference` to uppercase `REFERENCE`; all existing values are uppercased, unknown legacy values remain uppercase generic relationships, and all new writes use canonical values. `resolved` is maintained as `(resolution_status='resolved')`, `is_external` as `(resolution_status='external')`, `target_path` as the normalized internal path when present, and `link_kind` continues to record Markdown syntax kind (`reference` for explicit/package edges). A deferred consistency trigger rejects disagreement among legacy and new columns. Backfill runs under the bundle lock, reparses retained sources, then bundle-wide re-resolves before the unique index is validated. Under pgokf's upgrade rules (no `DROP`, `DELETE`, or destructive rewrite in an upgrade script) the uppercase normalization and backfill are ordinary `UPDATE`s and are allowed. When legacy rows would violate `links_logical_edge_idx`, the upgrade MUST coalesce each duplicate set into one edge inside the same transaction - keeping the lowest positional key, merging every occurrence into `derivation`, and merging non-conflicting `edge_metadata` - and MUST build and validate the unique index in that same transaction, so an upgrade either applies completely or not at all and never leaves the index absent.
 
 Explicit typed edges use frontmatter:
 
@@ -646,14 +659,14 @@ SELECT * FROM pgokf.register_bundle(
 
 ### 6.2 Generic Git repositories
 
-A companion (`okf-sync`, `pgokf-ingest`, CI job, or operator service) SHALL:
+The Git adapter is a mode of `pgokf-ingest` (or a sibling binary in the companions image) built on the shared companion runtime (`pgokf-companion`: watch loop, signal handling, CLI conventions, tenant scoping through `pgokf-pgconn`). It SHALL:
 
 1. clone/fetch into a controlled worktree;
 2. resolve the configured ref to an immutable commit;
 3. optionally select a bundle subdirectory;
 4. enforce repository URL/ref allowlists and checkout limits;
 5. call `register_bundle` on the checked-out filesystem tree, or stream `(path, bytes)` to `register_bundle_content`;
-6. record repository URL, resolved revision, subdirectory, and adapter version in `pgokf.bundles.options` and concept `source` metadata.
+6. record repository URL, resolved revision, subdirectory, and adapter version in `pgokf.bundles.options` and concept `origin` metadata.
 
 The current `okf-sync` discovery layer and extension `ByteSource` do not implement network Git cloning as a native PostgreSQL source. Git support is adapter orchestration around existing filesystem/content sync. This avoids network credentials and unbounded repository operations inside a PostgreSQL backend.
 
@@ -681,12 +694,12 @@ The adapter:
 - parses enough frontmatter to select configured standalone types including `Code Snippet`, `Scaffold Template`, and `Script`, and also supply complete detected Skill packages, while still supplying reserved root `index.md` and relevant `log.md` files;
 - supplies exact bytes through `register_bundle_content`, or checks out a filesystem bundle;
 - follows pagination and rate-limit backoff;
-- does not log tokens or embed them in bundle options/source metadata;
+- does not log tokens or embed them in bundle options or `origin` metadata;
 - treats a force-push as a new resolved revision and ordinary content diff;
 - does not follow symlinks outside a checked-out root;
-- records immutable `source.url` values when possible.
+- records immutable `origin.url` values when possible.
 
-A native future `source_type='github'` requires a migration to the bundles check constraint, credential references, refresh semantics, and a new `ByteSource`; it is explicitly outside extension version 0.2.1.
+A native future `source_type='github'` requires a migration to the bundles check constraint, credential references, refresh semantics, and a new `ByteSource`; it is explicitly outside the releases this specification covers.
 
 ### 6.4 Database and application content
 
@@ -730,7 +743,9 @@ pgokf.catalogue_search(
 
 The enriched result contains, in fixed order: `bundle_id, concept_id, path, title, description, type, language, tags, visibility, rank, headline, trust jsonb, resources jsonb, diagnostics jsonb, script_safety text`. It joins generic concepts to typed projections, provenance, diagnostics, and scan summaries after authorization; it never embeds exact Script/Reference/template bytes or restricted scanner details.
 
-The query parser is `websearch_to_tsquery` (or configured safe equivalent), with bounded UTF-8 bytes/tokens; raw caller-controlled `to_tsquery` syntax is forbidden. Ranking is fixed for ranking version `catalogue-rank-1`:
+`catalogue_search` and every wrapper in §7.3 dispatch through the same `search_backend` seam as `concept_search` (pgokf 0.1.x: `native | bm25`, with `bm25_provider` selecting Tiger Data `pg_textsearch` or ParadeDB `pg_search`). Each backend owns its ranking: the formula below is the **native** backend's and is identified in the cursor as `catalogue-rank-1`; a BM25 backend ships its own ranking version identifier (for example `catalogue-rank-bm25-1`), and a cursor minted under one backend is rejected with `22023` under another. The type-specific vectors (`code_tsv`, `script_tsv`, `reference_tsv`) are backend-specific indexes: `tsvector` columns under native, one BM25 expression index per projection under `pg_textsearch`, with the same query-shape rules as `concept_search` (an index-ordered top-k scan with filters as quals; no score comparison in `WHERE`). The parameter-binding rule from pgokf 0.1.14 stands: a `SECURITY DEFINER` path that must plan a predicate `pg_search` cannot handle binds the tenant as a parameter rather than calling `current_setting()` inline; `pg_textsearch` is an ordinary index access method that plans under row-level security directly, which was verified before 0.1.15 shipped and MUST be re-verified for each typed index.
+
+The query parser is `websearch_to_tsquery` (or configured safe equivalent), with bounded UTF-8 bytes/tokens; raw caller-controlled `to_tsquery` syntax is forbidden. Ranking is fixed for the native ranking version `catalogue-rank-1`:
 
 `rank = 0.55*ts_rank_cd(common_tsv,q) + 0.25*ts_rank_cd(type_tsv,q) + 0.10*exact_title + 0.05*exact_language + 0.05*verified_trust`, clamped to `[0,1]` after each component is normalized to `[0,1]`. `common_tsv` weights title A, tags/type/description B, body D. Type vectors weight Code Snippet/Script exact tokens C, Scaffold parameter names/output paths C, Skill procedure headings/body C, Reference extracted/text body C. Unsafe/blocked Scripts are excluded by default; authorized `script_safety='all'` includes them labeled and applies a 0.25 multiplicative demotion. Unknown/unscanned Scripts remain labeled `unknown` and are never described as clean.
 
@@ -751,7 +766,7 @@ Visibility is mandatory for all five types. File-authored concepts MUST declare 
 | reader with transaction-local private capability | `public`, `internal`, `private` |
 | writer/admin | no broader read visibility unless separately granted |
 
-The private capability is a signed/validated gateway decision installed as transaction-local `pgokf.private_read='on'` only by a non-login capability-setter role; applications cannot set it directly. Effective tenant is mandatory for application roles; unset tenant MUST deny rather than retain legacy see-all behavior. Owner/superuser bypass roles MUST NOT be used by applications.
+The private capability is a signed/validated gateway decision installed as transaction-local `pgokf.private_read='on'`. The mechanism, not just the intent, is normative: `pgokf.private_read` is registered by the extension with `SUSET` context, so no application role can `SET` it; it is set transaction-locally (`set_config('pgokf.private_read', 'on', true)`) only by a superuser-owned, pinned-search-path `SECURITY DEFINER` capability-setter function that validates the gateway decision before setting it. This is deliberately unlike `pgokf.tenant`, which is `USERSET` (a scoping selector any session may set, per the 0.1.13 security model); the two GUCs MUST NOT be described or implemented as alike. Whether an unset tenant is denied is governed by the durable `require_tenant` policy key (pgokf 0.1.16): a hardened multi-tenant deployment sets it and an unscoped session sees nothing and cannot write; the default keeps pgokf's opt-in tenancy. Visibility enforcement applies regardless of that setting. Owner/superuser bypass roles MUST NOT be used by applications.
 
 Base catalogue/type/link/diagnostic/scan tables have all privileges revoked from application roles. RLS is enabled and forced with tenant + visibility policies using `pgokf_private.can_read(tenant_id,visibility)`. Reader access is only through `security_barrier` views or pinned-search-path `SECURITY DEFINER` functions that call the same predicate. Search, facets, retrieval, source/history, links, diagnostics, rendering, export, and resource download all enforce it. A caller visibility filter only narrows authorized rows. Missing, cross-tenant, and invisible identities have indistinguishable errors; hidden targets do not affect exposed counts/facets/diagnostics/resource summaries. Writes stamp the effective tenant and reject visibility widening of package children.
 
@@ -787,7 +802,7 @@ CREATE TYPE pgokf.code_snippet_result AS (
   tags text[],
   visibility text,
   author jsonb,
-  source jsonb,
+  origin jsonb,
   license text,
   filename text,
   code text,
@@ -921,7 +936,7 @@ pgokf.put_code_snippet(
   tags text[] DEFAULT '{}',
   visibility text DEFAULT 'internal',
   author jsonb DEFAULT NULL,
-  source jsonb DEFAULT NULL,
+  origin jsonb DEFAULT NULL,
   examples text DEFAULT NULL,
   extra_frontmatter jsonb DEFAULT '{}'
 ) RETURNS pgokf.bundle_sync_result
@@ -936,7 +951,7 @@ pgokf.put_scaffold_template(
   tags text[] DEFAULT '{}',
   visibility text DEFAULT 'internal',
   author jsonb DEFAULT NULL,
-  source jsonb DEFAULT NULL,
+  origin jsonb DEFAULT NULL,
   output_format text DEFAULT 'zip',
   extra_frontmatter jsonb DEFAULT '{}'
 ) RETURNS pgokf.bundle_sync_result
@@ -990,7 +1005,7 @@ pgokf.code_catalogue_stats()
   RETURNS pgokf.code_catalogue_stats
 ```
 
-A rebuild requires retained `concept_source` or another exact source snapshot. It MUST report concepts that cannot be rebuilt because source was not stored. It MUST not pretend `body_text` is sufficient.
+A rebuild requires retained `concept_source` or another exact source snapshot. It MUST report concepts that cannot be rebuilt because source was not stored. It MUST not pretend `body_text` is sufficient. After a logical restore the projections are already present (they are dumped, §5.3); rebuild is for projections that are missing or stale relative to a newer validator/policy version.
 
 ## 9. Sync, history, and package reconciliation
 
@@ -1004,7 +1019,7 @@ Script history, when enabled, stores exact bytes, byte size, SHA-256, source fil
 
 ## 10. UI interface contract
 
-The UI is a separate application. It is not shipped as part of the PostgreSQL extension and MUST NOT own catalogue semantics.
+The UI is a separate application. It is not shipped as part of the PostgreSQL extension and MUST NOT own catalogue semantics. Its agent-facing counterpart, `pgokf-mcp`, is the normative implementation of the progressive-disclosure contract in §19.2; the UI inherits that contract rather than defining a parallel one. The workspace injector in §21 is the third client of the same functions.
 
 ### 10.1 UI responsibilities
 
@@ -1055,7 +1070,7 @@ UI-facing JSON should expose:
   "tags": ["retry", "async"],
   "visibility": "internal",
   "author": "human:alice",
-  "source": {"kind": "github", "url": "...", "revision": "..."},
+  "origin": {"kind": "github", "url": "...", "revision": "..."},
   "code": "...",
   "file_hash": "...",
   "modified_at": "..."
@@ -1119,7 +1134,7 @@ Network adapters run outside PostgreSQL with URL/ref allowlists and credential r
 ### Phase 1: parser/projection
 
 - Add pure typed body/frontmatter parsers and fixture suites.
-- Add migrations for all five mandatory type projections, diagnostics, links, and scan tables, indexes, grants, and RLS.
+- Add migrations for all five mandatory type projections, diagnostics, links, and scan tables, indexes, grants, and RLS; every upgrade script ends with `SELECT pgokf_private.register_dump_relations();` (§5.3).
 - Wire projection into `run_bundle_sync` after generic upsert.
 - Add strict/warn/off bundle option.
 - Verify generic metadata remains complete.
@@ -1134,8 +1149,8 @@ Acceptance:
 
 ### Phase 2: search and retrieval
 
-- Add code-specific `simple`-configuration vector/index.
-- Add language/tag/visibility filters and stable cursors.
+- Add code-specific `simple`-configuration vector/index under the native backend, and the per-projection BM25 expression index under `pg_textsearch`, both behind the `search_backend` seam (§7.2).
+- Add language/tag/visibility filters and per-backend versioned cursors.
 - Add exact snippet/scaffold/Skill/Script/Reference retrieval, unified search, scan status, diagnostics, and facets.
 - Add SQL API documentation and privilege tests.
 
@@ -1183,17 +1198,29 @@ Acceptance:
 
 ### Phase 5: interface contract
 
-- Add HTTP/MCP mappings without moving semantics out of pgokf.
+- Extend `pgokf-mcp` with the §19.2 discovery/activation/resource tools; the HTTP layer maps the same functions without moving semantics out of pgokf.
 - Add UI schema examples and error mapping.
 - Add ZIP digest/ETag/content-disposition behavior.
 - Run tenant/visibility authorization tests.
+
+### Phase 6: workspace injection
+
+- Add the `pgokf-workspace` companion (§21): manifest resolution through the reader API, target-adapter registry, byte-identical materialization, lockfile, `--check` / `--update`.
+- Ship adapters for the initial targets with each layout verified against the client's current documentation.
+
+Acceptance:
+
+- the same manifest produces byte-identical trees for repeated runs against an unchanged catalog;
+- `--check` reports every drift between the lockfile and the catalog without writing;
+- a concept the session may not see is absent from the tree and the lockfile, with no error that reveals it;
+- a `SKILL.md` in the tree is byte-identical to `skills.skill_md`.
 
 ## 13. Required test matrix
 
 At minimum:
 
 - parser: missing/duplicate headings, missing/multiple schema fences, fence-language mismatch, nested/long fences, Unicode, CRLF, empty payload;
-- metadata: string/object author/source, forbidden secret keys, unknown extension keys, OKF provenance coexistence;
+- metadata: string/object author/origin, the OKF actor convention (no undefined prefix), forbidden secret keys, unknown extension keys, OKF provenance coexistence;
 - synchronization: classifier precedence, raw resource bypass of `parse_concept`, complete filesystem/content snapshots, strict/warn/off, add/update/remove/move/type/ownership change, package invalidation, rollback, source storage on/off;
 - search: legacy composite ABI, unified joins/rank formula/versioned cursors, type wrappers, identifier tokenization, language aliases, tags, visibility, lifecycle/trust, unsafe Script exclusion/demotion/labels, facets, disabled/retired bundles, tenants, max limit;
 - CTL1: every grammar production, transforms, whitespace trim, escaped delimiters, one pass, typed equality/contains, each locals/empty else, nesting limit;
@@ -1257,7 +1284,7 @@ Standard Agent Skills frontmatter includes `name`, `description`, optional `lice
 | `allowed-tools` | `metadata.agent_skill.allowed-tools` | Optional declaration; it is not an execution authorization. |
 | complete original frontmatter | `metadata.agent_skill` | Required preservation, including unknown fields and original scalar/array/object values. |
 
-The virtual concept has `type: Skill`, `title: <name>`, a path-derived identity based on the package's `SKILL.md`, explicit visibility from package metadata or bundle policy default `internal`, and body equal to the Markdown after frontmatter. `metadata.agent_skill` MUST contain the complete parsed original frontmatter object, not only recognized keys. The mandatory `skills.skill_md` projection MUST preserve original `SKILL.md` bytes even when optional `concept_source` is disabled.
+The Agent Skills standard's structural rules are validated and reported as diagnostics (warnings by default; errors when the bundle opts into strict): `name` is lowercase letters, digits, and hyphens, at most 64 characters, and equal to the package directory's basename (`skill_name_invalid`, `skill_name_directory_mismatch`); `description` is present and bounded to the standard's limit (`skill_description_invalid`); resources live under `scripts/`, `references/`, and `assets/`. The exact limits are taken from the published standard at <https://agentskills.io/> at implementation time and recorded with the validator version. The virtual concept has `type: Skill`, `title: <name>`, a path-derived identity based on the package's `SKILL.md`, explicit visibility from package metadata or bundle policy default `internal`, and body equal to the Markdown after frontmatter. `metadata.agent_skill` MUST contain the complete parsed original frontmatter object, not only recognized keys. The mandatory `skills.skill_md` projection MUST preserve original `SKILL.md` bytes even when optional `concept_source` is disabled.
 
 ### 15.3 Body contract
 
@@ -1304,7 +1331,11 @@ exit_codes:
   2: invalid arguments or connection failure
 tags: [postgresql, replication, monitoring]
 visibility: internal
-source:
+author: human:alice
+generated:
+  by: human:alice
+  at: 2026-08-30T10:00:00Z
+origin:
   kind: github
   repository: https://github.com/acme/operations.git
   revision: 2dd9c90
@@ -1348,7 +1379,7 @@ The outer four-backtick fence is documentation framing only.
 | `runtime` | recommended | String or mapping describing interpreter, minimum/exact version, platform, and required commands/packages. It is descriptive and never grants execution authority. |
 | `arguments` | recommended | Ordered argument/flag/environment-input declarations with name, type, position/flag, required/default, validation, and secret classification where applicable. Absence means unspecified, not zero arguments. |
 | `exit_codes` | recommended | Mapping from integer exit status to documented meaning; duplicate or non-integer keys are invalid. |
-| `source` | recommended | Same origin mapping as Code Snippet, including immutable revision where available. |
+| `origin` | recommended | Same origin mapping as Code Snippet, including immutable revision where available. |
 | `tags`, `author`, `license` | as policy requires | Same generic OKF and catalogue semantics as Code Snippet. |
 | `visibility` | yes | `public`, `internal`, or `private`; package-derived Scripts inherit/narrow the Skill visibility. |
 
@@ -1387,8 +1418,15 @@ type: Reference
 title: PostgreSQL failover constraints
 description: Decision table and recovery safety constraints.
 format: markdown
-author: team:database-reliability
-source:
+author: human:alice
+owner: team-database-reliability
+generated:
+  by: human:alice
+  at: 2026-08-30T10:00:00Z
+verified:
+  - by: human:sre-lead
+    at: 2026-08-31T14:30:00Z
+origin:
   kind: git
   repository: https://example.invalid/runbooks.git
   revision: 2dd9c90
@@ -1396,15 +1434,13 @@ source:
 tags: [postgresql, failover]
 visibility: internal
 license: Apache-2.0
-provenance:
-  verified_by: human:alice
 ---
 
 # Summary
 ...
 ```
 
-`type`, `title`, `format`, `author`, and `visibility` are required. `description`, `source`, `tags`, `license`, and provenance/OKF `sources` are recommended and retain their normal meanings. `format` is a canonical lower-case format (`markdown`, `text`, `json`, `yaml`, `pdf`) or media type (`image/png`, `application/octet-stream`). Standalone Markdown body after frontmatter is the exact textual Reference payload and is stored both as exact UTF-8 bytes and indexed text; frontmatter is metadata, not part of `exact_bytes`. A standalone wrapper may reference an external immutable asset with a content digest, but ingestion MUST fetch/stage and verify exact bytes before creating an available projection; unresolved remote URLs are metadata only and cannot masquerade as stored content.
+`type`, `title`, `format`, `author`, and `visibility` are required for a *typed* Reference. `description`, `origin`, `tags`, `license`, and the OKF provenance families (`generated`, `verified`, `sources`) are recommended and retain their normal OKF meanings and shapes (`verified` is the OKF list of `{by, at}` events, never a `provenance:` mapping of this specification's own). **Legacy rule:** `type: Reference` already exists in the wild as a free-form type (the sample bundle and any earlier catalog use it for ordinary documents with none of the typed fields). The validator MUST treat a `Reference` document that lacks `format`, `author`, or `visibility` as a generic concept - it is never an error and produces at most an `info` diagnostic - unless the bundle has opted into strict validation, in which case it is a typed validation error like any other. `format` is a canonical lower-case format (`markdown`, `text`, `json`, `yaml`, `pdf`) or media type (`image/png`, `application/octet-stream`). Standalone Markdown body after frontmatter is the exact textual Reference payload and is stored both as exact UTF-8 bytes and indexed text; frontmatter is metadata, not part of `exact_bytes`. A standalone wrapper may reference an external immutable asset with a content digest, but ingestion MUST fetch/stage and verify exact bytes before creating an available projection; unresolved remote URLs are metadata only and cannot masquerade as stored content.
 
 All ordinary source adapters classify this as `OkfDocument` and pass it through generic parsing, then the Reference projector. Content/Git/GitHub inputs MUST be complete snapshots under existing semantics. Binary standalone References use the record-at-a-time/package resource form with metadata supplied alongside exact bytes; they MUST NOT be coerced through Markdown.
 
@@ -1489,7 +1525,7 @@ Each result includes at least identity, title, description, type, tags, rank, he
 
 ### 19.2 Three-stage progressive disclosure
 
-Agent Skills progressive disclosure maps to a stable UI/API contract:
+Agent Skills progressive disclosure maps to a stable UI/API contract, implemented normatively by the `pgokf-mcp` tools (discovery, activation, resource access map one to one onto its tool surface) and inherited by the UI (§10):
 
 1. **Discovery:** return a compact index containing `name`/title, description, type, tags, identity, and compact trust/portability indicators. The response SHOULD target approximately 100 tokens per concept and MUST omit full bodies and artifact bytes.
 2. **Activation:** when a user or agent selects a Skill, fetch its full body, original Agent Skills metadata, provenance, validation diagnostics, and relationship summaries.
@@ -1570,7 +1606,49 @@ PostgreSQL and pgokf never execute Script concepts. Any external client or runne
 
 Scan results and findings use the mandatory §11.1 schema, status/severity vocabulary, signature state, exact-hash binding, expiry, and restricted details. A clean scan is evidence for one immutable byte sequence, not a guarantee or execution authority. §7 excludes unsafe Scripts by default and labels/demotes them only for explicitly authorized all-status searches; restricted findings never appear in headlines.
 
-## 21. References
+## 21. Workspace injection (agent plugin)
+
+An agent workspace is preloaded from the catalog through a manifest, the static counterpart of the MCP server's on-demand access. The injector is a companion, `pgokf-workspace`, in the companions image on the shared runtime; it holds no catalogue semantics and no credentials beyond a reader connection.
+
+### 21.1 Manifest
+
+```yaml
+# okf-workspace.yaml, checked into the workspace
+version: 1
+targets: [claude-code, codex, hermes-agent]     # one tree per target, see 21.2
+catalog:
+  url_env: OKF_PG_URL                           # reader-role connection
+  tenant: acme                                  # optional; applied as pgokf.tenant
+policy:
+  visibility: [public, internal]                # narrows only; the database enforces
+  trust: verified-only                          # verified-only | any
+  portable: true                                # Skills must carry a portable assertion
+  script_safety: safe-only                      # never materialize unsafe/unknown Scripts
+include:
+  - { type: Skill, tags: [postgresql, operations] }
+  - { type: Reference, ids: [runbooks/failover, runbooks/backups] }
+  - { type: Code Snippet, query: "retry backoff", limit: 10 }
+exclude:
+  - { ids: [skills/experimental/*] }
+```
+
+Selectors resolve through the reader API (`catalogue_search`, the type wrappers, `get_skill` / `get_script` / `get_reference`), so tenant scope, visibility, script safety, and non-disclosure are enforced by the database, not by the tool; a concept the session may not see is simply absent. The manifest is read-only over the catalog; publishing a workspace's own skills back is a separate ingest path, not this tool.
+
+### 21.2 Target adapters
+
+Targets are a registry of declarative profiles; adding one is a data change. Each profile states the layout root, the index file (if any), the naming and size limits, whether scripts keep their executable bit, and which of three shapes it takes:
+
+- **Native Agent Skills consumer:** a directory the harness scans; packages are copied byte-identical (`SKILL.md` unchanged, resources under `scripts/`, `references/`, `assets/`). Initial entries: `claude-code` (`.claude/skills/<name>/`), `hermes-agent`, `codex`, `kimi`, `gemini-cli`, `cursor`.
+- **Instruction-file harness:** a tool that reads an `AGENTS.md`-style file and has no skills directory; the adapter renders a compact discovery index (the §19.2 shape) into that file and the full content under a `knowledge/` tree beside it.
+- **Prompt bundle:** for model servers and bare endpoints (`ollama`, a DeepSeek-hosted harness) that consume a system prompt or Modelfile; the adapter emits one bounded bundle plus the file tree, or defers to the adapter of the harness that fronts the model.
+
+A `generic` profile (index plus files) covers any unknown target. Each shipped adapter's layout is verified against the client's current documentation when it is implemented and recorded with the adapter version; the injector MUST refuse to guess a layout for a target it does not know.
+
+### 21.3 Lockfile and reproducibility
+
+`okf-workspace.lock` records, per target and per materialized concept, `(bundle_id, concept_id, file_hash, package_hash, content_sha256, origin.revision)` and the catalog snapshot identity. `pgokf-workspace sync` writes the tree and the lockfile; `--check` compares the lockfile against the catalog and reports drift without writing; `--update` re-syncs and rewrites the lockfile. Repeated runs against an unchanged catalog are byte-identical. Materialized Scripts remain subject to §20.4: the injector never executes them and copies the scan status alongside.
+
+## 22. References
 
 - Open Knowledge Format v0.2, `SPEC.md`: <https://github.com/GoogleCloudPlatform/open-knowledge-format/blob/main/SPEC.md>
 - pgokf parser model: `/datapool/projects/okf-pg-catalog/crates/okf-parser/src/model.rs`

@@ -120,6 +120,33 @@ know that a second BM25 backend is coming.
    layer is §10 of the extension spec plus the MCP server.
 3. **Build order** as proposed in §6: pg_textsearch backend first.
 
+4. **Decisions taken on 2026-09-06 (applied to `OKF-EXTENSION-SPEC.md`):**
+   - Stay as close to OKF v0.2 as possible. `author` uses the OKF actor
+     convention verbatim (`human:<id>`, `process:<id>`, `<producer>/<version>`);
+     no `team:` or `agent:` prefix. Teams are owner-style custom metadata
+     (`owner: team-...`). `generated` is required on typed concepts; `author`
+     is the publisher/owner, not a replacement for it.
+   - The payload-origin mapping is renamed `source` → `origin` everywhere
+     (frontmatter, projection columns, retrieval composites, authoring
+     wrappers) so it cannot be confused with OKF `sources`.
+   - Provenance examples use OKF shapes (`verified:` list of `{by, at}`),
+     not a `provenance:` mapping of the spec's own.
+   - Agent Skills structural rules (name/description limits, name equals
+     directory, resource layout) are validator diagnostics; the complete
+     original frontmatter stays preserved under `metadata.agent_skill`.
+   - The tenancy question in §4b is closed by `require_tenant` (0.1.16).
+   - A workspace injector (`pgokf-workspace`, spec §21) preloads agent
+     workspaces from a manifest through a target-adapter registry (native
+     Agent Skills consumers such as claude-code, codex, hermes-agent, kimi,
+     gemini-cli, cursor; instruction-file harnesses; prompt bundles for
+     ollama-style model servers; a `generic` profile), read-only over the
+     catalog, with a lockfile. Reverse publishing stays a separate ingest
+     path. Every §2 and §3 item of this review is now applied in the spec
+     (`reference_documents` table, built-in `sha256()`, legacy Reference
+     rule, one `sh` rule, SUSET `private_read` mechanism, links coalescing,
+     backend seam, backup registration, adapters as `pgokf-ingest` modes, MCP
+     normative for §19.2, target pgokf 0.2.0 with "0.2.1" as the profile).
+
 ### 4a. pg_textsearch facts established by experiment (v1.4.0 on PostgreSQL 18)
 
 - Ships as one `.deb` per major/arch inside the release archives (PostgreSQL
