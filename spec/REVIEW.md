@@ -122,8 +122,8 @@ know that a second BM25 backend is coming.
 
 4. **Decisions taken on 2026-09-06 (applied to `OKF-EXTENSION-SPEC.md`):**
    - Stay as close to OKF v0.2 as possible. `author` uses the OKF actor
-     convention verbatim (`human:<id>`, `process:<id>`, `<producer>/<version>`);
-     no `team:` or `agent:` prefix. Teams are owner-style custom metadata
+     convention (`human:<id>`, `process:<id>`, `<producer>/<version>`) plus the
+     `agent:<id>` extension prefix the user chose to keep; no `team:` prefix. Teams are owner-style custom metadata
      (`owner: team-...`). `generated` is required on typed concepts; `author`
      is the publisher/owner, not a replacement for it.
    - The payload-origin mapping is renamed `source` → `origin` everywhere
