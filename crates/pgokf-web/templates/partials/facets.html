@@ -1,0 +1,15 @@
+  <datalist id="pgokf-types">{% for f in facets.types %}<option value="{{ f.value }}"></option>{% endfor %}</datalist>
+  {% if !facets.tags.is_empty() %}
+  <div class="facet-block">
+    <h3>{% if form.q.is_empty() %}Tags{% else %}Tags in these results{% endif %}</h3>
+    <div class="chips">
+      {% for f in facets.tags %}<a class="chip{% if f.active %} active{% endif %}" href="{{ f.href }}">{{ f.label }} <span class="count">{{ f.count }}</span></a>{% endfor %}
+    </div>
+  </div>
+  {% endif %}
+  {% if !facets.bundles.is_empty() %}
+  <div class="facet-block">
+    <h3>By bundle</h3>
+    <ul class="facet-list">{% for f in facets.bundles %}<li><a href="{{ f.href }}"{% if f.active %} class="active"{% endif %}>{{ f.label }}</a><span class="count">{{ f.count }}</span></li>{% endfor %}</ul>
+  </div>
+  {% endif %}

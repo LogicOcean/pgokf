@@ -8,6 +8,7 @@ members = [
     "crates/pgokf-ingest",
     "crates/pgokf-mcp",
     "crates/pgokf-pgconn",
+    "crates/pgokf-web",
 ]
 default-members = ["crates/okf-parser", "crates/okf-sync"]
 resolver = "2"

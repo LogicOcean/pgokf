@@ -28,6 +28,7 @@ operations see [operations.md](operations.md); for the knobs see
 | `embed` | `ghcr.io/logicocean/pgokf-companions:<version>` | `pgokf-embed --watch`: every `OKF_EMBED_INTERVAL` seconds, embeds concepts that have no vector yet against your OpenAI-compatible embeddings server. |
 | `backup` (profile `ops`) | server image | One-shot `pgokf-backup`: verified `pg_dump` archive + roles dump + checksums, with retention. Driven from cron. |
 | `ingest` (profile `ingest`) | companions image | `pgokf-ingest --watch`: mountless ingestion of a bucket-hosted bundle. |
+| `ui` (profile `ui`) | companions image | `pgokf-web`: the read-only web UI and JSON API, published on `PGOKF_UI_BIND:PGOKF_UI_PORT` (loopback `8080` by default). See [the web UI](#the-web-ui). |
 | `mcp` (profile `tools`) | companions image | `pgokf-mcp` over stdio for AI-agent clients, as the reader role. |
 
 The network is **external** (created once, never owned by the stack) so
@@ -202,6 +203,28 @@ warning. See [search-guide.md](search-guide.md#enabling-the-bm25-backend)
 for when BM25 wins and when native does, and for the provider comparison
 (an image built with `--build-arg WITH_PG_SEARCH=1 --build-arg WITH_PG_TEXTSEARCH=0`
 carries ParadeDB `pg_search` instead; preload `pg_search` in that case).
+
+---
+
+## The web UI
+
+```sh
+docker compose --profile ui up -d
+```
+
+`pgokf-web` serves the catalog at `http://127.0.0.1:8080` (change
+`PGOKF_UI_BIND` / `PGOKF_UI_PORT` in `.env`): search with facets and paging
+on the configured backend, bundle browsing, concept pages with the rendered
+source, provenance, metadata, a link graph, similar concepts and history, and
+an operations page. It connects as the reader role only, so it can never
+write, and it has no login of its own: keep it on loopback or a private
+network and put a TLS-terminating, authenticating reverse proxy in front of
+it before exposing it. When the stack's embedding endpoint is configured the
+search page also offers semantic and hybrid modes, embedding the query with
+the same model the `embed` daemon uses. `OKF_UI_TENANT` scopes its sessions to
+one tenant (required once `require_tenant` is on). The same data is available
+as JSON under `/api/` (`/api/health`, `/api/search?q=...`, `/api/bundles`,
+`/api/concepts/<bundle_id>/<concept_id>`).
 
 ---
 

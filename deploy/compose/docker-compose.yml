@@ -1,6 +1,8 @@
 # Production compose stack for a pgokf catalog on one Docker host.
 #
 # Services
+#   ui       (profile ui) pgokf-web: the read-only web UI and JSON API on
+#            ${PGOKF_UI_BIND}:${PGOKF_UI_PORT} (loopback:8080 by default)
 #   db       the pgokf server image (PostgreSQL + pgokf + pgvector + pg_cron +
 #            pg_textsearch), preloading the extensions, with the GUC ceilings
 #            set and bundles bind-mounted read-only at /bundles
@@ -172,6 +174,38 @@ services:
       OKF_WATCH_INTERVAL: ${OKF_INGEST_INTERVAL:-60}
     networks:
       - pgokf-net
+
+  # The web UI and JSON API: read-only through the reader role, bound to the
+  # loopback interface by default (put a TLS-terminating reverse proxy in
+  # front of it to expose it). Semantic and hybrid search modes light up when
+  # the embed service's endpoint is configured, since the UI embeds the query
+  # with the same model.
+  ui:
+    image: ${PGOKF_COMPANIONS_IMAGE}
+    profiles: ["ui"]
+    container_name: pgokf-ui
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["pgokf-web"]
+    environment:
+      OKF_PG_URL: "postgresql://${PGOKF_READER_ROLE:-okf_reader}:${PGOKF_READER_PASSWORD}@db:5432/${POSTGRES_DB:-okf}"
+      OKF_WEB_BIND: "0.0.0.0:8080"
+      OKF_WEB_TITLE: ${PGOKF_UI_TITLE:-}
+      OKF_TENANT: ${OKF_UI_TENANT:-}
+      OKF_EMBED_ENDPOINT: ${OKF_EMBED_ENDPOINT:-}
+      OKF_EMBED_MODEL: ${OKF_EMBED_MODEL:-}
+      OKF_EMBED_API_KEY: ${OKF_EMBED_API_KEY:-}
+    ports:
+      - "${PGOKF_UI_BIND:-127.0.0.1}:${PGOKF_UI_PORT:-8080}:8080"
+    networks:
+      - pgokf-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   mcp:
     image: ${PGOKF_COMPANIONS_IMAGE}

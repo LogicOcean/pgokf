@@ -66,16 +66,36 @@ pub async fn set_tenant(client: &Client, tenant: &str) -> Result<()> {
 /// Returns an error if the connection string cannot be parsed, the TLS trust
 /// store cannot be built, or the connection cannot be established.
 pub async fn connect(database_url: &str, force_tls: bool) -> Result<(Client, JoinHandle<()>)> {
-    let config: Config = database_url
-        .parse()
-        .context("parsing the PostgreSQL connection string")?;
+    let config = parse_config(database_url)?;
 
     if should_use_tls(config.get_ssl_mode(), force_tls) {
-        let tls = build_rustls_connector().context("building the PostgreSQL TLS connector")?;
+        let tls = rustls_connector()?;
         spawn_connection(&config, tls).await
     } else {
         spawn_connection(&config, NoTls).await
     }
+}
+
+/// Parse a libpq-style connection string into a `tokio-postgres` [`Config`],
+/// for callers that build their own connection pool on the same settings.
+///
+/// # Errors
+///
+/// Returns an error when the string is not a valid connection string.
+pub fn parse_config(database_url: &str) -> Result<Config> {
+    database_url
+        .parse()
+        .context("parsing the PostgreSQL connection string")
+}
+
+/// The rustls-backed TLS connector [`connect`] uses, for callers that build a
+/// pool and need the same trust configuration (native roots, aws-lc-rs).
+///
+/// # Errors
+///
+/// Returns an error when the native root store cannot be loaded.
+pub fn rustls_connector() -> Result<MakeRustlsConnect> {
+    build_rustls_connector().context("building the PostgreSQL TLS connector")
 }
 
 /// Decide whether to negotiate TLS for this connection.

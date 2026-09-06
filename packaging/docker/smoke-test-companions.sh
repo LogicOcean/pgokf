@@ -15,7 +15,7 @@ DOCKER="${DOCKER:-docker}"
 log() { printf '==> %s\n' "$*" >&2; }
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
-for binary in pgokf-ingest pgokf-embed pgokf-mcp; do
+for binary in pgokf-ingest pgokf-embed pgokf-mcp pgokf-web; do
   ${DOCKER} run --rm "${IMAGE}" "${binary}" --help >/dev/null \
     || fail "${binary} --help did not run"
   log "ok: ${binary} --help"

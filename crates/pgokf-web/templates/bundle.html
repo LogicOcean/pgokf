@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block content %}
+<nav class="crumbs" aria-label="Breadcrumb"><a href="/bundles">Bundles</a> <span>/</span> <span>{{ bundle.name }}</span></nav>
+<section class="hero">
+  <div>
+    <h1>{{ bundle.name }}</h1>
+    <p class="lede"><code>{{ bundle.path }}</code>{% if let Some(v) = bundle.okf_version %} · OKF {{ v }}{% endif %} · {{ bundle.file_count }} files · last synced {{ bundle.last_synced_at.as_deref().unwrap_or("never")|datetime }}</p>
+  </div>
+  <div class="hero-status">
+    {% if bundle.enabled %}<span class="pill ok">enabled</span>{% else %}<span class="pill warn">disabled</span>{% endif %}
+    <a class="btn" href="/search?bundle={{ bundle.id }}">Search this bundle</a>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>Concepts <span class="muted">({% if continued || next_url.is_some() %}{{ shown }} of {{ bundle.file_count }} files{% else %}{{ shown }}{% endif %})</span></h2>
+    <input type="search" class="filter-input js-only" placeholder="Filter by title or path" data-filter="#pgokf-tree" aria-label="Filter concepts"></div>
+  {% if continued %}<p class="muted small">Continued: concepts after the previous page. <a href="/bundles/{{ bundle.id }}">Start over</a>.</p>{% endif %}
+  {% if groups.is_empty() %}<p class="empty">{% if continued %}No more concepts.{% else %}This bundle has no concepts.{% endif %}</p>{% else %}
+  <div id="pgokf-tree" class="tree">
+  {% for g in groups %}
+    <details open>
+      <summary><span class="dir">{{ g.directory }}</span> <span class="muted small">{{ g.concepts.len() }}</span></summary>
+      <ul class="concept-list">
+      {% for c in g.concepts %}
+        <li data-filter-text="{{ c.title.as_deref().unwrap_or("") }} {{ c.path }}">
+          <a href="/concepts/{{ c.bundle_id }}/{{ c.concept_id|urlencode_path }}"><strong>{{ c.title.as_deref().unwrap_or(c.concept_id.as_str()) }}</strong></a>
+          {% if let Some(t) = c.concept_type %}<span class="pill type">{{ t }}</span>{% endif %}
+          {% if let Some(d) = c.description %}<span class="muted"> — {{ d }}</span>{% endif %}
+          {% if !c.tags.is_empty() %}<span class="tags">{% for t in c.tags %}<span class="tag">{{ t }}</span>{% endfor %}</span>{% endif %}
+        </li>
+      {% endfor %}
+      </ul>
+    </details>
+  {% endfor %}
+  </div>
+  {% if let Some(next) = next_url %}<div class="more"><a class="btn" href="{{ next }}">Next {{ page_size }} concepts</a></div>{% endif %}
+  {% endif %}
+</section>
+
+<div class="two-col">
+  <section class="panel">
+    <div class="panel-head"><h2>Sync history</h2></div>
+    {% include "partials/synclog.html" %}
+  </section>
+  <section class="panel">
+    <div class="panel-head"><h2>Activity log <span class="muted">(log.md)</span></h2></div>
+    {% if bundle_log.is_empty() %}<p class="empty">No <code>log.md</code> entries.</p>{% else %}
+    <ul class="log">
+    {% for e in bundle_log %}<li><span class="muted small">{{ e.logged_at.as_deref().unwrap_or("")|datetime }} · {{ e.directory }}</span><br>{{ e.entry }}</li>{% endfor %}
+    </ul>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}

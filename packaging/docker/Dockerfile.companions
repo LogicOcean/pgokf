@@ -23,7 +23,7 @@ ARG RUST_VERSION=1.96.0
 ARG DEBIAN_CODENAME=trixie
 
 # --------------------------------------------------------------------------
-# Stage 1: compile the three binaries with the pinned toolchain
+# Stage 1: compile the four binaries with the pinned toolchain
 # --------------------------------------------------------------------------
 FROM rust:${RUST_VERSION}-slim-${DEBIAN_CODENAME} AS builder
 
@@ -51,10 +51,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     set -eux; \
     cargo build --release --locked \
-        -p pgokf-ingest -p pgokf-embed -p pgokf-mcp; \
+        -p pgokf-ingest -p pgokf-embed -p pgokf-mcp -p pgokf-web; \
     install -d /out; \
     install -m 0755 target/release/pgokf-ingest target/release/pgokf-embed \
-        target/release/pgokf-mcp /out/
+        target/release/pgokf-mcp target/release/pgokf-web /out/
 
 # --------------------------------------------------------------------------
 # Stage 2: minimal runtime

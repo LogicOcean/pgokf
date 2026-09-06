@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero">
+  <div>
+    <h1>Catalog overview</h1>
+    <p class="lede">{{ health.concept_count }} concepts across {{ health.bundle_count }} bundle{{ health.bundle_count|pluralize }}, searched by the <strong>{{ health.search_backend }}</strong> backend{% if let Some(p) = index.bm25_provider %} on {{ p }}{% endif %}.</p>
+  </div>
+  <div class="hero-status">
+    {% if health.ok %}<span class="pill ok">healthy</span>{% else %}<span class="pill bad">degraded</span>{% endif %}
+    {% if health.tenant_required %}<span class="pill warn" title="require_tenant is on: unscoped sessions see nothing">tenant required</span>{% endif %}
+    {% if health.in_recovery %}<span class="pill warn">replica</span>{% endif %}
+  </div>
+</section>
+
+<section class="cards">
+  <article class="card stat">
+    <h2>Concepts</h2>
+    <p class="big">{{ health.concept_count }}</p>
+    <p class="muted">{{ health.bundle_count }} bundle{{ health.bundle_count|pluralize }}</p>
+  </article>
+  <article class="card stat">
+    <h2>Lexical search</h2>
+    <p class="big">{{ health.search_backend }}</p>
+    <p class="muted">{% if index.bm25_available %}BM25 via {{ index.bm25_provider.as_deref().unwrap_or("provider") }}{% if index.bm25_index_exists %}, index built{% else %}, <strong>no index yet</strong>{% endif %}{% else %}native full-text search{% endif %}</p>
+  </article>
+  <article class="card stat">
+    <h2>Embeddings</h2>
+    {% if index.embedding_available %}
+    <p class="big">{{ index.embedding_coverage }}</p>
+    <p class="muted">{{ index.embedded_rows }} of {{ index.total_concepts }} concepts embedded ({{ index.embedding_dim }}-d{% if index.embedding_index_exists %}, HNSW index{% endif %})</p>
+    <progress class="meter" max="100" value="{{ index.embedding_coverage_pct }}" aria-label="Embedding coverage">{{ index.embedding_coverage }}</progress>
+    {% else %}
+    <p class="big muted">off</p>
+    <p class="muted">pgvector is not installed</p>
+    {% endif %}
+  </article>
+  <article class="card stat">
+    <h2>Versions</h2>
+    <p class="big">{{ health.version }}</p>
+    <p class="muted">SQL {{ health.sql_version }}{% if health.version != health.sql_version %} · <strong>mismatch, run ALTER EXTENSION pgokf UPDATE</strong>{% endif %}</p>
+  </article>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Bundles</h2>
+    <a class="btn ghost" href="/bundles">All bundles</a>
+  </div>
+  {% if stats.is_empty() %}
+  <p class="empty">No bundles are registered yet. Register one with <code>SELECT pgokf.register_bundle('/bundles/&lt;name&gt;');</code> as a writer.</p>
+  {% else %}
+  <table class="table">
+    <thead><tr><th>Bundle</th><th>Concepts</th><th>Links</th><th>Files</th><th>Last sync</th><th>State</th></tr></thead>
+    <tbody>
+    {% for s in stats %}
+      <tr>
+        <td><a href="/bundles/{{ s.bundle_id }}"><strong>{{ s.name }}</strong></a> <span class="muted small">#{{ s.bundle_id }} · {{ s.source_type }}</span></td>
+        <td>{{ s.indexed_concepts }}</td>
+        <td>{{ s.resolved_link_count }}<span class="muted">/{{ s.link_count }}</span></td>
+        <td>{{ s.file_count }}</td>
+        <td><time>{{ s.last_synced_at.as_deref().unwrap_or("never")|datetime }}</time>{% if let Some(age) = s.sync_age_seconds %} <span class="muted small">({{ age|duration }} ago)</span>{% endif %}</td>
+        <td>
+          {% if s.retired_at.is_some() %}<span class="pill muted">retired</span>
+          {% else if !s.enabled %}<span class="pill warn">disabled</span>
+          {% else if s.is_stale %}<span class="pill warn">stale</span>
+          {% else %}<span class="pill ok">active</span>{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>Recent syncs</h2><a class="btn ghost" href="/status">Operations</a></div>
+  {% include "partials/synclog.html" %}
+</section>
+{% endblock %}

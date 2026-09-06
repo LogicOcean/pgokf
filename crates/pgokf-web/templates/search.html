@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="search-layout">
+  <aside class="filters">
+    <form id="pgokf-filters" method="get" action="/search"
+          hx-get="/search/results" hx-target="#pgokf-results" hx-trigger="change, submit" hx-include="#pgokf-filters">
+      <input type="hidden" name="q" value="{{ form.q }}">
+      <div class="field">
+        <label for="f-mode">Mode</label>
+        <select id="f-mode" name="mode">
+          <option value="lexical" {% if form.mode.as_str() == "lexical" %}selected{% endif %}>Lexical ({{ backend_label }})</option>
+          <option value="hybrid" {% if form.mode.as_str() == "hybrid" %}selected{% endif %} {% if !semantic_available %}disabled{% endif %}>Hybrid (lexical + semantic)</option>
+          <option value="semantic" {% if form.mode.as_str() == "semantic" %}selected{% endif %} {% if !semantic_available %}disabled{% endif %}>Semantic (embeddings)</option>
+        </select>
+        {% if !semantic_available %}<p class="hint">Semantic modes need an embeddings endpoint (OKF_EMBED_ENDPOINT) and embedded concepts.</p>{% endif %}
+      </div>
+      <div class="field">
+        <label for="f-bundle">Bundle</label>
+        <select id="f-bundle" name="bundle">
+          <option value="">All bundles</option>
+          {% for b in bundles %}<option value="{{ b.id }}" {% if form.bundle.as_str() == b.id.to_string().as_str() %}selected{% endif %}>{{ b.name }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label for="f-type">Type</label>
+        <input id="f-type" name="type" list="pgokf-types" value="{{ form.concept_type }}" placeholder="any type">
+      </div>
+      <div class="field">
+        <label for="f-tags">Tags <span class="muted">(all of, comma-separated)</span></label>
+        <input id="f-tags" name="tags" value="{{ form.tags }}" placeholder="e.g. postgresql, failover">
+      </div>
+      <div class="field">
+        <label for="f-status">Lifecycle status</label>
+        <select id="f-status" name="status">
+          <option value="">any</option>
+          {% for o in facets.statuses %}<option value="{{ o.value }}" {% if o.selected %}selected{% endif %}>{{ o.label }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label for="f-trust">Trust tier</label>
+        <select id="f-trust" name="trust">
+          <option value="">any</option>
+          {% for o in facets.trust_tiers %}<option value="{{ o.value }}" {% if o.selected %}selected{% endif %}>{{ o.label }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label for="f-limit">Page size</label>
+        <select id="f-limit" name="limit">
+          {% for opt in form.limit_options %}<option value="{{ opt.0 }}" {% if opt.1 %}selected{% endif %}>{{ opt.0 }}</option>{% endfor %}
+        </select>
+      </div>
+      <button type="submit" class="btn">Apply</button>
+      <a class="btn ghost" href="/search{% if !form.q.is_empty() %}?q={{ form.q|urlencode }}{% endif %}">Reset filters</a>
+    </form>
+    <div id="pgokf-facets">{% include "partials/facets.html" %}</div>
+  </aside>
+  <section class="results-col">
+    <div id="pgokf-results" aria-live="polite">{% let append = false %}{% let oob = false %}{% include "partials/results.html" %}</div>
+  </section>
+</div>
+{% endblock %}

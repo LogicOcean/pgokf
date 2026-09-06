@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Bundles</h1>
+{% if stats.is_empty() %}
+<p class="empty">No bundles are registered yet.</p>
+{% else %}
+<div class="cards">
+{% for s in stats %}
+  <article class="card bundle">
+    <div class="card-head">
+      <h2><a href="/bundles/{{ s.bundle_id }}">{{ s.name }}</a></h2>
+      {% if s.retired_at.is_some() %}<span class="pill muted">retired</span>{% else if !s.enabled %}<span class="pill warn">disabled</span>{% else if s.is_stale %}<span class="pill warn">stale</span>{% else %}<span class="pill ok">active</span>{% endif %}
+    </div>
+    <dl class="kv">
+      <dt>Concepts</dt><dd>{{ s.indexed_concepts }}</dd>
+      <dt>Links</dt><dd>{{ s.resolved_link_count }} resolved of {{ s.link_count }}</dd>
+      <dt>Files</dt><dd>{{ s.file_count }}</dd>
+      <dt>Source</dt><dd>{{ s.source_type }}</dd>
+      <dt>Last sync</dt><dd>{{ s.last_synced_at.as_deref().unwrap_or("never")|datetime }}</dd>
+    </dl>
+  </article>
+{% endfor %}
+</div>
+{% endif %}
+{% endblock %}

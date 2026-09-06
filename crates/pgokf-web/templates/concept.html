@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% block content %}
+<nav class="crumbs" aria-label="Breadcrumb"><a href="/bundles">Bundles</a> <span>/</span> <a href="/bundles/{{ c.bundle_id }}">{{ c.bundle_name }}</a> <span>/</span> <span>{{ c.path }}</span></nav>
+<section class="hero concept-hero">
+  <div>
+    <h1>{{ c.title.as_deref().unwrap_or(c.concept_id.as_str()) }}</h1>
+    {% if let Some(d) = c.description %}<p class="lede">{{ d }}</p>{% endif %}
+    <div class="meta-row">
+      {% if let Some(t) = c.concept_type %}<a class="pill type" href="/search?type={{ t|urlencode }}" title="Browse concepts of this type">{{ t }}</a>{% endif %}
+      {% if let Some(p) = c.provenance %}{% if let Some(tier) = p.trust_tier %}<a class="pill trust-{{ tier }}" href="/search?trust={{ tier|urlencode }}" title="Derived trust tier; browse this tier">{{ tier }}</a>{% endif %}{% if let Some(st) = p.status %}<a class="pill muted" href="/search?status={{ st|urlencode }}" title="Lifecycle status; browse this status">{{ st }}</a>{% endif %}{% endif %}
+      {% for t in c.tags %}<a class="tag" href="/search?tags={{ t|urlencode }}" title="Browse this tag">{{ t }}</a>{% endfor %}
+    </div>
+  </div>
+  <div class="hero-status">
+    <button type="button" class="btn ghost js-only" data-copy="{{ c.bundle_id }}:{{ c.concept_id }}" title="Copy the (bundle_id, concept_id) identity">Copy identity</button>
+    {% if c.has_source %}<a class="btn" href="/source/{{ c.bundle_id }}/{{ c.concept_id|urlencode_path }}" download>Download source</a>{% endif %}
+  </div>
+</section>
+
+<div class="tabs" data-tabs>
+  <div class="tablist" role="tablist" aria-label="Concept views">
+    <button role="tab" id="tab-body" aria-controls="panel-body" aria-selected="true" data-tab="body">Body</button>
+    <button role="tab" id="tab-provenance" aria-controls="panel-provenance" aria-selected="false" data-tab="provenance">Provenance</button>
+    <button role="tab" id="tab-links" aria-controls="panel-links" aria-selected="false" data-tab="links">Links &amp; graph{% if !neighbors.is_empty() %} <span class="count">{{ neighbors.len() }}</span>{% endif %}</button>
+    <button role="tab" id="tab-metadata" aria-controls="panel-metadata" aria-selected="false" data-tab="metadata">Metadata{% if !metadata.is_empty() %} <span class="count">{{ metadata.len() }}</span>{% endif %}</button>
+    <button role="tab" id="tab-similar" aria-controls="panel-similar" aria-selected="false" data-tab="similar">Similar</button>
+    {% if !history.is_empty() %}<button role="tab" id="tab-history" aria-controls="panel-history" aria-selected="false" data-tab="history">History <span class="count">{{ history.len() }}</span></button>{% endif %}
+  </div>
+
+  <section role="tabpanel" id="panel-body" aria-labelledby="tab-body" data-panel="body" class="panel prose-wrap active">
+    <h2 class="nojs">Body</h2>
+    {% if body_html.trim().is_empty() %}<p class="empty">This concept has no body.</p>{% else %}<article class="prose">{{ body_html|safe }}</article>{% endif %}
+  </section>
+
+  <section role="tabpanel" id="panel-provenance" aria-labelledby="tab-provenance" data-panel="provenance" class="panel">
+    <h2 class="nojs">Provenance</h2>
+    <dl class="kv wide">
+      <dt>Identity</dt><dd><code>({{ c.bundle_id }}, {{ c.concept_id }})</code></dd>
+      <dt>Path</dt><dd><code>{{ c.path }}</code></dd>
+      <dt>File hash</dt><dd><code class="hash">{{ c.file_hash }}</code></dd>
+      <dt>Indexed</dt><dd>{{ c.indexed_at|datetime }}{% if let Some(m) = c.modified_at %} · modified {{ m|datetime }}{% endif %}</dd>
+      <dt>Tenant</dt><dd>{{ c.tenant_id }}</dd>
+      {% if let Some(r) = c.resource %}<dt>Resource</dt><dd>{{ r|linkify|safe }}</dd>{% endif %}
+      {% if let Some(p) = c.provenance %}
+        <dt>Generated</dt><dd>{{ p.generated_by.as_deref().unwrap_or("—") }}{% if let Some(at) = p.generated_at %} at {{ at|datetime }}{% endif %}</dd>
+        <dt>Trust tier</dt><dd>{{ p.trust_tier.as_deref().unwrap_or("—") }}</dd>
+        <dt>Status</dt><dd>{{ p.status.as_deref().unwrap_or("—") }}{% if let Some(s) = p.stale_after %} · stale after {{ s|datetime }}{% endif %}</dd>
+        {% if p.usage_window_from.is_some() || p.usage_window_to.is_some() %}<dt>Usage window</dt><dd>{{ p.usage_window_from.as_deref().unwrap_or("…")|datetime }} → {{ p.usage_window_to.as_deref().unwrap_or("…")|datetime }}</dd>{% endif %}
+      {% else %}
+        <dt>Provenance</dt><dd class="muted">none declared</dd>
+      {% endif %}
+    </dl>
+    <h3>Verification events</h3>
+    {% if c.verifications.is_empty() %}<p class="empty">Not verified.</p>{% else %}
+    <ol class="timeline">{% for v in c.verifications %}<li><strong>{{ v.verified_by }}</strong>{% if let Some(at) = v.verified_at %} <span class="muted">{{ at|datetime }}</span>{% endif %}</li>{% endfor %}</ol>
+    {% endif %}
+    <h3>Sources</h3>
+    {% if c.sources.is_empty() %}<p class="empty">No sources declared.</p>{% else %}
+    <table class="table compact"><thead><tr><th>#</th><th>Id</th><th>Title</th><th>Resource</th><th>Author</th><th>Last modified</th></tr></thead><tbody>
+    {% for s in c.sources %}<tr><td>{{ s.ordinal }}</td><td>{{ s.source_id.as_deref().unwrap_or("") }}</td><td>{{ s.title.as_deref().unwrap_or("") }}</td><td>{% if let Some(r) = s.resource %}{{ r|linkify|safe }}{% endif %}</td><td>{{ s.author.as_deref().unwrap_or("") }}</td><td>{{ s.last_modified.as_deref().unwrap_or("")|datetime }}</td></tr>{% endfor %}
+    </tbody></table>
+    {% endif %}
+  </section>
+
+  <section role="tabpanel" id="panel-links" aria-labelledby="tab-links" data-panel="links" class="panel">
+    <h2 class="nojs">Links &amp; graph</h2>
+    <div class="graph-layout">
+      <div class="graph-wrap">
+        {% if neighbors.is_empty() %}<p class="empty">No resolved links within {{ hops }} hop{{ hops|pluralize }}.</p>{% else %}{{ graph_svg|safe }}{% endif %}
+        <form method="get" action="{{ self_href }}#tab-links" class="inline-form">
+          <label for="hops">Hops</label>
+          <select id="hops" name="hops" data-autosubmit>{% for opt in hops_options %}<option value="{{ opt.0 }}" {% if opt.1 %}selected{% endif %}>{{ opt.0 }}</option>{% endfor %}</select>
+          <button type="submit" class="btn small nojs">Redraw</button>
+        </form>
+      </div>
+      <div>
+        <h3>Outgoing <span class="count">{{ outgoing.len() }}</span></h3>
+        {% if outgoing.is_empty() %}<p class="empty">No outgoing links.</p>{% else %}
+        <ul class="links">{% for l in outgoing %}<li>
+          {% for r in l.relations %}<span class="pill muted">{{ r }}</span> {% endfor %}
+          {% if l.is_resolved() %}{% if let Some(href) = l.href %}<a href="{{ href }}">{{ l.label }}</a>{% endif %}{% if l.is_self %} <span class="muted small">this page</span>{% endif %}
+          {% else if l.is_external() %}<span>{{ l.label }}</span> <span class="muted small">external</span>
+          {% else %}<span>{{ l.label }}</span> <span class="pill warn small" title="the target does not resolve to a concept">unresolved · {{ l.detail.as_deref().unwrap_or("") }}</span>{% endif %}
+          {% if l.count > 1 %}<span class="count" title="{{ l.count }} links to the same target">×{{ l.count }}</span>{% endif %}
+        </li>{% endfor %}</ul>
+        {% endif %}
+        <h3>Incoming <span class="count">{{ incoming.len() }}</span></h3>
+        {% if incoming.is_empty() %}<p class="empty">Nothing links here.</p>{% else %}
+        <ul class="links">{% for l in incoming %}<li>
+          {% for r in l.relations %}<span class="pill muted">{{ r }}</span> {% endfor %}
+          {% if let Some(href) = l.href %}<a href="{{ href }}">{{ l.label }}</a>{% else %}<span>{{ l.label }}</span>{% endif %}{% if l.is_self %} <span class="muted small">this page</span>{% endif %}
+          {% if l.count > 1 %}<span class="count" title="{{ l.count }} links from the same concept">×{{ l.count }}</span>{% endif %}
+        </li>{% endfor %}</ul>
+        {% endif %}
+      </div>
+    </div>
+  </section>
+
+  <section role="tabpanel" id="panel-metadata" aria-labelledby="tab-metadata" data-panel="metadata" class="panel">
+    <h2 class="nojs">Metadata</h2>
+    {% if metadata.is_empty() %}<p class="empty">No custom frontmatter.</p>{% else %}
+    <table class="table compact"><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody>
+    {% for m in metadata %}<tr><td><code>{{ m.key }}</code></td><td><pre class="json">{{ m.value }}</pre></td></tr>{% endfor %}
+    </tbody></table>
+    {% endif %}
+  </section>
+
+  <section role="tabpanel" id="panel-similar" aria-labelledby="tab-similar" data-panel="similar" class="panel">
+    <h2 class="nojs">Similar</h2>
+    {% if similar.is_empty() %}<p class="empty">No similar concepts found.</p>{% else %}{% let hits = similar %}{% include "partials/hits.html" %}{% endif %}
+  </section>
+
+  {% if !history.is_empty() %}
+  <section role="tabpanel" id="panel-history" aria-labelledby="tab-history" data-panel="history" class="panel">
+    <h2 class="nojs">History</h2>
+    <table class="table compact"><thead><tr><th>Version</th><th>Valid from</th><th>Valid to</th><th>Change</th><th>Title</th><th>Hash</th></tr></thead><tbody>
+    {% for v in history %}<tr><td>{{ v.number }}</td><td>{{ v.valid_from|datetime }}</td><td>{{ v.valid_to.as_deref().unwrap_or("current")|datetime }}</td><td><span class="pill muted">{{ v.change_kind }}</span></td><td>{{ v.title.as_deref().unwrap_or("") }}</td><td>{% if let Some(h) = v.file_hash %}<code class="hash">{{ h }}</code>{% else %}<span class="muted">removed</span>{% endif %}</td></tr>{% endfor %}
+    </tbody></table>
+  </section>
+  {% endif %}
+</div>
+{% endblock %}

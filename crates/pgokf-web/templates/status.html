@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Operations</h1>
+<section class="cards">
+  <article class="card"><h2>Health</h2>
+    <dl class="kv">
+      <dt>ok</dt><dd>{% if health.ok %}<span class="pill ok">true</span>{% else %}<span class="pill bad">false</span>{% endif %}</dd>
+      <dt>roles</dt><dd>{{ health.roles_ok }}</dd><dt>config</dt><dd>{{ health.config_ok }}</dd>
+      <dt>backend</dt><dd>{{ health.search_backend }}</dd><dt>bm25 ready</dt><dd>{{ health.bm25_ready }}</dd>
+      <dt>tenant required</dt><dd>{{ health.tenant_required }}</dd><dt>in recovery</dt><dd>{{ health.in_recovery }}</dd>
+      <dt>library</dt><dd>{{ health.version }}</dd><dt>SQL</dt><dd>{{ health.sql_version }}</dd>
+    </dl></article>
+  <article class="card"><h2>Search indexes</h2>
+    <dl class="kv">
+      <dt>bm25 provider</dt><dd>{{ index.bm25_provider.as_deref().unwrap_or("none") }} <span class="muted">(setting: {{ index.bm25_provider_setting }})</span></dd>
+      <dt>bm25 index</dt><dd>{% if index.bm25_index_exists %}built · {{ index.bm25_indexed_rows }}/{{ index.bm25_total_rows }} rows{% else %}absent{% endif %}</dd>
+      <dt>pgvector</dt><dd>{{ index.embedding_available }}</dd>
+      <dt>embedding index</dt><dd>{{ index.embedding_index_exists }}</dd>
+      <dt>embedded</dt><dd>{{ index.embedded_rows }}/{{ index.total_concepts }} ({{ index.embedding_coverage }}, dim {{ index.embedding_dim }})</dd>
+    </dl></article>
+  <article class="card span2"><h2>Policy <span class="muted">(get_config)</span></h2><pre class="json">{{ config_json }}</pre></article>
+</section>
+
+<div class="two-col">
+  <section class="panel"><div class="panel-head"><h2>Stale concepts <span class="count">{{ stale.len() }}</span></h2></div>
+    {% if stale.is_empty() %}<p class="empty">Nothing past its <code>stale_after</code>.</p>{% else %}
+    <ul class="links">{% for s in stale %}<li><a href="/concepts/{{ s.bundle_id }}/{{ s.concept_id|urlencode_path }}">{{ s.title.as_deref().unwrap_or(s.concept_id.as_str()) }}</a> <span class="muted small">{{ s.path }} · stale since {{ s.stale_after.as_deref().unwrap_or("")|datetime }}</span></li>{% endfor %}</ul>{% endif %}
+  </section>
+  <section class="panel"><div class="panel-head"><h2>Duplicate content <span class="count">{{ duplicates.len() }}</span></h2></div>
+    {% if duplicates.is_empty() %}<p class="empty">No identical files across bundles.</p>{% else %}
+    <ul class="links">{% for d in duplicates %}<li><code class="hash">{{ d.file_hash }}</code> <span class="muted small">× {{ d.occurrences }}</span><br>{% for id in d.concept_ids %}<span class="tag">{{ id }}</span>{% endfor %}</li>{% endfor %}</ul>{% endif %}
+  </section>
+</div>
+<section class="panel"><div class="panel-head"><h2>Sync log</h2></div>{% include "partials/synclog.html" %}</section>
+{% endblock %}

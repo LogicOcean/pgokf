@@ -23,7 +23,6 @@
 // occurrence would harm readability more than it helps.
 #![allow(clippy::doc_markdown)]
 
-mod client;
 mod db;
 
 use std::time::Duration;
@@ -31,8 +30,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 
-use crate::client::EmbeddingsClient;
 use crate::db::PendingConcept;
+use pgokf_companion::embeddings::EmbeddingsClient;
 
 /// Command-line / environment configuration for one embedding run.
 ///

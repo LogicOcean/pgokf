@@ -1,0 +1,31 @@
+{% if !append %}
+<div class="results-head">
+  <h1>{{ results.heading }}</h1>
+  <p class="muted">{{ results.summary }}</p>
+</div>
+{% if let Some(note) = results.notice %}<p class="notice">{{ note }}</p>{% endif %}
+{% endif %}
+{% if results.hits.is_empty() %}
+  {% if !append %}
+  {% if form.q.is_empty() && !results.browsing %}
+  <div class="empty-state">
+    <h2>Type a query to search</h2>
+    <p>Lexical search uses web-search syntax: <code>failover -manual</code>, <code>"exact phrase"</code>, <code>backup OR restore</code>. The filters narrow by bundle, type, tags, lifecycle status, and trust tier, and work on their own to browse.</p>
+  </div>
+  {% else %}
+  <div class="empty-state"><h2>No results</h2><p>Nothing matched. Try fewer words, a different mode, or clear a filter.</p></div>
+  {% endif %}
+  {% endif %}
+{% else %}
+{% let hits = results.hits %}
+{% include "partials/hits.html" %}
+{% endif %}
+{% if let Some(next) = results.next_url %}
+<div class="more">
+  <a class="btn" href="{{ next }}" hx-get="{{ results.next_partial_url.as_deref().unwrap_or("") }}" hx-target="#pgokf-results" hx-swap="beforeend" hx-select="ol.hits > li, .more" hx-sync="this:drop" hx-disabled-elt="this">Load more</a>
+</div>
+{% else if append %}
+{# The last page still carries a (button-less) .more so the client can retire the button that fetched it. #}
+<div class="more"></div>
+{% endif %}
+{% if oob && !append %}<div hx-swap-oob="true" id="pgokf-facets">{% include "partials/facets.html" %}</div>{% endif %}

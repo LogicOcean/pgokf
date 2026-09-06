@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! OpenAI-compatible embeddings HTTP client.
+//! OpenAI-compatible embeddings HTTP client, shared by the companions that
+//! embed text: `pgokf-embed` (concept bodies, in bulk) and `pgokf-web` (a
+//! search query, for semantic and hybrid search). Enabled by the `embeddings`
+//! feature so companions that never embed do not link an HTTP client.
 //!
-//! Speaks the `POST {endpoint}/v1/embeddings` protocol shared by OpenAI, a
+//! Speaks the `POST {endpoint}/v1/embeddings` protocol shared by `OpenAI`, a
 //! local `text-embeddings-inference` / `llama.cpp` server, and any other
 //! OpenAI-compatible service: a request body of `{"model": ..., "input":
 //! [...]}` and a response body of `{"data": [{"embedding": [...], "index":
@@ -16,7 +19,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Holds the resolved request URL, the model name, and an optional bearer
 /// token. The token lives only in this process's memory - it is never written
-/// to PostgreSQL or logged.
+/// to `PostgreSQL` or logged.
 pub struct EmbeddingsClient {
     http: Client,
     url: String,

@@ -21,6 +21,9 @@
 //! The loop is generic over the pass and the shutdown future, which is what
 //! makes it unit-testable with paused time and a hand-triggered shutdown.
 
+#[cfg(feature = "embeddings")]
+pub mod embeddings;
+
 pub mod cli {
     //! Command-line conventions shared by the companions.
 

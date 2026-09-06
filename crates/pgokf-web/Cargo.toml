@@ -1,0 +1,42 @@
+[package]
+name = "pgokf-web"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Web UI and JSON API companion for the pgokf catalog: search, browse, inspect, and monitor through the reader role."
+homepage.workspace = true
+documentation.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories = ["database", "web-programming::http-server"]
+
+[[bin]]
+name = "pgokf-web"
+path = "src/main.rs"
+
+[dependencies]
+ammonia = "4.0"
+anyhow = "1.0"
+askama = { version = "0.13", features = ["urlencode"] }
+axum = { version = "0.8", default-features = false, features = [
+    "http1",
+    "json",
+    "query",
+    "tokio",
+] }
+clap = { version = "4.5", features = ["derive", "env"] }
+deadpool-postgres = "0.14"
+okf-parser = { version = "=0.1.16", path = "../okf-parser" }
+pgokf-companion = { version = "=0.1.16", path = "../pgokf-companion", features = ["embeddings"] }
+pgokf-pgconn = { version = "=0.1.16", path = "../pgokf-pgconn" }
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "net", "signal", "time"] }
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
+tower = { version = "0.5", features = ["limit"] }
+
+[lints]
+workspace = true

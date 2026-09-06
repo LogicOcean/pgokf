@@ -1,0 +1,18 @@
+{% if sync_log.is_empty() %}
+<p class="empty">No sync has run yet.</p>
+{% else %}
+<table class="table compact">
+  <thead><tr><th>When</th><th>Bundle</th><th>Operation</th><th>Actor</th><th class="num">added</th><th class="num">updated</th><th class="num">removed</th><th class="num">unchanged</th></tr></thead>
+  <tbody>
+  {% for e in sync_log %}
+    <tr>
+      <td><time>{{ e.synced_at|datetime }}</time></td>
+      <td>{% if let Some(id) = e.bundle_id %}{% if e.op.as_str() == "unregister" %}<span class="muted">{{ e.bundle_path.as_deref().unwrap_or("") }}</span>{% else %}<a href="/bundles/{{ id }}">{{ e.bundle_path.as_deref().unwrap_or("") }}</a>{% endif %}{% else %}<span class="muted">{{ e.bundle_path.as_deref().unwrap_or("(unregistered)") }}</span>{% endif %}</td>
+      <td><span class="pill muted">{{ e.op }}</span></td>
+      <td class="muted">{{ e.actor }}</td>
+      <td class="num">{{ e.added|num }}</td><td class="num">{{ e.updated|num }}</td><td class="num">{{ e.removed|num }}</td><td class="num muted">{{ e.unchanged|num }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}

@@ -10,7 +10,27 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **`pgokf-web`, a web UI and JSON API companion.** Search (lexical on the
+  configured backend, plus semantic and hybrid when an embeddings endpoint is
+  configured) with facets and keyset paging, bundle browsing, concept pages
+  with rendered Markdown, provenance, metadata, links with a link graph,
+  similar concepts and history, and an operations page over `health()`,
+  `search_index_status()`, `get_config()`, stale and duplicate concepts, and
+  the sync log. Filters without query text browse the matching concepts, so
+  tag, type, status, and bundle links list directly. Read-only through
+  `pgokf_reader` (page views read the projection tables; only the source
+  download goes through the audited `get_concept_source()`); catalog content
+  is sanitized before rendering and every response carries a
+  Content-Security-Policy; statement, request, and pool-wait timeouts bound
+  every request. Ships in the companions image and as the compose stack's
+  `ui` profile (`PGOKF_UI_BIND`, `PGOKF_UI_PORT`, `PGOKF_UI_TITLE`,
+  `OKF_UI_TENANT`).
+- The OpenAI-compatible embeddings client moved from `pgokf-embed` into
+  `pgokf-companion` (feature `embeddings`), shared with `pgokf-web`;
+  `pgokf-pgconn` exposes `parse_config` and `rustls_connector` for pool
+  builders.
 
 ## [0.1.16] - 2026-09-05
 

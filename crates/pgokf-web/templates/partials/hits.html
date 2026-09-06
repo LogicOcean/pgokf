@@ -1,0 +1,13 @@
+<ol class="hits">
+  {% for h in hits %}
+  <li class="hit">
+    <div class="hit-head">
+      <a class="hit-title" href="{{ h.href }}">{{ h.title.as_deref().unwrap_or(h.concept_id.as_str()) }}</a>
+      {% if let Some(t) = h.concept_type %}<span class="pill type">{{ t }}</span>{% endif %}
+      {% if let Some(r) = h.rank_display %}<span class="rank" title="rank">{{ r }}</span>{% endif %}
+    </div>
+    <div class="hit-meta"><a href="/bundles/{{ h.bundle_id }}">{{ h.bundle_name }}</a> <span class="muted">/ {{ h.path }}</span>{% if !h.tags.is_empty() %} <span class="tags">{% for t in h.tags %}<span class="tag">{{ t }}</span>{% endfor %}</span>{% endif %}</div>
+    {% if let Some(s) = h.headline_html %}<p class="hit-snippet">{{ s|safe }}</p>{% endif %}
+  </li>
+  {% endfor %}
+</ol>
