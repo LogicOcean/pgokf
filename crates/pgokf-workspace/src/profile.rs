@@ -42,6 +42,46 @@ pub enum Target {
     Generic,
 }
 
+/// How a harness's MCP configuration refers to the catalog connection
+/// without the secret being written into the tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvRef {
+    /// `${OKF_PG_URL}`: expanded by the harness from its environment.
+    Dollar,
+    /// `${env:OKF_PG_URL}`: Cursor's interpolation form.
+    DollarEnv,
+    /// The harness forwards named variables from its own environment
+    /// (Codex `env_vars`), so no value appears in the file at all.
+    Forward,
+    /// The harness expands nothing: a placeholder the user replaces in a
+    /// file that lives outside the repository (Hermes).
+    Placeholder,
+}
+
+/// The file format of a harness's MCP configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpFormat {
+    /// `{"mcpServers": {...}}`, the shape most clients share.
+    McpServersJson,
+    /// Codex `config.toml` with `[mcp_servers.<name>]` tables.
+    CodexToml,
+    /// A YAML fragment to merge under Hermes's `mcp_servers:` key.
+    HermesYaml,
+}
+
+/// Where a harness reads MCP servers from, as its documentation states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct McpSpec {
+    /// Path of the file, relative to the workspace root.
+    pub path: &'static str,
+    pub format: McpFormat,
+    pub env_ref: EnvRef,
+    /// Whether the harness picks the file up from the workspace on its
+    /// own; otherwise the guide tells the user where to merge it.
+    pub auto_loaded: bool,
+    pub source: &'static str,
+}
+
 /// What a target expects, as documented by its own client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Profile {
@@ -59,6 +99,8 @@ pub struct Profile {
     pub verified: &'static str,
     /// One-line guidance shown next to the target.
     pub notes: &'static str,
+    /// The harness's MCP configuration, when it has one.
+    pub mcp: Option<McpSpec>,
 }
 
 impl Profile {
@@ -120,6 +162,13 @@ const PROFILES: &[Profile] = &[
         source: "https://code.claude.com/docs/en/skills (project skills: .claude/skills/<name>/SKILL.md)",
         verified: "2026-09-06",
         notes: "Unzip at the repository root; Claude Code loads the skill from .claude/skills/.",
+        mcp: Some(McpSpec {
+            path: ".mcp.json",
+            format: McpFormat::McpServersJson,
+            env_ref: EnvRef::Dollar,
+            auto_loaded: true,
+            source: "https://code.claude.com/docs/en/mcp (project scope .mcp.json; ${VAR} expansion)",
+        }),
     },
     Profile {
         target: Target::Codex,
@@ -130,6 +179,13 @@ const PROFILES: &[Profile] = &[
         source: "https://learn.chatgpt.com/docs/build-skills (repository scope: .agents/skills)",
         verified: "2026-09-06",
         notes: "Unzip at the repository root; Codex reads .agents/skills/ in the repository and its parents.",
+        mcp: Some(McpSpec {
+            path: ".codex/config.toml",
+            format: McpFormat::CodexToml,
+            env_ref: EnvRef::Forward,
+            auto_loaded: true,
+            source: "https://learn.chatgpt.com/docs/extend/mcp?surface=cli (project .codex/config.toml, [mcp_servers.<name>], env_vars)",
+        }),
     },
     Profile {
         target: Target::HermesAgent,
@@ -140,6 +196,13 @@ const PROFILES: &[Profile] = &[
         source: "https://hermes-agent.nousresearch.com/docs/user-guide/features/skills (project: .hermes/skills, also .agents/skills)",
         verified: "2026-09-06",
         notes: "Unzip at the project root; move the package to ~/.hermes/skills/ for a user-wide skill.",
+        mcp: Some(McpSpec {
+            path: "okf-hermes-mcp.yaml",
+            format: McpFormat::HermesYaml,
+            env_ref: EnvRef::Placeholder,
+            auto_loaded: false,
+            source: "https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp (mcp_servers in ~/.hermes/config.yaml only)",
+        }),
     },
     Profile {
         target: Target::Kimi,
@@ -150,6 +213,13 @@ const PROFILES: &[Profile] = &[
         source: "https://moonshotai.github.io/kimi-cli/en/customization/skills.html (project: .kimi/skills, also .agents/skills)",
         verified: "2026-09-06",
         notes: "Unzip at the project root; Kimi also reads .claude/skills/ and .agents/skills/.",
+        mcp: Some(McpSpec {
+            path: ".kimi/mcp.json",
+            format: McpFormat::McpServersJson,
+            env_ref: EnvRef::Dollar,
+            auto_loaded: true,
+            source: "https://moonshotai.github.io/kimi-cli/en/customization/mcp.html (project .kimi/mcp.json)",
+        }),
     },
     Profile {
         target: Target::GeminiCli,
@@ -160,6 +230,13 @@ const PROFILES: &[Profile] = &[
         source: "https://geminicli.com/docs/cli/skills/ (workspace: .gemini/skills or .agents/skills)",
         verified: "2026-09-06",
         notes: "Unzip at the workspace root; Gemini CLI also reads .agents/skills/.",
+        mcp: Some(McpSpec {
+            path: ".gemini/settings.json",
+            format: McpFormat::McpServersJson,
+            env_ref: EnvRef::Dollar,
+            auto_loaded: true,
+            source: "https://geminicli.com/docs/tools/mcp-server/ (.gemini/settings.json mcpServers; $VAR expansion)",
+        }),
     },
     Profile {
         target: Target::Cursor,
@@ -170,16 +247,30 @@ const PROFILES: &[Profile] = &[
         source: "https://cursor.com/docs/context/skills (project: .cursor/skills or .agents/skills)",
         verified: "2026-09-06",
         notes: "Unzip at the project root; Cursor also reads .agents/skills/ and, for compatibility, .claude/skills/.",
+        mcp: Some(McpSpec {
+            path: ".cursor/mcp.json",
+            format: McpFormat::McpServersJson,
+            env_ref: EnvRef::DollarEnv,
+            auto_loaded: true,
+            source: "https://cursor.com/docs/context/mcp (.cursor/mcp.json; ${env:NAME} interpolation)",
+        }),
     },
     Profile {
         target: Target::AgentsDir,
         id: "agents",
-        label: "Any Agent Skills harness (.agents/skills)",
+        label: "Generic .agents/ directory (any Agent Skills harness)",
         shape: Shape::Skills,
         root: ".agents/skills",
         source: "The cross-tool location documented by Codex, Cursor, Gemini CLI, Hermes Agent, and Kimi",
         verified: "2026-09-06",
-        notes: "One package several harnesses read; pick this when a repository serves more than one agent.",
+        notes: "The cross-tool .agents/skills/ location read by Codex, Cursor, Gemini CLI, Hermes Agent, and Kimi; pick it when a repository serves more than one agent.",
+        mcp: Some(McpSpec {
+            path: "okf-mcp.json",
+            format: McpFormat::McpServersJson,
+            env_ref: EnvRef::Dollar,
+            auto_loaded: false,
+            source: "The mcpServers shape shared by Claude Code, Cursor, Gemini CLI, and Kimi; merge it into the harness's own file",
+        }),
     },
     Profile {
         target: Target::AgentsMd,
@@ -190,6 +281,13 @@ const PROFILES: &[Profile] = &[
         source: "https://agents.md (the AGENTS.md convention) with the full content under knowledge/",
         verified: "2026-09-06",
         notes: "For a harness that reads an instruction file and has no skills directory; merge the index into an existing AGENTS.md by hand.",
+        mcp: Some(McpSpec {
+            path: "okf-mcp.json",
+            format: McpFormat::McpServersJson,
+            env_ref: EnvRef::Dollar,
+            auto_loaded: false,
+            source: "The mcpServers shape shared by most clients; merge it into the harness's own file",
+        }),
     },
     Profile {
         target: Target::Ollama,
@@ -200,6 +298,7 @@ const PROFILES: &[Profile] = &[
         source: "https://docs.ollama.com/modelfile (Modelfile FROM/SYSTEM)",
         verified: "2026-09-06",
         notes: "A Modelfile and system prompt with the most useful content inline, plus the full files; `ollama create <name> -f okf-prompt/Modelfile`.",
+        mcp: None,
     },
     Profile {
         target: Target::Generic,
@@ -210,6 +309,13 @@ const PROFILES: &[Profile] = &[
         source: "This crate's own layout: INDEX.md and one file per concept",
         verified: "2026-09-06",
         notes: "For anything else; point the tool at okf-knowledge/INDEX.md.",
+        mcp: Some(McpSpec {
+            path: "okf-mcp.json",
+            format: McpFormat::McpServersJson,
+            env_ref: EnvRef::Dollar,
+            auto_loaded: false,
+            source: "The mcpServers shape shared by most clients; merge it into the harness's own file",
+        }),
     },
 ];
 
@@ -234,6 +340,13 @@ mod tests {
             assert!(p.verified.starts_with("2026-"), "{} is unverified", p.id);
             if p.shape == Shape::Skills {
                 assert!(p.root.ends_with("skills"), "{} root {}", p.id, p.root);
+            }
+            if let Some(mcp) = p.mcp {
+                assert!(
+                    !mcp.source.is_empty() && !mcp.path.is_empty(),
+                    "{} mcp",
+                    p.id
+                );
             }
         }
     }

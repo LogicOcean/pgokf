@@ -11,7 +11,7 @@ use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use crate::profile::{Profile, Shape, Target};
+use crate::profile::{EnvRef, McpFormat, McpSpec, Profile, Shape, Target};
 use crate::selection::{ConceptRecord, Selection, Snapshot, yaml_string};
 
 /// Agent Skills limits for `SKILL.md` frontmatter.
@@ -22,6 +22,52 @@ const PROMPT_BUDGET: usize = 24_000;
 /// The manifest and lockfile names of spec §21.
 pub const MANIFEST_FILE: &str = "okf-workspace.yaml";
 pub const LOCK_FILE: &str = "okf-workspace.lock";
+
+/// The optional parts of a plugin beyond the knowledge itself.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum Component {
+    /// The harness's MCP server configuration for `pgokf-mcp`, so the
+    /// agent can query the catalog live (targets that have one).
+    Mcp,
+    /// A guide to the catalog: identities, trust tiers, the MCP tools and
+    /// the JSON API, written for the agent.
+    Guide,
+    /// A small CLI helper (`okf.sh`) over the JSON API, for harnesses
+    /// without MCP.
+    Tools,
+}
+
+impl Component {
+    /// Parse `mcp`, `guide`, or `tools`.
+    #[must_use]
+    pub fn parse(id: &str) -> Option<Self> {
+        match id.trim() {
+            "mcp" => Some(Self::Mcp),
+            "guide" | "docs" | "documentation" => Some(Self::Guide),
+            "tools" | "scripts" => Some(Self::Tools),
+            _ => None,
+        }
+    }
+
+    /// The identifier used in manifests and arguments.
+    #[must_use]
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Mcp => "mcp",
+            Self::Guide => "guide",
+            Self::Tools => "tools",
+        }
+    }
+
+    /// Every component, in the order the UI lists them.
+    #[must_use]
+    pub const fn all() -> [Self; 3] {
+        [Self::Mcp, Self::Guide, Self::Tools]
+    }
+}
 
 /// What to build.
 #[derive(Debug, Clone)]
@@ -35,7 +81,20 @@ pub struct BuildOptions {
     pub catalog_name: String,
     /// `FROM` line of the Ollama Modelfile.
     pub base_model: Option<String>,
+    /// The extra parts to include.
+    pub components: Vec<Component>,
+    /// How the harness starts the MCP server (default `pgokf-mcp`).
+    pub mcp_command: Option<String>,
+    /// The tenant the agent's session should use, when the catalog is
+    /// tenant-scoped (a name, never a secret).
+    pub tenant: Option<String>,
+    /// Base URL of the pgokf web UI and JSON API, for the guide and the
+    /// helper script.
+    pub web_url: Option<String>,
 }
+
+/// The MCP server name written into harness configurations.
+pub const MCP_SERVER_NAME: &str = "pgokf";
 
 /// One file of the tree, path relative to the workspace root.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -44,6 +103,8 @@ pub struct PluginFile {
     #[serde(skip)]
     pub bytes: Vec<u8>,
     pub sha256: String,
+    /// Written with the executable bit (the CLI helper).
+    pub executable: bool,
 }
 
 /// A built workspace tree.
@@ -155,6 +216,7 @@ pub fn assemble(
     let profile = Profile::of(options.target);
     let name = package_name(&options.name)?;
     let base_model = validated_base_model(options.base_model.as_deref())?;
+    validated_web_url(options.web_url.as_deref())?;
     let title = options
         .title
         .clone()
@@ -197,9 +259,10 @@ pub fn assemble(
         ));
     }
     files.extend(content);
+    files.extend(extras(profile, &layout, options)?);
     files.push(file(
         MANIFEST_FILE.to_owned(),
-        manifest_yaml(&name, options.target, selection).into_bytes(),
+        manifest_yaml(&name, options.target, selection, &options.components).into_bytes(),
     ));
     files.push(file(
         LOCK_FILE.to_owned(),
@@ -377,6 +440,239 @@ fn link_destination(path: &str) -> String {
     }
 }
 
+/// The optional components: MCP configuration, the catalog guide, and the
+/// CLI helper, placed where each shape keeps its resources.
+fn extras(profile: &Profile, layout: &Layout, options: &BuildOptions) -> Result<Vec<PluginFile>> {
+    let mut out = Vec::new();
+    let mut components = options.components.clone();
+    components.sort_unstable();
+    components.dedup();
+    let (docs_dir, tools_dir) = match profile.shape {
+        Shape::Skills => (
+            layout.content_dir.clone(),
+            format!("{}/scripts", layout.root),
+        ),
+        Shape::InstructionFile => ("knowledge".to_owned(), "tools".to_owned()),
+        Shape::PromptBundle | Shape::Generic => (
+            format!("{}/knowledge", layout.root),
+            format!("{}/tools", layout.root),
+        ),
+    };
+    for component in components {
+        match component {
+            Component::Mcp => {
+                if let Some(spec) = profile.mcp {
+                    out.push(file(
+                        spec.path.to_owned(),
+                        mcp_config(&spec, options)?.into_bytes(),
+                    ));
+                }
+            }
+            Component::Guide => {
+                out.push(file(
+                    format!("{docs_dir}/USING-THE-CATALOG.md"),
+                    guide_md(profile, options).into_bytes(),
+                ));
+            }
+            Component::Tools => {
+                let mut f = file(
+                    format!("{tools_dir}/okf.sh"),
+                    tools_script(options).into_bytes(),
+                );
+                f.executable = true;
+                out.push(f);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The MCP server entry in the harness's own format. The connection string
+/// never enters the file: the harness expands it from the environment,
+/// forwards it, or the user fills a placeholder outside the repository.
+fn mcp_config(spec: &McpSpec, options: &BuildOptions) -> Result<String> {
+    let command = validated_command(options.mcp_command.as_deref())?;
+    let url_ref = match spec.env_ref {
+        EnvRef::Dollar => "${OKF_PG_URL}".to_owned(),
+        EnvRef::DollarEnv => "${env:OKF_PG_URL}".to_owned(),
+        EnvRef::Forward | EnvRef::Placeholder => {
+            "postgresql://okf_reader:PASSWORD@HOST:5432/okf".to_owned()
+        }
+    };
+    let tenant = options.tenant.as_deref().filter(|t| !t.trim().is_empty());
+    Ok(match spec.format {
+        McpFormat::McpServersJson => {
+            let mut env = serde_json::Map::new();
+            env.insert("OKF_PG_URL".to_owned(), json!(url_ref));
+            if let Some(t) = tenant {
+                env.insert("OKF_TENANT".to_owned(), json!(t));
+            }
+            let doc = json!({
+                "mcpServers": {
+                    MCP_SERVER_NAME: { "command": command, "args": [], "env": env }
+                }
+            });
+            serde_json::to_string_pretty(&doc).unwrap_or_default() + "\n"
+        }
+        McpFormat::CodexToml => {
+            let mut toml = format!(
+                "# pgokf catalog MCP server (generated by pgokf-workspace).\n\
+                 # OKF_PG_URL is forwarded from your environment, never written here.\n\
+                 [mcp_servers.{MCP_SERVER_NAME}]\ncommand = {}\nargs = []\nenv_vars = [\"OKF_PG_URL\"]\n",
+                yaml_string(&command)
+            );
+            if let Some(t) = tenant {
+                let _ = writeln!(toml, "env = {{ OKF_TENANT = {} }}", yaml_string(t));
+            }
+            toml
+        }
+        McpFormat::HermesYaml => {
+            let mut yaml = format!(
+                "# Merge under the `mcp_servers:` key of ~/.hermes/config.yaml (Hermes reads no\n\
+                 # project-level MCP file). Replace the placeholder connection string there;\n\
+                 # Hermes passes only the env values you list to the server.\n\
+                 mcp_servers:\n  {MCP_SERVER_NAME}:\n    command: {}\n    args: []\n    env:\n      OKF_PG_URL: {}\n",
+                yaml_string(&command),
+                yaml_string(&url_ref)
+            );
+            if let Some(t) = tenant {
+                let _ = writeln!(yaml, "      OKF_TENANT: {}", yaml_string(t));
+            }
+            yaml
+        }
+    })
+}
+
+/// A command name or path: no whitespace or shell metacharacters, so it
+/// can only name a program.
+fn validated_command(raw: Option<&str>) -> Result<String> {
+    let command = raw
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .unwrap_or("pgokf-mcp");
+    if command
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-' | '\\' | ':'))
+    {
+        Ok(command.to_owned())
+    } else {
+        Err(anyhow!(
+            "MCP command {command:?} is not a program name or path"
+        ))
+    }
+}
+
+/// A base URL for the JSON API: http(s), no whitespace, no trailing slash.
+fn validated_web_url(raw: Option<&str>) -> Result<Option<String>> {
+    let Some(url) = raw.map(str::trim).filter(|u| !u.is_empty()) else {
+        return Ok(None);
+    };
+    if (url.starts_with("http://") || url.starts_with("https://"))
+        && url
+            .chars()
+            .all(|c| c.is_ascii_graphic() && c != '\'' && c != '"' && c != '`')
+    {
+        Ok(Some(url.trim_end_matches('/').to_owned()))
+    } else {
+        Err(anyhow!("web URL {url:?} is not an http(s) URL"))
+    }
+}
+
+/// The guide the agent reads to use the catalog beyond the packaged files.
+fn guide_md(profile: &Profile, options: &BuildOptions) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Using the catalog ({})", options.catalog_name);
+    out.push_str(
+        "\nThis package holds a selection of concepts from a pgokf catalog: a PostgreSQL-backed \
+         catalog of Open Knowledge Format (OKF) documents. Each concept has a stable identity \
+         `(bundle_id, concept_id)`, a type, tags, a lifecycle status, and a derived trust tier \
+         (`human-reviewed` > `machine-confirmed` > `unverified`). Prefer higher tiers when \
+         documents disagree, and cite the identity when you rely on one.\n",
+    );
+    if options.components.contains(&Component::Mcp) {
+        out.push_str("\n## Live access through MCP\n\n");
+        match profile.mcp {
+            Some(spec) if spec.auto_loaded => {
+                let _ = writeln!(
+                    out,
+                    "`{}` configures the `{MCP_SERVER_NAME}` MCP server (the `pgokf-mcp` companion); the harness loads it from the workspace. Set `OKF_PG_URL` to a reader connection string in the environment that starts the harness.",
+                    spec.path
+                );
+            }
+            Some(spec) => {
+                let _ = writeln!(
+                    out,
+                    "`{}` holds the `{MCP_SERVER_NAME}` MCP server entry; merge it into the harness's own configuration and set `OKF_PG_URL` (a reader connection string) where that file expects it.",
+                    spec.path
+                );
+            }
+            None => {
+                out.push_str("This target has no MCP configuration; use the JSON API below.\n");
+            }
+        }
+        out.push_str(
+            "\nTools: `concept_search` (full-text query with `type`, `tags`, `status`, `trust_tier` filters), \
+             `find_similar` (more like a concept), `concept_neighbors` (walk resolved links), \
+             `get_concept` (a concept's fields and text), `list_plugin_targets` and \
+             `build_workspace_plugin` (rebuild a package like this one). Example:\n\n\
+             ```json\n{\"name\": \"concept_search\", \"arguments\": {\"query\": \"failover\", \"limit\": 5}}\n```\n",
+        );
+    }
+    out.push_str("\n## The JSON API\n\n");
+    let base = options
+        .web_url
+        .as_deref()
+        .map_or("http://<pgokf-web host>:8080", |u| u.trim_end_matches('/'));
+    let _ = writeln!(
+        out,
+        "The pgokf web UI serves the same catalog as JSON under `{base}/api/`:\n\n\
+         - `GET {base}/api/search?q=<query>&limit=20` (add `type=`, `tags=`, `status=`, `trust=`, `bundle=`; with filters and no `q` it browses)\n\
+         - `GET {base}/api/concepts/<bundle_id>/<concept_id>`\n\
+         - `GET {base}/api/graph/<bundle_id>/<concept_id>?hops=2` and `GET {base}/api/graph?bundle=<id>&limit=300`\n\
+         - `GET {base}/api/bundles`, `GET {base}/api/health`"
+    );
+    if options.components.contains(&Component::Tools) {
+        out.push_str(
+            "\n`okf.sh` in this package wraps those endpoints (`okf.sh search <query>`, `okf.sh get <bundle_id> <concept_id>`, `okf.sh graph <bundle_id> <concept_id> [hops]`, `okf.sh bundles`); it needs `curl` and reads `OKF_WEB_URL`.\n",
+        );
+    }
+    out.push_str(
+        "\n## Rebuilding this package\n\n`okf-workspace.yaml` at the workspace root records the selection and `okf-workspace.lock` the catalog snapshot with a hash per file; rebuild from the web UI's Plugins page or with the `build_workspace_plugin` MCP tool.\n",
+    );
+    out
+}
+
+/// A POSIX shell helper over the JSON API.
+fn tools_script(options: &BuildOptions) -> String {
+    let default_url = options
+        .web_url
+        .as_deref()
+        .map_or("http://localhost:8080", |u| u.trim_end_matches('/'));
+    OKF_SH.replace("__DEFAULT_URL__", default_url)
+}
+
+/// The helper script's text; `__DEFAULT_URL__` is the web UI base URL.
+const OKF_SH: &str = r#"#!/bin/sh
+# okf.sh - query the pgokf catalog through its JSON API (generated by pgokf-workspace).
+# Usage: okf.sh search <query> [limit] | get <bundle_id> <concept_id> | graph <bundle_id> <concept_id> [hops] | bundles | health
+# Needs curl; set OKF_WEB_URL to the pgokf-web base URL (default: __DEFAULT_URL__).
+set -eu
+BASE="${OKF_WEB_URL:-__DEFAULT_URL__}"
+enc() { printf '%s' "$1" | od -An -tx1 -v | tr -d ' \n' | sed 's/\([0-9a-f][0-9a-f]\)/%\1/g'; }
+case "${1:-}" in
+  search) [ $# -ge 2 ] || { echo 'usage: okf.sh search <query> [limit]' >&2; exit 2; }
+    curl -fsS "$BASE/api/search?q=$(enc "$2")&limit=${3:-20}" ;;
+  get) [ $# -ge 3 ] || { echo 'usage: okf.sh get <bundle_id> <concept_id>' >&2; exit 2; }
+    curl -fsS "$BASE/api/concepts/$2/$3" ;;
+  graph) [ $# -ge 3 ] || { echo 'usage: okf.sh graph <bundle_id> <concept_id> [hops]' >&2; exit 2; }
+    curl -fsS "$BASE/api/graph/$2/$3?hops=${4:-2}" ;;
+  bundles) curl -fsS "$BASE/api/bundles" ;;
+  health) curl -fsS "$BASE/api/health" ;;
+  *) echo 'usage: okf.sh search|get|graph|bundles|health ...' >&2; exit 2 ;;
+esac
+echo
+"#;
+
 fn lockfile(
     name: &str,
     target: Target,
@@ -405,6 +701,7 @@ fn file(path: String, bytes: Vec<u8>) -> PluginFile {
         path,
         bytes,
         sha256,
+        executable: false,
     }
 }
 
@@ -571,6 +868,12 @@ fn skill_md(
     );
     out.push_str("## Contents\n");
     out.push_str(&listing(listed, "references/"));
+    if options.components.contains(&Component::Guide) {
+        out.push_str("\nRead [references/USING-THE-CATALOG.md](references/USING-THE-CATALOG.md) for how to query the live catalog (MCP tools, JSON API) beyond these files.\n");
+    }
+    if options.components.contains(&Component::Tools) {
+        out.push_str("\n`scripts/okf.sh` queries the catalog's JSON API (`scripts/okf.sh search <query>`).\n");
+    }
     out.push_str("\n## Provenance\n\n");
     let _ = writeln!(
         out,
@@ -716,7 +1019,12 @@ fn strip_frontmatter(text: &str) -> &str {
 }
 
 /// The manifest that reproduces this build (spec §21.1).
-fn manifest_yaml(name: &str, target: Target, selection: &Selection) -> String {
+fn manifest_yaml(
+    name: &str,
+    target: Target,
+    selection: &Selection,
+    components: &[Component],
+) -> String {
     let mut out = String::new();
     out.push_str(
         "# okf-workspace.yaml - generated by pgokf. Rebuild the same tree from the web Plugins page\n\
@@ -725,6 +1033,10 @@ fn manifest_yaml(name: &str, target: Target, selection: &Selection) -> String {
     out.push_str("version: 1\n");
     let _ = writeln!(out, "name: {}", yaml_string(name));
     let _ = writeln!(out, "targets: [{}]", target.id());
+    let mut ids: Vec<&str> = components.iter().map(|c| c.id()).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let _ = writeln!(out, "components: [{}]", ids.join(", "));
     out.push_str("catalog:\n  url_env: OKF_PG_URL\n");
     let _ = write!(
         out,
@@ -800,6 +1112,10 @@ mod tests {
             title: None,
             catalog_name: "acme".to_owned(),
             base_model: None,
+            components: Vec::new(),
+            mcp_command: None,
+            tenant: None,
+            web_url: None,
         }
     }
 
@@ -1111,6 +1427,105 @@ mod tests {
     }
 
     #[test]
+    fn components_add_mcp_config_guide_and_helper_in_the_documented_places() {
+        // Arrange
+        let records = vec![record(1, "a", "Alpha", "human-reviewed", "Do A.")];
+        let with = |target: Target| BuildOptions {
+            components: vec![Component::Mcp, Component::Guide, Component::Tools],
+            tenant: Some("acme".to_owned()),
+            web_url: Some("https://okf.example.test/".to_owned()),
+            ..options(target)
+        };
+
+        // Act
+        let claude = assemble(
+            &with(Target::ClaudeCode),
+            &selection(),
+            &snapshot(),
+            &records,
+        )
+        .expect("claude");
+        let codex =
+            assemble(&with(Target::Codex), &selection(), &snapshot(), &records).expect("codex");
+        let hermes = assemble(
+            &with(Target::HermesAgent),
+            &selection(),
+            &snapshot(),
+            &records,
+        )
+        .expect("hermes");
+        let cursor =
+            assemble(&with(Target::Cursor), &selection(), &snapshot(), &records).expect("cursor");
+        let ollama =
+            assemble(&with(Target::Ollama), &selection(), &snapshot(), &records).expect("ollama");
+
+        // Assert
+        let paths = |p: &Plugin| p.files.iter().map(|f| f.path.clone()).collect::<Vec<_>>();
+        let text = |p: &Plugin, path: &str| {
+            String::from_utf8_lossy(&p.files.iter().find(|f| f.path == path).expect(path).bytes)
+                .into_owned()
+        };
+        assert!(paths(&claude).contains(&".mcp.json".to_owned()));
+        assert!(
+            paths(&claude).contains(
+                &".claude/skills/ops-runbooks/references/USING-THE-CATALOG.md".to_owned()
+            )
+        );
+        let helper = claude
+            .files
+            .iter()
+            .find(|f| f.path == ".claude/skills/ops-runbooks/scripts/okf.sh")
+            .expect("helper");
+        assert!(helper.executable);
+        assert!(
+            String::from_utf8_lossy(&helper.bytes)
+                .contains("OKF_WEB_URL:-https://okf.example.test}")
+        );
+        let doc: serde_json::Value =
+            serde_json::from_str(&text(&claude, ".mcp.json")).expect("json");
+        assert_eq!(doc["mcpServers"]["pgokf"]["command"], "pgokf-mcp");
+        assert_eq!(
+            doc["mcpServers"]["pgokf"]["env"]["OKF_PG_URL"],
+            "${OKF_PG_URL}"
+        );
+        assert_eq!(doc["mcpServers"]["pgokf"]["env"]["OKF_TENANT"], "acme");
+        let toml = text(&codex, ".codex/config.toml");
+        assert!(
+            toml.contains("[mcp_servers.pgokf]") && toml.contains("env_vars = [\"OKF_PG_URL\"]")
+        );
+        assert!(!toml.contains("PASSWORD"));
+        let yaml = text(&hermes, "okf-hermes-mcp.yaml");
+        assert!(yaml.contains("mcp_servers:\n  pgokf:") && yaml.contains("PASSWORD@HOST"));
+        assert!(text(&cursor, ".cursor/mcp.json").contains("${env:OKF_PG_URL}"));
+        assert!(
+            !paths(&ollama).iter().any(|p| p.contains("mcp")),
+            "ollama has no MCP"
+        );
+        assert!(paths(&ollama).contains(&"okf-prompt/tools/okf.sh".to_owned()));
+        assert!(text(&claude, MANIFEST_FILE).contains("components: [guide, mcp, tools]"));
+    }
+
+    #[test]
+    fn mcp_command_and_web_url_are_validated() {
+        // Arrange & Act & Assert
+        assert!(validated_command(Some("pgokf-mcp; rm -rf /")).is_err());
+        assert_eq!(
+            validated_command(Some("/usr/local/bin/pgokf-mcp")).expect("ok"),
+            "/usr/local/bin/pgokf-mcp"
+        );
+        assert!(validated_web_url(Some("javascript:alert(1)")).is_err());
+        assert!(validated_web_url(Some("http://x y")).is_err());
+        assert_eq!(
+            validated_web_url(Some("https://okf.example.test/"))
+                .expect("ok")
+                .as_deref(),
+            Some("https://okf.example.test")
+        );
+        assert_eq!(Component::parse("docs"), Some(Component::Guide));
+        assert_eq!(Component::parse("nope"), None);
+    }
+
+    #[test]
     fn manifest_reproduces_the_selection() {
         // Arrange
         let selection = Selection {
@@ -1124,10 +1539,10 @@ mod tests {
         };
 
         // Act
-        let yaml = manifest_yaml("ops", Target::Cursor, &selection);
+        let yaml = manifest_yaml("ops", Target::Cursor, &selection, &[Component::Mcp]);
 
         // Assert
-        assert!(yaml.contains("targets: [cursor]\n"));
+        assert!(yaml.contains("targets: [cursor]\ncomponents: [mcp]\n"));
         assert!(yaml.contains("  trust: verified-only\n"));
         assert!(yaml.contains("  - { bundle_ids: [2], types: [\"Runbook\"], tags: [\"ops\"], query: \"failover\", limit: 50 }\n"));
     }

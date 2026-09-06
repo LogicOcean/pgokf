@@ -301,3 +301,38 @@ html:not([data-js]) .tabs [role=tabpanel] { margin-bottom: 1.5rem; }
 [data-only-target] { display: none; }
 form[data-target="ollama"] [data-only-target="ollama"] { display: block; }
 @media (max-width: 900px) { .builder-layout { grid-template-columns: 1fr; } }
+
+/* ---- edge highlighting ---------------------------------------------------- */
+:root { --graph-lit: #ff7a1a; }
+:root[data-theme="dark"] { --graph-lit: #ffa04d; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --graph-lit: #ffa04d; } }
+.graph3d-label.lit { border: 1px solid var(--graph-lit); font-weight: 600; opacity: 1 !important; }
+.graph3d-card { max-height: calc(100% - 1.2rem); overflow: auto; }
+.graph3d-card .card-close { position: absolute; right: .35rem; top: .2rem; border: 0; background: none; font-size: 1.1rem; line-height: 1; cursor: pointer; color: var(--muted); }
+.graph3d-card .connections { list-style: none; padding: 0; }
+.graph3d-card .connections li { padding: .1rem 0; }
+.linkish { font: inherit; background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; text-align: left; }
+.linkish:hover { text-decoration: underline; }
+
+/* ---- phones ------------------------------------------------------------ */
+.targets-picker > summary { display: none; }
+.targets-picker[open] > summary { display: none; }
+@media (max-width: 900px) {
+  .topnav { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; max-width: 100%; -webkit-overflow-scrolling: touch; padding-bottom: .1rem; }
+  .topnav::-webkit-scrollbar { display: none; }
+  .topnav a { white-space: nowrap; }
+  .tabs .tablist { -webkit-overflow-scrolling: touch; scrollbar-width: none; mask-image: linear-gradient(to right, #000 92%, transparent); }
+  .tabs .tablist::-webkit-scrollbar { display: none; }
+  .panel, .card, .prose-wrap { overflow-x: auto; }
+  .table { min-width: 560px; }
+  .hero { gap: .6rem; }
+  .hero-status { flex-wrap: wrap; }
+  .graph3d-card { left: .6rem; right: .6rem; max-width: none; top: auto; bottom: 3.2rem; }
+  .graph3d-legend { flex-wrap: wrap; gap: .4rem; }
+  .graph3d-controls { gap: .2rem; }
+  .graph3d-label { font-size: .68rem; max-width: 150px; }
+  .explorer-side { order: 2; }
+  .targets-picker > summary, .targets-picker[open] > summary { display: block; cursor: pointer; font-weight: 600; padding: .5rem .65rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); margin-bottom: .5rem; }
+  .targets-picker > summary .muted { font-weight: 400; }
+  .two-col { grid-template-columns: 1fr; }
+}

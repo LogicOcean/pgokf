@@ -14,7 +14,7 @@ visibility decision is the database's.
 | **Bundles** (`/bundles`, `/bundles/{id}`) | `catalog_stats()`, `list_bundles()`, the bundle's concepts grouped by directory, `list_sync_log()`, `list_bundle_log()` |
 | **Concept** (`/concepts/{bundle_id}/{concept_id}`) | the concept row with its rendered Markdown (the stored source when `store_source` is on, otherwise the search text; body links to other concepts are resolved through `pgokf.links`, headings get anchor ids), custom metadata, provenance / verification / sources, outgoing and incoming links (folded per counterpart) with an interactive 3D link graph over `concept_neighbors()` and `pgokf.links` (rotate, zoom, click a node for details, explore onward from any node; a server-rendered SVG stands in without WebGL or JavaScript), `find_similar()`, `concept_history()`, and a source download through `get_concept_source()` |
 | **Graph** (`/graph`) | the catalog-wide link graph: the best-connected concepts of the catalog or one bundle (coloured by bundle or type) or, seeded from a concept, its neighborhood; nodes and edges open detail cards, zoom, center, 2D/3D, and full-screen controls, a finder, and "explore from here" |
-| **Plugins** (`/plugins`) | the agent plugin builder over the `pgokf-workspace` crate: choose a target (Claude Code, Codex, Hermes Agent, Kimi, Gemini CLI, Cursor, the shared `.agents/skills/` directory, an `AGENTS.md` instruction file, an Ollama prompt bundle, or a generic tree), select concepts by bundle, query, type, tags, ids, and trust, preview the concepts and the file tree, download the zip; the page shows the equivalent `build_workspace_plugin` MCP call |
+| **Plugins** (`/plugins`) | the agent plugin builder over the `pgokf-workspace` crate: choose a target (Claude Code, Codex, Hermes Agent, Kimi, Gemini CLI, Cursor, the generic `.agents/` directory, an `AGENTS.md` instruction file, an Ollama prompt bundle, or a generic tree), select concepts by bundle, query, type, tags, ids, and trust, choose the components (the knowledge, the harness's MCP server config, a catalog guide, an `okf.sh` helper over the JSON API), preview the concepts and the file tree, download the zip; the page shows the equivalent `build_workspace_plugin` MCP call |
 | **Operations** (`/status`) | `health()`, `search_index_status()`, `get_config()`, `stale_concepts()`, `duplicate_concepts()`, the sync log |
 | **JSON API** (`/api/health`, `/api/bundles`, `/api/search`, `/api/concepts/{bundle_id}/{concept_id}`, `/api/graph?bundle=&limit=` and `/api/graph/{bundle_id}/{concept_id}?hops=N`) | the same data layer, for scripts and dashboards; the graph documents are what the 3D views draw |
 
@@ -22,7 +22,10 @@ Search results carry the database's `ts_headline` snippet (sanitized to its
 highlight markup), the rank, the bundle, and the path. Facets, the result
 list, and the page URL update in place as filters change (htmx); without
 JavaScript the same forms and links do full page loads, and the concept
-page shows its tabs as stacked sections.
+page shows its tabs as stacked sections. Every page is laid out for phones
+as well: the navigation scrolls, tables scroll inside their panels, the
+graph keeps its controls on the canvas, and a node's card lists its
+connections so an edge can be reached by a tap.
 
 ## Configuration
 

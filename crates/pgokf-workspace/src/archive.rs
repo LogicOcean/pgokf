@@ -24,6 +24,11 @@ pub fn zip(plugin: &Plugin) -> Result<Vec<u8>> {
         .last_modified_time(DateTime::default())
         .unix_permissions(0o644);
     for file in &plugin.files {
+        let options = if file.executable {
+            options.unix_permissions(0o755)
+        } else {
+            options
+        };
         writer
             .start_file(&file.path, options)
             .with_context(|| format!("adding {} to the archive", file.path))?;
@@ -76,7 +81,7 @@ pub fn write_to_dir(plugin: &Plugin, dir: &Path, overwrite: bool) -> Result<Vec<
     // Pass two: write.
     let mut written = Vec::with_capacity(targets.len());
     for (file, target) in plugin.files.iter().zip(targets) {
-        if let Err(error) = write_one(&target, &file.bytes, overwrite) {
+        if let Err(error) = write_one(&target, &file.bytes, overwrite, file.executable) {
             return Err(error.context(format!(
                 "after writing {} of {} files",
                 written.len(),
@@ -88,7 +93,7 @@ pub fn write_to_dir(plugin: &Plugin, dir: &Path, overwrite: bool) -> Result<Vec<
     Ok(written)
 }
 
-fn write_one(target: &Path, bytes: &[u8], overwrite: bool) -> Result<()> {
+fn write_one(target: &Path, bytes: &[u8], overwrite: bool, executable: bool) -> Result<()> {
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
@@ -107,7 +112,16 @@ fn write_one(target: &Path, bytes: &[u8], overwrite: bool) -> Result<()> {
         .with_context(|| format!("opening {}", target.display()))?;
     handle
         .write_all(bytes)
-        .with_context(|| format!("writing {}", target.display()))
+        .with_context(|| format!("writing {}", target.display()))?;
+    #[cfg(unix)]
+    if executable {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("marking {} executable", target.display()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = executable;
+    Ok(())
 }
 
 /// No existing ancestor of `relative` inside `dir` may be a symbolic link,
@@ -161,6 +175,7 @@ mod tests {
                 path: "okf-knowledge/INDEX.md".to_owned(),
                 bytes: b"# t\n".to_vec(),
                 sha256: String::new(),
+                executable: false,
             }],
             concept_count: 0,
             concepts: Vec::new(),
@@ -218,6 +233,7 @@ mod tests {
             path: "okf-workspace.lock".to_owned(),
             bytes: b"new".to_vec(),
             sha256: String::new(),
+            executable: false,
         });
 
         // Act

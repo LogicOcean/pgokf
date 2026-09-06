@@ -43,6 +43,9 @@
   var fitPending = false;
   var groupColors = new Map();
   var selected = null;
+  var highlightLink = null;
+  var hoverLink = null;
+  var touch = window.matchMedia('(hover: none), (pointer: coarse)').matches;
 
   var PALETTE = ['#2f6fed', '#e0762e', '#3aa76d', '#c2409a', '#8b6bd6', '#d7b12a', '#2fb5c9', '#b04a4a', '#6b8e23', '#9c7c5c'];
 
@@ -75,6 +78,27 @@
       return groupColors.get(node.group) || colors.hops[3];
     }
     return colors.hops[Math.min(node.hops, colors.hops.length - 1)];
+  }
+
+  function sameLink(a, b) {
+    return a && b && endId(a.source) === endId(b.source) && endId(a.target) === endId(b.target);
+  }
+  function linkIsLit(link) { return sameLink(link, highlightLink) || sameLink(link, hoverLink); }
+  function nodeIsLit(node) {
+    var l = highlightLink || hoverLink;
+    return !!l && (endId(l.source) === node.id || endId(l.target) === node.id);
+  }
+  // Re-run the colour and width accessors so a highlight change is drawn.
+  function repaint() {
+    if (!graph) return;
+    graph.linkColor(graph.linkColor());
+    graph.linkWidth(graph.linkWidth());
+    graph.nodeColor(graph.nodeColor());
+    labels.forEach(function (el, id) {
+      var node = nodeById(id);
+      el.classList.toggle('lit', !!node && nodeIsLit(node));
+      el.classList.toggle('dim', !!(highlightLink || hoverLink) && !!node && !nodeIsLit(node));
+    });
   }
 
   function assignGroupColors() {
@@ -238,6 +262,25 @@
   }
 
   // ---- selection cards -----------------------------------------------------
+  function linksOf(node) {
+    return data.links.filter(function (l) { return endId(l.source) === node.id || endId(l.target) === node.id; });
+  }
+
+  // The node card lists its connections, so an edge can be reached by a
+  // tap on a phone where a thin line is hard to hit.
+  function connectionsHtml(node) {
+    var links = linksOf(node);
+    if (!links.length) return '';
+    var items = links.slice(0, 12).map(function (l, i) {
+      var outgoing = endId(l.source) === node.id;
+      var other = nodeById(outgoing ? endId(l.target) : endId(l.source));
+      return '<li><button type="button" class="linkish" data-edge="' + i + '">' +
+        (outgoing ? '→ ' : '← ') + escapeHtml(other ? other.title : '?') + '</button>' +
+        (l.count > 1 ? ' <span class="count">×' + l.count + '</span>' : '') + '</li>';
+    }).join('');
+    return '<div class="muted small">Connections' + (links.length > 12 ? ' (first 12 of ' + links.length + ')' : '') + '</div><ul class="edge-texts connections">' + items + '</ul>';
+  }
+
   function actions(node) {
     return '<div class="graph3d-actions">' +
       '<a class="btn small" href="' + escapeHtml(node.href) + '">Open</a>' +
@@ -248,13 +291,16 @@
   function selectNode(node, focus) {
     if (!node) { card.hidden = true; return; }
     selected = node;
-    var degree = data.links.filter(function (l) { return endId(l.source) === node.id || endId(l.target) === node.id; }).length;
+    highlightLink = null;
+    repaint();
+    var degree = linksOf(node).length;
     card.innerHTML =
+      '<button type="button" class="card-close" aria-label="Close" data-close>×</button>' +
       '<strong>' + escapeHtml(node.title) + '</strong>' +
       (node.type ? ' <span class="pill type">' + escapeHtml(node.type) + '</span>' : '') +
       '<div class="muted small">' + escapeHtml(node.bundle_name + ' / ' + node.path) + ' · ' +
       (data.color_by === 'hops' ? (node.hops === 0 ? 'this concept' : node.hops + ' hop' + (node.hops === 1 ? '' : 's') + ' away') : node.degree + ' link' + (node.degree === 1 ? '' : 's') + ' in the catalog') +
-      ' · ' + degree + ' drawn</div>' + actions(node);
+      ' · ' + degree + ' drawn</div>' + actions(node) + connectionsHtml(node);
     card.hidden = false;
     if (focus) focusOn(node);
   }
@@ -265,9 +311,13 @@
     var to = nodeById(endId(link.target));
     if (!from || !to) return;
     selected = null;
+    highlightLink = link;
+    repaint();
     var rel = (link.relations || []).filter(function (r) { return r !== 'reference'; });
     var texts = (link.texts || []).map(function (t) { return '<li>' + escapeHtml(t) + '</li>'; }).join('');
     card.innerHTML =
+      '<button type="button" class="card-close" aria-label="Close" data-close>×</button>' +
+      '<div class="muted small">Link</div>' +
       '<strong>' + escapeHtml(from.title) + '</strong> → <strong>' + escapeHtml(to.title) + '</strong>' +
       '<div class="muted small">' + escapeHtml(link.count + ' link' + (link.count === 1 ? '' : 's') + (rel.length ? ' · ' + rel.join(', ') : '')) + '</div>' +
       (texts ? '<div class="muted small">Link text:</div><ul class="edge-texts">' + texts + '</ul>' : '') +
@@ -293,7 +343,21 @@
     );
   }
 
+  function closeCard() {
+    card.hidden = true;
+    highlightLink = null;
+    selected = null;
+    repaint();
+  }
+
   card.addEventListener('click', function (event) {
+    if (event.target.closest('[data-close]')) { closeCard(); return; }
+    var edge = event.target.closest('[data-edge]');
+    if (edge && selected) {
+      var link = linksOf(selected)[parseInt(edge.getAttribute('data-edge'), 10)];
+      if (link) selectLink(link);
+      return;
+    }
     var explore = event.target.closest('[data-explore]');
     if (!explore) return;
     seedUrl = explore.getAttribute('data-explore');
@@ -340,7 +404,7 @@
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
     if (event.key === '+' || event.key === '=') zoom(0.7);
     else if (event.key === '-') zoom(1.45);
-    else if (event.key === 'Escape') { card.hidden = true; }
+    else if (event.key === 'Escape') { closeCard(); }
   });
 
   // ---- finder (explorer) ----------------------------------------------------
@@ -376,7 +440,9 @@
         assignGroupColors();
         if (!graph) build();
         var colors = palette();
-        graph.nodeColor(function (n) { return colorFor(n, colors); });
+        highlightLink = null;
+        hoverLink = null;
+        graph.nodeColor(function (n) { return nodeIsLit(n) ? cssVar('--graph-lit', '#ff7a1a') : colorFor(n, colors); });
         graph.graphData({ nodes: data.nodes, links: data.links });
         rebuildLabels();
         renderLegend();
@@ -408,24 +474,29 @@
       .nodeId('id')
       .nodeLabel(function () { return ''; })
       .onNodeHover(function (node) { showTip(node ? nodeTip(node) : ''); })
-      .onLinkHover(function (link) { showTip(link ? linkTip(link) : ''); })
-      .nodeColor(function (n) { return colorFor(n, colors); })
+      .onLinkHover(function (link) {
+        hoverLink = link || null;
+        repaint();
+        showTip(link ? linkTip(link) : '');
+      })
+      .nodeColor(function (n) { return nodeIsLit(n) ? cssVar('--graph-lit', '#ff7a1a') : colorFor(n, colors); })
       .nodeVal(function (n) {
         if (data && data.color_by !== 'hops') return 2 + Math.min(10, n.degree * 0.6);
         return n.hops === 0 ? 12 : n.hops === 1 ? 5 : 2.5;
       })
       .nodeResolution(16)
       .nodeOpacity(0.95)
-      .linkColor(function () { return colors.link; })
-      .linkOpacity(0.55)
-      .linkWidth(function (l) { return Math.min(3, 0.5 + l.count * 0.5); })
+      .linkColor(function (l) { return linkIsLit(l) ? cssVar('--graph-lit', '#ff7a1a') : colors.link; })
+      .linkOpacity(0.6)
+      .linkWidth(function (l) { return (linkIsLit(l) ? 3.5 : 0) + Math.min(3, (touch ? 1.2 : 0.5) + l.count * 0.5); })
+      .linkHoverPrecision(touch ? 8 : 4)
       .linkDirectionalArrowLength(4)
       .linkDirectionalArrowRelPos(1)
       .linkLabel(function () { return ''; })
       .onNodeClick(function (node) { selectNode(node, true); })
       .onLinkClick(function (link) { selectLink(link); })
       .onNodeRightClick(function (node) { window.location.href = node.href; })
-      .onBackgroundClick(function () { card.hidden = true; })
+      .onBackgroundClick(closeCard)
       .warmupTicks(60)
       .cooldownTicks(200)
       .onEngineStop(function () { if (fitPending) { fitPending = false; fit(); } });
@@ -445,8 +516,8 @@
     new MutationObserver(function () {
       var next = palette();
       graph.backgroundColor(next.background);
-      graph.nodeColor(function (n) { return colorFor(n, next); });
-      graph.linkColor(function () { return next.link; });
+      graph.nodeColor(function (n) { return nodeIsLit(n) ? cssVar('--graph-lit', '#ff7a1a') : colorFor(n, next); });
+      graph.linkColor(function (l) { return linkIsLit(l) ? cssVar('--graph-lit', '#ff7a1a') : next.link; });
       renderLegend();
     }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
   }

@@ -23,8 +23,11 @@ use anyhow::Result;
 use tokio_postgres::GenericClient;
 
 pub use archive::{write_to_dir, zip};
-pub use plugin::{BuildOptions, LOCK_FILE, MANIFEST_FILE, Plugin, PluginFile, assemble, slug};
-pub use profile::{Profile, Shape, Target};
+pub use plugin::{
+    BuildOptions, Component, LOCK_FILE, MANIFEST_FILE, MCP_SERVER_NAME, Plugin, PluginFile,
+    assemble, slug,
+};
+pub use profile::{EnvRef, McpFormat, McpSpec, Profile, Shape, Target};
 pub use selection::{
     BundleState, ConceptRecord, DEFAULT_LIMIT, MAX_CONCEPTS, Selection, Snapshot, load_sources,
     resolve, snapshot,

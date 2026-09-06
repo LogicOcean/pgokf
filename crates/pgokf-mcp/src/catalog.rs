@@ -9,7 +9,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
-use pgokf_workspace::{BuildOptions, Profile, Selection, Target};
+use pgokf_workspace::{BuildOptions, Component, Profile, Selection, Target};
 use serde_json::{Value, json};
 use tokio_postgres::Client;
 use tokio_postgres::types::ToSql;
@@ -28,7 +28,9 @@ const INLINE_PLUGIN_BYTES: usize = 1_048_576;
 pub struct Catalog {
     client: Client,
     /// The database name, shown in plugin indexes as the catalog name.
-    catalog_name: String,
+    database_name: String,
+    /// The session's tenant, carried into generated MCP configurations.
+    tenant: Option<String>,
 }
 
 impl Catalog {
@@ -55,7 +57,7 @@ impl Catalog {
         if let Some(tenant) = tenant {
             pgokf_pgconn::set_tenant(&client, tenant).await?;
         }
-        let catalog_name: String = client
+        let database_name: String = client
             .query_one("SELECT current_database()", &[])
             .await
             .context("reading the database name")?
@@ -63,7 +65,8 @@ impl Catalog {
 
         Ok(Self {
             client,
-            catalog_name,
+            database_name,
+            tenant: tenant.map(str::to_owned),
         })
     }
 
@@ -149,6 +152,9 @@ impl Catalog {
                         "verified_only": {"type": "boolean", "description": "Only human-reviewed or machine-confirmed concepts."},
                         "limit": {"type": "integer", "description": "Maximum concepts (1..=500, default 100)."},
                         "base_model": {"type": "string", "description": "Ollama only: the Modelfile FROM line (default llama3.1)."},
+                        "components": {"type": "array", "items": {"type": "string", "enum": ["mcp", "guide", "tools"]}, "description": "Extra parts: mcp (the harness's MCP server config for pgokf-mcp; the connection string is never written), guide (how to use the catalog: identities, trust tiers, MCP tools, JSON API), tools (okf.sh helper over the JSON API). Default: all three."},
+                        "mcp_command": {"type": "string", "description": "How the harness starts the MCP server (default pgokf-mcp)."},
+                        "web_url": {"type": "string", "description": "Base URL of the pgokf web UI, for the guide and the helper script."},
                         "output_dir": {"type": "string", "description": "Write the tree under this workspace directory instead of returning contents."},
                         "overwrite": {"type": "boolean", "description": "With output_dir: replace files that already exist, including an existing AGENTS.md (default false; symbolic links are never followed)."}
                     },
@@ -265,12 +271,9 @@ impl Catalog {
         )
     }
 
-    async fn build_workspace_plugin(&self, args: &Value) -> Result<Value> {
-        let target_id = require_str(args, "target")?;
-        let target = Target::parse(target_id).ok_or_else(|| {
-            anyhow!("unknown target '{target_id}'; list_plugin_targets names the supported ones")
-        })?;
-        let selection = Selection {
+    /// The selection the tool arguments describe.
+    fn selection_from_args(args: &Value) -> Result<Selection> {
+        Ok(Selection {
             bundle_ids: opt_i64_vec(args, "bundle_ids")?.unwrap_or_default(),
             concept_ids: opt_string_vec(args, "concept_ids")?.unwrap_or_default(),
             tags: opt_string_vec(args, "tags")?.unwrap_or_default(),
@@ -293,14 +296,42 @@ impl Catalog {
                     pgokf_workspace::MAX_CONCEPTS
                 ),
             },
+        })
+    }
+
+    /// The build options the tool arguments describe.
+    fn options_from_args(&self, args: &Value, target: Target) -> Result<BuildOptions> {
+        let components = match opt_string_vec(args, "components")? {
+            None => Component::all().to_vec(),
+            Some(ids) => ids
+                .iter()
+                .map(|id| {
+                    Component::parse(id).ok_or_else(|| {
+                        anyhow!("unknown component '{id}'; use mcp, guide, or tools")
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?,
         };
-        let options = BuildOptions {
+        Ok(BuildOptions {
             target,
             name: opt_str(args, "name").unwrap_or("okf-knowledge").to_owned(),
             title: opt_str(args, "title").map(str::to_owned),
-            catalog_name: self.catalog_name.clone(),
+            catalog_name: self.database_name.clone(),
             base_model: opt_str(args, "base_model").map(str::to_owned),
-        };
+            components,
+            mcp_command: opt_str(args, "mcp_command").map(str::to_owned),
+            tenant: self.tenant.clone(),
+            web_url: opt_str(args, "web_url").map(str::to_owned),
+        })
+    }
+
+    async fn build_workspace_plugin(&self, args: &Value) -> Result<Value> {
+        let target_id = require_str(args, "target")?;
+        let target = Target::parse(target_id).ok_or_else(|| {
+            anyhow!("unknown target '{target_id}'; list_plugin_targets names the supported ones")
+        })?;
+        let selection = Self::selection_from_args(args)?;
+        let options = self.options_from_args(args, target)?;
         let plugin = pgokf_workspace::build(&self.client, &options, &selection).await?;
 
         let mut result = json!({
@@ -321,6 +352,7 @@ impl Catalog {
                 "path": f.path,
                 "bytes": f.bytes.len(),
                 "sha256": f.sha256,
+                "executable": f.executable,
             })).collect::<Vec<_>>(),
         });
         match opt_str(args, "output_dir") {

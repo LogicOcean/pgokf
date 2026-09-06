@@ -20,7 +20,7 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use pgokf_companion::embeddings::EmbeddingsClient;
-use pgokf_workspace::{BuildOptions, ConceptRecord, Profile, Selection, Target};
+use pgokf_workspace::{BuildOptions, Component, ConceptRecord, Profile, Selection, Target};
 use serde::Deserialize;
 use serde_json::Value;
 use tower::limit::ConcurrencyLimitLayer;
@@ -625,6 +625,8 @@ pub(crate) struct TargetView {
 
 /// The builder form's state, echoed back into the fields.
 #[derive(Debug, Clone)]
+// The flags mirror the form's checkboxes one to one.
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct PluginForm {
     pub target: String,
     pub name: String,
@@ -637,6 +639,11 @@ pub(crate) struct PluginForm {
     pub verified: bool,
     pub limit: String,
     pub base_model: String,
+    pub with_mcp: bool,
+    pub with_guide: bool,
+    pub with_tools: bool,
+    pub mcp_command: String,
+    pub web_url: String,
     /// `true` once any selector is set.
     pub has_selection: bool,
     /// The same request as a query string, for the download link and the
@@ -653,6 +660,8 @@ pub(crate) struct PluginPreview {
     pub index_file: String,
     pub file_paths: Vec<String>,
     pub manifest_hint: String,
+    /// Where the MCP configuration lands for this target, when included.
+    pub mcp_note: Option<String>,
     pub mcp_call: String,
     pub download_url: String,
 }
@@ -2060,6 +2069,18 @@ struct PluginParams {
     limit: String,
     #[serde(default)]
     base_model: String,
+    /// Component flags (`1`/`on`), one field each: the query parser does
+    /// not collect repeated keys.
+    #[serde(default)]
+    mcp: String,
+    #[serde(default)]
+    guide: String,
+    #[serde(default)]
+    tools: String,
+    #[serde(default)]
+    mcp_command: String,
+    #[serde(default)]
+    web_url: String,
 }
 
 const DEFAULT_PLUGIN_NAME: &str = "okf-knowledge";
@@ -2100,6 +2121,7 @@ impl PluginParams {
             ),
         };
         let verified = matches!(self.verified.as_str(), "1" | "true" | "on");
+        let components = self.components();
         let selection = Selection {
             bundle_ids: bundle_id.into_iter().collect(),
             concept_ids: split_list(&self.ids),
@@ -2132,13 +2154,16 @@ impl PluginParams {
             ),
             ("limit", limit.map(|n| n.to_string()).unwrap_or_default()),
             ("base_model", self.base_model.trim().to_owned()),
+            ("mcp_command", self.mcp_command.trim().to_owned()),
+            ("web_url", self.web_url.trim().to_owned()),
         ];
-        let query_string = pairs
+        let mut query: Vec<String> = pairs
             .iter()
             .filter(|(_, v)| !v.is_empty())
             .map(|(k, v)| format!("{k}={}", filters::percent_encode(v)))
-            .collect::<Vec<_>>()
-            .join("&");
+            .collect();
+        query.extend(components.iter().map(|c| format!("{}=1", c.id())));
+        let query_string = query.join("&");
         let form = PluginForm {
             target: target_id,
             name,
@@ -2151,10 +2176,28 @@ impl PluginParams {
             verified,
             limit: limit.map(|n| n.to_string()).unwrap_or_default(),
             base_model: self.base_model.trim().to_owned(),
+            with_mcp: components.contains(&Component::Mcp),
+            with_guide: components.contains(&Component::Guide),
+            with_tools: components.contains(&Component::Tools),
+            mcp_command: self.mcp_command.trim().to_owned(),
+            web_url: self.web_url.trim().to_owned(),
             has_selection: !selection.is_empty(),
             query_string,
         };
         Ok((form, target, selection, non_empty(&self.base_model)))
+    }
+
+    /// The requested components, in canonical order.
+    fn components(&self) -> Vec<Component> {
+        let on = |raw: &str| matches!(raw.trim(), "1" | "true" | "on");
+        [
+            (on(&self.mcp), Component::Mcp),
+            (on(&self.guide), Component::Guide),
+            (on(&self.tools), Component::Tools),
+        ]
+        .into_iter()
+        .filter_map(|(set, c)| set.then_some(c))
+        .collect()
     }
 }
 
@@ -2198,12 +2241,26 @@ fn build_options(
     target: Target,
     base_model: Option<String>,
 ) -> BuildOptions {
+    let mut components = Vec::new();
+    if form.with_mcp {
+        components.push(Component::Mcp);
+    }
+    if form.with_guide {
+        components.push(Component::Guide);
+    }
+    if form.with_tools {
+        components.push(Component::Tools);
+    }
     BuildOptions {
         target,
         name: form.name.clone(),
         title: non_empty(&form.title),
         catalog_name: app.catalog_name.clone(),
         base_model,
+        components,
+        mcp_command: non_empty(&form.mcp_command),
+        tenant: app.tenant.clone(),
+        web_url: non_empty(&form.web_url),
     }
 }
 
@@ -2270,7 +2327,22 @@ async fn plugin_preview(
         "query": selection.query,
         "verified_only": selection.verified_only,
         "limit": selection.effective_limit(),
+        "components": options.components.iter().map(|c| c.id()).collect::<Vec<_>>(),
+        "mcp_command": options.mcp_command,
+        "web_url": options.web_url,
         "output_dir": "/path/to/your/workspace",
+    });
+    let mcp_note = form.with_mcp.then(|| match profile.mcp {
+        Some(spec) if spec.auto_loaded => format!(
+            "The MCP server entry is written to {}, which {} loads from the workspace.",
+            spec.path, profile.label
+        ),
+        Some(spec) => format!(
+            "The MCP server entry is written to {}; merge it into the harness's own configuration.",
+            spec.path
+        ),
+        None => "This target has no MCP configuration; the guide points at the JSON API instead."
+            .to_owned(),
     });
     let mcp_args = match mcp_args {
         Value::Object(map) => Value::Object(
@@ -2297,6 +2369,7 @@ async fn plugin_preview(
             .map(|p| p.files.iter().map(|f| f.path.clone()).collect())
             .unwrap_or_default(),
         manifest_hint: format!("{}: {}", profile.label, profile.notes),
+        mcp_note,
         mcp_call: serde_json::to_string_pretty(&serde_json::json!({
             "name": "build_workspace_plugin",
             "arguments": mcp_args,
@@ -2822,6 +2895,14 @@ mod tests {
             form.query_string,
             "target=codex&name=Ops&tags=a%2C%20b&ids=x%2C%20y&verified=1"
         );
+        let with = PluginParams {
+            tools: "1".to_owned(),
+            mcp: "on".to_owned(),
+            ..PluginParams::default()
+        };
+        let (form, ..) = with.normalize().ok().expect("valid");
+        assert!(form.with_mcp && form.with_tools && !form.with_guide);
+        assert!(form.query_string.ends_with("mcp=1&tools=1"));
         assert!(
             PluginParams {
                 target: "nope".to_owned(),

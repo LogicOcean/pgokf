@@ -59,15 +59,31 @@
   // ---- plugin builder: the chosen target drives which fields show -------
   var builder = document.getElementById('pgokf-plugin-form');
   if (builder) {
+    var picker = builder.querySelector('details.targets-picker');
+    var pickerLabel = builder.querySelector('[data-target-label]');
     var syncTarget = function () {
       var picked = builder.querySelector('input[name=target]:checked');
       builder.setAttribute('data-target', picked ? picked.value : '');
       builder.querySelectorAll('.target-card').forEach(function (cardEl) {
         cardEl.classList.toggle('selected', cardEl.contains(picked));
       });
+      if (pickerLabel && picked) {
+        var label = picked.closest('.target-card').querySelector('.target-label');
+        pickerLabel.textContent = label ? label.textContent : picked.value;
+      }
     };
     builder.addEventListener('change', syncTarget);
     syncTarget();
+    // On a phone the ten target cards fold behind their summary.
+    if (picker) {
+      var narrow = window.matchMedia('(max-width: 900px)');
+      var foldPicker = function () { picker.open = !narrow.matches; };
+      foldPicker();
+      narrow.addEventListener('change', foldPicker);
+      builder.addEventListener('change', function (event) {
+        if (event.target.name === 'target' && narrow.matches) picker.open = false;
+      });
+    }
   }
 
   // ---- tabs (ARIA tabs pattern; the hash names the tab as #tab-<name>) ----

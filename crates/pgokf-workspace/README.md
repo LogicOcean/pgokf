@@ -25,7 +25,15 @@ An Agent Skills package is `SKILL.md` (name, a description that says what
 the knowledge covers and when to use it, catalog metadata) plus one file per
 concept under `references/`, the concept's exact stored source when the
 catalog keeps source, otherwise a document reconstructed from the indexed
-fields and marked as such. Every tree also carries `okf-workspace.yaml`,
+fields and marked as such.
+
+Three optional components make the package more than a skills directory:
+
+| Component | What it adds | Where |
+| --------- | ------------ | ----- |
+| `mcp` | the harness's MCP server entry for `pgokf-mcp`, so the agent can query the catalog live; the connection string is never written into the tree (Claude Code and Gemini CLI expand `${OKF_PG_URL}`, Cursor `${env:OKF_PG_URL}`, Codex forwards it through `env_vars`, Hermes gets a snippet to merge into its user config with a placeholder) | `.mcp.json`, `.cursor/mcp.json`, `.codex/config.toml`, `.gemini/settings.json`, `.kimi/mcp.json`, `okf-hermes-mcp.yaml`, or `okf-mcp.json` for the generic shapes; each location is documented in the profile |
+| `guide` | `USING-THE-CATALOG.md`: identities, trust tiers, the MCP tools, the JSON API, how to rebuild the package | beside the references (`references/`, `knowledge/`) |
+| `tools` | `okf.sh`, a POSIX helper over the JSON API (`search`, `get`, `graph`, `bundles`, `health`) for harnesses without MCP; marked executable | `scripts/` in a skill, `tools/` elsewhere | Every tree also carries `okf-workspace.yaml`,
 the manifest that reproduces the selection, and `okf-workspace.lock`, which
 records the catalog snapshot and a content hash per file. A build against
 an unchanged catalog is byte-identical.
@@ -42,5 +50,5 @@ build goes through the audited `get_concept_source()`, which is what that
 log is for.
 
 Use it from the web UI (**Plugins** page) or the MCP server
-(`build_workspace_plugin`, `list_plugin_targets`); both call the same
-[`build`] function.
+(`build_workspace_plugin` with `components`, `mcp_command`, `web_url`;
+`list_plugin_targets`); both call the same [`build`] function.

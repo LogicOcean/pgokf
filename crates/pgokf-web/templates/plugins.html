@@ -10,6 +10,8 @@
   <aside class="filters">
     <form id="pgokf-plugin-form" method="get" action="/plugins" data-target="{{ form.target }}"
           hx-get="/plugins/preview" hx-target="#pgokf-plugin-preview" hx-trigger="change, submit, keyup changed delay:400ms from:.live" hx-include="#pgokf-plugin-form">
+      <details class="targets-picker" open>
+        <summary>Target: <span data-target-label>{{ form.target }}</span> <span class="muted small">(change)</span></summary>
       <fieldset class="targets">
         <legend>Target</legend>
         {% for t in targets %}
@@ -20,6 +22,22 @@
           <span class="muted small">{{ t.notes }}</span>
         </label>
         {% endfor %}
+      </fieldset>
+      </details>
+      <fieldset>
+        <legend>Include</legend>
+        <div class="field check"><label><input type="checkbox" checked disabled> Knowledge <span class="muted">(the concepts, always)</span></label></div>
+        <div class="field check"><label><input type="checkbox" name="mcp" value="1" {% if form.with_mcp %}checked{% endif %}> MCP server config <span class="muted">(live catalog access through <code>pgokf-mcp</code>; the connection string is never written into the file)</span></label></div>
+        <div class="field check"><label><input type="checkbox" name="guide" value="1" {% if form.with_guide %}checked{% endif %}> Catalog guide <span class="muted">(identities, trust tiers, the MCP tools and the JSON API)</span></label></div>
+        <div class="field check"><label><input type="checkbox" name="tools" value="1" {% if form.with_tools %}checked{% endif %}> CLI helper <span class="muted">(<code>okf.sh</code> over the JSON API, for harnesses without MCP)</span></label></div>
+        <div class="field">
+          <label for="p-mcp">MCP command <span class="muted">(how the harness starts the server)</span></label>
+          <input id="p-mcp" type="text" class="live" name="mcp_command" value="{{ form.mcp_command }}" placeholder="pgokf-mcp">
+        </div>
+        <div class="field">
+          <label for="p-web">Web UI URL <span class="muted">(for the guide and the helper)</span></label>
+          <input id="p-web" type="url" class="live" name="web_url" value="{{ form.web_url }}" placeholder="http://catalog.example:8080">
+        </div>
       </fieldset>
       <div class="field">
         <label for="p-name">Package name</label>

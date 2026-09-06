@@ -25,7 +25,7 @@
   </section>
   <section class="panel">
     <div class="panel-head"><h3>Files in the zip</h3></div>
-    <p class="muted small">Written under <code>{{ p.root }}</code>; the harness reads <code>{{ p.index_file }}</code> first.</p>
+    <p class="muted small">Written under <code>{{ p.root }}</code>; the harness reads <code>{{ p.index_file }}</code> first.{% if let Some(m) = p.mcp_note %} {{ m }}{% endif %}</p>
     <ul class="tree-list">{% for f in p.file_paths %}<li><code>{{ f }}</code></li>{% endfor %}</ul>
   </section>
 </div>

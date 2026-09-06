@@ -36,15 +36,24 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
   concept) for Claude Code, Codex, Hermes Agent, Kimi, Gemini CLI, Cursor,
   or the shared `.agents/skills/` directory, an `AGENTS.md` instruction
   file, an Ollama prompt bundle (Modelfile and system prompt), or a generic
-  tree, always with `okf-workspace.yaml` and `okf-workspace.lock`. Every
-  target layout was read from the harness's documentation and is recorded
-  with its source; unknown targets are refused. Builds are byte-identical
-  for an unchanged catalog.
+  tree, always with `okf-workspace.yaml` and `okf-workspace.lock`. Optional
+  components make it more than a skills directory: the harness's MCP
+  server entry for `pgokf-mcp` (connection string referenced, never
+  written), a catalog guide, and an `okf.sh` helper over the JSON API.
+  Every target and MCP-configuration layout was read from the harness's
+  documentation and is recorded with its source; unknown targets are
+  refused. Builds are byte-identical for an unchanged catalog.
 - **Graph explorer** (`/graph`): the catalog-wide link graph (best-connected
   concepts of the catalog or one bundle, coloured by bundle or type) or a
-  concept's neighborhood, with clickable nodes and edges (edge cards show
-  the link texts), zoom, center, 2D/3D, and full-screen controls, a finder,
-  and "explore from here". `/api/graph` serves the same document.
+  concept's neighborhood, with clickable nodes and edges (hovering or
+  selecting an edge highlights it and its ends; edge cards show the link
+  texts; a node's card lists its connections for touch), zoom, center,
+  2D/3D, and full-screen controls, a finder, and "explore from here".
+  `/api/graph` serves the same document.
+- The UI is laid out for phones: scrolling navigation and tab strips,
+  tables that scroll inside their panels, results before filters, the
+  builder's target list folded behind its summary, and graph controls on
+  the canvas.
 - The OpenAI-compatible embeddings client moved from `pgokf-embed` into
   `pgokf-companion` (feature `embeddings`), shared with `pgokf-web`;
   `pgokf-pgconn` exposes `parse_config` and `rustls_connector` for pool
