@@ -446,6 +446,7 @@ jobs:
             RUST_VERSION=${{ env.RUST_TOOLCHAIN }}
             CARGO_PGRX_VERSION=${{ env.CARGO_PGRX_VERSION }}
             PGOKF_VERSION=${{ env.VERSION }}
+            WITH_PG_TEXTSEARCH=${{ env.WITH_PG_TEXTSEARCH }}
           outputs: type=image,name=${{ env.SERVER_IMAGE }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Export digest

@@ -43,8 +43,10 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
   resource. Upgrade script `pgokf--0.1.16--0.2.0.sql`. Deferred to a later
   release: the `.okf-package.yaml` sidecar, standalone `type: Script` and
   typed `Reference` documents, the diagnostics table, `relationships`
-  frontmatter, and visibility enforcement in search (the columns are
-  projected and propagated, not yet consulted).
+  frontmatter, and visibility enforcement (the columns are
+  projected and propagated but consulted nowhere - not in search, and not
+  in retrieval, so `visibility` is descriptive in 0.2.0 and is not an
+  access control).
 - The plugin builder (`pgokf-workspace`, the web **Plugins** page, the MCP
   `build_workspace_plugin`) copies a selected skill package **whole**
   through the audited readers: `SKILL.md` unchanged, scripts executable,
@@ -363,7 +365,7 @@ with its default and touches no existing row.
   WITH_PG_TEXTSEARCH=0` to keep ParadeDB. A database that has `pg_search`
   created must drop it (on the old image, `DROP EXTENSION pg_search CASCADE`)
   before `pg_textsearch` can be created; the step-by-step migration is in
-  [docs/compose-deployment.md](docs/compose-deployment.md#upgrading-from-0114-paradedb-pg_search-to-0115-pg_textsearch).
+  [docs/compose-deployment.md](docs/compose-deployment.md#upgrading-from-0114-paradedb-pg_search-to-0115-or-later-pg_textsearch).
 - **Test harness:** the in-database tests that need a preloaded BM25 provider
   now run when `PGOKF_TEST_PRELOAD` names it (pgrx starts its own instance,
   so the operator's cluster configuration never reached them, and they had

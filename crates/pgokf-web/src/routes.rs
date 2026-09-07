@@ -133,10 +133,13 @@ pub(crate) fn router(app: Shared) -> Router {
         .fallback(not_found)
         .layer(ConcurrencyLimitLayer::new(MAX_IN_FLIGHT))
         .layer(middleware::from_fn(request_timeout))
-        .layer(middleware::from_fn(security_headers))
         .layer(middleware::from_fn(shape_errors))
         .layer(middleware::from_fn_with_state(app.clone(), authenticate))
         .layer(middleware::from_fn(same_origin_writes))
+        // Outermost, because a layer wraps everything added before it: the
+        // 401s, the cross-site refusal and the sign-in redirect are answers
+        // this server gives too, and they carry the same headers as a page.
+        .layer(middleware::from_fn(security_headers))
         .with_state(app)
 }
 
@@ -2856,7 +2859,18 @@ async fn upload_documents(app: &App, access: &Access<'_>, multipart: Multipart) 
         UploadTarget::Existing(store)
     } else {
         ensure_sources(access.writer).await?;
-        UploadTarget::New(validated_bundle_name(&fields.new_bundle)?)
+        let name = validated_bundle_name(&fields.new_bundle)?;
+        // `register_bundle_content` is a full snapshot resync, so calling it
+        // for an existing name with only the files in hand would delete
+        // every other document in that bundle. Choosing it in the list goes
+        // through `apply_change`, which merges.
+        if app.db.content_bundle_exists(&name).await? {
+            return Err(AppError::bad_request(format!(
+                "A bundle called {name} already exists. Choose it in the list to add to it; \
+                 creating it again would replace everything already in it."
+            )));
+        }
+        UploadTarget::New(name)
     };
     let directory = validated_directory(&fields.directory)?;
     let now = now_iso();

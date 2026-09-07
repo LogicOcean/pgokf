@@ -297,7 +297,16 @@ outside the database and talks to the catalog through the public SQL surface.
   `--tokens-file` and the token's role (`reader` or `builder`) decides which
   tools it may call.
 
-All three share one connection helper (the `pgokf-pgconn` crate): plaintext to
+- **[`pgokf-web`](https://github.com/LogicOcean/pgokf/tree/main/crates/pgokf-web)** is the web UI and JSON API over the
+  same catalog: search, browsing, concept pages, the link graph, and the agent
+  plugin builder, read-only through a `pgokf_reader` connection. It is
+  read-only until an operator gives it both a writer connection and a way of
+  knowing who is asking (an OpenID Connect provider, an authenticating
+  proxy's headers, or a local users file), which turns on the human workflow
+  of §21.6 - upload, edit, review - and an admin page. It terminates no TLS:
+  put a TLS-terminating reverse proxy in front of it.
+
+All four share one connection helper (the `pgokf-pgconn` crate): plaintext to
 PostgreSQL by default, with the same opt-in verified-TLS session (`--tls` or
 `sslmode=require`) for reaching a database across an untrusted network.
 

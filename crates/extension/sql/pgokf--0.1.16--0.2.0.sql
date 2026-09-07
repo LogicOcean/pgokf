@@ -342,21 +342,21 @@ ALTER FUNCTION pgokf.get_skill(bigint, text)
 REVOKE ALL ON FUNCTION pgokf.get_skill(bigint, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pgokf.get_skill(bigint, text) TO pgokf_reader;
 COMMENT ON FUNCTION pgokf.get_skill(bigint, text) IS
-    'Return one Agent Skills package as pgokf.skill_result: name, description, package directory and hash, visibility, the complete original frontmatter, the exact SKILL.md bytes, and the JSON listing of its scripts, references, and assets. Reader-level, tenant-scoped, and audited: each successful read appends a get_skill row to the access log. Raises 22023 for an unknown or hidden skill.';
+    'Return one Agent Skills package as pgokf.skill_result: name, description, package directory and hash, visibility, the complete original frontmatter, the exact SKILL.md bytes, and the JSON listing of its scripts, references, and assets. Reader-level, tenant-scoped, and audited: each successful read appends a get_skill row to the access log. Raises 22023 for an unknown skill.';
 
 ALTER FUNCTION pgokf.get_script(bigint, text)
     SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
 REVOKE ALL ON FUNCTION pgokf.get_script(bigint, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pgokf.get_script(bigint, text) TO pgokf_reader;
 COMMENT ON FUNCTION pgokf.get_script(bigint, text) IS
-    'Return one package script as pgokf.script_result: language, package-relative path and owning skill, size, SHA-256, declared runtime/arguments/exit codes when known, and the exact stored bytes (never body_text). Reader-level, tenant-scoped, and audited: each successful read appends a get_script row to the access log. Raises 22023 for an unknown or hidden script.';
+    'Return one package script as pgokf.script_result: language, package-relative path and owning skill, size, SHA-256, declared runtime/arguments/exit codes when known, and the exact stored bytes (never body_text). Reader-level, tenant-scoped, and audited: each successful read appends a get_script row to the access log. Raises 22023 for an unknown script.';
 
 ALTER FUNCTION pgokf.get_reference(bigint, text, boolean)
     SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
 REVOKE ALL ON FUNCTION pgokf.get_reference(bigint, text, boolean) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pgokf.get_reference(bigint, text, boolean) TO pgokf_reader;
 COMMENT ON FUNCTION pgokf.get_reference(bigint, text, boolean) IS
-    'Return one package reference or asset as pgokf.reference_result: format and media type, package-relative path and owning skill, size, SHA-256, its text when textual, and the exact stored bytes when include_bytes (the default) is true. Reader-level, tenant-scoped, and audited: each successful read appends a get_reference row to the access log (detail metadata when the bytes were not requested). Raises 22023 for an unknown or hidden reference.';
+    'Return one package reference or asset as pgokf.reference_result: format and media type, package-relative path and owning skill, size, SHA-256, its text when textual, and the exact stored bytes when include_bytes (the default) is true. Reader-level, tenant-scoped, and audited: each successful read appends a get_reference row to the access log (detail metadata when the bytes were not requested). Raises 22023 for an unknown reference.';
 
 -- ===========================================================================
 -- 4. The access log accepts the three new audited operations. The 0.1.8

@@ -38,6 +38,9 @@ standalone companions built alongside the extension:
 | `crates/pgokf-ingest` | Standalone mountless-ingestion companion: lists an S3-compatible bucket, diffs against the catalog, and streams changed files to `register_bundle_content`; one-shot or continuous with `--watch`. |
 | `crates/pgokf-embed` | Standalone embedding companion: computes concept embeddings against an OpenAI-compatible endpoint and streams them in via `set_concept_embedding`. |
 | `crates/pgokf-mcp` | Standalone MCP server exposing the catalog read surface (search, graph, provenance) to AI agents over the Model Context Protocol, on stdio or over HTTP with bearer tokens and roles. |
+| `crates/pgokf-web` | Standalone web UI and JSON API: search with facets, bundle browsing, concept pages, the 3D link graph and graph explorer, the agent-plugin builder, an operations page, and - once an identity mode and a writer connection are configured - the human workflow (upload, edit, review) and an admin page. |
+| `crates/pgokf-workspace` | The workspace injector as a library: a catalog selection becomes an agent-harness tree (Agent Skills package, `AGENTS.md`, prompt bundle, portable Agent Plugin, or generic), with a manifest and a lockfile. Used by the web builder and the MCP `build_workspace_plugin` tool. |
+| `crates/pgokf-companion` | Shared runtime for the companions: the `--watch` loop, the SIGINT/SIGTERM shutdown signal, and the OpenAI-compatible embeddings client. |
 | `crates/pgokf-pgconn` | Shared TLS-capable PostgreSQL connection helper used by the companions. |
 
 Keeping the parser and sync engine free of any pgrx dependency makes them unit

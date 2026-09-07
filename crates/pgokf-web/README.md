@@ -1,9 +1,10 @@
 # pgokf-web
 
 The pgokf catalog's web UI and JSON API: search, browse, inspect, and monitor
-a catalog through the `pgokf_reader` role. A thin, read-only companion that
-holds no catalogue semantics of its own; every list, rank, filter, and
-visibility decision is the database's.
+a catalog through the `pgokf_reader` role - read-only until a writer
+connection and an identity mode are configured (see the human workflow
+below). A thin companion that holds no catalogue semantics of its own;
+every list, rank, filter, and visibility decision is the database's.
 
 ## What it shows
 

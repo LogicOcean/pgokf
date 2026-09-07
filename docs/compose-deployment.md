@@ -28,7 +28,7 @@ operations see [operations.md](operations.md); for the knobs see
 | `embed` | `ghcr.io/logicocean/pgokf-companions:<version>` | `pgokf-embed --watch`: every `OKF_EMBED_INTERVAL` seconds, embeds concepts that have no vector yet against your OpenAI-compatible embeddings server. |
 | `backup` (profile `ops`) | server image | One-shot `pgokf-backup`: verified `pg_dump` archive + roles dump + checksums, with retention. Driven from cron. |
 | `ingest` (profile `ingest`) | companions image | `pgokf-ingest --watch`: mountless ingestion of a bucket-hosted bundle. |
-| `ui` (profile `ui`) | companions image | `pgokf-web`: the read-only web UI and JSON API, published on `PGOKF_UI_BIND:PGOKF_UI_PORT` (loopback `8080` by default). See [the web UI](#the-web-ui). |
+| `ui` (profile `ui`) | companions image | `pgokf-web`: the web UI and JSON API, published on `PGOKF_UI_BIND:PGOKF_UI_PORT` (loopback `8080` by default). Read-only until a writer connection and an identity mode are configured, which turns on the human workflow. See [the web UI](#the-web-ui). |
 | `mcp` (profile `tools`) | companions image | `pgokf-mcp` over stdio for AI-agent clients, as the reader role. |
 | `mcp-http` (profile `mcp-http`) | companions image | The same MCP server over HTTP, on `PGOKF_MCP_BIND:PGOKF_MCP_PORT` (loopback `8081` by default), for agent clients that cannot launch a subprocess. Every request carries a bearer token. See [MCP over HTTP](#mcp-over-http). |
 

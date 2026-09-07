@@ -2,14 +2,14 @@
 
 ## Supported versions
 
-`pgokf` is pre-1.0. Security fixes are made against the latest released
-`0.1.x` line; older tags do not receive backports. Upgrade to the newest
-release to receive fixes.
+`pgokf` is pre-1.0. Security fixes are made against the latest release;
+older tags do not receive backports. Upgrade to the newest release to
+receive fixes.
 
 | Version | Supported |
 | ------- | --------- |
-| latest `0.1.x` | ✅ |
-| older `0.1.x` | ❌ |
+| latest release | ✅ |
+| any older tag | ❌ |
 
 ## Reporting a vulnerability
 

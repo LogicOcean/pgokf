@@ -169,6 +169,14 @@
     if (graph) graph.zoomToFit(500, 48);
   }
 
+  // Tell the renderer how big it is. The camera's aspect - and so where a
+  // label lands - follows from this, so it runs on every size change and on
+  // the full-screen transition rather than only from the observer.
+  function resize() {
+    if (!graph) return;
+    graph.width(canvasHost.clientWidth).height(canvasHost.clientHeight);
+  }
+
   // ---- projection of world positions to overlay pixels --------------------
   function project(camera, x, y, z, width, height) {
     var v = camera.matrixWorldInverse.elements;
@@ -213,8 +221,13 @@
     frame = null;
     if (!graph || root.hidden || root.offsetParent === null) { frame = requestAnimationFrame(placeLabels); return; }
     var camera = graph.camera();
-    var width = canvasHost.clientWidth;
-    var height = canvasHost.clientHeight;
+    // The renderer's own dimensions, not the element's: the camera's
+    // projection matrix was built from these, and reading the DOM here
+    // instead would race the resize - which is what sent every label off
+    // into the distance for a frame or more when the aspect changed on
+    // entering full screen.
+    var width = graph.width() || canvasHost.clientWidth;
+    var height = graph.height() || canvasHost.clientHeight;
     labels.forEach(function (el, id) {
       var node = nodeById(id);
       if (!node || node.x === undefined) { el.style.display = 'none'; return; }
@@ -405,7 +418,12 @@
       else root.classList.toggle('fullscreen');
     });
   });
-  document.addEventListener('fullscreenchange', function () { setTimeout(fit, 400); });
+  document.addEventListener('fullscreenchange', function () {
+    // Size the renderer at once: the observer would get there, but a frame
+    // drawn with the old aspect misplaces every label until it does.
+    resize();
+    setTimeout(function () { resize(); fit(); }, 400);
+  });
   document.addEventListener('keydown', function (event) {
     if (root.hidden || root.offsetParent === null) return;
     var tag = event.target && event.target.tagName;
@@ -515,16 +533,13 @@
       .onEngineStop(function () { if (fitPending) { fitPending = false; fit(); } });
     // Repulsion with a reach limit keeps disconnected bundles from pushing
     // each other out of frame in the catalog-wide picture.
-    graph.d3Force('charge').strength(explorer ? -90 : -140).distanceMax(explorer ? 220 : 400);
-    graph.d3Force('link').distance(function (l) { return 40 + Math.min(40, l.count * 4); });
+    graph.d3Force('charge').strength(explorer ? -140 : -210).distanceMax(explorer ? 300 : 520);
+    graph.d3Force('link').distance(function (l) { return 60 + Math.min(45, l.count * 4.5); });
     canvasHost.addEventListener('dblclick', function () {
       if (selected && !card.hidden) window.location.href = selected.href;
     });
 
-    new ResizeObserver(function () {
-      if (!graph) return;
-      graph.width(canvasHost.clientWidth).height(canvasHost.clientHeight);
-    }).observe(canvasHost);
+    new ResizeObserver(resize).observe(canvasHost);
 
     new MutationObserver(function () {
       var next = palette();

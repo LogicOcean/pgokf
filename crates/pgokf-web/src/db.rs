@@ -786,6 +786,25 @@ impl Db {
             .unwrap_or(false))
     }
 
+    /// Whether a content bundle of this name already exists, in any state.
+    ///
+    /// The extension keys a content bundle on the synthetic path
+    /// `content:<name>`, so a disabled or retired one still collides even
+    /// though [`Db::content_bundles`] hides it - and a collision on the
+    /// "new bundle" path would resync the existing bundle to just the files
+    /// in hand, deleting the rest.
+    ///
+    /// # Errors
+    ///
+    /// A catalog query failure.
+    pub(crate) async fn content_bundle_exists(&self, name: &str) -> Result<bool> {
+        let path = format!("content:{name}");
+        Ok(self
+            .query_opt("SELECT 1 FROM pgokf.bundles WHERE path = $1", &[&path])
+            .await?
+            .is_some())
+    }
+
     /// The content bundles (registered from in-memory content, so the UI
     /// can resync them) that are enabled and not retired.
     pub(crate) async fn content_bundles(&self) -> Result<Vec<ContentBundle>> {
@@ -1300,7 +1319,7 @@ impl Db {
                     coalesce(c.tags, '{{}}'), c.resource, c.body_text, c.file_hash,
                     {}, {}, c.tenant_id, s.raw_content
              FROM pgokf.concepts c
-             JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.retired_at IS NULL
+             JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled AND b.retired_at IS NULL
              LEFT JOIN pgokf.concept_source s
                     ON s.bundle_id = c.bundle_id AND s.concept_id = c.id
              WHERE c.bundle_id = $1 AND c.id = $2",
@@ -1748,7 +1767,7 @@ impl Db {
                              WHEN d.concept_id IS NOT NULL THEN 'reference' END,
                         coalesce(d.media_type, 'text/plain')
                  FROM pgokf.concepts c
-                 JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.retired_at IS NULL
+                 JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled AND b.retired_at IS NULL
                  LEFT JOIN pgokf.skills sk ON sk.bundle_id = c.bundle_id AND sk.concept_id = c.id
                  LEFT JOIN pgokf.scripts s ON s.bundle_id = c.bundle_id AND s.concept_id = c.id
                  LEFT JOIN pgokf.reference_documents d

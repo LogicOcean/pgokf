@@ -487,10 +487,7 @@ impl ByteSource for FilesystemSource {
     }
 
     fn read_bytes(&self, path: &Path) -> Result<Vec<u8>, CatalogError> {
-        let absolute = self.canonical_root.join(path);
-        std::fs::read(&absolute).map_err(|error| {
-            CatalogError::internal(format!("failed to read bundle file: {error}"), path)
-        })
+        read_bounded(&self.canonical_root.join(path), path)
     }
 
     fn root_okf_version(&self) -> Option<String> {
@@ -649,7 +646,6 @@ fn stage_changed_concepts<S: ByteSource>(
         skipped: Vec::new(),
         strict,
         store_source,
-        limits,
     };
     // Manifests first: a resource inherits its owning skill's visibility.
     let (manifests, others): (Vec<&FileMetadata>, Vec<&FileMetadata>) = delta
@@ -745,7 +741,6 @@ struct Staging {
     skipped: Vec<PathBuf>,
     strict: bool,
     store_source: bool,
-    limits: ParserLimits,
 }
 
 impl Staging {
@@ -798,7 +793,9 @@ fn stage_resource(
         file_hash: &metadata.hash,
         modified_at_epoch: modified_at_epoch(metadata),
     };
-    let _ = staging.limits;
+    // The ceiling is enforced by `read_bounded` (filesystem) and by
+    // `validate_arrays` (mountless), where the bytes enter - a resource is
+    // stored verbatim, so there is no later parse to catch an oversized one.
     if metadata.class == FileClass::SkillScript {
         match packages::stage_script(bytes, &context, staging.store_source) {
             Ok(staged) => staging.staged.push(staged),
@@ -1115,6 +1112,82 @@ fn replace_concept_metadata(bundle_id: i64, staged: &[StagedConcept]) -> Result<
 /// absent/invalid `okf_version`, yields `None`, so it can never abort a sync.
 /// Only the bundle-root `index.md` is consulted; nested `index.md` files carry
 /// per-directory bookkeeping and never set the bundle version.
+/// Read one bundle file, bounded, and refusing anything the scan would not
+/// have accepted.
+///
+/// Discovery already measured this path and refused symbolic links, but that
+/// was a separate syscall: between the scan and this read a file can grow
+/// past `max_file_bytes` or be replaced by a link pointing anywhere the
+/// server's own user can read. That mattered less when every byte still had
+/// to survive the concept parser; a package resource under `scripts/`,
+/// `references/` or `assets/` is stored **verbatim** and served back byte
+/// for byte, so this read is the only thing between a bundle directory and
+/// a reader.
+///
+/// The file is therefore opened once and judged through that open
+/// descriptor - a link swapped in after the scan is caught because the file
+/// it names is not the regular file that was measured - and the read itself
+/// is capped, so a file that grows mid-read is refused rather than pulled
+/// wholly into memory.
+fn read_bounded(absolute: &Path, relative: &Path) -> Result<Vec<u8>, CatalogError> {
+    use std::io::Read as _;
+
+    let too_big = |len: u64, limit: u64| {
+        CatalogError::invalid_parameter(
+            format!("bundle file is {len} bytes, over the {limit}-byte max_file_bytes ceiling"),
+            relative,
+        )
+    };
+    let io = |error: std::io::Error| {
+        CatalogError::internal(format!("failed to read bundle file: {error}"), relative)
+    };
+
+    // The link check is on the path, the ceiling on the descriptor: what is
+    // measured is what is read.
+    let listed = std::fs::symlink_metadata(absolute).map_err(io)?;
+    if listed.file_type().is_symlink() {
+        return Err(CatalogError::invalid_parameter(
+            "bundle file is a symbolic link, which the bundle scan does not follow",
+            relative,
+        ));
+    }
+    let file = std::fs::File::open(absolute).map_err(io)?;
+    let opened = file.metadata().map_err(io)?;
+    if !opened.is_file() || !same_file(&listed, &opened) {
+        return Err(CatalogError::invalid_parameter(
+            "bundle file changed identity between the scan and the read",
+            relative,
+        ));
+    }
+    let limit = u64::try_from(guc::max_file_bytes()).unwrap_or(u64::MAX);
+    if opened.len() > limit {
+        return Err(too_big(opened.len(), limit));
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(opened.len()).unwrap_or_default());
+    // One byte past the ceiling, so a file growing under us is refused
+    // rather than read to whatever length it reaches.
+    let read = file
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(io)?;
+    if u64::try_from(read).unwrap_or(u64::MAX) > limit {
+        return Err(too_big(u64::try_from(read).unwrap_or(u64::MAX), limit));
+    }
+    Ok(bytes)
+}
+
+/// Whether two metadata readings describe the same file on disk.
+#[cfg(unix)]
+fn same_file(listed: &std::fs::Metadata, opened: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    listed.dev() == opened.dev() && listed.ino() == opened.ino()
+}
+
+#[cfg(not(unix))]
+fn same_file(listed: &std::fs::Metadata, opened: &std::fs::Metadata) -> bool {
+    listed.len() == opened.len()
+}
+
 fn read_root_okf_version(root: &Path) -> Option<String> {
     let index_path = root.join("index.md");
     let metadata = std::fs::metadata(&index_path).ok()?;

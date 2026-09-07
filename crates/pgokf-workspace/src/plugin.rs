@@ -1167,7 +1167,16 @@ fn validated_command(raw: Option<&str>) -> Result<String> {
     }
 }
 
-/// A base URL for the JSON API: http(s), no whitespace, no trailing slash.
+/// Characters a URL never needs and a shell reads as syntax. The web URL is
+/// written into `okf.sh`, which ships executable and which the generated
+/// guide tells the agent to run, so it is held to the same standard as a
+/// command: quoting is the fix, this is the second lock.
+const SHELL_METACHARACTERS: [char; 14] = [
+    '\'', '"', '`', '$', '\\', '(', ')', '{', '}', ';', '&', '|', '<', '>',
+];
+
+/// A base URL for the JSON API: http(s), no whitespace, no trailing slash,
+/// and nothing a shell would read as syntax.
 fn validated_web_url(raw: Option<&str>) -> Result<Option<String>> {
     let Some(url) = raw.map(str::trim).filter(|u| !u.is_empty()) else {
         return Ok(None);
@@ -1175,11 +1184,14 @@ fn validated_web_url(raw: Option<&str>) -> Result<Option<String>> {
     if (url.starts_with("http://") || url.starts_with("https://"))
         && url
             .chars()
-            .all(|c| c.is_ascii_graphic() && c != '\'' && c != '"' && c != '`')
+            .all(|c| c.is_ascii_graphic() && !SHELL_METACHARACTERS.contains(&c))
     {
         Ok(Some(url.trim_end_matches('/').to_owned()))
     } else {
-        Err(anyhow!("web URL {url:?} is not an http(s) URL"))
+        Err(anyhow!(
+            "web URL {url:?} is not an http(s) URL, or holds a character a shell would read as \
+             syntax"
+        ))
     }
 }
 
@@ -1446,7 +1458,10 @@ const OKF_SH: &str = r#"#!/bin/sh
 # Usage: okf.sh search <query> [limit] | get <bundle_id> <concept_id> | graph <bundle_id> <concept_id> [hops] | bundles | health
 # Needs curl; set OKF_WEB_URL to the pgokf-web base URL (default: __DEFAULT_URL__).
 set -eu
-BASE="${OKF_WEB_URL:-__DEFAULT_URL__}"
+# Single-quoted: the shell expands nothing inside, so the URL below is data
+# whatever it contains.
+OKF_DEFAULT_URL='__DEFAULT_URL__'
+BASE="${OKF_WEB_URL:-$OKF_DEFAULT_URL}"
 enc() { printf '%s' "$1" | od -An -tx1 -v | tr -d ' \n' | sed 's/\([0-9a-f][0-9a-f]\)/%\1/g'; }
 case "${1:-}" in
   search) [ $# -ge 2 ] || { echo 'usage: okf.sh search <query> [limit]' >&2; exit 2; }
@@ -2464,7 +2479,7 @@ mod tests {
         assert!(helper.executable);
         assert!(
             String::from_utf8_lossy(&helper.bytes)
-                .contains("OKF_WEB_URL:-https://okf.example.test}")
+                .contains("OKF_DEFAULT_URL='https://okf.example.test'")
         );
         let doc: serde_json::Value =
             serde_json::from_str(&text(&claude, ".mcp.json")).expect("json");
@@ -2521,6 +2536,20 @@ mod tests {
         }
         assert!(validated_web_url(Some("javascript:alert(1)")).is_err());
         assert!(validated_web_url(Some("http://x y")).is_err());
+        // The web URL is written into okf.sh, which ships executable: a
+        // character a shell reads as syntax never reaches it.
+        for hostile in [
+            "http://h.example/$(id)",
+            "http://h.example/`id`",
+            "http://h.example/${IFS}",
+            "http://h.example/;id",
+            "http://h.example/&id",
+            "http://h.example/|id",
+            "http://h.example/>out",
+            "http://h.example/\\",
+        ] {
+            assert!(validated_web_url(Some(hostile)).is_err(), "{hostile}");
+        }
         assert_eq!(
             validated_web_url(Some("https://okf.example.test/"))
                 .expect("ok")
@@ -2881,6 +2910,31 @@ mod tests {
         assert!(remote.contains("mcp_url: \"https://catalog.example/mcp\""));
         assert!(remote.contains("token_env: OKF_MCP_TOKEN"));
         assert!(!remote.contains("url_env: OKF_PG_URL"));
+    }
+
+    #[test]
+    fn the_helper_script_treats_its_default_url_as_data() {
+        // Arrange: the URL is interpolated into a shell script that ships
+        // executable, so it must land somewhere the shell expands nothing.
+        let script = tools_script(&BuildOptions {
+            web_url: Some("https://catalog.example".to_owned()),
+            ..options(Target::Generic)
+        });
+
+        // Act
+        let assignment = script
+            .lines()
+            .find(|line| line.starts_with("OKF_DEFAULT_URL="))
+            .expect("the default is its own assignment");
+
+        // Assert: single-quoted, and the validator keeps a quote out of it,
+        // so nothing in the value can be read as syntax.
+        assert_eq!(assignment, "OKF_DEFAULT_URL='https://catalog.example'");
+        assert!(script.contains("BASE=\"${OKF_WEB_URL:-$OKF_DEFAULT_URL}\""));
+        assert!(
+            !script.contains("${OKF_WEB_URL:-https://"),
+            "the URL must not sit in an expansion's default branch"
+        );
     }
 
     #[test]

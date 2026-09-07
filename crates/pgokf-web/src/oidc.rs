@@ -31,6 +31,7 @@
 //! when present, and the `nonce` this site sent.
 
 use std::collections::BTreeSet;
+use std::fmt;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -80,7 +81,7 @@ const MAX_METADATA_BYTES: usize = 512 * 1024;
 const PROVIDER_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What the operator configured.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct OidcConfig {
     /// The issuer URL, exactly as the provider declares it.
     pub issuer: String,
@@ -98,6 +99,28 @@ pub(crate) struct OidcConfig {
     pub roles: RoleMapping,
     /// What the sign-in button calls the provider.
     pub provider_name: String,
+}
+
+/// Hand-written so the client secret cannot reach a log line, as the
+/// session signing key cannot: a derived `Debug` on this would print it in
+/// full the first time anything formatted the authenticator.
+impl fmt::Debug for OidcConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OidcConfig")
+            .field("issuer", &self.issuer)
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .field("redirect_uri", &self.redirect_uri)
+            .field("scopes", &self.scopes)
+            .field("subject_claims", &self.subject_claims)
+            .field("groups_claim", &self.groups_claim)
+            .field("roles", &self.roles)
+            .field("provider_name", &self.provider_name)
+            .finish()
+    }
 }
 
 /// The parts of the provider's configuration this site uses.

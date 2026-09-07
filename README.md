@@ -24,7 +24,7 @@ An OKF **bundle** is just a directory of UTF-8 Markdown "concept" documents with
 - 🕰️ **Version history.** Opt-in point-in-time trail: `concept_history` and `concept_as_of('… last Tuesday')`.
 - 🧾 **Audit & lifecycle.** A durable sync log + per-sync change manifest, an exfiltration/access log, reversible **retire**/**purge**, and cross-bundle **dedup**.
 - 📥 **Two ingestion paths.** From a **filesystem** path, or **mountless** - bytes streamed from an S3-compatible object store, with the extension performing zero network I/O.
-- 🧰 **Companion tools.** Object-store ingestion, a reference **embedder**, an **MCP server** that exposes the catalog to AI agents, and a read-only **web UI** with search, browsing, provenance, link graphs, and operations views.
+- 🧰 **Companion tools.** Object-store ingestion, a reference **embedder**, an **MCP server** that exposes the catalog to AI agents, and a **web UI** with search, browsing, provenance, link graphs, an agent-plugin builder, and operations views - read-only until you give it a writer connection and a way of knowing who is asking, which turns on upload, edit and review.
 - 📦 **Operable.** `catalog_stats()` / `health()` / `search_index_status()`, Parquet + source-file exports, `pg_cron` scheduled refresh, `pg_dump`-complete backups, PGXN / `.deb` / `.rpm` packaging, and multi-architecture Docker images (amd64 + arm64, so Apple Silicon too) that bundle pgvector, pg_cron, and pg_textsearch (on the PostgreSQL 17 and 18 images).
 
 See the exact, versioned surface - every function, table, type, GUC, and role - in **[docs/sql-api.md](docs/sql-api.md)** and **[docs/api-stability.md](docs/api-stability.md)**.

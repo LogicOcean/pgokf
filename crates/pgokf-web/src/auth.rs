@@ -667,11 +667,35 @@ impl UsersAuth {
             let record = &users[name];
             let _ = writeln!(text, "{name}:{}:{}", record.role.id(), record.hash);
         }
-        let temp = path.with_extension("tmp");
-        std::fs::write(&temp, text).with_context(|| format!("writing {}", temp.display()))?;
-        std::fs::rename(&temp, path).with_context(|| format!("replacing {}", path.display()))?;
+        Self::write_private(path, &text)?;
         let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
         *guard = LoadedUsers { modified, users };
+        Ok(())
+    }
+
+    /// Replace the users file, atomically and privately.
+    ///
+    /// The file holds every Argon2id hash, so the replacement is created
+    /// readable only by its owner - `fs::write` would create it `0644` and
+    /// the rename would then hand the operator's `chmod 600` away on the
+    /// first edit through the Admin page - and is flushed to disk before it
+    /// takes the name, so a crash leaves either the old file or the new one.
+    fn write_private(path: &Path, text: &str) -> Result<()> {
+        use std::io::Write as _;
+
+        let temp = path.with_extension("tmp");
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options
+            .open(&temp)
+            .with_context(|| format!("writing {}", temp.display()))?;
+        file.write_all(text.as_bytes())
+            .and_then(|()| file.sync_all())
+            .with_context(|| format!("writing {}", temp.display()))?;
+        drop(file);
+        std::fs::rename(&temp, path).with_context(|| format!("replacing {}", path.display()))?;
         Ok(())
     }
 
