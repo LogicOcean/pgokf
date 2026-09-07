@@ -88,12 +88,15 @@
     var l = highlightLink || hoverLink;
     return !!l && (endId(l.source) === node.id || endId(l.target) === node.id);
   }
-  // Re-run the colour and width accessors so a highlight change is drawn.
+  // Re-run the colour, width, size, and particle accessors so a highlight
+  // change is drawn.
   function repaint() {
     if (!graph) return;
     graph.linkColor(graph.linkColor());
     graph.linkWidth(graph.linkWidth());
+    graph.linkDirectionalParticles(graph.linkDirectionalParticles());
     graph.nodeColor(graph.nodeColor());
+    graph.nodeVal(graph.nodeVal());
     labels.forEach(function (el, id) {
       var node = nodeById(id);
       el.classList.toggle('lit', !!node && nodeIsLit(node));
@@ -442,7 +445,7 @@
         var colors = palette();
         highlightLink = null;
         hoverLink = null;
-        graph.nodeColor(function (n) { return nodeIsLit(n) ? cssVar('--graph-lit', '#ff7a1a') : colorFor(n, colors); });
+        graph.nodeColor(function (n) { return colorFor(n, colors); });
         graph.graphData({ nodes: data.nodes, links: data.links });
         rebuildLabels();
         renderLegend();
@@ -479,16 +482,24 @@
         repaint();
         showTip(link ? linkTip(link) : '');
       })
-      .nodeColor(function (n) { return nodeIsLit(n) ? cssVar('--graph-lit', '#ff7a1a') : colorFor(n, colors); })
+      .nodeColor(function (n) { return colorFor(n, colors); })
       .nodeVal(function (n) {
-        if (data && data.color_by !== 'hops') return 2 + Math.min(10, n.degree * 0.6);
-        return n.hops === 0 ? 12 : n.hops === 1 ? 5 : 2.5;
+        // A lit node keeps its colour and grows instead.
+        var boost = nodeIsLit(n) ? 1.8 : 1;
+        if (data && data.color_by !== 'hops') return boost * (2 + Math.min(10, n.degree * 0.6));
+        return boost * (n.hops === 0 ? 12 : n.hops === 1 ? 5 : 2.5);
       })
       .nodeResolution(16)
       .nodeOpacity(0.95)
-      .linkColor(function (l) { return linkIsLit(l) ? cssVar('--graph-lit', '#ff7a1a') : colors.link; })
+      // A lit link glows: a wide pale halo in the accent tint (nothing like
+      // a node colour) with bright particles running along it.
+      .linkColor(function (l) { return linkIsLit(l) ? cssVar('--graph-glow', '#9cc2ff') : colors.link; })
       .linkOpacity(0.6)
-      .linkWidth(function (l) { return (linkIsLit(l) ? 3.5 : 0) + Math.min(3, (touch ? 1.2 : 0.5) + l.count * 0.5); })
+      .linkWidth(function (l) { return (linkIsLit(l) ? 5 : 0) + Math.min(3, (touch ? 1.2 : 0.5) + l.count * 0.5); })
+      .linkDirectionalParticles(function (l) { return linkIsLit(l) ? 6 : 0; })
+      .linkDirectionalParticleWidth(3.2)
+      .linkDirectionalParticleSpeed(0.012)
+      .linkDirectionalParticleColor(function () { return cssVar('--graph-glow-core', '#ffffff'); })
       .linkHoverPrecision(touch ? 8 : 4)
       .linkDirectionalArrowLength(4)
       .linkDirectionalArrowRelPos(1)
@@ -516,8 +527,8 @@
     new MutationObserver(function () {
       var next = palette();
       graph.backgroundColor(next.background);
-      graph.nodeColor(function (n) { return nodeIsLit(n) ? cssVar('--graph-lit', '#ff7a1a') : colorFor(n, next); });
-      graph.linkColor(function (l) { return linkIsLit(l) ? cssVar('--graph-lit', '#ff7a1a') : next.link; });
+      graph.nodeColor(function (n) { return colorFor(n, next); });
+      graph.linkColor(function (l) { return linkIsLit(l) ? cssVar('--graph-glow', '#9cc2ff') : next.link; });
       renderLegend();
     }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
   }

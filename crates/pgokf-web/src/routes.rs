@@ -463,10 +463,13 @@ fn redirect(to: &str) -> Response {
     (StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response()
 }
 
-/// A `next` parameter that stays on this site: a path, never a URL.
+/// A `next` parameter that stays on this site: one path, never a URL. A
+/// second slash or a backslash (which browsers read as a slash) would make
+/// it a link to another host, and control characters have no place in it.
 fn safe_next(next: &str) -> String {
     let next = next.trim();
-    if next.starts_with('/') && !next.starts_with("//") && !next.contains("://") {
+    let plain = next.chars().all(|c| !c.is_control() && c != '\\');
+    if plain && next.starts_with('/') && !next.starts_with("//") && !next.contains("://") {
         next.to_owned()
     } else {
         "/".to_owned()
@@ -520,6 +523,8 @@ pub(crate) struct Shell {
     pub can_upload: bool,
     pub can_review: bool,
     pub can_admin: bool,
+    /// Whether this server can end the session (a local users file).
+    pub can_sign_out: bool,
 }
 
 /// The signed-in person as the header shows them.
@@ -550,6 +555,7 @@ impl Shell {
             can_upload: workflow && session.allows(Role::Uploader),
             can_review: workflow && session.allows(Role::Approver),
             can_admin: session.allows(Role::Admin),
+            can_sign_out: session.mode == Mode::Users && session.principal.is_some(),
         }
     }
 
@@ -569,6 +575,7 @@ impl Shell {
             can_upload: false,
             can_review: false,
             can_admin: false,
+            can_sign_out: false,
         }
     }
 }
@@ -2401,9 +2408,9 @@ fn validated_directory(dir: &str) -> Result<String, AppError> {
     let dir = dir.trim().trim_matches('/');
     let plain = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-');
     let ok = dir.is_empty()
-        || dir
-            .split('/')
-            .all(|seg| !seg.is_empty() && seg != "." && seg != ".." && seg.chars().all(plain));
+        || dir.split('/').all(|seg| {
+            !seg.is_empty() && seg != "." && seg != ".." && seg != ".git" && seg.chars().all(plain)
+        });
     if ok && dir.len() <= 200 {
         Ok(dir.to_owned())
     } else {
@@ -2554,12 +2561,21 @@ async fn login_submit(
         }
         return Ok(response);
     }
-    // A pause between attempts, so guessing costs time.
+    // A pause between attempts, so guessing costs time; after a few
+    // failures the name waits out a cooldown.
     tokio::time::sleep(Duration::from_millis(400)).await;
+    let error = match users.cooldown(&form.username) {
+        Some(wait) => format!(
+            "Too many failed attempts for this name; try again in {} second{}.",
+            wait.as_secs().max(1),
+            if wait.as_secs().max(1) == 1 { "" } else { "s" }
+        ),
+        None => "Unknown user name or wrong password.".to_owned(),
+    };
     let mut response = html(&LoginPage {
         shell: Shell::new(&app, &session, "Sign in", "login"),
         next: safe_next(&form.next),
-        error: Some("Unknown user name or wrong password.".to_owned()),
+        error: Some(error),
     })?;
     *response.status_mut() = StatusCode::UNAUTHORIZED;
     Ok(response)
@@ -4825,6 +4841,13 @@ mod tests {
         assert!(validated_file_name(".md").is_err());
         assert_eq!(safe_next("/bundles/3"), "/bundles/3");
         assert_eq!(safe_next("//evil.example"), "/");
+        assert_eq!(safe_next("/\\evil.example"), "/");
+        assert_eq!(safe_next("/x\r\nSet-Cookie: a=b"), "/");
+        assert!(validated_directory(".git/hooks").is_err());
+        assert_eq!(
+            validated_directory(".github/skills").ok().expect("ok"),
+            ".github/skills"
+        );
         assert_eq!(safe_next("https://evil.example/"), "/");
         assert_eq!(safe_next(""), "/");
     }

@@ -70,10 +70,17 @@ every variable unconditionally.
   the proxy's own addresses, or a local users file (Argon2id hashes) with a
   login form and an HMAC-signed, `HttpOnly`, `SameSite=Lax` session cookie
   whose role is re-read from the file on every request, so removing a user
-  takes effect at once. State-changing requests are refused when the browser
-  says they came from another site (fetch metadata, else `Origin` against
-  `Host`). Bind the UI to loopback (the default) and expose it through a
-  reverse proxy that terminates TLS, or keep it on a private network.
+  takes effect at once, and a changed password ends every session opened
+  before it. Sign-ins are throttled per name (after five failures each
+  attempt waits out a doubling cooldown), and an unknown name costs the
+  same time as a wrong password. State-changing requests are refused when
+  the browser says they came from another site (fetch metadata, else
+  `Origin` against `Host`). In `header` mode the proxy MUST set the
+  identity headers itself and never pass a client's copy through; the UI
+  believes them only from the proxy's addresses, which is why
+  `--auth-trusted-proxy` is required. Bind the UI to loopback (the default)
+  and expose it through a reverse proxy that terminates TLS, or keep it on
+  a private network.
 - A verification is granted only by an approver: a `verified` list typed
   into an uploaded or edited document is set aside under
   `superseded_verifications` (with who, when, and why), never believed, so
@@ -122,6 +129,11 @@ probe answer an anonymous request, so signing out ends access. Everyone
 signed in has a **profile** page: their identity, what their role allows,
 the documents they produced and verified, and (in `users` mode) a password
 change.
+
+Two limits worth knowing: the frontmatter is re-serialized when a document
+is saved, approved, or sent back (key order is kept; YAML comments are
+not), and bundle changes are serialized inside one UI process, so run one
+instance of the workflow at a time.
 
 Every decision is an ordinary OKF field in the document itself (`generated`,
 `author`, `verified`, `status`, `reviews`, `superseded_verifications`), so

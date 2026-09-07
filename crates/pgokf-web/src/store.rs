@@ -116,9 +116,10 @@ impl DocumentStore {
 }
 
 /// The file `path` names inside `root`, refusing anything that could
-/// leave it: absolute paths, `..` segments, hidden segments, and a
-/// symbolic link anywhere along the way (a link could point outside). A
-/// harmless `.` segment is dropped, as `Path::components` does.
+/// leave it or reach a git directory: absolute paths, `..` segments,
+/// `.git`, and a symbolic link anywhere along the way (a link could point
+/// outside). A harmless `.` segment is dropped, as `Path::components`
+/// does; other hidden directories (`.github/skills`) are ordinary.
 pub(crate) fn confined(root: &Path, path: &str) -> Result<PathBuf> {
     let relative = Path::new(path);
     if relative.as_os_str().is_empty() {
@@ -128,8 +129,8 @@ pub(crate) fn confined(root: &Path, path: &str) -> Result<PathBuf> {
     for component in relative.components() {
         match component {
             Component::Normal(segment) => {
-                if segment.to_string_lossy().starts_with('.') {
-                    bail!("{path:?} has a hidden or relative segment");
+                if segment == ".git" {
+                    bail!("{path:?} reaches into a git directory");
                 }
                 file.push(segment);
                 if let Ok(meta) = std::fs::symlink_metadata(&file)
@@ -232,7 +233,11 @@ mod tests {
             confined(&root, "docs/./a.md").expect("a harmless dot"),
             root.join("docs/a.md")
         );
-        assert!(confined(&root, ".hidden/a.md").is_err());
+        assert!(confined(&root, ".git/hooks/pre-commit.md").is_err());
+        assert_eq!(
+            confined(&root, ".github/skills/x/SKILL.md").expect("hidden dirs are ordinary"),
+            root.join(".github/skills/x/SKILL.md")
+        );
         assert!(confined(&root, "link/a.md").is_err(), "through a symlink");
         assert!(confined(&root, "").is_err());
         let _ = std::fs::remove_dir_all(&root);

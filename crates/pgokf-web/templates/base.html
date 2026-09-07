@@ -37,7 +37,7 @@
   </nav>
   <div class="topmeta">
     {% if let Some(t) = shell.tenant %}<span class="badge tenant" title="Session tenant (pgokf.tenant)">tenant: {{ t }}</span>{% endif %}
-    {% if let Some(u) = shell.user %}<a class="user-menu" href="/profile" title="Your profile: signed in as {{ u.display }} ({{ u.role }})"><span class="user-name">{{ u.display }}</span> <span class="pill muted">{{ u.role }}</span></a>{% if shell.can_admin %}<a class="btn ghost small{% if shell.nav.as_str() == "admin" %} active{% endif %}" href="/admin">Admin</a>{% endif %}{% if shell.signin_url.is_none() %}<form method="post" action="/logout" class="inline"><button type="submit" class="btn ghost small">Sign out</button></form>{% endif %}{% else if let Some(url) = shell.signin_url %}<a class="btn ghost small" href="{{ url }}">Sign in</a>{% endif %}
+    {% if let Some(u) = shell.user %}<a class="user-menu" href="/profile" title="Your profile: signed in as {{ u.display }} ({{ u.role }})"><span class="user-name">{{ u.display }}</span> <span class="pill muted">{{ u.role }}</span></a>{% if shell.can_admin %}<a class="btn ghost small{% if shell.nav.as_str() == "admin" %} active{% endif %}" href="/admin">Admin</a>{% endif %}{% if shell.can_sign_out %}<form method="post" action="/logout" class="inline"><button type="submit" class="btn ghost small">Sign out</button></form>{% endif %}{% else if let Some(url) = shell.signin_url %}<a class="btn ghost small" href="{{ url }}">Sign in</a>{% endif %}
     <button type="button" class="btn ghost icon js-only" id="pgokf-theme" aria-label="Toggle dark mode" title="Toggle dark mode">◐</button>
   </div>
 </header>

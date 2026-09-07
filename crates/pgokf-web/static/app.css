@@ -433,10 +433,12 @@ html[data-js] [data-needs][hidden] { display: none; }
 }
 
 /* ---- edge highlighting ---------------------------------------------------- */
-:root { --graph-lit: #ff7a1a; }
-:root[data-theme="dark"] { --graph-lit: #ffa04d; }
-@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --graph-lit: #ffa04d; } }
-.graph3d-label.lit { border: 1px solid var(--graph-lit); font-weight: 600; opacity: 1 !important; }
+/* The highlight is a glow, not a colour change: a pale accent halo with a
+   white core, so it never reads as one of the node colours. */
+:root { --graph-glow: #9cc2ff; --graph-glow-core: #ffffff; }
+:root[data-theme="dark"] { --graph-glow: #bcd4ff; --graph-glow-core: #ffffff; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --graph-glow: #bcd4ff; --graph-glow-core: #ffffff; } }
+.graph3d-label.lit { border: 1px solid var(--graph-glow); box-shadow: 0 0 0 3px color-mix(in srgb, var(--graph-glow) 45%, transparent), 0 0 12px var(--graph-glow); font-weight: 600; opacity: 1 !important; }
 .graph3d-card { max-height: calc(100% - 1.2rem); overflow: auto; }
 .graph3d-card .card-close { position: absolute; right: .35rem; top: .2rem; border: 0; background: none; font-size: 1.1rem; line-height: 1; cursor: pointer; color: var(--muted); }
 .graph3d-card .connections { list-style: none; padding: 0; }

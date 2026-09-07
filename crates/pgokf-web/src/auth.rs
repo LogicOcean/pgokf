@@ -20,8 +20,8 @@ use std::collections::HashMap;
 use std::fmt::{self, Write as _};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Mutex, RwLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
@@ -31,7 +31,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 
 /// What a person may do, as a ladder: each role holds every role below it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -298,7 +298,28 @@ pub(crate) struct UsersAuth {
     secret: Vec<u8>,
     session_seconds: u64,
     cookie_secure: bool,
+    /// Failed sign-ins per user name, for the throttle.
+    failures: Mutex<HashMap<String, Failures>>,
 }
+
+/// Recent failed sign-ins for one name: after a few, each further attempt
+/// waits out a cooldown that doubles, so guessing cannot run in parallel.
+#[derive(Debug, Clone, Copy)]
+struct Failures {
+    count: u32,
+    until: Instant,
+}
+
+/// Failures before the cooldown starts.
+const FREE_FAILURES: u32 = 5;
+/// The longest cooldown between attempts.
+const MAX_COOLDOWN: Duration = Duration::from_mins(15);
+/// Failures are forgotten after this long without one.
+const FAILURE_MEMORY: Duration = Duration::from_hours(1);
+
+/// A hash that is verified when the name is unknown, so an unknown name
+/// costs the same time as a wrong password (no name enumeration by timing).
+const DECOY_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAAAAAAAA$Y6DPgaHqK98VOJvF2yIP2m1TPVK0Nk2K7jBCqZqTdxU";
 
 /// The users file as last read, with the modification time it had.
 #[derive(Debug, Clone)]
@@ -310,9 +331,11 @@ struct LoadedUsers {
 /// The session cookie's name.
 pub(crate) const SESSION_COOKIE: &str = "pgokf_session";
 
-/// What a session cookie carries: the subject and when it expires. The
-/// role is looked up in the users file on every request, so removing or
-/// demoting a user takes effect at once.
+/// What a session cookie carries: the subject, when it expires, and a
+/// fingerprint of the password hash the session was opened with. The role
+/// is looked up in the users file on every request, so removing or
+/// demoting a user takes effect at once, and a changed password ends every
+/// session opened before it.
 #[derive(Debug, Serialize, Deserialize)]
 struct SessionClaims {
     #[serde(rename = "s")]
@@ -321,6 +344,16 @@ struct SessionClaims {
     expires: u64,
     #[serde(rename = "n")]
     nonce: String,
+    #[serde(rename = "p", default)]
+    password_fingerprint: String,
+}
+
+/// A short digest of a stored hash: enough to tell a session opened under
+/// an old password from one under the current one, without carrying the
+/// hash itself.
+fn fingerprint(hash: &str) -> String {
+    let digest = Sha256::digest(hash.as_bytes());
+    URL_SAFE_NO_PAD.encode(&digest[..12])
 }
 
 impl UsersAuth {
@@ -345,6 +378,7 @@ impl UsersAuth {
             secret,
             session_seconds,
             cookie_secure,
+            failures: Mutex::new(HashMap::new()),
         })
     }
 
@@ -527,18 +561,70 @@ impl UsersAuth {
         Ok(users)
     }
 
-    /// The person a login names, when the password verifies.
+    /// The person a sign-in names, when the password verifies. A name under
+    /// cooldown is refused without checking; an unknown name still costs a
+    /// hash verification; a failure counts towards the cooldown.
     pub(crate) fn verify(&self, name: &str, password: &str) -> Option<Principal> {
-        let record = self.record(name.trim())?;
-        let parsed = PasswordHash::new(&record.hash).ok()?;
-        Argon2::default()
-            .verify_password(password.as_bytes(), &parsed)
-            .ok()?;
-        Some(Principal {
-            subject: name.trim().to_owned(),
-            display: name.trim().to_owned(),
-            role: record.role,
-        })
+        let name = name.trim();
+        if self.throttled(name) {
+            return None;
+        }
+        let record = self.record(name);
+        let hash = record.as_ref().map_or(DECOY_HASH, |r| r.hash.as_str());
+        let verified = PasswordHash::new(hash).is_ok_and(|parsed| {
+            Argon2::default()
+                .verify_password(password.as_bytes(), &parsed)
+                .is_ok()
+        });
+        match record {
+            Some(record) if verified => {
+                self.forget_failures(name);
+                Some(Principal {
+                    subject: name.to_owned(),
+                    display: name.to_owned(),
+                    role: record.role,
+                })
+            }
+            _ => {
+                self.count_failure(name);
+                None
+            }
+        }
+    }
+
+    /// How long a name must wait before its next attempt is even checked.
+    pub(crate) fn cooldown(&self, name: &str) -> Option<Duration> {
+        let failures = self.failures.lock().ok()?;
+        let entry = failures.get(name.trim())?;
+        entry.until.checked_duration_since(Instant::now())
+    }
+
+    fn throttled(&self, name: &str) -> bool {
+        self.cooldown(name).is_some()
+    }
+
+    fn count_failure(&self, name: &str) {
+        let Ok(mut failures) = self.failures.lock() else {
+            return;
+        };
+        let now = Instant::now();
+        failures.retain(|_, f| now.duration_since(f.until) < FAILURE_MEMORY);
+        let entry = failures.entry(name.to_owned()).or_insert(Failures {
+            count: 0,
+            until: now,
+        });
+        entry.count += 1;
+        if entry.count > FREE_FAILURES {
+            let doublings = (entry.count - FREE_FAILURES).min(10);
+            let wait = Duration::from_secs(2_u64.pow(doublings)).min(MAX_COOLDOWN);
+            entry.until = now + wait;
+        }
+    }
+
+    fn forget_failures(&self, name: &str) {
+        if let Ok(mut failures) = self.failures.lock() {
+            failures.remove(name);
+        }
     }
 
     /// A `Set-Cookie` value that signs the person in.
@@ -547,6 +633,10 @@ impl UsersAuth {
             subject: principal.subject.clone(),
             expires: now_unix() + self.session_seconds,
             nonce: URL_SAFE_NO_PAD.encode(random_bytes(12)?),
+            password_fingerprint: self
+                .record(&principal.subject)
+                .map(|r| fingerprint(&r.hash))
+                .unwrap_or_default(),
         };
         let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims)?);
         let tag = URL_SAFE_NO_PAD.encode(self.sign(payload.as_bytes()));
@@ -578,6 +668,10 @@ impl UsersAuth {
             return None;
         }
         let record = self.record(&claims.subject)?;
+        if claims.password_fingerprint != fingerprint(&record.hash) {
+            // The password changed since this session was opened.
+            return None;
+        }
         Some(Principal {
             subject: claims.subject.clone(),
             display: claims.subject,
@@ -848,6 +942,7 @@ mod tests {
             secret,
             session_seconds: 3600,
             cookie_secure: false,
+            failures: Mutex::new(HashMap::new()),
         }
     }
 
@@ -996,6 +1091,83 @@ mod tests {
         let text = std::fs::read_to_string(&path).expect("reads");
         assert!(text.contains("bob:editor:$argon2id$"), "{text}");
         assert!(!text.contains("alice"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn repeated_failures_earn_a_cooldown_and_a_success_clears_it() {
+        // Arrange
+        let auth = users_auth();
+
+        // Act: five free failures, then the sixth starts the cooldown.
+        for _ in 0..FREE_FAILURES {
+            assert!(auth.verify("alice", "wrong").is_none());
+        }
+        assert!(auth.cooldown("alice").is_none(), "still free");
+        assert!(auth.verify("alice", "wrong").is_none());
+        let waiting = auth.cooldown("alice");
+        let refused_even_when_right = auth.verify("alice", "correct horse");
+
+        // Assert
+        assert!(waiting.is_some(), "a cooldown started");
+        assert!(
+            refused_even_when_right.is_none(),
+            "not checked during the cooldown"
+        );
+        assert!(
+            auth.verify("bob", "correct horse").is_some(),
+            "other names are unaffected"
+        );
+        auth.forget_failures("alice");
+        assert!(auth.verify("alice", "correct horse").is_some());
+        assert!(
+            auth.cooldown("alice").is_none(),
+            "a success clears the record"
+        );
+        assert!(
+            auth.verify("nobody", "x").is_none(),
+            "an unknown name costs a verification too"
+        );
+    }
+
+    #[test]
+    fn a_changed_password_ends_the_sessions_opened_before_it() {
+        // Arrange
+        let dir = std::env::temp_dir().join(format!("pgokf-users-fp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("users");
+        std::fs::write(
+            &path,
+            format!(
+                "alice:editor:{}\n",
+                hash_password("first password").unwrap()
+            ),
+        )
+        .expect("write");
+        let auth = UsersAuth::load(&path, vec![7_u8; 32], 3600, false).expect("loads");
+        let alice = auth.verify("alice", "first password").expect("verifies");
+        let cookie = auth.issue_cookie(&alice).expect("issues");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(cookie.split(';').next().unwrap()).unwrap(),
+        );
+        assert!(auth.identify(&headers).is_some());
+
+        // Act
+        auth.set_password("alice", "second password!")
+            .expect("changes");
+
+        // Assert
+        assert!(auth.identify(&headers).is_none(), "the old session is over");
+        let again = auth.verify("alice", "second password!").expect("verifies");
+        let fresh = auth.issue_cookie(&again).expect("issues");
+        let mut fresh_headers = HeaderMap::new();
+        fresh_headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(fresh.split(';').next().unwrap()).unwrap(),
+        );
+        assert!(auth.identify(&fresh_headers).is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
