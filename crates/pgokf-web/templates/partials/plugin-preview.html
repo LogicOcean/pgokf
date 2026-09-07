@@ -10,7 +10,7 @@
   </div>
   <div class="result-cta">
     <a class="btn primary big" href="{{ p.download_url }}" download>Download {{ form.name }}.zip</a>
-    <span class="muted small">Unpack at the workspace root. Reading the sources for the download is recorded in the catalog's access log.</span>
+    <span class="muted small">{{ p.install_note }} Reading the sources for the download is recorded in the catalog's access log.</span>
   </div>
 </div>
 <div class="two-col">
@@ -39,6 +39,6 @@
 {% else if !form.has_selection %}
 <div class="empty-state">
   <h3>Nothing selected yet</h3>
-  <p>Pick a bundle, a type, a tag, a search, or concept ids in step 2. The preview appears here as soon as something matches.</p>
+  <p>Pick a bundle, a type, a tag, a search, or specific files in step 2. The preview appears here as soon as something matches.</p>
 </div>
 {% endif %}

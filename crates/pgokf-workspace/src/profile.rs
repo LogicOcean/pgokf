@@ -5,12 +5,27 @@
 //! Every layout here was read from the client's own documentation when the
 //! adapter was written (the `verified` field records the date and source);
 //! the builder refuses a target it does not know rather than guess one.
+//!
+//! The first profile is the portable one: an Agent Plugin directory as the
+//! Agent Plugins Specification 1.0.0 (<https://github.com/agentplugins/agent-plugins-spec>)
+//! defines it: `plugin.json` at the root, skills under `skills/`, MCP servers
+//! in `mcp.json`. Any client that implements that specification loads it
+//! from a directory path; the per-harness profiles remain for clients that
+//! read their own layouts.
 
 use std::fmt;
 
-/// One of the three shapes a workspace tree can take (spec §21.2).
+/// The canonical `$schema` of an Agent Plugins 1.0.0 `plugin.json`.
+pub const AGENT_PLUGIN_SCHEMA: &str = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json";
+/// The canonical `$schema` of an Agent Plugins 1.0.0 `mcp.json`.
+pub const AGENT_PLUGIN_MCP_SCHEMA: &str = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json";
+
+/// One of the shapes a workspace tree can take (spec §21.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shape {
+    /// A self-contained Agent Plugin directory (Agent Plugins 1.0.0):
+    /// `<name>/plugin.json`, `<name>/skills/<skill>/...`, `<name>/mcp.json`.
+    AgentPlugin,
     /// A directory the harness scans for Agent Skills packages
     /// (`<root>/<name>/SKILL.md` plus `references/`).
     Skills,
@@ -27,6 +42,9 @@ pub enum Shape {
 /// A target harness the builder can write for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Target {
+    /// A portable Agent Plugin directory for any client that implements the
+    /// Agent Plugins Specification.
+    AgentPlugin,
     ClaudeCode,
     Codex,
     HermesAgent,
@@ -56,6 +74,11 @@ pub enum EnvRef {
     /// The harness expands nothing: a placeholder the user replaces in a
     /// file that lives outside the repository (Hermes).
     Placeholder,
+    /// Agent Plugins: the server reads its connection string from an env
+    /// file under the client-managed `${PLUGIN_DATA}` directory, the only
+    /// expansion the specification defines; nothing about the catalog
+    /// appears in the package.
+    PluginData,
 }
 
 /// The file format of a harness's MCP configuration.
@@ -67,6 +90,8 @@ pub enum McpFormat {
     CodexToml,
     /// A YAML fragment to merge under Hermes's `mcp_servers:` key.
     HermesYaml,
+    /// Agent Plugins `mcp.json`: `$schema` plus typed `mcpServers` entries.
+    AgentPluginJson,
 }
 
 /// Where a harness reads MCP servers from, as its documentation states.
@@ -153,6 +178,23 @@ impl fmt::Display for Target {
 }
 
 const PROFILES: &[Profile] = &[
+    Profile {
+        target: Target::AgentPlugin,
+        id: "agent-plugin",
+        label: "Agent Plugin (portable, Agent Plugins 1.0.0)",
+        shape: Shape::AgentPlugin,
+        root: "",
+        source: "https://github.com/agentplugins/agent-plugins-spec (spec/1.0.0.md: plugin.json at the root, skills/<name>/SKILL.md, mcp.json)",
+        verified: "2026-09-07",
+        notes: "A self-contained plugin directory for any client that implements the Agent Plugins Specification; install it wherever that client loads plugins from. The MCP server reads its connection string from ${PLUGIN_DATA}/pgokf.env, which you create once.",
+        mcp: Some(McpSpec {
+            path: "mcp.json",
+            format: McpFormat::AgentPluginJson,
+            env_ref: EnvRef::PluginData,
+            auto_loaded: true,
+            source: "https://github.com/agentplugins/agent-plugins-spec (spec/1.0.0.md §7.2: mcp.json, stdio command as one token, ${PLUGIN_DATA} expansion in args)",
+        }),
+    },
     Profile {
         target: Target::ClaudeCode,
         id: "claude-code",
@@ -355,6 +397,7 @@ mod tests {
     fn every_target_has_a_profile() {
         // Arrange
         let targets = [
+            Target::AgentPlugin,
             Target::ClaudeCode,
             Target::Codex,
             Target::HermesAgent,
@@ -377,6 +420,7 @@ mod tests {
     #[test]
     fn unknown_targets_are_refused_rather_than_guessed() {
         // Arrange & Act & Assert
+        assert_eq!(Target::parse("agent-plugin"), Some(Target::AgentPlugin));
         assert_eq!(Target::parse("claude-code"), Some(Target::ClaudeCode));
         assert_eq!(Target::parse(" codex "), Some(Target::Codex));
         assert_eq!(Target::parse("windsurf"), None);

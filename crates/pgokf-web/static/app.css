@@ -307,6 +307,27 @@ html:not([data-js]) .tabs [role=tabpanel] { margin-bottom: 1.5rem; }
 .chip:hover { border-color: var(--accent); }
 .chip[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .chip[aria-pressed="true"] .count { color: inherit; opacity: .8; }
+.picker { margin-top: .25rem; }
+.picker > summary { cursor: pointer; font-weight: 600; font-size: .9em; color: var(--muted); margin-bottom: .6rem; }
+.picker-body { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: .7rem .8rem .2rem; margin-bottom: .9rem; background: var(--surface); }
+.picker-toolbar { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; margin-bottom: .5rem; }
+.picker-bundle { display: flex; gap: .4rem; align-items: center; font-size: .9em; font-weight: 600; color: var(--muted); }
+.picker-bundle select { font-weight: 400; color: var(--text); }
+.picker-filter { flex: 1; min-width: 12rem; }
+.picker-tree { max-height: 320px; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: .35rem .5rem; margin-bottom: .8rem; font-size: .9em; background: var(--surface-2); }
+.picker-tree:empty { display: none; }
+.picker-tree ul { list-style: none; margin: 0; padding-left: 1.1rem; }
+.picker-tree > ul { padding-left: 0; }
+.picker-tree li { padding: .1rem 0; }
+.picker-tree details > summary { cursor: pointer; font-weight: 600; color: var(--muted); list-style: none; }
+.picker-tree details > summary::before { content: "▸ "; font-size: .8em; }
+.picker-tree details[open] > summary::before { content: "▾ "; }
+.picker-tree label { display: flex; gap: .45rem; align-items: baseline; cursor: pointer; }
+.picker-tree label:hover { color: var(--accent); }
+.picker-tree .pick-path { font-family: var(--mono); font-size: .92em; }
+.picker-tree .pick-title { color: var(--muted); }
+.picker-tree .pill { font-size: .72em; }
+.picker-tree li[hidden] { display: none; }
 .advanced { margin-top: .25rem; }
 .advanced > summary { cursor: pointer; font-weight: 600; font-size: .9em; color: var(--muted); margin-bottom: .6rem; }
 .options { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; margin-bottom: .9rem; }

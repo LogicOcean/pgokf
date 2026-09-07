@@ -114,6 +114,145 @@
     builder.addEventListener('change', function () { syncTarget(); syncExtras(); });
     syncTarget();
     syncExtras();
+    initPicker(builder);
+  }
+
+  // ---- file picker: browse a bundle, tick files, feed the picks field -------
+  function initPicker(form) {
+    var picker = form.querySelector('[data-picker]');
+    var picks = document.getElementById('p-picks');
+    if (!picker || !picks) return;
+    var bundleSelect = picker.querySelector('[data-picker-bundle]');
+    var filter = picker.querySelector('[data-picker-filter]');
+    var status = picker.querySelector('[data-picker-status]');
+    var tree = picker.querySelector('[data-picker-tree]');
+    var loaded = null;   // { bundleId, entries }
+    var openDirs = {};   // dir -> true/false once the user toggled it
+    var pickedSet = function () {
+      var set = {};
+      picks.value.split('\n').forEach(function (line) {
+        line = line.trim();
+        if (line) set[line] = true;
+      });
+      return set;
+    };
+    var writePicks = function (set) {
+      picks.value = Object.keys(set).join('\n');
+      picks.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    var refOf = function (entry) { return loaded.bundleId + ':' + entry.id; };
+    var render = function () {
+      tree.textContent = '';
+      if (!loaded) return;
+      var set = pickedSet();
+      var needle = (filter.value || '').trim().toLowerCase();
+      // Group by directory (the part of the path before the file name).
+      var dirs = {};
+      var order = [];
+      loaded.entries.forEach(function (entry) {
+        if (needle && (entry.path + ' ' + (entry.title || '')).toLowerCase().indexOf(needle) === -1) return;
+        var slash = entry.path.lastIndexOf('/');
+        var dir = slash === -1 ? '' : entry.path.slice(0, slash);
+        if (!dirs[dir]) { dirs[dir] = []; order.push(dir); }
+        dirs[dir].push(entry);
+      });
+      // Code-unit order puts a package directory before its subdirectories.
+      order.sort();
+      var root = document.createElement('ul');
+      order.forEach(function (dir) {
+        var li = document.createElement('li');
+        var details = document.createElement('details');
+        details.setAttribute('data-dir', dir);
+        details.open = Object.prototype.hasOwnProperty.call(openDirs, dir)
+          ? openDirs[dir]
+          : (!!needle || order.length <= 6);
+        var summary = document.createElement('summary');
+        summary.textContent = (dir || '(bundle root)') + ' ';
+        var count = document.createElement('span');
+        count.className = 'muted small';
+        count.textContent = dirs[dir].length;
+        summary.appendChild(count);
+        details.appendChild(summary);
+        var list = document.createElement('ul');
+        dirs[dir].forEach(function (entry) {
+          var item = document.createElement('li');
+          var label = document.createElement('label');
+          var box = document.createElement('input');
+          box.type = 'checkbox';
+          box.setAttribute('data-pick', refOf(entry));
+          box.checked = !!set[refOf(entry)];
+          var path = document.createElement('span');
+          path.className = 'pick-path';
+          path.textContent = entry.path.slice(dir ? dir.length + 1 : 0);
+          label.appendChild(box);
+          label.appendChild(path);
+          if (entry.package) {
+            var pill = document.createElement('span');
+            pill.className = 'pill type';
+            pill.textContent = 'skill package';
+            label.appendChild(pill);
+          } else if (entry.package_of) {
+            var member = document.createElement('span');
+            member.className = 'pill muted';
+            member.textContent = entry.type === 'Script' ? 'script' : 'reference';
+            label.appendChild(member);
+          } else if (entry.type) {
+            var type = document.createElement('span');
+            type.className = 'pill muted';
+            type.textContent = entry.type;
+            label.appendChild(type);
+          }
+          var fileName = entry.path.slice(dir ? dir.length + 1 : 0);
+          if (entry.title && entry.title !== entry.id && entry.title !== fileName) {
+            var title = document.createElement('span');
+            title.className = 'pick-title';
+            title.textContent = entry.title;
+            label.appendChild(title);
+          }
+          item.appendChild(label);
+          list.appendChild(item);
+        });
+        details.appendChild(list);
+        li.appendChild(details);
+        root.appendChild(li);
+      });
+      tree.appendChild(root);
+      var picked = Object.keys(set).length;
+      status.textContent = (loaded.truncated ? 'first ' + loaded.entries.length + ' files shown; ' : loaded.entries.length + ' files; ')
+        + picked + ' picked';
+    };
+    var load = function () {
+      var bundleId = bundleSelect.value;
+      if (!bundleId) { loaded = null; render(); return; }
+      status.textContent = 'loading…';
+      fetch('/api/bundles/' + encodeURIComponent(bundleId) + '/tree', { headers: { Accept: 'application/json' } })
+        .then(function (response) { if (!response.ok) throw new Error(response.status); return response.json(); })
+        .then(function (data) {
+          loaded = { bundleId: bundleId, entries: data.entries || [], truncated: !!data.truncated };
+          render();
+        })
+        .catch(function () { loaded = null; tree.textContent = ''; status.textContent = 'could not load this bundle'; });
+    };
+    tree.addEventListener('toggle', function (event) {
+      var details = event.target;
+      if (details && details.hasAttribute && details.hasAttribute('data-dir')) {
+        openDirs[details.getAttribute('data-dir')] = details.open;
+      }
+    }, true);
+    tree.addEventListener('change', function (event) {
+      var box = event.target.closest('[data-pick]');
+      if (!box) return;
+      var set = pickedSet();
+      if (box.checked) set[box.getAttribute('data-pick')] = true; else delete set[box.getAttribute('data-pick')];
+      writePicks(set);
+      render();
+    });
+    // The picks field is the source of truth; typing in it re-marks the tree.
+    picks.addEventListener('input', render);
+    filter.addEventListener('input', render);
+    bundleSelect.addEventListener('change', function () { openDirs = {}; load(); });
+    picker.addEventListener('toggle', function () { if (picker.open && !loaded) load(); });
+    if (picker.open) load();
   }
 
   // ---- tabs (ARIA tabs pattern; the hash names the tab as #tab-<name>) ----

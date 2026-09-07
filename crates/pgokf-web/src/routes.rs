@@ -20,7 +20,9 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use pgokf_companion::embeddings::EmbeddingsClient;
-use pgokf_workspace::{BuildOptions, Component, ConceptRecord, Profile, Selection, Target};
+use pgokf_workspace::{
+    BuildOptions, Component, ConceptRecord, ConceptRef, Profile, Selection, Target,
+};
 use serde::Deserialize;
 use serde_json::Value;
 use tower::limit::ConcurrencyLimitLayer;
@@ -53,6 +55,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// How many of the catalog's most used tags the builder offers as chips.
 const CHIP_TAGS: usize = 14;
 
+/// The most concepts the file picker lists for one bundle.
+const TREE_CAP: i64 = 5000;
+
 /// Requests handled at once; the rest queue (and time out) rather than
 /// piling onto the connection pool.
 const MAX_IN_FLIGHT: usize = 64;
@@ -62,6 +67,7 @@ pub(crate) fn router(app: Shared) -> Router {
     let api = Router::new()
         .route("/health", get(api_health))
         .route("/bundles", get(api_bundles))
+        .route("/bundles/{id}/tree", get(api_bundle_tree))
         .route("/search", get(api_search))
         .route("/concepts/{bundle_id}/{*concept_id}", get(api_concept))
         .route("/graph", get(api_catalog_graph))
@@ -640,6 +646,8 @@ pub(crate) struct PluginForm {
     pub types: String,
     pub tags: String,
     pub ids: String,
+    /// One `bundle_id:concept_id` per line.
+    pub picks: String,
     pub q: String,
     pub verified: bool,
     pub limit: String,
@@ -651,6 +659,8 @@ pub(crate) struct PluginForm {
     pub web_url: String,
     /// `true` once any selector is set.
     pub has_selection: bool,
+    /// A malformed picks line, shown with the preview; the download refuses it.
+    pub pick_problem: Option<String>,
     /// The same request as a query string, for the download link and the
     /// preview partial.
     pub query_string: String,
@@ -672,6 +682,8 @@ pub(crate) struct PluginPreview {
     pub package_count: usize,
     /// The chosen target's display name.
     pub target_label: String,
+    /// Where the unpacked zip goes for this target.
+    pub install_note: String,
 }
 
 /// One custom-metadata row, value pretty-printed.
@@ -1916,6 +1928,44 @@ async fn api_health(State(app): State<Shared>) -> Result<Json<Value>, AppError> 
     Ok(Json(health))
 }
 
+/// Where the unpacked zip goes: an Agent Plugin is one directory the client
+/// installs, every other shape is unpacked over the workspace root.
+fn install_note(profile: &pgokf_workspace::Profile, name: &str) -> String {
+    if profile.shape == pgokf_workspace::Shape::AgentPlugin {
+        format!(
+            "Unpack anywhere and install the {name}/ directory with your agent's plugin command \
+             (a plugin.json, skills/, and mcp.json as the Agent Plugins Specification defines \
+             them); then write OKF_PG_URL into pgokf.env under the client's plugin data \
+             directory if the MCP entry is included."
+        )
+    } else {
+        "Unpack at the workspace root.".to_owned()
+    }
+}
+
+/// Every concept of one bundle for the builder's file picker (capped; the
+/// response says when the cap was hit).
+async fn api_bundle_tree(
+    State(app): State<Shared>,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, AppError> {
+    let (entries, truncated) = capped(app.db.bundle_tree(id, TREE_CAP + 1).await?, TREE_CAP);
+    Ok(Json(serde_json::json!({
+        "bundle_id": id,
+        "truncated": truncated,
+        "entries": entries,
+    })))
+}
+
+/// Keep at most `cap` rows of a listing fetched with one extra row, and say
+/// whether that extra row existed (the listing was cut).
+fn capped<T>(mut rows: Vec<T>, cap: i64) -> (Vec<T>, bool) {
+    let cap = usize::try_from(cap).unwrap_or(usize::MAX);
+    let truncated = rows.len() > cap;
+    rows.truncate(cap);
+    (rows, truncated)
+}
+
 async fn api_bundles(State(app): State<Shared>) -> Result<Json<Value>, AppError> {
     let stats = app.db.catalog_stats().await?;
     Ok(Json(serde_json::to_value(stats).unwrap_or(Value::Null)))
@@ -2129,6 +2179,9 @@ struct PluginParams {
     tags: String,
     #[serde(default)]
     ids: String,
+    /// Specific files, one `bundle_id:concept_id` per line.
+    #[serde(default)]
+    picks: String,
     #[serde(default)]
     q: String,
     #[serde(default)]
@@ -2153,6 +2206,21 @@ struct PluginParams {
 
 const DEFAULT_PLUGIN_NAME: &str = "okf-knowledge";
 
+/// The picks field: one `bundle_id:concept_id` per line, duplicates folded.
+/// A malformed line is not a request error - the preview must keep updating
+/// while the user types - so it comes back as a message for the page, with
+/// the well-formed lines still applied; the download refuses it.
+fn parse_picks(raw: &str) -> (Vec<ConceptRef>, Option<String>) {
+    let (picks, malformed) = ConceptRef::parse_entries(raw);
+    let problem = malformed.first().map(|line| {
+        format!(
+            "picked file {line:?} is not of the form bundle:concept id (for example \
+             3:skills/deploy/SKILL); tick files in the picker or fix the line"
+        )
+    });
+    (picks, problem)
+}
+
 fn split_list(raw: &str) -> Vec<String> {
     raw.split([',', '\n'])
         .map(str::trim)
@@ -2164,7 +2232,7 @@ fn split_list(raw: &str) -> Vec<String> {
 impl PluginParams {
     /// Validate into the builder's inputs plus the echoed form state.
     fn normalize(&self) -> Result<(PluginForm, Target, Selection, Option<String>), AppError> {
-        let target_id = non_empty(&self.target).unwrap_or_else(|| "claude-code".to_owned());
+        let target_id = non_empty(&self.target).unwrap_or_else(|| "agent-plugin".to_owned());
         let target = Target::parse(&target_id)
             .ok_or_else(|| AppError::bad_request(format!("unknown target {target_id}")))?;
         let bundle_id = match non_empty(&self.bundle) {
@@ -2190,6 +2258,7 @@ impl PluginParams {
         };
         let verified = matches!(self.verified.as_str(), "1" | "true" | "on");
         let components = self.components();
+        let (picks, pick_problem) = parse_picks(&self.picks);
         let selection = Selection {
             bundle_ids: bundle_id.into_iter().collect(),
             concept_ids: split_list(&self.ids),
@@ -2198,19 +2267,76 @@ impl PluginParams {
             query: non_empty(&self.q),
             verified_only: verified,
             limit,
+            picks,
         };
         let name = non_empty(&self.name).unwrap_or_else(|| DEFAULT_PLUGIN_NAME.to_owned());
+        let query_string =
+            self.query_string(&target_id, &name, &selection, limit, verified, &components);
+        let form = PluginForm {
+            target: target_id,
+            name,
+            title: self.title.trim().to_owned(),
+            bundle: bundle_id.map(|b| b.to_string()).unwrap_or_default(),
+            types: selection.types.join(", "),
+            tags: selection.tags.join(", "),
+            ids: selection.concept_ids.join("\n"),
+            picks: selection
+                .picks
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+            q: selection.query.clone().unwrap_or_default(),
+            verified,
+            limit: limit.map(|n| n.to_string()).unwrap_or_default(),
+            base_model: self.base_model.trim().to_owned(),
+            with_mcp: components.contains(&Component::Mcp),
+            with_guide: components.contains(&Component::Guide),
+            with_tools: components.contains(&Component::Tools),
+            mcp_command: self.mcp_command.trim().to_owned(),
+            web_url: self.web_url.trim().to_owned(),
+            has_selection: !selection.is_empty(),
+            query_string,
+            pick_problem,
+        };
+        Ok((form, target, selection, non_empty(&self.base_model)))
+    }
+
+    /// The request as a query string, for the download link and the preview
+    /// partial (empty fields dropped, one flag per chosen component).
+    fn query_string(
+        &self,
+        target_id: &str,
+        name: &str,
+        selection: &Selection,
+        limit: Option<usize>,
+        verified: bool,
+        components: &[Component],
+    ) -> String {
         let pairs: Vec<(&str, String)> = vec![
-            ("target", target_id.clone()),
-            ("name", name.clone()),
+            ("target", target_id.to_owned()),
+            ("name", name.to_owned()),
             ("title", self.title.trim().to_owned()),
             (
                 "bundle",
-                bundle_id.map(|b| b.to_string()).unwrap_or_default(),
+                selection
+                    .bundle_ids
+                    .first()
+                    .map(ToString::to_string)
+                    .unwrap_or_default(),
             ),
             ("types", selection.types.join(", ")),
             ("tags", selection.tags.join(", ")),
             ("ids", selection.concept_ids.join(", ")),
+            (
+                "picks",
+                selection
+                    .picks
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
             ("q", selection.query.clone().unwrap_or_default()),
             (
                 "verified",
@@ -2231,28 +2357,7 @@ impl PluginParams {
             .map(|(k, v)| format!("{k}={}", filters::percent_encode(v)))
             .collect();
         query.extend(components.iter().map(|c| format!("{}=1", c.id())));
-        let query_string = query.join("&");
-        let form = PluginForm {
-            target: target_id,
-            name,
-            title: self.title.trim().to_owned(),
-            bundle: bundle_id.map(|b| b.to_string()).unwrap_or_default(),
-            types: selection.types.join(", "),
-            tags: selection.tags.join(", "),
-            ids: selection.concept_ids.join("\n"),
-            q: selection.query.clone().unwrap_or_default(),
-            verified,
-            limit: limit.map(|n| n.to_string()).unwrap_or_default(),
-            base_model: self.base_model.trim().to_owned(),
-            with_mcp: components.contains(&Component::Mcp),
-            with_guide: components.contains(&Component::Guide),
-            with_tools: components.contains(&Component::Tools),
-            mcp_command: self.mcp_command.trim().to_owned(),
-            web_url: self.web_url.trim().to_owned(),
-            has_selection: !selection.is_empty(),
-            query_string,
-        };
-        Ok((form, target, selection, non_empty(&self.base_model)))
+        query.join("&")
     }
 
     /// The requested components, in canonical order.
@@ -2277,6 +2382,7 @@ trait ShapeLabel {
 impl ShapeLabel for Profile {
     fn shape_label(&self) -> &'static str {
         match self.shape {
+            pgokf_workspace::Shape::AgentPlugin => "Agent Plugin directory",
             pgokf_workspace::Shape::Skills => "Agent Skills package",
             pgokf_workspace::Shape::InstructionFile => "instruction file",
             pgokf_workspace::Shape::PromptBundle => "prompt bundle",
@@ -2298,10 +2404,10 @@ fn target_views(selected: &str) -> Vec<TargetView> {
                 .map_or(p.label, |(name, _)| name)
                 .trim()
                 .to_owned(),
-            root: if p.root.is_empty() {
-                "workspace root".to_owned()
-            } else {
-                format!("{}/", p.root)
+            root: match p.shape {
+                pgokf_workspace::Shape::AgentPlugin => "<name>/plugin.json".to_owned(),
+                _ if p.root.is_empty() => "workspace root".to_owned(),
+                _ => format!("{}/", p.root),
             },
             notes: p.notes.to_owned(),
             shape: p.shape_label().to_owned(),
@@ -2398,6 +2504,7 @@ async fn plugin_preview(
         "types": selection.types,
         "tags": selection.tags,
         "concept_ids": selection.concept_ids,
+        "picks": selection.picks.iter().map(ToString::to_string).collect::<Vec<_>>(),
         "query": selection.query,
         "verified_only": selection.verified_only,
         "limit": selection.effective_limit(),
@@ -2451,6 +2558,7 @@ async fn plugin_preview(
         download_url: format!("/plugins/build.zip?{}", form.query_string),
         package_count: plugin.as_ref().map_or(0, |p| p.package_count),
         target_label: profile.label.to_owned(),
+        install_note: install_note(profile, &form.name),
         concepts,
     })
 }
@@ -2475,11 +2583,12 @@ async fn preview_or_message(
 
 async fn plugins_page(State(app): State<Shared>, Query(params): Query<PluginParams>) -> PageResult {
     let (form, target, selection, base_model) = params.normalize()?;
+    let (preview, error) = preview_or_message(&app, &form, target, &selection, base_model).await;
+    let error = form.pick_problem.clone().or(error);
     let bundles = app.db.bundles().await?;
     let type_facets = app.db.catalog_facets(None, "type").await?;
     let mut tag_facets = app.db.catalog_facets(None, "tag").await?;
     tag_facets.truncate(CHIP_TAGS);
-    let (preview, error) = preview_or_message(&app, &form, target, &selection, base_model).await;
     html(&PluginsPage {
         shell: Shell::new(&app, "Agent Plugin builder", "plugins"),
         targets: target_views(&form.target),
@@ -2498,6 +2607,7 @@ async fn plugins_preview(
 ) -> PageResult {
     let (form, target, selection, base_model) = params.normalize()?;
     let (preview, error) = preview_or_message(&app, &form, target, &selection, base_model).await;
+    let error = form.pick_problem.clone().or(error);
     let push_url = format!("/plugins?{}", form.query_string);
     let mut response = html(&PluginPreviewPartial {
         form,
@@ -2611,6 +2721,9 @@ async fn placeholder_contents(app: &App, concepts: &mut [ConceptRecord]) -> Resu
 /// and send it as a zip to unpack at the workspace root.
 async fn plugins_zip(State(app): State<Shared>, Query(params): Query<PluginParams>) -> PageResult {
     let (form, target, selection, base_model) = params.normalize()?;
+    if let Some(problem) = form.pick_problem {
+        return Err(AppError::bad_request(problem));
+    }
     if selection.is_empty() {
         return Err(AppError::bad_request(
             "give a query, a bundle, a type, a tag, or concept ids to build a plugin",
@@ -3056,6 +3169,32 @@ mod tests {
             Some("{\"team\":\"platform\"}")
         );
         assert_eq!(actor_display(&Value::Null), None);
+    }
+
+    #[test]
+    fn parse_picks_keeps_the_good_lines_and_reports_the_first_bad_one() {
+        // Arrange / Act
+        let (picks, problem) = parse_picks("3:skills/a/SKILL\n\nnope\n3:skills/a/SKILL\n1:x");
+        let (clean, none) = parse_picks("");
+
+        // Assert
+        assert_eq!(
+            picks.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            ["3:skills/a/SKILL", "1:x"]
+        );
+        assert!(problem.as_deref().is_some_and(|p| p.contains("\"nope\"")));
+        assert!(clean.is_empty() && none.is_none());
+    }
+
+    #[test]
+    fn capped_listings_report_the_extra_row_and_drop_it() {
+        // Arrange / Act
+        let (full, cut) = capped(vec![1, 2, 3, 4], 3);
+        let (short, whole) = capped(vec![1, 2], 3);
+
+        // Assert
+        assert_eq!((full, cut), (vec![1, 2, 3], true));
+        assert_eq!((short, whole), (vec![1, 2], false));
     }
 
     #[test]

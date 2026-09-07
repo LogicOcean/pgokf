@@ -27,10 +27,14 @@ pub use plugin::{
     BuildOptions, Component, LOCK_FILE, MANIFEST_FILE, MCP_SERVER_NAME, Plugin, PluginFile,
     assemble, slug,
 };
-pub use profile::{EnvRef, McpFormat, McpSpec, Profile, Shape, Target};
+pub use profile::{
+    AGENT_PLUGIN_MCP_SCHEMA, AGENT_PLUGIN_SCHEMA, EnvRef, McpFormat, McpSpec, Profile, Shape,
+    Target,
+};
 pub use selection::{
-    BundleState, ConceptRecord, DEFAULT_LIMIT, MAX_CONCEPTS, PackageRecord, ResourceFile,
-    ResourceRecord, Selection, Snapshot, drop_packaged_resources, load_sources, resolve, snapshot,
+    BundleState, ConceptRecord, ConceptRef, DEFAULT_LIMIT, MAX_CONCEPTS, PackageRecord,
+    ResourceFile, ResourceRecord, Selection, Snapshot, drop_packaged_resources, load_sources,
+    resolve, snapshot,
 };
 
 /// Resolve a selection, load its content, and assemble the tree for a target.

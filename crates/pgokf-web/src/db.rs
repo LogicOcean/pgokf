@@ -205,6 +205,20 @@ pub(crate) struct ProvenanceSource {
     pub last_modified: Option<String>,
 }
 
+/// One concept as the builder's file picker lists it.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct TreeEntry {
+    pub id: String,
+    pub path: String,
+    #[serde(rename = "type")]
+    pub concept_type: Option<String>,
+    pub title: Option<String>,
+    /// A skill manifest: picking it copies the whole package.
+    pub package: bool,
+    /// The owning skill's id when the concept is a package member.
+    pub package_of: Option<String>,
+}
+
 /// A skill package (`pgokf.skills`) with the resources it owns.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct PackageInfo {
@@ -638,6 +652,38 @@ impl Db {
             .as_ref()
             .map(bundle_info)
             .transpose()
+    }
+
+    /// Every concept of one visible bundle (up to `cap`) for the builder's
+    /// file picker: identity, path, type, title, and whether it is a skill
+    /// package or a package member.
+    pub(crate) async fn bundle_tree(&self, bundle_id: i64, cap: i64) -> Result<Vec<TreeEntry>> {
+        self.query_map(
+            "SELECT c.id, c.path, c.type, c.title,
+                    (sk.concept_id IS NOT NULL),
+                    coalesce(s.package_concept_id, d.package_concept_id)
+             FROM pgokf.concepts c
+             JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled AND b.retired_at IS NULL
+             LEFT JOIN pgokf.skills sk ON sk.bundle_id = c.bundle_id AND sk.concept_id = c.id
+             LEFT JOIN pgokf.scripts s ON s.bundle_id = c.bundle_id AND s.concept_id = c.id
+             LEFT JOIN pgokf.reference_documents d
+                    ON d.bundle_id = c.bundle_id AND d.concept_id = c.id
+             WHERE c.bundle_id = $1
+             ORDER BY c.path
+             LIMIT $2",
+            &[&bundle_id, &cap],
+            |r| {
+                Ok(TreeEntry {
+                    id: col(r, 0)?,
+                    path: col(r, 1)?,
+                    concept_type: col(r, 2)?,
+                    title: col(r, 3)?,
+                    package: col::<Option<bool>>(r, 4)?.unwrap_or(false),
+                    package_of: col(r, 5)?,
+                })
+            },
+        )
+        .await
     }
 
     /// Up to `limit` concepts of one bundle ordered by path, starting after

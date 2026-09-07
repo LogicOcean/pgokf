@@ -9,7 +9,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
-use pgokf_workspace::{BuildOptions, Component, Profile, Selection, Target};
+use pgokf_workspace::{BuildOptions, Component, ConceptRef, Profile, Selection, Target};
 use serde_json::{Value, json};
 use tokio_postgres::Client;
 use tokio_postgres::types::ToSql;
@@ -74,6 +74,17 @@ impl Catalog {
     /// each with a JSON-Schema description of its arguments.
     #[must_use]
     pub fn tool_definitions() -> Value {
+        let mut tools = Self::catalog_tool_definitions();
+        if let Value::Array(items) = &mut tools
+            && let Value::Array(more) = Self::plugin_tool_definitions()
+        {
+            items.extend(more);
+        }
+        tools
+    }
+
+    /// The search, graph, and retrieval tools.
+    fn catalog_tool_definitions() -> Value {
         json!([
             {
                 "name": "concept_search",
@@ -141,10 +152,16 @@ impl Catalog {
                     },
                     "required": ["bundle_id", "concept_id"]
                 }
-            },
+            }
+        ])
+    }
+
+    /// The plugin-building tools.
+    fn plugin_tool_definitions() -> Value {
+        json!([
             {
                 "name": "list_plugin_targets",
-                "description": "List the agent harnesses a workspace plugin can be built for (claude-code, codex, hermes-agent, kimi, gemini-cli, cursor, agents, agents-md, ollama, generic) with the documented directory each one reads.",
+                "description": "List the targets a workspace plugin can be built for: agent-plugin (a portable Agent Plugins 1.0.0 directory with plugin.json, skills/, and mcp.json) and the per-harness layouts (claude-code, codex, hermes-agent, kimi, gemini-cli, cursor, agents, agents-md, ollama, generic), with the documented directory each one reads.",
                 "inputSchema": {"type": "object", "properties": {}}
             },
             {
@@ -158,6 +175,7 @@ impl Catalog {
                         "title": {"type": "string", "description": "Display title for the index (defaults to the name)."},
                         "bundle_ids": {"type": "array", "items": {"type": "integer"}, "description": "Restrict to these bundle ids."},
                         "concept_ids": {"type": "array", "items": {"type": "string"}, "description": "Include exactly these concept ids (within the selected bundles)."},
+                        "picks": {"type": "array", "items": {"type": "string"}, "description": "Specific files by identity, as 'bundle_id:concept_id' strings (a skill's SKILL.md id copies the whole package; a script or reference id copies that file). Picks are added to whatever the other selectors match and are never cut by the limit."},
                         "tags": {"type": "array", "items": {"type": "string"}, "description": "All-of tag containment filter."},
                         "types": {"type": "array", "items": {"type": "string"}, "description": "Any-of concept type filter."},
                         "query": {"type": "string", "description": "Full-text query (websearch syntax); results are ranked."},
@@ -302,7 +320,13 @@ impl Catalog {
 
     /// The selection the tool arguments describe.
     fn selection_from_args(args: &Value) -> Result<Selection> {
+        let picks = ConceptRef::parse_list(
+            &opt_string_vec(args, "picks")?
+                .unwrap_or_default()
+                .join("\n"),
+        )?;
         Ok(Selection {
+            picks,
             bundle_ids: opt_i64_vec(args, "bundle_ids")?.unwrap_or_default(),
             concept_ids: opt_string_vec(args, "concept_ids")?.unwrap_or_default(),
             tags: opt_string_vec(args, "tags")?.unwrap_or_default(),

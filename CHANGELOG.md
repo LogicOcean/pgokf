@@ -96,6 +96,23 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
   texts; a node's card lists its connections for touch), zoom, center,
   2D/3D, and full-screen controls, a finder, and "explore from here".
   `/api/graph` serves the same document.
+- **Portable Agent Plugins.** The builder's first target, `agent-plugin`,
+  writes a self-contained directory as the Agent Plugins Specification
+  1.0.0 defines it: `plugin.json` (the closed portable manifest, versioned
+  by the catalog's newest sync plus a content digest), `skills/` holding the
+  knowledge skill and every stored package byte for byte, and `mcp.json`
+  with a typed stdio entry that starts `pgokf-mcp --env-file
+  ${PLUGIN_DATA}/pgokf.env`, so no connection string and no ambient variable
+  is needed. `pgokf-mcp` gained `--env-file`; a flag wins over the file and
+  the file over the environment, so an installed plugin always talks to the
+  catalog its own file names.
+- **Picking specific files.** A selection may name files by identity
+  (`picks`, `bundle_id:concept_id`) on top of the narrowing selectors; picks
+  are ordered first so the limit never drops them, and a picked `SKILL.md`
+  brings its whole package while a picked script or reference is one file.
+  The builder page browses a bundle's files in a tree (directories, skill
+  packages and their members marked) and ticks them into the selection; the
+  MCP tool takes `picks`; `/api/bundles/{id}/tree` lists a bundle for it.
 - The **Agent Plugin builder** page is a five-step flow: choose the agent
   (a card grid with each harness's directory and a note for the chosen
   one), choose the content (bundle, search, one-click type and tag chips

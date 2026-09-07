@@ -18,6 +18,8 @@
 mod catalog;
 mod rpc;
 
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result};
 use clap::Parser;
 use serde_json::{Value, json};
@@ -36,36 +38,125 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
     about = "Expose the pgokf catalog to AI agents as Model Context Protocol tools over stdio."
 )]
 struct Cli {
-    /// PostgreSQL connection string for a `pgokf_reader`-capable role.
-    #[arg(long, env = "OKF_PG_URL", hide_env_values = true)]
-    database_url: String,
+    /// PostgreSQL connection string for a `pgokf_reader`-capable role. Also
+    /// read as `OKF_PG_URL` from the `--env-file`, then from the environment.
+    #[arg(long, hide_env_values = true)]
+    database_url: Option<String>,
 
-    /// Optional multi-tenant scope applied as `pgokf.tenant` for the session.
-    #[arg(long, env = "OKF_TENANT")]
+    /// Optional multi-tenant scope applied as `pgokf.tenant` for the session
+    /// (`OKF_TENANT` in the env file or the environment).
+    #[arg(long)]
     tenant: Option<String>,
 
-    /// Require a TLS-encrypted link to PostgreSQL. TLS is also enabled by an
-    /// `sslmode=require` (or stricter) in the connection URL; otherwise the link
-    /// is plaintext (the default, for a local socket / trusted network).
-    #[arg(long, env = "OKF_PG_TLS", default_value_t = false)]
+    /// Require a TLS-encrypted link to PostgreSQL (`OKF_PG_TLS` in the env
+    /// file or the environment). TLS is also enabled by an `sslmode=require`
+    /// (or stricter) in the connection URL; otherwise the link is plaintext
+    /// (the default, for a local socket / trusted network).
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", value_name = "BOOL")]
+    tls: Option<bool>,
+
+    /// A `KEY=VALUE` file read for the settings above (an Agent Plugins
+    /// package points at `${PLUGIN_DATA}/pgokf.env`). A flag on the command
+    /// line wins over the file, and the file wins over the environment, so
+    /// an installed plugin always talks to the catalog its own file names.
+    #[arg(long, value_name = "PATH")]
+    env_file: Option<String>,
+}
+
+/// The resolved connection settings.
+#[derive(Debug, PartialEq, Eq)]
+struct Settings {
+    database_url: String,
+    tenant: Option<String>,
     tls: bool,
 }
 
-impl Cli {
-    /// Apply the shared rule for optional values that also come from the
-    /// environment: empty means unset (see [`pgokf_companion::cli::non_empty`]).
-    fn normalized(mut self) -> Self {
-        self.tenant = pgokf_companion::cli::non_empty(self.tenant);
-        self
+/// Apply the precedence: command line, then the env file, then the
+/// process environment (`ambient`). Empty values count as unset.
+fn resolve_settings(
+    cli: &Cli,
+    file: &BTreeMap<String, String>,
+    ambient: &BTreeMap<String, String>,
+) -> Result<Settings> {
+    let pick = |flag: Option<&str>, key: &str| -> Option<String> {
+        flag.map(str::to_owned)
+            .or_else(|| file.get(key).cloned())
+            .or_else(|| ambient.get(key).cloned())
+            .filter(|v| !v.trim().is_empty())
+    };
+    let database_url = pick(cli.database_url.as_deref(), "OKF_PG_URL").context(
+        "no connection string: pass --database-url, set OKF_PG_URL, or name an --env-file that sets it",
+    )?;
+    let tenant = pick(cli.tenant.as_deref(), "OKF_TENANT");
+    let tls = match cli.tls {
+        Some(flag) => flag,
+        None => pick(None, "OKF_PG_TLS").is_some_and(|v| matches!(v.trim(), "1" | "true" | "on")),
+    };
+    Ok(Settings {
+        database_url,
+        tenant,
+        tls,
+    })
+}
+
+/// The variables this server consults, as the process environment holds
+/// them.
+fn ambient_settings() -> BTreeMap<String, String> {
+    ["OKF_PG_URL", "OKF_TENANT", "OKF_PG_TLS"]
+        .into_iter()
+        .filter_map(|key| std::env::var(key).ok().map(|v| (key.to_owned(), v)))
+        .collect()
+}
+
+/// Parse `KEY=VALUE` lines (blank lines and `#` comments skipped, an
+/// `export ` prefix and surrounding quotes tolerated) into a map.
+fn parse_env_file(text: &str) -> BTreeMap<String, String> {
+    let mut vars = BTreeMap::new();
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let key = key.strip_prefix("export ").unwrap_or(key).trim();
+        let value = value.trim().trim_matches('"').trim_matches('\'');
+        if !key.is_empty() {
+            vars.insert(key.to_owned(), value.to_owned());
+        }
     }
+    vars
+}
+
+/// The variables of the `--env-file`, when one is given. Used by Agent
+/// Plugins packages, whose `mcp.json` points at `${PLUGIN_DATA}/pgokf.env`
+/// (a file the user creates once outside the plugin, so no secret ever
+/// enters the package). A value given on the command line or in the
+/// environment wins over the file; a missing file is an error naming it.
+fn env_file_vars(path: Option<&str>) -> Result<BTreeMap<String, String>> {
+    let Some(path) = path else {
+        return Ok(BTreeMap::new());
+    };
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading the env file {path} (create it with OKF_PG_URL=...)"))?;
+    Ok(parse_env_file(&text))
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse().normalized();
-    let catalog = Catalog::connect(&cli.database_url, cli.tenant.as_deref(), cli.tls)
-        .await
-        .context("failed to connect to the catalog")?;
+    let cli = Cli::parse();
+    let file = env_file_vars(cli.env_file.as_deref())?;
+    let settings = resolve_settings(&cli, &file, &ambient_settings())?;
+    let catalog = Catalog::connect(
+        &settings.database_url,
+        settings.tenant.as_deref(),
+        settings.tls,
+    )
+    .await
+    .context("failed to connect to the catalog")?;
     serve(catalog).await
 }
 
@@ -170,4 +261,110 @@ async fn write_response(stdout: &mut Stdout, response: &Response) -> Result<()> 
         .context("writing to stdout")?;
     stdout.flush().await.context("flushing stdout")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_env_file_reads_assignments_and_skips_noise() {
+        // Arrange
+        let text = "# comment\n\nexport OKF_PG_URL=\"postgresql://r@h/db\"\nOKF_TENANT='acme'\nbroken line\n  OKF_PG_TLS = true \n";
+
+        // Act
+        let vars = parse_env_file(text);
+
+        // Assert
+        assert_eq!(
+            vars.get("OKF_PG_URL").map(String::as_str),
+            Some("postgresql://r@h/db")
+        );
+        assert_eq!(vars.get("OKF_TENANT").map(String::as_str), Some("acme"));
+        assert_eq!(vars.get("OKF_PG_TLS").map(String::as_str), Some("true"));
+        assert_eq!(vars.len(), 3);
+    }
+
+    #[test]
+    fn parse_env_file_ignores_a_byte_order_mark_and_keeps_equals_in_values() {
+        // Arrange / Act
+        let vars = parse_env_file("\u{feff}OKF_PG_URL=postgresql://u@h/db?options=-c%20a=b\r\n");
+
+        // Assert
+        assert_eq!(
+            vars.get("OKF_PG_URL").map(String::as_str),
+            Some("postgresql://u@h/db?options=-c%20a=b")
+        );
+    }
+
+    #[test]
+    fn settings_prefer_the_flag_then_the_file_then_the_environment() {
+        // Arrange
+        let file = BTreeMap::from([
+            ("OKF_PG_URL".to_owned(), "postgresql://file".to_owned()),
+            ("OKF_PG_TLS".to_owned(), "on".to_owned()),
+        ]);
+        let ambient = BTreeMap::from([
+            ("OKF_PG_URL".to_owned(), "postgresql://ambient".to_owned()),
+            ("OKF_TENANT".to_owned(), "acme".to_owned()),
+            ("OKF_PG_TLS".to_owned(), "false".to_owned()),
+        ]);
+        let base = Cli {
+            database_url: None,
+            tenant: None,
+            tls: None,
+            env_file: None,
+        };
+
+        // Act
+        let from_file = resolve_settings(&base, &file, &ambient).expect("resolves");
+        let flagged = resolve_settings(
+            &Cli {
+                database_url: Some("postgresql://flag".to_owned()),
+                tls: Some(false),
+                ..base
+            },
+            &file,
+            &ambient,
+        )
+        .expect("resolves");
+        let nothing = resolve_settings(
+            &Cli {
+                database_url: None,
+                tenant: None,
+                tls: None,
+                env_file: None,
+            },
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        );
+
+        // Assert
+        assert_eq!(
+            from_file,
+            Settings {
+                database_url: "postgresql://file".to_owned(),
+                tenant: Some("acme".to_owned()),
+                tls: true,
+            }
+        );
+        assert_eq!(flagged.database_url, "postgresql://flag");
+        assert!(!flagged.tls, "an explicit --tls false beats the file");
+        assert!(
+            nothing
+                .expect_err("no url")
+                .to_string()
+                .contains("no connection string")
+        );
+    }
+
+    #[test]
+    fn a_missing_env_file_is_an_error_naming_it() {
+        // Arrange / Act
+        let error = env_file_vars(Some("/nonexistent/pgokf.env")).expect_err("missing file");
+
+        // Assert
+        assert!(error.to_string().contains("/nonexistent/pgokf.env"));
+        assert!(env_file_vars(None).expect("no file is fine").is_empty());
+    }
 }

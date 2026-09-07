@@ -39,17 +39,97 @@ pub struct Selection {
     pub verified_only: bool,
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Specific files picked by identity. Unlike the selectors above, which
+    /// narrow the catalog, picks *add*: a picked concept is included whether
+    /// or not it matches the other selectors, and picks are never cut by the
+    /// limit.
+    #[serde(default)]
+    pub picks: Vec<ConceptRef>,
+}
+
+/// One concept named by identity: `(bundle_id, concept_id)`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ConceptRef {
+    pub bundle_id: i64,
+    pub concept_id: String,
+}
+
+impl ConceptRef {
+    /// Parse the `bundle_id:concept_id` form used in forms and manifests.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        let (bundle, id) = text.trim().split_once(':')?;
+        let bundle_id = bundle.trim().parse::<i64>().ok()?;
+        let concept_id = id.trim();
+        (bundle_id > 0 && !concept_id.is_empty()).then(|| Self {
+            bundle_id,
+            concept_id: concept_id.to_owned(),
+        })
+    }
+}
+
+impl ConceptRef {
+    /// Split a list of picks (one per line or comma-separated) into the
+    /// well-formed picks, duplicates folded in first-seen order, and the
+    /// malformed entries verbatim; blank entries are skipped. A form can keep
+    /// previewing with the good picks while it reports the bad ones.
+    #[must_use]
+    pub fn parse_entries(text: &str) -> (Vec<Self>, Vec<String>) {
+        let mut picks: Vec<Self> = Vec::new();
+        let mut malformed = Vec::new();
+        for entry in text
+            .split(['\n', ','])
+            .map(str::trim)
+            .filter(|e| !e.is_empty())
+        {
+            match Self::parse(entry) {
+                Some(pick) if !picks.contains(&pick) => picks.push(pick),
+                Some(_) => {}
+                None => malformed.push(entry.to_owned()),
+            }
+        }
+        (picks, malformed)
+    }
+
+    /// The strict form of [`Self::parse_entries`]: every entry must parse.
+    ///
+    /// # Errors
+    ///
+    /// The first entry that is not `bundle_id:concept_id`.
+    pub fn parse_list(text: &str) -> Result<Vec<Self>> {
+        let (picks, malformed) = Self::parse_entries(text);
+        match malformed.first() {
+            Some(entry) => Err(anyhow!(
+                "picked file {entry:?} is not of the form bundle_id:concept_id"
+            )),
+            None => Ok(picks),
+        }
+    }
+}
+
+impl std::fmt::Display for ConceptRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.bundle_id, self.concept_id)
+    }
 }
 
 impl Selection {
-    /// `true` when at least one selector narrows the catalog.
+    /// `true` when nothing at all is selected: no narrowing selector and no
+    /// pick.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.bundle_ids.is_empty()
+        !self.has_filters() && self.picks.is_empty()
+    }
+
+    /// `true` when at least one narrowing selector is set (a pick alone is
+    /// not one: it names files without narrowing the catalog).
+    #[must_use]
+    pub fn has_filters(&self) -> bool {
+        !(self.bundle_ids.is_empty()
             && self.concept_ids.is_empty()
             && self.tags.is_empty()
             && self.types.is_empty()
-            && self.query.as_deref().is_none_or(|q| q.trim().is_empty())
+            && self.query.as_deref().is_none_or(|q| q.trim().is_empty()))
     }
 
     /// The effective row limit, bounded to [`MAX_CONCEPTS`].
@@ -80,6 +160,18 @@ impl Selection {
         }
         if self.verified_only {
             parts.push("verified only".to_owned());
+        }
+        if !self.picks.is_empty() {
+            let picked = format!(
+                "{} picked file{}",
+                self.picks.len(),
+                if self.picks.len() == 1 { "" } else { "s" }
+            );
+            if parts.is_empty() {
+                parts.push(picked);
+            } else {
+                parts.push(format!("plus {picked}"));
+            }
         }
         if parts.is_empty() {
             "nothing selected".to_owned()
@@ -196,6 +288,51 @@ pub struct BundleState {
 
 const TRUSTED_TIERS: [&str; 2] = ["human-reviewed", "machine-confirmed"];
 
+/// The one statement a selection resolves through. The picks join is a
+/// union on top of the narrowing selectors (`$11` says whether any is set,
+/// so a picks-only selection does not match the whole catalog); the trust
+/// filter (`$5`) gates both, which is why it sits outside the union's
+/// parentheses.
+const RESOLVE_SQL: &str = "SELECT c.bundle_id, coalesce(b.name, regexp_replace(b.path, '^.*/', '')),
+                      c.id, c.path, c.title, c.description, c.type, coalesce(c.tags, '{}'),
+                      c.file_hash, coalesce(p.trust_tier, 'unverified'), coalesce(p.status, 'stable'),
+                      r.ord,
+                      sk.agent_skill->>'name', sk.package_root, sk.package_hash,
+                      CASE WHEN s.concept_id IS NOT NULL THEN 'script'
+                           WHEN d.source_path LIKE 'assets/%' THEN 'asset'
+                           WHEN d.concept_id IS NOT NULL THEN 'reference' END,
+                      coalesce(s.source_path, d.source_path),
+                      coalesce(s.package_concept_id, d.package_concept_id),
+                      coalesce(s.executable_sha256, d.content_sha256),
+                      (pk.b IS NOT NULL) AS picked
+               FROM pgokf.concepts c
+               JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled AND b.retired_at IS NULL
+               LEFT JOIN pgokf.concept_provenance p
+                      ON p.bundle_id = c.bundle_id AND p.concept_id = c.id
+               LEFT JOIN pgokf.skills sk ON sk.bundle_id = c.bundle_id AND sk.concept_id = c.id
+               LEFT JOIN pgokf.scripts s ON s.bundle_id = c.bundle_id AND s.concept_id = c.id
+               LEFT JOIN pgokf.reference_documents d
+                      ON d.bundle_id = c.bundle_id AND d.concept_id = c.id
+               LEFT JOIN (
+                   SELECT o.b, o.id, min(o.ord) AS ord
+                   FROM ROWS FROM (unnest($6::bigint[]), unnest($7::text[])) WITH ORDINALITY AS o(b, id, ord)
+                   GROUP BY o.b, o.id
+               ) r ON r.b = c.bundle_id AND r.id = c.id
+               LEFT JOIN (
+                   SELECT DISTINCT q.b, q.id
+                   FROM unnest($9::bigint[], $10::text[]) AS q(b, id)
+               ) pk ON pk.b = c.bundle_id AND pk.id = c.id
+               WHERE (pk.b IS NOT NULL
+                      OR ($11
+                          AND ($1::bigint[] IS NULL OR c.bundle_id = ANY($1))
+                          AND ($2::text[] IS NULL OR c.type = ANY($2))
+                          AND ($3::text[] IS NULL OR c.tags @> $3)
+                          AND ($4::text[] IS NULL OR c.id = ANY($4))
+                          AND ($6::bigint[] IS NULL OR r.ord IS NOT NULL)))
+                 AND ($5::text[] IS NULL OR coalesce(p.trust_tier, 'unverified') = ANY($5))
+               ORDER BY (pk.b IS NOT NULL) DESC, r.ord NULLS LAST, c.bundle_id, c.id
+               LIMIT $8";
+
 /// Resolve a selection to concept records without their content (a preview,
 /// or the first step of a build). Ordered by bundle then concept id; a query
 /// selection is ordered by rank instead.
@@ -212,7 +349,26 @@ pub async fn resolve<C: GenericClient>(
             "the selection is empty: give a query, a bundle, a type, a tag, or concept ids"
         ));
     }
-    let limit = i64::try_from(selection.effective_limit()).unwrap_or(i64::MAX);
+    // Picks are added on top of the narrowed set and are never cut by the
+    // limit: they sort first, and the limit is raised to hold every pick
+    // (still bounded by MAX_CONCEPTS, beyond which a build is refused).
+    let mut distinct_picks = selection.picks.clone();
+    distinct_picks.sort();
+    distinct_picks.dedup();
+    if distinct_picks.len() > MAX_CONCEPTS {
+        return Err(anyhow!(
+            "{} files picked; a plugin holds at most {MAX_CONCEPTS} concepts",
+            distinct_picks.len()
+        ));
+    }
+    let limit =
+        i64::try_from(selection.effective_limit().max(distinct_picks.len())).unwrap_or(i64::MAX);
+    let has_filters = selection.has_filters();
+    let pick_bundles: Vec<i64> = distinct_picks.iter().map(|p| p.bundle_id).collect();
+    let pick_ids: Vec<String> = distinct_picks
+        .iter()
+        .map(|p| p.concept_id.clone())
+        .collect();
     let bundle_ids = (!selection.bundle_ids.is_empty()).then(|| selection.bundle_ids.clone());
     let types = (!selection.types.is_empty()).then(|| selection.types.clone());
     let tags = (!selection.tags.is_empty()).then(|| selection.tags.clone());
@@ -226,39 +382,8 @@ pub async fn resolve<C: GenericClient>(
         None => (None, None),
     };
 
-    let sql = "SELECT c.bundle_id, coalesce(b.name, regexp_replace(b.path, '^.*/', '')),
-                      c.id, c.path, c.title, c.description, c.type, coalesce(c.tags, '{}'),
-                      c.file_hash, coalesce(p.trust_tier, 'unverified'), coalesce(p.status, 'stable'),
-                      r.ord,
-                      sk.agent_skill->>'name', sk.package_root, sk.package_hash,
-                      CASE WHEN s.concept_id IS NOT NULL THEN 'script'
-                           WHEN d.source_path LIKE 'assets/%' THEN 'asset'
-                           WHEN d.concept_id IS NOT NULL THEN 'reference' END,
-                      coalesce(s.source_path, d.source_path),
-                      coalesce(s.package_concept_id, d.package_concept_id),
-                      coalesce(s.executable_sha256, d.content_sha256)
-               FROM pgokf.concepts c
-               JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled AND b.retired_at IS NULL
-               LEFT JOIN pgokf.concept_provenance p
-                      ON p.bundle_id = c.bundle_id AND p.concept_id = c.id
-               LEFT JOIN pgokf.skills sk ON sk.bundle_id = c.bundle_id AND sk.concept_id = c.id
-               LEFT JOIN pgokf.scripts s ON s.bundle_id = c.bundle_id AND s.concept_id = c.id
-               LEFT JOIN pgokf.reference_documents d
-                      ON d.bundle_id = c.bundle_id AND d.concept_id = c.id
-               LEFT JOIN (
-                   SELECT o.b, o.id, min(o.ord) AS ord
-                   FROM ROWS FROM (unnest($6::bigint[]), unnest($7::text[])) WITH ORDINALITY AS o(b, id, ord)
-                   GROUP BY o.b, o.id
-               ) r ON r.b = c.bundle_id AND r.id = c.id
-               WHERE ($1::bigint[] IS NULL OR c.bundle_id = ANY($1))
-                 AND ($2::text[] IS NULL OR c.type = ANY($2))
-                 AND ($3::text[] IS NULL OR c.tags @> $3)
-                 AND ($4::text[] IS NULL OR c.id = ANY($4))
-                 AND ($5::text[] IS NULL OR coalesce(p.trust_tier, 'unverified') = ANY($5))
-                 AND ($6::bigint[] IS NULL OR r.ord IS NOT NULL)
-               ORDER BY r.ord NULLS LAST, c.bundle_id, c.id
-               LIMIT $8";
-    let params: [&(dyn ToSql + Sync); 8] = [
+    let sql = RESOLVE_SQL;
+    let params: [&(dyn ToSql + Sync); 11] = [
         &bundle_ids,
         &types,
         &tags,
@@ -267,6 +392,9 @@ pub async fn resolve<C: GenericClient>(
         &ranked_bundles,
         &ranked_ids,
         &limit,
+        &pick_bundles,
+        &pick_ids,
+        &has_filters,
     ];
     let rows = client
         .query(sql, &params)
@@ -780,6 +908,87 @@ mod tests {
                 .to_string()
                 .contains("changed while the plugin was being built")
         );
+    }
+
+    #[test]
+    fn concept_refs_parse_the_bundle_colon_id_form() {
+        // Arrange / Act / Assert
+        assert_eq!(
+            ConceptRef::parse(" 3:skills/deploy/SKILL "),
+            Some(ConceptRef {
+                bundle_id: 3,
+                concept_id: "skills/deploy/SKILL".to_owned()
+            })
+        );
+        assert_eq!(
+            ConceptRef::parse("2:a:b").map(|r| r.concept_id),
+            Some("a:b".to_owned())
+        );
+        assert_eq!(ConceptRef::parse("x:id"), None);
+        assert_eq!(ConceptRef::parse("0:id"), None);
+        assert_eq!(ConceptRef::parse("3:"), None);
+        assert_eq!(ConceptRef::parse("no-colon"), None);
+        assert_eq!(ConceptRef::parse("3:x").unwrap().to_string(), "3:x");
+    }
+
+    #[test]
+    fn picks_make_a_selection_non_empty_without_filtering() {
+        // Arrange
+        let picked = Selection {
+            picks: vec![ConceptRef {
+                bundle_id: 1,
+                concept_id: "a".to_owned(),
+            }],
+            ..Selection::default()
+        };
+        let mixed = Selection {
+            tags: vec!["ops".to_owned()],
+            picks: picked.picks.clone(),
+            ..Selection::default()
+        };
+
+        // Act / Assert
+        assert!(!picked.is_empty());
+        assert!(!picked.has_filters());
+        assert_eq!(picked.describe(), "1 picked file");
+        assert!(mixed.has_filters());
+        assert_eq!(mixed.describe(), "tagged ops, plus 1 picked file");
+    }
+
+    #[test]
+    fn the_resolve_statement_gates_picks_by_trust_and_guards_filters() {
+        // The union of picks and filters is parenthesized so the trust
+        // filter applies to both, and the filters are guarded by $11.
+        assert!(RESOLVE_SQL.contains("WHERE (pk.b IS NOT NULL"));
+        assert!(RESOLVE_SQL.contains("OR ($11\n"));
+        let union_end = RESOLVE_SQL
+            .find("r.ord IS NOT NULL)))")
+            .expect("union closes");
+        let trust = RESOLVE_SQL
+            .find("AND ($5::text[] IS NULL")
+            .expect("trust filter");
+        assert!(
+            trust > union_end,
+            "the trust filter follows the closed union"
+        );
+        assert!(RESOLVE_SQL.contains("ORDER BY (pk.b IS NOT NULL) DESC"));
+    }
+
+    #[test]
+    fn parse_list_folds_duplicates_and_names_the_bad_entry() {
+        // Arrange / Act
+        let picks = ConceptRef::parse_list("1:a\n2:b, 1:a\n\n").expect("parses");
+        let error = ConceptRef::parse_list("1:a\nnope").expect_err("bad entry");
+        let (kept, malformed) = ConceptRef::parse_entries("1:a\nnope\n0:z\n2:b");
+
+        // Assert
+        assert_eq!(
+            picks.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            ["1:a", "2:b"]
+        );
+        assert!(error.to_string().contains("\"nope\""));
+        assert_eq!(kept.len(), 2, "the good entries survive a bad one");
+        assert_eq!(malformed, ["nope", "0:z"]);
     }
 
     #[test]

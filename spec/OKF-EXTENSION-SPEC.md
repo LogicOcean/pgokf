@@ -1632,7 +1632,7 @@ exclude:
   - { ids: [skills/experimental/*] }
 ```
 
-Selectors resolve through the reader API (`catalogue_search`, the type wrappers, `get_skill` / `get_script` / `get_reference`), so tenant scope, visibility, script safety, and non-disclosure are enforced by the database, not by the tool; a concept the session may not see is simply absent. The manifest is read-only over the catalog; publishing a workspace's own skills back is a separate ingest path, not this tool.
+Selectors resolve through the reader API (`catalogue_search`, the type wrappers, `get_skill` / `get_script` / `get_reference`), so tenant scope, visibility, script safety, and non-disclosure are enforced by the database, not by the tool; a concept the session may not see is simply absent. An `include` entry may also carry `picks`, explicit `bundle_id:concept_id` identities added on top of the narrowing selectors and never cut by `limit`; a picked Skill brings its whole package, a picked Script or Reference one file. The manifest is read-only over the catalog; publishing a workspace's own skills back is a separate ingest path, not this tool.
 
 ### 21.2 Target adapters
 
@@ -1643,6 +1643,8 @@ Targets are a registry of declarative profiles; adding one is a data change. Eac
 - **Prompt bundle:** for model servers and bare endpoints (`ollama`, a DeepSeek-hosted harness) that consume a system prompt or Modelfile; the adapter emits one bounded bundle plus the file tree, or defers to the adapter of the harness that fronts the model.
 
 A `generic` profile (index plus files) covers any unknown target. Each shipped adapter's layout is verified against the client's current documentation when it is implemented and recorded with the adapter version; the injector MUST refuse to guess a layout for a target it does not know.
+
+- **Portable Agent Plugin (the default target):** a self-contained directory per the Agent Plugins Specification 1.0.0 (<https://github.com/agentplugins/agent-plugins-spec>): `plugin.json` (the closed manifest; `version` is `1.0.0+<content digest>`), `skills/` holding the knowledge skill and every stored package byte-identical, and `mcp.json` whose stdio entry starts `pgokf-mcp --env-file ${PLUGIN_DATA}/pgokf.env`. The specification expands only `${PLUGIN_ROOT}` and `${PLUGIN_DATA}` and forbids secrets and ambient-environment dependence, so the connection string lives in a file the user creates once under the client-managed data directory; the manifest and lockfile are written inside the plugin directory.
 
 ### 21.3 Lockfile and reproducibility
 

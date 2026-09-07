@@ -20,7 +20,7 @@ so it adds nothing new to the workspace's `cargo deny` surface.
 | `get_concept` | `concept_id` (required), `bundle_id?` | `pgokf.concepts` projection |
 | `get_skill` | `bundle_id` (required), `concept_id` (required) | `pgokf.get_skill`: an Agent Skills package stored in the catalog (metadata, the exact `SKILL.md` text, and the scripts, references, and assets it owns); audited |
 | `list_plugin_targets` | none | the `pgokf-workspace` target registry: each harness's documented skills directory |
-| `build_workspace_plugin` | `target` (required), `name?`, `title?`, `bundle_ids?`, `concept_ids?`, `tags?`, `types?`, `query?`, `verified_only?`, `limit?`, `base_model?`, `components?` (`mcp`, `guide`, `tools`; default all), `mcp_command?`, `web_url?`, `output_dir?`, `overwrite?` | `pgokf-workspace`: an Agent Skills package (`SKILL.md` + `references/`), an `AGENTS.md` instruction file, an Ollama prompt bundle, or a generic tree, with `okf-workspace.yaml` and `okf-workspace.lock`; skill packages stored in the catalog (`type: Skill`, select them with `types: ["Skill"]` or by id) are copied whole and byte for byte, scripts executable; with `output_dir` the tree is written into the workspace, otherwise the files are returned inline (up to 1 MiB; UTF-8 files as text, binary files as `{"encoding": "base64", "data": ...}`) |
+| `build_workspace_plugin` | `target` (required; `agent-plugin` for a portable Agent Plugins 1.0.0 directory, or a harness id), `name?`, `title?`, `bundle_ids?`, `concept_ids?`, `picks?` (`"bundle_id:concept_id"` strings: specific files added to whatever else matches), `tags?`, `types?`, `query?`, `verified_only?`, `limit?`, `base_model?`, `components?` (`mcp`, `guide`, `tools`; default all), `mcp_command?`, `web_url?`, `output_dir?`, `overwrite?` | `pgokf-workspace`: an Agent Skills package (`SKILL.md` + `references/`), an `AGENTS.md` instruction file, an Ollama prompt bundle, or a generic tree, with `okf-workspace.yaml` and `okf-workspace.lock`; skill packages stored in the catalog (`type: Skill`, select them with `types: ["Skill"]` or by id) are copied whole and byte for byte, scripts executable; with `output_dir` the tree is written into the workspace, otherwise the files are returned inline (up to 1 MiB; UTF-8 files as text, binary files as `{"encoding": "base64", "data": ...}`) |
 
 Each tool returns an MCP tool result whose single text content block holds the
 JSON the query produced: an array of rows for the search, graph, and concept
@@ -28,6 +28,15 @@ tools, one object for `get_skill` and `build_workspace_plugin`. A missing or
 hidden skill surfaces as the catalog's own `22023` error text.
 
 ## Configuration
+
+`--env-file <path>` reads `KEY=VALUE` lines (comments, quotes, and `export`
+prefixes allowed) for `OKF_PG_URL`, `OKF_TENANT`, and `OKF_PG_TLS`. A flag on
+the command line wins over the file, and the file wins over the process
+environment, so an installed plugin always talks to the catalog its own file
+names. An Agent Plugins package built by `pgokf-workspace` starts the server
+with `--env-file ${PLUGIN_DATA}/pgokf.env`: the connection string lives in a
+file you create once under the client's plugin data directory, never in the
+package.
 
 | Flag | Env | Meaning |
 | --- | --- | --- |

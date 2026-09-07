@@ -10,7 +10,10 @@ use anyhow::{Result, anyhow};
 use serde::Serialize;
 use serde_json::json;
 
-use crate::profile::{EnvRef, McpFormat, McpSpec, Profile, Shape, Target};
+use crate::profile::{
+    AGENT_PLUGIN_MCP_SCHEMA, AGENT_PLUGIN_SCHEMA, EnvRef, McpFormat, McpSpec, Profile, Shape,
+    Target,
+};
 use crate::selection::{ConceptRecord, Selection, Snapshot, sha256_hex, yaml_string};
 
 /// Agent Skills limits for `SKILL.md` frontmatter.
@@ -169,10 +172,38 @@ struct Layout {
     packages_dir: String,
     /// A package script selected without its package.
     scripts_dir: String,
+    /// Where `okf-workspace.yaml` and `okf-workspace.lock` go: the workspace
+    /// root, or inside the plugin directory when the plugin is the unit.
+    meta_dir: String,
+}
+
+impl Layout {
+    fn meta_path(&self, file: &str) -> String {
+        if self.meta_dir.is_empty() {
+            file.to_owned()
+        } else {
+            format!("{}/{file}", self.meta_dir)
+        }
+    }
 }
 
 fn layout(profile: &Profile, name: &str) -> Layout {
     match profile.shape {
+        // The plugin directory is the unit: everything, the manifest and
+        // lockfile included, lives under `<name>/`, and the knowledge skill
+        // is one of its skills.
+        Shape::AgentPlugin => {
+            let root = name.to_owned();
+            let skill = format!("{root}/skills/{name}");
+            Layout {
+                index_path: format!("{skill}/SKILL.md"),
+                content_dir: format!("{skill}/references"),
+                packages_dir: format!("{root}/skills"),
+                scripts_dir: format!("{skill}/scripts"),
+                meta_dir: root.clone(),
+                root,
+            }
+        }
         Shape::Skills => {
             let root = format!("{}/{name}", profile.root);
             Layout {
@@ -180,6 +211,7 @@ fn layout(profile: &Profile, name: &str) -> Layout {
                 content_dir: format!("{root}/references"),
                 packages_dir: profile.root.to_owned(),
                 scripts_dir: format!("{root}/scripts"),
+                meta_dir: String::new(),
                 root,
             }
         }
@@ -189,6 +221,7 @@ fn layout(profile: &Profile, name: &str) -> Layout {
             content_dir: "knowledge".to_owned(),
             packages_dir: "knowledge/skills".to_owned(),
             scripts_dir: "knowledge".to_owned(),
+            meta_dir: String::new(),
         },
         Shape::PromptBundle => Layout {
             root: profile.root.to_owned(),
@@ -196,6 +229,7 @@ fn layout(profile: &Profile, name: &str) -> Layout {
             content_dir: format!("{}/knowledge", profile.root),
             packages_dir: format!("{}/skills", profile.root),
             scripts_dir: format!("{}/knowledge", profile.root),
+            meta_dir: String::new(),
         },
         Shape::Generic => Layout {
             root: profile.root.to_owned(),
@@ -203,6 +237,7 @@ fn layout(profile: &Profile, name: &str) -> Layout {
             content_dir: format!("{}/concepts", profile.root),
             packages_dir: format!("{}/skills", profile.root),
             scripts_dir: format!("{}/concepts", profile.root),
+            meta_dir: String::new(),
         },
     }
 }
@@ -245,7 +280,14 @@ pub fn assemble(
         .len()
         > 1;
 
-    let materialized = content_files(&layout, &name, records, multi_bundle)?;
+    let discovers_by_directory = matches!(profile.shape, Shape::AgentPlugin | Shape::Skills);
+    let materialized = content_files(
+        &layout,
+        &name,
+        records,
+        multi_bundle,
+        discovers_by_directory,
+    )?;
     let Materialized {
         listed,
         packages,
@@ -255,36 +297,17 @@ pub fn assemble(
 
     let index_dir = layout.index_path.rsplit_once('/').map_or("", |(d, _)| d);
     let package_prefix = relative_prefix(index_dir, &layout.packages_dir);
-    let index = match profile.shape {
-        Shape::Skills => skill_md(
-            &name,
-            &title,
-            options,
-            selection,
-            records,
-            &listed,
-            &packages,
-            &package_prefix,
-        ),
-        Shape::InstructionFile => agents_md(
-            &title,
-            options,
-            selection,
-            records,
-            &listed,
-            &packages,
-            &package_prefix,
-        ),
-        Shape::PromptBundle | Shape::Generic => index_md(
-            &title,
-            options,
-            selection,
-            records,
-            &listed,
-            &packages,
-            &package_prefix,
-        ),
-    };
+    let index = render_index(&IndexInputs {
+        profile,
+        name: &name,
+        title: &title,
+        options,
+        selection,
+        records,
+        listed: &listed,
+        packages: &packages,
+        package_prefix: &package_prefix,
+    });
     let mut files = vec![file(layout.index_path.clone(), index.into_bytes())];
     if profile.shape == Shape::PromptBundle {
         let prompt = system_prompt(&title, options, records);
@@ -300,13 +323,24 @@ pub fn assemble(
     files.extend(content);
     files.extend(extras(profile, &layout, options)?);
     files.push(file(
-        MANIFEST_FILE.to_owned(),
+        layout.meta_path(MANIFEST_FILE),
         manifest_yaml(&name, options.target, selection, &options.components).into_bytes(),
     ));
     files.push(file(
-        LOCK_FILE.to_owned(),
+        layout.meta_path(LOCK_FILE),
         lockfile(&name, options.target, &layout.root, snapshot, &entries).into_bytes(),
     ));
+    if profile.shape == Shape::AgentPlugin {
+        // Last, so its version digest covers every other file of the plugin.
+        let manifest = plugin_json(&name, options, selection, records, snapshot, &files);
+        files.insert(
+            1,
+            file(
+                format!("{}/plugin.json", layout.root),
+                manifest.into_bytes(),
+            ),
+        );
+    }
     ensure_unique_paths(&files)?;
 
     Ok(Plugin {
@@ -318,6 +352,65 @@ pub fn assemble(
         package_count: packages.len(),
         concepts: records.to_vec(),
     })
+}
+
+/// Everything the index file of a shape is rendered from.
+struct IndexInputs<'a> {
+    profile: &'a Profile,
+    name: &'a str,
+    title: &'a str,
+    options: &'a BuildOptions,
+    selection: &'a Selection,
+    records: &'a [ConceptRecord],
+    listed: &'a [(String, &'a ConceptRecord)],
+    packages: &'a [(String, &'a ConceptRecord)],
+    package_prefix: &'a str,
+}
+
+/// The index file in the shape's own form: a `SKILL.md`, an `AGENTS.md`, or
+/// an `INDEX.md`.
+fn render_index(inputs: &IndexInputs<'_>) -> String {
+    let IndexInputs {
+        profile,
+        name,
+        title,
+        options,
+        selection,
+        records,
+        listed,
+        packages,
+        package_prefix,
+    } = *inputs;
+    match profile.shape {
+        Shape::AgentPlugin | Shape::Skills => skill_md(
+            name,
+            title,
+            options,
+            selection,
+            records,
+            listed,
+            packages,
+            package_prefix,
+        ),
+        Shape::InstructionFile => agents_md(
+            title,
+            options,
+            selection,
+            records,
+            listed,
+            packages,
+            package_prefix,
+        ),
+        Shape::PromptBundle | Shape::Generic => index_md(
+            title,
+            options,
+            selection,
+            records,
+            listed,
+            packages,
+            package_prefix,
+        ),
+    }
 }
 
 /// What `content_files` produces: the document listing the index renders,
@@ -341,9 +434,34 @@ fn content_files<'a>(
     plugin_name: &str,
     records: &'a [ConceptRecord],
     multi_bundle: bool,
+    discovers_by_directory: bool,
 ) -> Result<Materialized<'a>> {
     let bundle_dirs = bundle_directories(records);
     let package_dirs = package_directories(records, plugin_name);
+    if discovers_by_directory {
+        // A harness that discovers skills by directory name skips a package
+        // whose SKILL.md name differs from its directory, so a suffixed
+        // directory would ship a package the client never loads.
+        for record in records {
+            let Some(package) = &record.package else {
+                continue;
+            };
+            let dir = &package_dirs[&(record.bundle_id, record.concept_id.as_str())];
+            if *dir != slug(&package.name) {
+                return Err(anyhow!(
+                    "skill package {} (bundle {}) cannot be written as {dir}: its name collides \
+                     with {}; rename the plugin or drop the duplicate from the selection",
+                    package.name,
+                    record.bundle_id,
+                    if *dir == format!("{}-{}", slug(&package.name), record.bundle_id) {
+                        "the plugin's own directory or another package of that name"
+                    } else {
+                        "another package of that name"
+                    }
+                ));
+            }
+        }
+    }
     let index_dir = layout.index_path.rsplit_once('/').map_or("", |(d, _)| d);
     let mut listed = Vec::new();
     let mut packages = Vec::new();
@@ -568,13 +686,12 @@ fn package_name(name: &str) -> Result<String> {
     if trimmed.is_empty() {
         return Ok(DEFAULT_NAME.to_owned());
     }
-    let slugged = slug(trimmed);
-    if slugged == DEFAULT_NAME && !trimmed.eq_ignore_ascii_case(DEFAULT_NAME) {
+    if !trimmed.chars().any(|c| c.is_ascii_alphanumeric()) {
         return Err(anyhow!(
             "package name {trimmed:?} needs at least one letter or digit (a-z, 0-9)"
         ));
     }
-    Ok(slugged)
+    Ok(slug(trimmed))
 }
 
 const DEFAULT_NAME: &str = "okf-knowledge";
@@ -621,6 +738,7 @@ fn extras(profile: &Profile, layout: &Layout, options: &BuildOptions) -> Result<
             layout.content_dir.clone(),
             format!("{}/scripts", layout.root),
         ),
+        Shape::AgentPlugin => (layout.content_dir.clone(), layout.scripts_dir.clone()),
         Shape::InstructionFile => ("knowledge".to_owned(), "tools".to_owned()),
         Shape::PromptBundle | Shape::Generic => (
             format!("{}/knowledge", layout.root),
@@ -631,10 +749,14 @@ fn extras(profile: &Profile, layout: &Layout, options: &BuildOptions) -> Result<
         match component {
             Component::Mcp => {
                 if let Some(spec) = profile.mcp {
-                    out.push(file(
-                        spec.path.to_owned(),
-                        mcp_config(&spec, options)?.into_bytes(),
-                    ));
+                    // A plugin's mcp.json sits in the plugin directory; every
+                    // other harness reads a workspace-rooted path.
+                    let path = if profile.shape == Shape::AgentPlugin {
+                        format!("{}/{}", layout.root, spec.path)
+                    } else {
+                        spec.path.to_owned()
+                    };
+                    out.push(file(path, mcp_config(&spec, options)?.into_bytes()));
                 }
             }
             Component::Guide => {
@@ -664,12 +786,34 @@ fn mcp_config(spec: &McpSpec, options: &BuildOptions) -> Result<String> {
     let url_ref = match spec.env_ref {
         EnvRef::Dollar => "${OKF_PG_URL}".to_owned(),
         EnvRef::DollarEnv => "${env:OKF_PG_URL}".to_owned(),
-        EnvRef::Forward | EnvRef::Placeholder => {
+        EnvRef::Forward | EnvRef::Placeholder | EnvRef::PluginData => {
             "postgresql://okf_reader:PASSWORD@HOST:5432/okf".to_owned()
         }
     };
     let tenant = options.tenant.as_deref().filter(|t| !t.trim().is_empty());
     Ok(match spec.format {
+        McpFormat::AgentPluginJson => {
+            // Agent Plugins expand only ${PLUGIN_ROOT} and ${PLUGIN_DATA}, and
+            // a conformant plugin depends on no ambient variable and embeds no
+            // secret: the server reads its connection string from an env file
+            // the user creates once under the client-managed data directory.
+            let command = validated_plugin_command(&command)?;
+            let mut server = serde_json::Map::new();
+            server.insert("type".to_owned(), json!("stdio"));
+            server.insert("command".to_owned(), json!(command));
+            server.insert(
+                "args".to_owned(),
+                json!(["--env-file", format!("${{PLUGIN_DATA}}/{PLUGIN_ENV_FILE}")]),
+            );
+            if let Some(t) = tenant {
+                server.insert("env".to_owned(), json!({ "OKF_TENANT": t }));
+            }
+            let doc = json!({
+                "$schema": AGENT_PLUGIN_MCP_SCHEMA,
+                "mcpServers": { MCP_SERVER_NAME: server }
+            });
+            serde_json::to_string_pretty(&doc).unwrap_or_default() + "\n"
+        }
         McpFormat::McpServersJson => {
             let mut env = serde_json::Map::new();
             env.insert("OKF_PG_URL".to_owned(), json!(url_ref));
@@ -710,6 +854,109 @@ fn mcp_config(spec: &McpSpec, options: &BuildOptions) -> Result<String> {
             yaml
         }
     })
+}
+
+/// The env file a plugin's MCP server reads from `${PLUGIN_DATA}`.
+pub const PLUGIN_ENV_FILE: &str = "pgokf.env";
+
+/// The Agent Plugins manifest (`plugin.json`, Agent Plugins 1.0.0): the
+/// closed set of portable fields, nothing else.
+///
+/// `version` is `1.<yyyymmdd>.<seconds of day>+<digest>`: the ordered part
+/// comes from the newest sync among the included bundles, so a rebuilt
+/// plugin compares newer under `SemVer` once the catalog changed, and the
+/// build metadata is a digest over every other file of the plugin and the
+/// manifest's own portable fields, so it changes exactly when anything the
+/// plugin ships does.
+fn plugin_json(
+    name: &str,
+    options: &BuildOptions,
+    selection: &Selection,
+    records: &[ConceptRecord],
+    snapshot: &Snapshot,
+    files: &[PluginFile],
+) -> String {
+    let mut keywords: Vec<&str> = distinct(
+        records
+            .iter()
+            .flat_map(|r| r.tags.iter().map(String::as_str))
+            .chain(records.iter().filter_map(|r| r.concept_type.as_deref())),
+        20,
+    );
+    keywords.sort_unstable();
+    let mut doc = serde_json::Map::new();
+    doc.insert("$schema".to_owned(), json!(AGENT_PLUGIN_SCHEMA));
+    doc.insert("name".to_owned(), json!(name));
+    doc.insert(
+        "description".to_owned(),
+        json!(description(options, selection, records)),
+    );
+    if let Some(url) = options.web_url.as_deref().filter(|u| !u.trim().is_empty()) {
+        doc.insert("homepage".to_owned(), json!(url.trim()));
+    }
+    if !keywords.is_empty() {
+        doc.insert("keywords".to_owned(), json!(keywords));
+    }
+    let mut digested = files.iter().fold(String::new(), |mut acc, f| {
+        let _ = writeln!(acc, "{}\n{}", f.path, f.sha256);
+        acc
+    });
+    digested.push_str(&serde_json::Value::Object(doc.clone()).to_string());
+    let digest = sha256_hex(digested.as_bytes());
+    doc.insert(
+        "version".to_owned(),
+        json!(format!("{}+{}", ordered_version(snapshot), &digest[..12])),
+    );
+    serde_json::to_string_pretty(&serde_json::Value::Object(doc)).unwrap_or_default() + "\n"
+}
+
+/// `1.<yyyymmdd>.<seconds of day>` from the newest `last_synced_at` of the
+/// snapshot's bundles (an RFC 3339 instant), or `1.0.0` when the snapshot
+/// carries none (a preview).
+fn ordered_version(snapshot: &Snapshot) -> String {
+    let newest = snapshot
+        .bundles
+        .iter()
+        .filter_map(|b| b.last_synced_at.as_deref())
+        .max();
+    let Some(stamp) = newest else {
+        return "1.0.0".to_owned();
+    };
+    // 2026-09-07T00:05:12Z (or with an offset / fraction): digits only.
+    let digits: Vec<u32> = stamp
+        .chars()
+        .take(19)
+        .filter_map(|c| c.to_digit(10))
+        .collect();
+    if digits.len() < 14 {
+        return "1.0.0".to_owned();
+    }
+    let number = |range: std::ops::Range<usize>| -> u32 {
+        digits[range].iter().fold(0, |acc, d| acc * 10 + d)
+    };
+    let date = number(0..8);
+    let seconds = number(8..10) * 3600 + number(10..12) * 60 + number(12..14);
+    format!("1.{date}.{seconds}")
+}
+
+/// An Agent Plugins `command`: one executable token that is either a bare
+/// name (resolved on the platform's search path) or a plugin-relative path
+/// beginning with `./` that stays inside the plugin (spec §7.2.1, §4.1);
+/// anything else makes the server entry invalid for a conformant client.
+fn validated_plugin_command(command: &str) -> Result<String> {
+    let bare = !command.contains(['/', '\\', ':']);
+    let relative = command.starts_with("./")
+        && !command.contains('\\')
+        && !command.contains(':')
+        && !command.split('/').any(|seg| seg == "..");
+    if bare || relative {
+        Ok(command.to_owned())
+    } else {
+        Err(anyhow!(
+            "MCP command {command:?} is not valid for an Agent Plugin: use a bare program name \
+             (resolved on PATH) or a plugin-relative path beginning with ./"
+        ))
+    }
 }
 
 /// A command name or path: no whitespace or shell metacharacters, so it
@@ -805,8 +1052,14 @@ fn guide_md(profile: &Profile, options: &BuildOptions) -> String {
             "\n`okf.sh` in this package wraps those endpoints (`okf.sh search <query>`, `okf.sh get <bundle_id> <concept_id>`, `okf.sh graph <bundle_id> <concept_id> [hops]`, `okf.sh bundles`); it needs `curl` and reads `OKF_WEB_URL`.\n",
         );
     }
-    out.push_str(
-        "\n## Rebuilding this package\n\n`okf-workspace.yaml` at the workspace root records the selection and `okf-workspace.lock` the catalog snapshot with a hash per file; rebuild from the web UI's Plugins page or with the `build_workspace_plugin` MCP tool.\n",
+    let _ = write!(
+        out,
+        "\n## Rebuilding this package\n\n`okf-workspace.yaml` {} records the selection and `okf-workspace.lock` the catalog snapshot with a hash per file; rebuild from the web UI's Plugins page or with the `build_workspace_plugin` MCP tool.\n",
+        if profile.shape == Shape::AgentPlugin {
+            "in the plugin directory"
+        } else {
+            "at the workspace root"
+        }
     );
     out
 }
@@ -1092,10 +1345,15 @@ fn skill_md(
     out.push_str("\n## Provenance\n\n");
     let _ = writeln!(
         out,
-        "Built by pgokf-workspace from the catalog. `{LOCK_FILE}` at the workspace root records the \
+        "Built by pgokf-workspace from the catalog. `{LOCK_FILE}` {} records the \
          catalog snapshot and a content hash per file; `{MANIFEST_FILE}` reproduces the selection. \
          Files marked reconstructed in the lockfile were rebuilt from indexed text because the bundle \
-         was ingested without stored source."
+         was ingested without stored source.",
+        if Profile::of(options.target).shape == Shape::AgentPlugin {
+            "in the plugin directory"
+        } else {
+            "at the workspace root"
+        }
     );
     out
 }
@@ -1274,6 +1532,14 @@ fn manifest_yaml(
     );
     out.push_str("include:\n  - ");
     let mut fields: Vec<String> = Vec::new();
+    if !selection.picks.is_empty() {
+        let picks: Vec<String> = selection
+            .picks
+            .iter()
+            .map(|p| yaml_string(&p.to_string()))
+            .collect();
+        fields.push(format!("picks: [{}]", picks.join(", ")));
+    }
     if !selection.bundle_ids.is_empty() {
         let ids: Vec<String> = selection
             .bundle_ids
@@ -1638,6 +1904,11 @@ mod tests {
             "hf.co/Qwen/Qwen3:Q8_0"
         );
         assert_eq!(package_name("  ").expect("default"), DEFAULT_NAME);
+        assert_eq!(
+            package_name("OKF Knowledge").expect("slugs"),
+            "okf-knowledge"
+        );
+        assert!(package_name("---").is_err());
     }
 
     #[test]
@@ -1779,6 +2050,24 @@ mod tests {
             validated_command(Some("/usr/local/bin/pgokf-mcp")).expect("ok"),
             "/usr/local/bin/pgokf-mcp"
         );
+        // An Agent Plugin's command is a bare token or plugin-relative.
+        assert_eq!(
+            validated_plugin_command("pgokf-mcp").expect("ok"),
+            "pgokf-mcp"
+        );
+        assert_eq!(
+            validated_plugin_command("./bin/pgokf-mcp").expect("ok"),
+            "./bin/pgokf-mcp"
+        );
+        for bad in [
+            "/usr/local/bin/pgokf-mcp",
+            "./../x",
+            "bin/x",
+            "C:\\x",
+            "./a\\b",
+        ] {
+            assert!(validated_plugin_command(bad).is_err(), "{bad}");
+        }
         assert!(validated_web_url(Some("javascript:alert(1)")).is_err());
         assert!(validated_web_url(Some("http://x y")).is_err());
         assert_eq!(
@@ -1922,7 +2211,8 @@ mod tests {
     #[test]
     fn package_directories_never_collide_with_each_other_or_the_plugin() {
         // Arrange: two packages named alike in different bundles, and one
-        // named like the plugin itself.
+        // named like the plugin itself, for a shape that lists packages in
+        // the index rather than discovering them by directory.
         let mut clash = package_record(2, "deploy");
         clash.bundle_name = "bundle-2".to_owned();
         let mut same_as_plugin = package_record(1, "ops-runbooks");
@@ -1931,7 +2221,7 @@ mod tests {
 
         // Act
         let plugin = assemble(
-            &options(Target::ClaudeCode),
+            &options(Target::Generic),
             &selection(),
             &snapshot(),
             &records,
@@ -1948,12 +2238,55 @@ mod tests {
         assert_eq!(
             manifests,
             [
-                ".claude/skills/ops-runbooks/SKILL.md",
-                ".claude/skills/deploy/SKILL.md",
-                ".claude/skills/deploy-2/SKILL.md",
-                ".claude/skills/ops-runbooks-1/SKILL.md",
+                "okf-knowledge/skills/deploy/SKILL.md",
+                "okf-knowledge/skills/deploy-2/SKILL.md",
+                "okf-knowledge/skills/ops-runbooks-1/SKILL.md",
             ]
         );
+    }
+
+    #[test]
+    fn directory_discovered_shapes_refuse_colliding_package_names() {
+        // Arrange: a harness that discovers skills by directory would skip a
+        // package whose SKILL.md name differs from its directory.
+        let mut clash = package_record(2, "deploy");
+        clash.bundle_name = "bundle-2".to_owned();
+        let two_deploys = vec![package_record(1, "deploy"), clash];
+        let mut same_as_plugin = package_record(1, "ops-runbooks");
+        same_as_plugin.concept_id = "skills/ops-runbooks/SKILL".to_owned();
+        let like_the_plugin = vec![same_as_plugin];
+
+        // Act
+        let skills = assemble(
+            &options(Target::ClaudeCode),
+            &selection(),
+            &snapshot(),
+            &two_deploys,
+        );
+        let portable = assemble(
+            &options(Target::AgentPlugin),
+            &selection(),
+            &snapshot(),
+            &like_the_plugin,
+        );
+        let fine = assemble(
+            &options(Target::ClaudeCode),
+            &selection(),
+            &snapshot(),
+            &[package_record(1, "deploy")],
+        );
+
+        // Assert
+        let skills_error = skills.expect_err("two packages named deploy").to_string();
+        assert!(skills_error.contains("deploy (bundle 2)"), "{skills_error}");
+        let portable_error = portable
+            .expect_err("package named like the plugin")
+            .to_string();
+        assert!(
+            portable_error.contains("plugin's own directory"),
+            "{portable_error}"
+        );
+        assert!(fine.is_ok());
     }
 
     #[test]
@@ -2022,7 +2355,8 @@ mod tests {
     #[test]
     fn same_bundle_same_name_packages_and_long_names_get_bounded_directories() {
         // Arrange: two packages in one bundle whose manifests declare the same
-        // name (different directories), one of them 64 characters long.
+        // name (different directories), one of them 64 characters long, for
+        // a shape that lists packages in its index.
         let long = "a".repeat(NAME_MAX);
         let mut first = package_record(1, &long);
         first.concept_id = "skills/first/SKILL".to_owned();
@@ -2032,7 +2366,7 @@ mod tests {
 
         // Act
         let plugin = assemble(
-            &options(Target::ClaudeCode),
+            &options(Target::Generic),
             &selection(),
             &snapshot(),
             &records,
@@ -2044,12 +2378,12 @@ mod tests {
             .files
             .iter()
             .filter(|f| f.path.ends_with("/SKILL.md"))
-            .filter_map(|f| f.path.strip_prefix(".claude/skills/"))
+            .filter_map(|f| f.path.strip_prefix("okf-knowledge/skills/"))
             .map(|rest| rest.split('/').next().unwrap())
             .collect();
-        assert_eq!(dirs[1], long);
-        assert_eq!(dirs[2], format!("{}-1", "a".repeat(NAME_MAX - 2)));
-        assert!(dirs[2].len() <= NAME_MAX);
+        assert_eq!(dirs[0], long);
+        assert_eq!(dirs[1], format!("{}-1", "a".repeat(NAME_MAX - 2)));
+        assert!(dirs[1].len() <= NAME_MAX);
         let index = String::from_utf8(plugin.files[0].bytes.clone()).expect("utf-8");
         assert!(index.contains("(installed as `"), "{index}");
     }
@@ -2120,5 +2454,178 @@ mod tests {
         );
         assert_eq!(relative_prefix("a/b", "a/b"), "");
         assert_eq!(relative_prefix("a/b", "c"), "../../c/");
+    }
+
+    #[test]
+    fn an_agent_plugin_is_a_self_contained_directory_with_manifest_and_mcp() {
+        // Arrange: a document and a stored package, all extras on.
+        let records = vec![
+            record(1, "runbooks/a", "Alpha", "human-reviewed", "Do A."),
+            package_record(1, "deploy"),
+        ];
+        let mut opts = options(Target::AgentPlugin);
+        opts.components = Component::all().to_vec();
+        opts.tenant = Some("acme".to_owned());
+        opts.web_url = Some("http://catalog.example:8080".to_owned());
+
+        // Act
+        let plugin = assemble(&opts, &selection(), &snapshot(), &records).expect("assembles");
+
+        // Assert: the Agent Plugins layout, everything under the plugin dir.
+        let paths: Vec<&str> = plugin.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(plugin.root, "ops-runbooks");
+        assert_eq!(
+            paths,
+            vec![
+                "ops-runbooks/skills/ops-runbooks/SKILL.md",
+                "ops-runbooks/plugin.json",
+                "ops-runbooks/skills/ops-runbooks/references/runbooks/a.md",
+                "ops-runbooks/skills/deploy/SKILL.md",
+                "ops-runbooks/skills/deploy/scripts/run.sh",
+                "ops-runbooks/skills/deploy/assets/logo.png",
+                "ops-runbooks/mcp.json",
+                "ops-runbooks/skills/ops-runbooks/references/USING-THE-CATALOG.md",
+                "ops-runbooks/skills/ops-runbooks/scripts/okf.sh",
+                "ops-runbooks/okf-workspace.yaml",
+                "ops-runbooks/okf-workspace.lock",
+            ]
+        );
+        // plugin.json: the closed portable manifest, no other top-level key.
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&plugin.files[1].bytes).expect("json");
+        assert_eq!(manifest["$schema"], AGENT_PLUGIN_SCHEMA);
+        assert_eq!(manifest["name"], "ops-runbooks");
+        assert!(
+            manifest["version"]
+                .as_str()
+                .unwrap()
+                .starts_with("1.20260906.0+"),
+            "{}",
+            manifest["version"]
+        );
+        assert_eq!(manifest["homepage"], "http://catalog.example:8080");
+        assert_eq!(
+            manifest["keywords"],
+            serde_json::json!(["Runbook", "Skill", "ops"])
+        );
+        let keys: Vec<&str> = manifest
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        for key in &keys {
+            assert!(
+                [
+                    "$schema",
+                    "name",
+                    "version",
+                    "description",
+                    "author",
+                    "homepage",
+                    "repository",
+                    "license",
+                    "keywords",
+                    "extensions"
+                ]
+                .contains(key),
+                "{key} is not a portable manifest field"
+            );
+        }
+        // mcp.json: typed stdio entry, one-token command, ${PLUGIN_DATA} env file, no URL.
+        let mcp: serde_json::Value = serde_json::from_slice(&plugin.files[6].bytes).expect("json");
+        assert_eq!(mcp["$schema"], AGENT_PLUGIN_MCP_SCHEMA);
+        let server = &mcp["mcpServers"]["pgokf"];
+        assert_eq!(server["type"], "stdio");
+        assert_eq!(server["command"], "pgokf-mcp");
+        assert_eq!(
+            server["args"],
+            serde_json::json!(["--env-file", "${PLUGIN_DATA}/pgokf.env"])
+        );
+        assert_eq!(server["env"], serde_json::json!({ "OKF_TENANT": "acme" }));
+        assert!(!String::from_utf8_lossy(&plugin.files[6].bytes).contains("postgresql://"));
+        assert!(!String::from_utf8_lossy(&plugin.files[6].bytes).contains("OKF_PG_URL"));
+    }
+
+    #[test]
+    fn the_plugin_version_follows_every_file_of_the_plugin() {
+        // Arrange
+        let same = vec![record(1, "runbooks/a", "Alpha", "human-reviewed", "Do A.")];
+        let changed = vec![record(
+            1,
+            "runbooks/a",
+            "Alpha",
+            "human-reviewed",
+            "Do A differently.",
+        )];
+        let mut titled = options(Target::AgentPlugin);
+        titled.title = Some("Other title".to_owned());
+        let mut with_mcp = options(Target::AgentPlugin);
+        with_mcp.components = vec![Component::Mcp];
+        let mut linked = options(Target::AgentPlugin);
+        linked.web_url = Some("http://catalog.example:8080".to_owned());
+        let version = |opts: &BuildOptions, records: &[ConceptRecord]| -> String {
+            let plugin = assemble(opts, &selection(), &snapshot(), records).expect("assembles");
+            let manifest: serde_json::Value = serde_json::from_slice(
+                &plugin
+                    .files
+                    .iter()
+                    .find(|f| f.path.ends_with("/plugin.json"))
+                    .unwrap()
+                    .bytes,
+            )
+            .expect("json");
+            manifest["version"].as_str().unwrap().to_owned()
+        };
+        let base = options(Target::AgentPlugin);
+
+        // Act / Assert: identical input, identical version; any other file
+        // of the plugin changing changes the build metadata.
+        assert_eq!(version(&base, &same), version(&base, &same));
+        assert_ne!(version(&base, &same), version(&base, &changed));
+        assert_ne!(version(&base, &same), version(&titled, &same));
+        assert_ne!(version(&base, &same), version(&with_mcp, &same));
+        assert_ne!(version(&base, &same), version(&linked, &same));
+    }
+
+    #[test]
+    fn the_ordered_version_comes_from_the_newest_sync() {
+        // Arrange
+        let mut newer = snapshot();
+        newer.bundles.push(BundleState {
+            id: 2,
+            name: "bundle-2".to_owned(),
+            sync_hash: None,
+            last_synced_at: Some("2026-09-07T01:02:03.5+00:00".to_owned()),
+        });
+        let mut unsynced = snapshot();
+        unsynced.bundles[0].last_synced_at = None;
+
+        // Act / Assert
+        assert_eq!(ordered_version(&snapshot()), "1.20260906.0");
+        assert_eq!(ordered_version(&newer), "1.20260907.3723");
+        assert_eq!(ordered_version(&unsynced), "1.0.0");
+    }
+
+    #[test]
+    fn the_manifest_records_picks() {
+        // Arrange
+        let selection = Selection {
+            picks: vec![crate::selection::ConceptRef {
+                bundle_id: 3,
+                concept_id: "skills/deploy/SKILL".to_owned(),
+            }],
+            ..Selection::default()
+        };
+
+        // Act
+        let manifest = manifest_yaml("kit", Target::AgentPlugin, &selection, &[]);
+
+        // Assert
+        assert!(
+            manifest.contains("picks: [\"3:skills/deploy/SKILL\"]"),
+            "{manifest}"
+        );
+        assert!(manifest.contains("targets: [agent-plugin]"));
     }
 }

@@ -31,7 +31,7 @@
   <section class="step" id="step-content">
     <header class="step-head">
       <span class="step-no" aria-hidden="true">2</span>
-      <div><h2>Choose the content</h2><p class="muted">Skill packages are copied whole (<code>SKILL.md</code>, scripts, references, assets); every other concept becomes a reference document. Combine any of the selectors below.</p></div>
+      <div><h2>Choose the content</h2><p class="muted">Select by bundle, search, type, and tag, or pick specific files below; picks are added to whatever the selectors match. Skill packages are copied whole (<code>SKILL.md</code>, scripts, references, assets); every other concept becomes a reference document.</p></div>
     </header>
     <div class="step-grid">
       <div class="field">
@@ -56,8 +56,27 @@
       {% if !tag_facets.is_empty() %}<div class="chips js-only" data-chips-for="p-tags">{% for f in tag_facets %}<button type="button" class="chip" data-chip="{{ f.value }}" aria-pressed="false">{{ f.value }} <span class="count">{{ f.count }}</span></button>{% endfor %}</div>{% endif %}
       <input id="p-tags" type="text" class="live" name="tags" value="{{ form.tags }}" placeholder="postgresql, operations (comma-separated)">
     </div>
+    <details class="picker"{% if !form.picks.is_empty() %} open{% endif %} data-picker>
+      <summary>Pick specific files <span class="muted small">(browse a bundle and tick what to include; a skill's <code>SKILL.md</code> brings its whole package)</span></summary>
+      <div class="picker-body">
+        <div class="picker-toolbar js-only">
+          <label class="picker-bundle">Browse
+            <select data-picker-bundle>
+              {% for b in bundles %}<option value="{{ b.id }}" {% if form.bundle.as_str() == b.id.to_string().as_str() %}selected{% endif %}>{{ b.name }}</option>{% endfor %}
+            </select>
+          </label>
+          <input type="search" class="picker-filter" data-picker-filter placeholder="Filter by path or title" aria-label="Filter files">
+          <span class="muted small" data-picker-status></span>
+        </div>
+        <div class="picker-tree js-only" data-picker-tree aria-label="Files of the bundle"></div>
+        <div class="field">
+          <label for="p-picks">Picked files <span class="muted">(one <code>bundle:concept id</code> per line; edit freely)</span></label>
+          <textarea id="p-picks" class="live" name="picks" rows="3" placeholder="3:skills/postgres-failover/SKILL">{{ form.picks }}</textarea>
+        </div>
+      </div>
+    </details>
     <details class="advanced"{% if !form.ids.is_empty() || form.verified %} open{% endif %}>
-      <summary>More selectors <span class="muted small">(specific concepts, trust, size)</span></summary>
+      <summary>More selectors <span class="muted small">(concept ids as a filter, trust, size)</span></summary>
       <div class="step-grid">
         <div class="field">
           <label for="p-ids">Concept ids <span class="muted">(one per line)</span></label>
