@@ -29,7 +29,7 @@ pub use plugin::{
 };
 pub use profile::{
     AGENT_PLUGIN_MCP_SCHEMA, AGENT_PLUGIN_SCHEMA, CUSTOM_TARGET_ID, CustomHarness, EnvRef,
-    McpFormat, McpSpec, Profile, Shape, Target,
+    McpFormat, McpSpec, Profile, RemoteSpec, Shape, TOKEN_ENV, Target, TokenRef,
 };
 pub use selection::{
     BundleState, ConceptRecord, ConceptRef, DEFAULT_LIMIT, MAX_CONCEPTS, PackageRecord,

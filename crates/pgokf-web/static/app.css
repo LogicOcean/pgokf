@@ -354,6 +354,10 @@ html:not([data-js]) .tabs [role=tabpanel] { margin-bottom: 1.5rem; }
 .step-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 1.25rem; }
 .step-grid.three { grid-template-columns: 1fr 1fr 1fr; }
 .step .field { margin-bottom: .8rem; }
+/* One of two alternatives is in use; the other stays readable but plainly
+   out of play rather than disappearing under the cursor. */
+.field.is-muted { opacity: .5; }
+.field.is-muted input { cursor: not-allowed; }
 .step-note { margin: .6rem 0 0; }
 .combo { position: relative; display: flex; }
 .combo input { flex: 1; padding-right: 2.2rem; }

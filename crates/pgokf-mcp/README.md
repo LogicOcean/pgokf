@@ -25,7 +25,7 @@ may call. See [Serving it over HTTP](#serving-it-over-http).
 | `get_concept` | `concept_id` (required), `bundle_id?` | `pgokf.concepts` projection |
 | `get_skill` | `bundle_id` (required), `concept_id` (required) | `pgokf.get_skill`: an Agent Skills package stored in the catalog (metadata, the exact `SKILL.md` text, and the scripts, references, and assets it owns); audited |
 | `list_plugin_targets` | none | the `pgokf-workspace` target registry: each harness's kind and documented directory |
-| `build_workspace_plugin` | `target` (required; `agent-plugin` for a portable Agent Plugins 1.0.0 directory, a harness id, or `custom` with `harness` `{label, kind?, skills_dir?}` for an agent the registry does not know), `name?`, `title?`, `all?` (start from every visible concept, so a selection narrowed only by types, tags, or a query needs no bundle), `bundle_ids?`, `concept_ids?`, `picks?` (`"bundle_id:concept_id"` strings: specific files added to whatever else matches), `tags?`, `types?`, `query?`, `verified_only?`, `limit?`, `base_model?`, `components?` (`mcp`, `guide`, `tools`; default all), `mcp_command?`, `web_url?`, `output_dir?`, `overwrite?` | `pgokf-workspace`: an Agent Skills package (`SKILL.md` + `references/`), an `AGENTS.md` instruction file, an Ollama prompt bundle, or a generic tree, with `okf-workspace.yaml` and `okf-workspace.lock`; skill packages stored in the catalog (`type: Skill`, select them with `types: ["Skill"]` or by id) are copied whole and byte for byte, scripts executable; with `output_dir` the tree is written into the workspace, otherwise the files are returned inline (up to 1 MiB; UTF-8 files as text, binary files as `{"encoding": "base64", "data": ...}`) |
+| `build_workspace_plugin` | `target` (required; `agent-plugin` for a portable Agent Plugins 1.0.0 directory, a harness id, or `custom` with `harness` `{label, kind?, skills_dir?}` for an agent the registry does not know), `name?`, `title?`, `all?` (start from every visible concept, so a selection narrowed only by types, tags, or a query needs no bundle), `bundle_ids?`, `concept_ids?`, `picks?` (`"bundle_id:concept_id"` strings: specific files added to whatever else matches), `tags?`, `types?`, `query?`, `verified_only?`, `limit?`, `base_model?`, `components?` (`mcp`, `guide`, `tools`; default all), `mcp_command?` or `mcp_url?` (point the harness at a `pgokf-mcp --http` endpoint instead of a local server; the bearer token is referenced, never written), `web_url?`, `output_dir?`, `overwrite?` | `pgokf-workspace`: an Agent Skills package (`SKILL.md` + `references/`), an `AGENTS.md` instruction file, an Ollama prompt bundle, or a generic tree, with `okf-workspace.yaml` and `okf-workspace.lock`; skill packages stored in the catalog (`type: Skill`, select them with `types: ["Skill"]` or by id) are copied whole and byte for byte, scripts executable; with `output_dir` the tree is written into the workspace, otherwise the files are returned inline (up to 1 MiB; UTF-8 files as text, binary files as `{"encoding": "base64", "data": ...}`) |
 
 Each tool returns an MCP tool result whose single text content block holds the
 JSON the query produced: an array of rows for the search, graph, and concept
@@ -218,10 +218,12 @@ curl -s https://catalog.example/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
-A plugin built by `build_workspace_plugin` still configures the **stdio** form
-(`pgokf-mcp --env-file ${PLUGIN_DATA}/pgokf.env`), which is what a locally
-installed plugin wants; point a client at an HTTP endpoint with a config like
-the one above.
+A plugin built by `build_workspace_plugin` configures the **stdio** form by
+default (`pgokf-mcp --env-file ${PLUGIN_DATA}/pgokf.env`), which is what a
+locally installed plugin wants. Pass `mcp_url` and it writes the remote form
+instead, in the harness's own documented shape, with the token referenced
+rather than written - see the
+[builder's README](../pgokf-workspace/README.md#pointing-at-an-http-endpoint).
 
 ## Scripted stdio session (and how to test it)
 

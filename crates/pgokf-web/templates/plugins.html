@@ -147,14 +147,18 @@
     </header>
     <div class="options">
       <label class="option is-fixed"><input type="checkbox" checked disabled><span><strong>Knowledge</strong><span class="muted">The selected concepts and skill packages. Always included.</span></span></label>
-      <label class="option"><input type="checkbox" name="mcp" value="1" {% if form.with_mcp %}checked{% endif %}><span><strong>MCP server entry</strong><span class="muted">The agent's own config for <code>pgokf-mcp</code>, so it can search the catalog live. The connection string is never written into the file.</span></span></label>
+      <label class="option"><input type="checkbox" name="mcp" value="1" {% if form.with_mcp %}checked{% endif %}><span><strong>MCP server entry</strong><span class="muted">The agent's own config for <code>pgokf-mcp</code>, so it can search the catalog live — a server it starts, or an HTTP endpoint it calls. No connection string and no token is ever written into the file.</span></span></label>
       <label class="option"><input type="checkbox" name="guide" value="1" {% if form.with_guide %}checked{% endif %}><span><strong>Catalog guide</strong><span class="muted">A short document on identities, trust tiers, the MCP tools, and the JSON API.</span></span></label>
       <label class="option"><input type="checkbox" name="tools" value="1" {% if form.with_tools %}checked{% endif %}><span><strong>CLI helper</strong><span class="muted"><code>okf.sh</code> over the JSON API, for agents without MCP.</span></span></label>
     </div>
     <div class="step-grid">
       <div class="field" data-needs="mcp">
-        <label for="p-mcp">MCP command <span class="muted">(how the agent starts the server)</span></label>
-        <input id="p-mcp" type="text" class="live" name="mcp_command" value="{{ form.mcp_command }}" placeholder="pgokf-mcp">
+        <label for="p-mcp">MCP command <span class="muted">(how the agent starts its own server)</span></label>
+        <input id="p-mcp" type="text" class="live" name="mcp_command" value="{{ form.mcp_command }}" placeholder="pgokf-mcp" data-alternative-to="p-mcp-url">
+      </div>
+      <div class="field" data-needs="mcp">
+        <label for="p-mcp-url">…or MCP endpoint <span class="muted">(an HTTP server it calls instead)</span></label>
+        <input id="p-mcp-url" type="url" class="live" name="mcp_url" value="{{ form.mcp_url }}" placeholder="https://catalog.example/mcp" data-alternative-to="p-mcp">
       </div>
       <div class="field" data-needs="guide tools">
         <label for="p-web">Web UI address <span class="muted">(for the guide and the helper)</span></label>

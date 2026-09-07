@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use pgokf_workspace::{
-    BuildOptions, Component, ConceptRef, CustomHarness, Profile, Selection, Shape, Target,
+    BuildOptions, Component, ConceptRef, CustomHarness, Profile, Selection, Shape, TOKEN_ENV,
+    Target, TokenRef,
 };
 use serde_json::{Value, json};
 use tokio::task::JoinHandle;
@@ -250,7 +251,8 @@ impl Catalog {
                         "limit": {"type": "integer", "description": "Maximum concepts (1..=500, default 100)."},
                         "base_model": {"type": "string", "description": "Ollama only: the Modelfile FROM line (default llama3.1)."},
                         "components": {"type": "array", "items": {"type": "string", "enum": ["mcp", "guide", "tools"]}, "description": "Extra parts: mcp (the harness's MCP server config for pgokf-mcp; the connection string is never written), guide (how to use the catalog: identities, trust tiers, MCP tools, JSON API), tools (okf.sh helper over the JSON API). Default: all three."},
-                        "mcp_command": {"type": "string", "description": "How the harness starts the MCP server (default pgokf-mcp)."},
+                        "mcp_command": {"type": "string", "description": "How the harness starts the MCP server (default pgokf-mcp). Alternative to mcp_url."},
+                        "mcp_url": {"type": "string", "description": "Point the harness at a pgokf-mcp --http endpoint (for example https://catalog.example/mcp) instead of a local stdio server. The bearer token is referenced, never written: the entry expands OKF_MCP_TOKEN where the harness documents an expansion form, names that variable where it documents one, and otherwise becomes a fragment to merge with a placeholder in it."},
                         "web_url": {"type": "string", "description": "Base URL of the pgokf web UI, for the guide and the helper script."},
                         "output_dir": {"type": "string", HOST_ONLY: true, "description": "Write the tree under this workspace directory instead of returning contents. Local transports only: over HTTP the tree would be written on the server, so it is refused."},
                         "overwrite": {"type": "boolean", HOST_ONLY: true, "description": "With output_dir: replace files that already exist, including an existing AGENTS.md (default false; symbolic links are never followed)."}
@@ -381,6 +383,27 @@ impl Catalog {
                         "documented_at": p.source,
                         "verified": p.verified,
                         "notes": p.notes,
+                        // What `mcp_url` would do for this target: where the
+                        // entry lands, and how the token reaches it. Absent
+                        // when the target has no MCP configuration at all.
+                        "mcp": p.mcp.map(|spec| {
+                            let (remote_path, auto_loaded) = spec.location(true);
+                            json!({
+                                "path": spec.path,
+                                "auto_loaded": spec.auto_loaded,
+                                "remote": spec.remote.map(|remote| json!({
+                                    "path": remote_path,
+                                    "auto_loaded": auto_loaded,
+                                    "merge_into": spec.merge_target(true),
+                                    "url_key": remote.url_key,
+                                    "type": remote.type_word,
+                                    "token": remote.token_ref.id(),
+                                    "token_env": (remote.token_ref != TokenRef::Forbidden)
+                                        .then_some(TOKEN_ENV),
+                                    "documented_at": remote.source,
+                                })),
+                            })
+                        }),
                     })
                 })
                 .collect(),
@@ -444,6 +467,7 @@ impl Catalog {
             base_model: opt_str(args, "base_model").map(str::to_owned),
             components,
             mcp_command: opt_str(args, "mcp_command").map(str::to_owned),
+            mcp_url: opt_str(args, "mcp_url").map(str::to_owned),
             tenant: self.tenant.clone(),
             web_url: opt_str(args, "web_url").map(str::to_owned),
         })

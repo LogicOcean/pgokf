@@ -206,6 +206,39 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
   binds an address reachable from elsewhere. New compose profile `mcp-http`
   with `PGOKF_MCP_BIND`, `PGOKF_MCP_PORT`, `OKF_MCP_TOKENS_DIR`, and
   `OKF_MCP_ALLOWED_ORIGINS`.
+- **Built plugins can point at that endpoint.** The workspace injector's
+  `mcp` component takes an `mcp_url` (the MCP tool's `build_workspace_plugin`
+  argument, and a field on the web **Plugins** page beside the MCP command,
+  which is its alternative): instead of configuring a server the harness
+  starts, the entry describes the remote one it calls. Each harness's remote
+  form was read from its own documentation and is recorded with its source,
+  as every layout in the registry is: `type: http` with `url` and `headers`
+  for Claude Code, Gemini CLI and Copilot, bare `url`/`headers` for Cursor,
+  Kimi and Hermes, `url` with `bearer_token_env_var` for Codex, and
+  `type: streamable-http` for a portable Agent Plugin. The bearer token is a
+  secret, so it is treated exactly as the connection string is - referenced,
+  never written: `${OKF_MCP_TOKEN}` where the harness expands one,
+  `${env:OKF_MCP_TOKEN}` for Cursor, the variable *named* for Codex, and
+  nothing at all for an Agent Plugin, whose specification forbids a
+  credential in a package (and whose HTTPS-outside-loopback rule the build
+  enforces). A harness that documents header values as literals - the
+  Copilot CLI and Kimi - does not get an entry in its own configuration file
+  at all: the build writes a fragment with a placeholder and the guide names
+  the file to merge it into and says to keep that out of version control, so
+  no file in the tree is ever meant to hold a secret. A URL carrying
+  credentials, a query string, or a fragment is refused, `mcp_url` and
+  `mcp_command` are alternatives, the manifest records the endpoint only
+  when an entry was written for it, and the guide explains that a `reader`
+  token is offered five tools and a `builder` seven. `list_plugin_targets`
+  now reports each target's remote form, so an agent can see what `mcp_url`
+  would do before calling it.
+- Two layouts in the registry were **corrected** while reviewing that work,
+  and they change the stdio builds too: Hermes Agent documents `${VAR}`
+  references in any string value of a server entry, so its snippet now
+  references `${OKF_PG_URL}` instead of carrying a placeholder connection
+  string; and Kimi reads only `~/.kimi/mcp.json`, with no project-level
+  file, so its entry is written as `okf-mcp.json` to merge rather than as
+  `.kimi/mcp.json` the harness would never have read.
 - **GitHub Copilot** is a target (`copilot`: `.github/skills/`, MCP entry
   in `.github/mcp.json` as a typed `local` server that inherits Copilot's
   environment). **Custom agents:** `target: custom` with a harness

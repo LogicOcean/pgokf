@@ -917,6 +917,7 @@ pub(crate) struct PluginForm {
     pub with_guide: bool,
     pub with_tools: bool,
     pub mcp_command: String,
+    pub mcp_url: String,
     pub web_url: String,
     /// `true` once any selector is set.
     pub has_selection: bool,
@@ -3504,17 +3505,21 @@ async fn api_health(State(app): State<Shared>) -> Result<Json<Value>, AppError> 
 
 /// Where the unpacked zip goes: an Agent Plugin is one directory the client
 /// installs, every other shape is unpacked over the workspace root.
-fn install_note(profile: &Profile<'_>, name: &str) -> String {
-    if profile.shape == pgokf_workspace::Shape::AgentPlugin {
-        format!(
-            "Unpack anywhere and install the {name}/ directory with your agent's plugin command \
-             (a plugin.json, skills/, and mcp.json as the Agent Plugins Specification defines \
-             them); then write OKF_PG_URL into pgokf.env under the client's plugin data \
-             directory if the MCP entry is included."
-        )
-    } else {
-        "Unpack at the workspace root.".to_owned()
+fn install_note(profile: &Profile<'_>, name: &str, remote: bool) -> String {
+    if profile.shape != pgokf_workspace::Shape::AgentPlugin {
+        return "Unpack at the workspace root.".to_owned();
     }
+    let credential = if remote {
+        "the specification forbids a credential in a package, so give your client the endpoint's \
+         bearer token itself"
+    } else {
+        "write OKF_PG_URL into pgokf.env under the client's plugin data directory"
+    };
+    format!(
+        "Unpack anywhere and install the {name}/ directory with your agent's plugin command \
+         (a plugin.json, skills/, and mcp.json as the Agent Plugins Specification defines \
+         them); then, if the MCP entry is included, {credential}."
+    )
 }
 
 /// Every concept of one bundle for the builder's file picker (capped; the
@@ -3789,6 +3794,8 @@ struct PluginParams {
     #[serde(default)]
     mcp_command: String,
     #[serde(default)]
+    mcp_url: String,
+    #[serde(default)]
     web_url: String,
 }
 
@@ -4039,6 +4046,7 @@ impl PluginParams {
             with_guide: components.contains(&Component::Guide),
             with_tools: components.contains(&Component::Tools),
             mcp_command: self.mcp_command.trim().to_owned(),
+            mcp_url: self.mcp_url.trim().to_owned(),
             web_url: self.web_url.trim().to_owned(),
             has_selection: !selection.is_empty(),
             query_string,
@@ -4091,6 +4099,7 @@ impl PluginParams {
             ("limit", limit.map(|n| n.to_string()).unwrap_or_default()),
             ("base_model", self.base_model.trim().to_owned()),
             ("mcp_command", self.mcp_command.trim().to_owned()),
+            ("mcp_url", self.mcp_url.trim().to_owned()),
             ("web_url", self.web_url.trim().to_owned()),
         ];
         let mut query: Vec<String> = pairs
@@ -4172,6 +4181,7 @@ fn build_options(
         base_model,
         components,
         mcp_command: non_empty(&form.mcp_command),
+        mcp_url: non_empty(&form.mcp_url),
         tenant: app.tenant.clone(),
         web_url: non_empty(&form.web_url),
     }
@@ -4189,6 +4199,37 @@ fn workspace_error(error: anyhow::Error) -> AppError {
         error.into()
     } else {
         AppError::bad_request(format!("{error:#}"))
+    }
+}
+
+/// What the preview says about the MCP entry: where it is written, and how
+/// the harness reaches the catalog with it.
+fn mcp_note(profile: &Profile, name: &str, remote: bool) -> String {
+    let Some(spec) = profile.mcp else {
+        return "This target has no MCP configuration; the guide points at the JSON API instead."
+            .to_owned();
+    };
+    let (path, auto_loaded) = spec.location(remote);
+    // A plugin's own files live inside its directory, as the file list on
+    // the same page shows them.
+    let path = if profile.shape == Shape::AgentPlugin {
+        format!("{}/{path}", pgokf_workspace::slug(name))
+    } else {
+        path.to_owned()
+    };
+    let where_it_goes = match spec.merge_target(remote) {
+        None if auto_loaded => format!("{path}, which {} loads from the workspace", profile.label),
+        None => format!("{path}; merge it into the harness's own configuration"),
+        Some(target) => format!("{path}; merge it into the harness's own {target}"),
+    };
+    if remote {
+        format!(
+            "The entry points {} at the endpoint you gave and is written to {where_it_goes}. \
+             The bearer token is never written into the tree.",
+            profile.label
+        )
+    } else {
+        format!("The MCP server entry is written to {where_it_goes}.")
     }
 }
 
@@ -4244,21 +4285,13 @@ async fn plugin_preview(
         "limit": selection.effective_limit(),
         "components": options.components.iter().map(|c| c.id()).collect::<Vec<_>>(),
         "mcp_command": options.mcp_command,
+        "mcp_url": options.mcp_url,
         "web_url": options.web_url,
         "output_dir": "/path/to/your/workspace",
     });
-    let mcp_note = form.with_mcp.then(|| match profile.mcp {
-        Some(spec) if spec.auto_loaded => format!(
-            "The MCP server entry is written to {}, which {} loads from the workspace.",
-            spec.path, profile.label
-        ),
-        Some(spec) => format!(
-            "The MCP server entry is written to {}; merge it into the harness's own configuration.",
-            spec.path
-        ),
-        None => "This target has no MCP configuration; the guide points at the JSON API instead."
-            .to_owned(),
-    });
+    let mcp_note = form
+        .with_mcp
+        .then(|| mcp_note(&profile, &form.name, !form.mcp_url.is_empty()));
     let mcp_args = match mcp_args {
         Value::Object(map) => Value::Object(
             map.into_iter()
@@ -4292,7 +4325,7 @@ async fn plugin_preview(
         download_url: format!("/plugins/build.zip?{}", form.query_string),
         package_count: plugin.as_ref().map_or(0, |p| p.package_count),
         target_label: profile.label.to_owned(),
-        install_note: install_note(&profile, &form.name),
+        install_note: install_note(&profile, &form.name, !form.mcp_url.is_empty()),
         concepts,
     })
 }

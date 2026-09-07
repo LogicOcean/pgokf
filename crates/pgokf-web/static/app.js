@@ -140,6 +140,23 @@
       });
     };
 
+    // Two fields that are alternatives: filling one greys the other, so a
+    // combination the builder refuses cannot be typed in the first place.
+    // A link that arrives with both filled must not grey both - nothing
+    // would then be editable - so on load the pair is left alone and the
+    // server's refusal stands until one is cleared.
+    builder.querySelectorAll('[data-alternative-to]').forEach(function (input) {
+      var other = document.getElementById(input.getAttribute('data-alternative-to'));
+      if (!other) return;
+      var sync = function () {
+        var mute = input.value.trim() !== '' && other.value.trim() === '';
+        other.disabled = mute;
+        other.closest('.field').classList.toggle('is-muted', mute);
+      };
+      input.addEventListener('input', sync);
+      sync();
+    });
+
     // Chips toggle a value in the comma-separated text field beside them;
     // typing in the field keeps the chips in step.
     builder.querySelectorAll('[data-chips-for]').forEach(function (group) {

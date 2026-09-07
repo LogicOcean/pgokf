@@ -8,11 +8,11 @@ use std::fmt::Write as _;
 
 use anyhow::{Result, anyhow};
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::profile::{
     AGENT_PLUGIN_MCP_SCHEMA, AGENT_PLUGIN_SCHEMA, CustomHarness, EnvRef, McpFormat, McpSpec,
-    Profile, Shape, Target,
+    Profile, Shape, TOKEN_ENV, Target, TokenRef,
 };
 use crate::selection::{ConceptRecord, Selection, Snapshot, sha256_hex, yaml_string};
 
@@ -86,7 +86,12 @@ pub struct BuildOptions {
     /// The extra parts to include.
     pub components: Vec<Component>,
     /// How the harness starts the MCP server (default `pgokf-mcp`).
+    /// Meaningless with [`BuildOptions::mcp_url`], which needs no command.
     pub mcp_command: Option<String>,
+    /// The endpoint of a `pgokf-mcp --http` server. When set, the harness's
+    /// MCP configuration describes that remote server instead of starting a
+    /// local one, and the bearer token is referenced, never written.
+    pub mcp_url: Option<String>,
     /// The tenant the agent's session should use, when the catalog is
     /// tenant-scoped (a name, never a secret).
     pub tenant: Option<String>,
@@ -99,6 +104,15 @@ pub struct BuildOptions {
 }
 
 impl BuildOptions {
+    /// The HTTP endpoint this build points at, if it points at one.
+    #[must_use]
+    pub fn remote_endpoint(&self) -> Option<&str> {
+        self.mcp_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+    }
+
     /// The profile the build is laid out with: the registry's for a known
     /// target, the described harness's for [`Target::Custom`].
     ///
@@ -267,11 +281,46 @@ fn layout(profile: &Profile, name: &str) -> Layout {
     }
 }
 
+/// Everything about a request that can be judged before any content is
+/// read: the URLs it carries, and whether the harness can do what it asks.
+///
+/// # Errors
+///
+/// A malformed web or MCP URL, both ways of reaching the MCP server at
+/// once, or an HTTP endpoint for a harness whose remote form is unknown.
+fn validate_options(options: &BuildOptions, profile: &Profile) -> Result<()> {
+    validated_web_url(options.web_url.as_deref())?;
+    validated_mcp_url(options.mcp_url.as_deref())?;
+    if options.remote_endpoint().is_none() {
+        return Ok(());
+    }
+    if options
+        .mcp_command
+        .as_deref()
+        .is_some_and(|c| !c.trim().is_empty())
+    {
+        return Err(anyhow!(
+            "mcp_url and mcp_command are alternatives: an HTTP endpoint is reached, not started"
+        ));
+    }
+    if let Some(spec) = profile.mcp
+        && spec.remote.is_none()
+    {
+        return Err(anyhow!(
+            "{} documents no remote MCP server form, so this build cannot point at an HTTP \
+             endpoint; leave mcp_url out to configure the stdio server",
+            profile.label
+        ));
+    }
+    Ok(())
+}
+
 /// Assemble the tree for a target from resolved records (with content).
 ///
 /// # Errors
 ///
-/// No records, or a record without content.
+/// No records, a record without content, or a request
+/// [`validate_options`] refuses.
 pub fn assemble(
     options: &BuildOptions,
     selection: &Selection,
@@ -292,7 +341,7 @@ pub fn assemble(
     let profile = &profile;
     let name = package_name(&options.name)?;
     let base_model = validated_base_model(options.base_model.as_deref())?;
-    validated_web_url(options.web_url.as_deref())?;
+    validate_options(options, profile)?;
     let title = options
         .title
         .clone()
@@ -348,8 +397,15 @@ pub fn assemble(
     }
     files.extend(content);
     files.extend(extras(profile, &layout, options)?);
+    let wrote_an_entry = profile.mcp.is_some() && options.components.contains(&Component::Mcp);
     files.extend(meta_files(
-        &layout, &name, options, selection, snapshot, &entries,
+        &layout,
+        &name,
+        options,
+        selection,
+        snapshot,
+        &entries,
+        wrote_an_entry,
     ));
     if profile.shape == Shape::AgentPlugin {
         // Last, so its version digest covers every other file of the plugin.
@@ -770,12 +826,13 @@ fn extras(profile: &Profile, layout: &Layout, options: &BuildOptions) -> Result<
         match component {
             Component::Mcp => {
                 if let Some(spec) = profile.mcp {
+                    let (name, _) = spec.location(options.remote_endpoint().is_some());
                     // A plugin's mcp.json sits in the plugin directory; every
                     // other harness reads a workspace-rooted path.
                     let path = if profile.shape == Shape::AgentPlugin {
-                        format!("{}/{}", layout.root, spec.path)
+                        format!("{}/{name}", layout.root)
                     } else {
-                        spec.path.to_owned()
+                        name.to_owned()
                     };
                     out.push(file(path, mcp_config(&spec, options)?.into_bytes()));
                 }
@@ -799,10 +856,106 @@ fn extras(profile: &Profile, layout: &Layout, options: &BuildOptions) -> Result<
     Ok(out)
 }
 
-/// The MCP server entry in the harness's own format. The connection string
-/// never enters the file: the harness expands it from the environment,
-/// forwards it, or the user fills a placeholder outside the repository.
+/// The MCP server entry in the harness's own format: a remote endpoint when
+/// one was given, otherwise a local stdio server. Neither the connection
+/// string nor the bearer token enters the file - the harness expands it
+/// from the environment, names the variable to read it from, or the user
+/// fills a placeholder in a file outside the repository.
 fn mcp_config(spec: &McpSpec, options: &BuildOptions) -> Result<String> {
+    match options.remote_endpoint() {
+        Some(_) => remote_mcp_config(spec, options),
+        None => local_mcp_config(spec, options),
+    }
+}
+
+/// What a header carries when the harness cannot reference a secret: a word
+/// nobody mistakes for a token, in a file the guide says to merge.
+const TOKEN_PLACEHOLDER: &str = "TOKEN";
+
+/// The entry for a `pgokf-mcp --http` endpoint, in the harness's own remote
+/// form. The token is referenced, named, or left as a placeholder - it is
+/// never written.
+fn remote_mcp_config(spec: &McpSpec, options: &BuildOptions) -> Result<String> {
+    let url = validated_mcp_url(options.mcp_url.as_deref())?
+        .ok_or_else(|| anyhow!("no MCP endpoint to configure"))?;
+    let remote = spec
+        .remote
+        .ok_or_else(|| anyhow!("this harness documents no remote MCP server form"))?;
+    // The header the harness writes, if it writes one at all.
+    let authorization = match remote.token_ref {
+        TokenRef::Dollar => Some(format!("Bearer ${{{TOKEN_ENV}}}")),
+        TokenRef::DollarEnv => Some(format!("Bearer ${{env:{TOKEN_ENV}}}")),
+        TokenRef::Merge => Some(format!("Bearer {TOKEN_PLACEHOLDER}")),
+        TokenRef::NamedEnvVar | TokenRef::Forbidden => None,
+    };
+    let json_entry = || {
+        let mut server = serde_json::Map::new();
+        if let Some(word) = remote.type_word {
+            server.insert("type".to_owned(), json!(word));
+        }
+        server.insert(remote.url_key.to_owned(), json!(url));
+        if let Some(header) = &authorization {
+            server.insert("headers".to_owned(), json!({ "Authorization": header }));
+        }
+        server
+    };
+    Ok(match spec.format {
+        McpFormat::AgentPluginJson => {
+            // Agent Plugins 1.0.0 §7.2.1: "Non-loopback endpoints MUST use
+            // HTTPS." A package declaring the schema must obey it.
+            if url.starts_with("http://") && !is_loopback_endpoint(&url) {
+                return Err(anyhow!(
+                    "the Agent Plugins specification requires HTTPS for an endpoint that is not \
+                     on the loopback interface, and this package declares that specification"
+                ));
+            }
+            let doc = json!({
+                "$schema": AGENT_PLUGIN_MCP_SCHEMA,
+                "mcpServers": { MCP_SERVER_NAME: Value::Object(json_entry()) }
+            });
+            serde_json::to_string_pretty(&doc).unwrap_or_default() + "\n"
+        }
+        McpFormat::McpServersJson => {
+            let doc = json!({ "mcpServers": { MCP_SERVER_NAME: Value::Object(json_entry()) } });
+            serde_json::to_string_pretty(&doc).unwrap_or_default() + "\n"
+        }
+        McpFormat::CopilotJson => {
+            let mut server = json_entry();
+            server.insert("tools".to_owned(), json!(["*"]));
+            let doc = json!({ "mcpServers": { MCP_SERVER_NAME: Value::Object(server) } });
+            serde_json::to_string_pretty(&doc).unwrap_or_default() + "\n"
+        }
+        McpFormat::CodexToml => format!(
+            "# pgokf catalog MCP server over HTTP (generated by pgokf-workspace).\n\
+             # The bearer token is read from {TOKEN_ENV} in your environment,\n\
+             # never written here.\n\
+             [mcp_servers.{MCP_SERVER_NAME}]\n{} = {}\nbearer_token_env_var = {}\n",
+            remote.url_key,
+            yaml_string(&url),
+            yaml_string(TOKEN_ENV)
+        ),
+        McpFormat::HermesYaml => {
+            let mut yaml = format!(
+                "# Merge under the `mcp_servers:` key of ~/.hermes/config.yaml (Hermes reads no\n\
+                 # project-level MCP file). The token is a secret and is not written here.\n\
+                 mcp_servers:\n  {MCP_SERVER_NAME}:\n    {}: {}\n",
+                remote.url_key,
+                yaml_string(&url)
+            );
+            if let Some(header) = &authorization {
+                let _ = write!(
+                    yaml,
+                    "    headers:\n      Authorization: {}\n",
+                    yaml_string(header)
+                );
+            }
+            yaml
+        }
+    })
+}
+
+/// The entry for a local stdio server the harness starts itself.
+fn local_mcp_config(spec: &McpSpec, options: &BuildOptions) -> Result<String> {
     let command = validated_command(options.mcp_command.as_deref())?;
     let url_ref = match spec.env_ref {
         EnvRef::Dollar => "${OKF_PG_URL}".to_owned(),
@@ -1030,6 +1183,96 @@ fn validated_web_url(raw: Option<&str>) -> Result<Option<String>> {
     }
 }
 
+/// The longest an endpoint may be. Every other free-text option is bounded;
+/// this one is written into three files and a query string.
+const MCP_URL_MAX: usize = 512;
+
+/// The endpoint of a `pgokf-mcp --http` server: http(s), carrying no secret
+/// of any kind, and nothing that could break out of the file it is written
+/// into.
+///
+/// A `pgokf-mcp --http` endpoint is a path (`POST /mcp`) and nothing more,
+/// so a query string or a fragment is refused outright rather than
+/// inspected: both are places a token gets put by mistake, and both would
+/// then be written into files meant to be committed. The Agent Plugins
+/// specification independently forbids user information and a fragment in
+/// a server URL.
+///
+/// # Errors
+///
+/// The URL is not http(s), is too long, names no host, carries credentials,
+/// a query or a fragment, or holds a character that does not belong in one.
+fn validated_mcp_url(raw: Option<&str>) -> Result<Option<String>> {
+    let Some(url) = raw.map(str::trim).filter(|u| !u.is_empty()) else {
+        return Ok(None);
+    };
+    if url.len() > MCP_URL_MAX {
+        return Err(anyhow!(
+            "MCP endpoint is {} characters; the most is {MCP_URL_MAX}",
+            url.len()
+        ));
+    }
+    let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    else {
+        return Err(anyhow!("MCP endpoint {url:?} is not an http(s) URL"));
+    };
+    if !url
+        .chars()
+        .all(|c| c.is_ascii_graphic() && c != '\'' && c != '"' && c != '`')
+    {
+        return Err(anyhow!("MCP endpoint {url:?} is not a URL"));
+    }
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    if authority.is_empty() {
+        return Err(anyhow!("MCP endpoint {url:?} names no host"));
+    }
+    if authority.contains('@') {
+        return Err(anyhow!(
+            "MCP endpoint {url:?} carries credentials; the token goes in the Authorization \
+             header, which this build references rather than writes"
+        ));
+    }
+    if rest.contains(['?', '#']) {
+        return Err(anyhow!(
+            "MCP endpoint {url:?} carries a query or a fragment; the endpoint is a path, and a \
+             token put in one would be written into files meant to be committed"
+        ));
+    }
+    Ok(Some(url.to_owned()))
+}
+
+/// Whether an endpoint's host is one only this machine can reach, which is
+/// where the Agent Plugins specification allows plain HTTP.
+fn is_loopback_endpoint(url: &str) -> bool {
+    let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    let authority = rest.split('/').next().unwrap_or(rest);
+    let host = match authority.rsplit_once(':') {
+        // A port only when digits follow and what precedes them is either a
+        // plain host or a bracketed IPv6 literal - the colons inside `::1`
+        // are not port separators.
+        Some((head, port))
+            if !port.is_empty()
+                && port.chars().all(|c| c.is_ascii_digit())
+                && (head.ends_with(']') || !head.contains(':')) =>
+        {
+            head
+        }
+        _ => authority,
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host == "[::1]"
+        || host
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
 /// The guide the agent reads to use the catalog beyond the packaged files.
 fn guide_md(profile: &Profile, options: &BuildOptions) -> String {
     let mut out = String::new();
@@ -1043,39 +1286,26 @@ fn guide_md(profile: &Profile, options: &BuildOptions) -> String {
     );
     if options.components.contains(&Component::Mcp) {
         out.push_str("\n## Live access through MCP\n\n");
-        match profile.mcp {
-            Some(spec) if spec.auto_loaded && spec.env_ref == EnvRef::Inherit => {
-                let _ = writeln!(
-                    out,
-                    "`{}` configures the `{MCP_SERVER_NAME}` MCP server (the `pgokf-mcp` companion); the harness loads it from the workspace and starts the server with its own environment, so set `OKF_PG_URL` to a reader connection string in the environment that starts the harness (no value is written into the file).",
-                    spec.path
-                );
-            }
-            Some(spec) if spec.auto_loaded => {
-                let _ = writeln!(
-                    out,
-                    "`{}` configures the `{MCP_SERVER_NAME}` MCP server (the `pgokf-mcp` companion); the harness loads it from the workspace. Set `OKF_PG_URL` to a reader connection string in the environment that starts the harness.",
-                    spec.path
-                );
-            }
-            Some(spec) => {
-                let _ = writeln!(
-                    out,
-                    "`{}` holds the `{MCP_SERVER_NAME}` MCP server entry; merge it into the harness's own configuration and set `OKF_PG_URL` (a reader connection string) where that file expects it.",
-                    spec.path
-                );
-            }
-            None => {
-                out.push_str("This target has no MCP configuration; use the JSON API below.\n");
-            }
+        match (profile.mcp, options.remote_endpoint()) {
+            (Some(spec), Some(url)) => out.push_str(&remote_mcp_guide(&spec, url)),
+            // A target with no MCP configuration has none whether or not an
+            // endpoint was named; the local branch says so.
+            (mcp, _) => guide_local_mcp(&mut out, mcp),
         }
         out.push_str(
             "\nTools: `concept_search` (full-text query with `type`, `tags`, `status`, `trust_tier` filters), \
              `find_similar` (more like a concept), `concept_neighbors` (walk resolved links), \
-             `get_concept` (a concept's fields and text), `list_plugin_targets` and \
-             `build_workspace_plugin` (rebuild a package like this one). Example:\n\n\
+             `get_concept` (a concept's fields and text), `get_skill` (a stored Agent Skills \
+             package), `list_plugin_targets` and `build_workspace_plugin` (rebuild a package \
+             like this one). Example:\n\n\
              ```json\n{\"name\": \"concept_search\", \"arguments\": {\"query\": \"failover\", \"limit\": 5}}\n```\n",
         );
+        if options.remote_endpoint().is_some() && profile.mcp.is_some() {
+            out.push_str(
+                "\nOver HTTP the token's role decides which of those you see: a `reader` token is \
+                 offered the five reading tools, a `builder` token those and the two plugin tools.\n",
+            );
+        }
     }
     out.push_str("\n## The JSON API\n\n");
     let base = options
@@ -1105,6 +1335,100 @@ fn guide_md(profile: &Profile, options: &BuildOptions) -> String {
         }
     );
     out
+}
+
+/// What the guide says about an endpoint this package points at: where the
+/// entry is, and how the token reaches it without being in the tree.
+fn remote_mcp_guide(spec: &McpSpec, url: &str) -> String {
+    let (path, auto_loaded) = spec.location(true);
+    let Some(remote) = spec.remote else {
+        return String::new();
+    };
+    let mut out = String::new();
+    let _ = write!(
+        out,
+        "`{path}` points the `{MCP_SERVER_NAME}` MCP server at `{url}`, a `pgokf-mcp --http` \
+         endpoint. {}",
+        if auto_loaded {
+            "The harness loads it from the workspace.".to_owned()
+        } else {
+            merge_sentence(spec.merge_target(true))
+        }
+    );
+    let _ = writeln!(
+        out,
+        " {}",
+        match remote.token_ref {
+            TokenRef::Dollar | TokenRef::DollarEnv => format!(
+                "Every request carries a bearer token: set `{TOKEN_ENV}` in the environment that \
+                 starts the harness, which expands it into the header. The token itself is not \
+                 written into this tree."
+            ),
+            TokenRef::NamedEnvVar => format!(
+                "Every request carries a bearer token: the entry names `{TOKEN_ENV}` for the \
+                 harness to read it from, so set that in the environment that starts the \
+                 harness. The token itself is not written into this tree."
+            ),
+            TokenRef::Merge => format!(
+                "Every request carries a bearer token, and this harness documents no way to \
+                 reference one from a configuration file - so the entry holds the placeholder \
+                 `{TOKEN_PLACEHOLDER}` and lives here as a fragment rather than in a file of \
+                 the workspace. Put your token in where you merge it, and keep that file out of \
+                 version control."
+            ),
+            TokenRef::Forbidden =>
+                "Every request carries a bearer token, and the Agent Plugins specification \
+                 forbids a credential in a package and defines no way to reference one - so the \
+                 entry names the endpoint only. Give your client the token itself."
+                    .to_owned(),
+        }
+    );
+    let _ = writeln!(
+        out,
+        "Mint one with `pgokf-mcp hash-token --name <who> --role reader --tokens-file <path>` on \
+         the server. Source for this layout: {}",
+        remote.source
+    );
+    out
+}
+
+/// Where a fragment belongs, named when the harness's own file is known.
+fn merge_sentence(target: Option<&str>) -> String {
+    target.map_or_else(
+        || "Merge it into the harness's own configuration.".to_owned(),
+        |path| format!("Merge it into the harness's own configuration, `{path}`."),
+    )
+}
+
+/// What the guide says about a server the harness starts itself.
+fn guide_local_mcp(out: &mut String, mcp: Option<McpSpec>) {
+    match mcp {
+        Some(spec) if spec.auto_loaded && spec.env_ref == EnvRef::Inherit => {
+            let _ = writeln!(
+                out,
+                "`{}` configures the `{MCP_SERVER_NAME}` MCP server (the `pgokf-mcp` companion); the harness loads it from the workspace and starts the server with its own environment, so set `OKF_PG_URL` to a reader connection string in the environment that starts the harness (no value is written into the file).",
+                spec.path
+            );
+        }
+        Some(spec) if spec.auto_loaded => {
+            let _ = writeln!(
+                out,
+                "`{}` configures the `{MCP_SERVER_NAME}` MCP server (the `pgokf-mcp` companion); the harness loads it from the workspace. Set `OKF_PG_URL` to a reader connection string in the environment that starts the harness.",
+                spec.path
+            );
+        }
+        Some(spec) => {
+            let _ = writeln!(
+                out,
+                "`{}` holds the `{MCP_SERVER_NAME}` MCP server entry. {} Set `OKF_PG_URL` (a reader connection string) where that file expects it.",
+                spec.path,
+                merge_sentence(spec.merge_target(false))
+            );
+        }
+        None => {
+            out.push_str("This target has no MCP configuration; use the JSON API below.\n");
+        }
+    }
 }
 
 /// A POSIX shell helper over the JSON API.
@@ -1147,6 +1471,9 @@ fn meta_files(
     selection: &Selection,
     snapshot: &Snapshot,
     entries: &[serde_json::Value],
+    // Whether an MCP entry was written at all; without one the tree calls
+    // no endpoint, whatever was asked for.
+    wrote_an_entry: bool,
 ) -> Vec<PluginFile> {
     vec![
         file(
@@ -1157,6 +1484,10 @@ fn meta_files(
                 options.harness.as_ref(),
                 selection,
                 &options.components,
+                // Only an endpoint an entry was actually written for
+                // reaches the catalog block; otherwise the tree calls
+                // nothing.
+                options.remote_endpoint().filter(|_| wrote_an_entry),
             )
             .into_bytes(),
         ),
@@ -1595,6 +1926,7 @@ fn manifest_yaml(
     harness: Option<&CustomHarness>,
     selection: &Selection,
     components: &[Component],
+    mcp_url: Option<&str>,
 ) -> String {
     let mut out = String::new();
     out.push_str(
@@ -1618,7 +1950,20 @@ fn manifest_yaml(
     ids.sort_unstable();
     ids.dedup();
     let _ = writeln!(out, "components: [{}]", ids.join(", "));
-    out.push_str("catalog:\n  url_env: OKF_PG_URL\n");
+    // How the built tree reaches the catalog: a server it starts, which
+    // reads the connection string from the environment, or an endpoint it
+    // calls, whose token it reads from the environment. Neither value is
+    // ever written here.
+    match mcp_url {
+        Some(url) => {
+            let _ = writeln!(
+                out,
+                "catalog:\n  mcp_url: {}\n  token_env: {TOKEN_ENV}",
+                yaml_string(url)
+            );
+        }
+        None => out.push_str("catalog:\n  url_env: OKF_PG_URL\n"),
+    }
     let _ = write!(
         out,
         "policy:\n  trust: {}\n",
@@ -1748,6 +2093,7 @@ mod tests {
             base_model: None,
             components: Vec::new(),
             mcp_command: None,
+            mcp_url: None,
             tenant: None,
             web_url: None,
         }
@@ -2134,7 +2480,10 @@ mod tests {
         );
         assert!(!toml.contains("PASSWORD"));
         let yaml = text(&hermes, "okf-hermes-mcp.yaml");
-        assert!(yaml.contains("mcp_servers:\n  pgokf:") && yaml.contains("PASSWORD@HOST"));
+        assert!(
+            yaml.contains("mcp_servers:\n  pgokf:") && yaml.contains("${OKF_PG_URL}"),
+            "Hermes references the variable rather than holding a placeholder: {yaml}"
+        );
         assert!(text(&cursor, ".cursor/mcp.json").contains("${env:OKF_PG_URL}"));
         assert!(
             !paths(&ollama).iter().any(|p| p.contains("mcp")),
@@ -2183,6 +2532,358 @@ mod tests {
     }
 
     #[test]
+    fn an_mcp_endpoint_is_validated_and_never_carries_credentials() {
+        // Arrange / Act / Assert
+        assert_eq!(
+            validated_mcp_url(Some(" https://catalog.example/mcp "))
+                .expect("ok")
+                .as_deref(),
+            Some("https://catalog.example/mcp")
+        );
+        assert_eq!(
+            validated_mcp_url(Some("http://127.0.0.1:8081/mcp"))
+                .expect("ok")
+                .as_deref(),
+            Some("http://127.0.0.1:8081/mcp")
+        );
+        assert!(validated_mcp_url(None).expect("none").is_none());
+        assert!(validated_mcp_url(Some("  ")).expect("blank").is_none());
+        assert!(validated_mcp_url(Some("ftp://catalog.example/mcp")).is_err());
+        assert!(validated_mcp_url(Some("javascript:alert(1)")).is_err());
+        assert!(validated_mcp_url(Some("https://a b/mcp")).is_err());
+        assert!(validated_mcp_url(Some("https:///mcp")).is_err(), "no host");
+        assert!(
+            validated_mcp_url(Some("https://pgokf_tok@catalog.example/mcp")).is_err(),
+            "a token belongs in a header, not in every access log on the way"
+        );
+        for carried in [
+            "https://catalog.example/mcp?token=s3cr3t",
+            "https://catalog.example/mcp#access_token=s3cr3t",
+            "https://catalog.example/mcp?x=1",
+        ] {
+            assert!(
+                validated_mcp_url(Some(carried)).is_err(),
+                "a query or fragment is where a token gets put by mistake: {carried}"
+            );
+        }
+        assert!(
+            validated_mcp_url(Some(&format!(
+                "https://catalog.example/{}",
+                "p".repeat(MCP_URL_MAX)
+            )))
+            .is_err(),
+            "bounded like every other free-text option"
+        );
+    }
+
+    #[test]
+    fn an_agent_plugin_refuses_a_plaintext_endpoint_it_could_not_declare() {
+        // Arrange: Agent Plugins 1.0.0 §7.2.1 - "Non-loopback endpoints
+        // MUST use HTTPS", and the package declares that specification.
+        let records = vec![record(1, "a", "Alpha", "human-reviewed", "Do A.")];
+        let with = |url: &str| BuildOptions {
+            components: vec![Component::Mcp],
+            mcp_url: Some(url.to_owned()),
+            ..options(Target::AgentPlugin)
+        };
+        let build = |url: &str| assemble(&with(url), &selection(), &snapshot(), &records);
+
+        // Act / Assert
+        assert!(build("http://catalog.example/mcp").is_err());
+        assert!(build("https://catalog.example/mcp").is_ok());
+        assert!(build("http://localhost:8081/mcp").is_ok(), "loopback");
+        assert!(build("http://127.0.0.1:8081/mcp").is_ok(), "loopback");
+        assert!(build("http://[::1]:8081/mcp").is_ok(), "loopback");
+        // Another target may talk plain HTTP on a private network; only the
+        // portable package carries the specification's constraint.
+        assert!(
+            assemble(
+                &BuildOptions {
+                    components: vec![Component::Mcp],
+                    mcp_url: Some("http://10.0.0.4:8081/mcp".to_owned()),
+                    ..options(Target::ClaudeCode)
+                },
+                &selection(),
+                &snapshot(),
+                &records
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_target_without_an_mcp_configuration_says_so_however_it_was_asked() {
+        // Arrange
+        let records = vec![record(1, "a", "Alpha", "human-reviewed", "Do A.")];
+        let built = BuildOptions {
+            components: vec![Component::Mcp, Component::Guide],
+            mcp_url: Some("https://catalog.example/mcp".to_owned()),
+            ..options(Target::Ollama)
+        };
+
+        // Act
+        let plugin = assemble(&built, &selection(), &snapshot(), &records).expect("builds");
+        let text = |path: &str| {
+            String::from_utf8_lossy(
+                &plugin
+                    .files
+                    .iter()
+                    .find(|f| f.path.ends_with(path))
+                    .expect(path)
+                    .bytes,
+            )
+            .into_owned()
+        };
+
+        // Assert: no entry, no token talk, and a manifest that does not
+        // claim the tree calls anything.
+        let guide = text("USING-THE-CATALOG.md");
+        assert!(guide.contains("This target has no MCP configuration"));
+        assert!(!guide.contains("OKF_MCP_TOKEN"));
+        assert!(!guide.contains("reader` token is offered"));
+        let manifest = text(MANIFEST_FILE);
+        assert!(manifest.contains("url_env: OKF_PG_URL"));
+        assert!(!manifest.contains("mcp_url"));
+    }
+
+    #[test]
+    fn an_endpoint_reaches_the_manifest_only_when_an_entry_was_written() {
+        // Arrange
+        let records = vec![record(1, "a", "Alpha", "human-reviewed", "Do A.")];
+        let without_the_component = BuildOptions {
+            components: vec![Component::Guide],
+            mcp_url: Some("https://catalog.example/mcp".to_owned()),
+            ..options(Target::ClaudeCode)
+        };
+
+        // Act
+        let plugin =
+            assemble(&without_the_component, &selection(), &snapshot(), &records).expect("builds");
+        let manifest = String::from_utf8_lossy(
+            &plugin
+                .files
+                .iter()
+                .find(|f| f.path.ends_with(MANIFEST_FILE))
+                .expect("manifest")
+                .bytes,
+        )
+        .into_owned();
+
+        // Assert
+        assert!(!plugin.files.iter().any(|f| f.path == ".mcp.json"));
+        assert!(!manifest.contains("mcp_url"), "{manifest}");
+    }
+
+    #[test]
+    fn an_endpoint_and_a_command_are_alternatives() {
+        // Arrange
+        let records = vec![record(1, "a", "Alpha", "human-reviewed", "Do A.")];
+        let both = BuildOptions {
+            components: vec![Component::Mcp],
+            mcp_command: Some("pgokf-mcp".to_owned()),
+            mcp_url: Some("https://catalog.example/mcp".to_owned()),
+            ..options(Target::ClaudeCode)
+        };
+        let unsupported = BuildOptions {
+            components: vec![Component::Mcp],
+            mcp_url: Some("https://catalog.example/mcp".to_owned()),
+            ..options(Target::Ollama)
+        };
+
+        // Act
+        let refused = assemble(&both, &selection(), &snapshot(), &records);
+        let prompt_bundle = assemble(&unsupported, &selection(), &snapshot(), &records);
+
+        // Assert
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|e| format!("{e:#}").contains("alternatives")),
+            "{refused:?}"
+        );
+        // Ollama has no MCP configuration at all, so an endpoint is simply
+        // unused rather than refused.
+        assert!(prompt_bundle.is_ok());
+    }
+
+    #[test]
+    fn a_remote_entry_names_the_endpoint_in_each_harness_documented_form() {
+        // Arrange
+        let records = vec![record(1, "a", "Alpha", "human-reviewed", "Do A.")];
+        let url = "https://catalog.example/mcp";
+        let with = |target: Target| BuildOptions {
+            components: vec![Component::Mcp, Component::Guide],
+            tenant: Some("acme".to_owned()),
+            mcp_url: Some(url.to_owned()),
+            ..options(target)
+        };
+        let built = |target: Target| {
+            assemble(&with(target), &selection(), &snapshot(), &records).expect("builds")
+        };
+        let text = |p: &Plugin, path: &str| {
+            String::from_utf8_lossy(&p.files.iter().find(|f| f.path == path).expect(path).bytes)
+                .into_owned()
+        };
+
+        // Act
+        let claude = built(Target::ClaudeCode);
+        let cursor = built(Target::Cursor);
+        let codex = built(Target::Codex);
+        let gemini = built(Target::GeminiCli);
+        let copilot = built(Target::Copilot);
+        let hermes = built(Target::HermesAgent);
+        let plugin = built(Target::AgentPlugin);
+
+        // Assert: each names the endpoint the way its own documentation
+        // does, and each references the token rather than holding one.
+        let entry = |p: &Plugin, path: &str| -> serde_json::Value {
+            serde_json::from_str::<serde_json::Value>(&text(p, path)).expect("json")["mcpServers"]
+                ["pgokf"]
+                .clone()
+        };
+        let claude_entry = entry(&claude, ".mcp.json");
+        assert_eq!(claude_entry["type"], "http");
+        assert_eq!(claude_entry["url"], url);
+        assert_eq!(
+            claude_entry["headers"]["Authorization"],
+            "Bearer ${OKF_MCP_TOKEN}"
+        );
+        assert!(claude_entry.get("command").is_none(), "nothing to start");
+
+        let cursor_entry = entry(&cursor, ".cursor/mcp.json");
+        assert_eq!(cursor_entry["url"], url);
+        assert_eq!(
+            cursor_entry["headers"]["Authorization"],
+            "Bearer ${env:OKF_MCP_TOKEN}"
+        );
+
+        let codex_toml = text(&codex, ".codex/config.toml");
+        assert!(
+            codex_toml.contains(&format!("url = \"{url}\"")),
+            "{codex_toml}"
+        );
+        assert!(codex_toml.contains("bearer_token_env_var = \"OKF_MCP_TOKEN\""));
+
+        // Gemini CLI expands ${VAR} in a header value (and `httpUrl` is
+        // deprecated in favour of `url` with a type), so it keeps its own
+        // file and references the token.
+        let gemini_entry = entry(&gemini, ".gemini/settings.json");
+        assert_eq!(gemini_entry["type"], "http");
+        assert_eq!(gemini_entry["url"], url);
+        assert_eq!(
+            gemini_entry["headers"]["Authorization"],
+            "Bearer ${OKF_MCP_TOKEN}"
+        );
+        assert!(gemini_entry.get("httpUrl").is_none(), "deprecated");
+
+        // The Copilot CLI documents header values as literals, so its entry
+        // is a fragment with a placeholder, not a file in the workspace.
+        let copilot_entry = entry(&copilot, "okf-mcp.json");
+        assert_eq!(copilot_entry["type"], "http");
+        assert_eq!(copilot_entry["tools"], serde_json::json!(["*"]));
+        assert_eq!(copilot_entry["headers"]["Authorization"], "Bearer TOKEN");
+
+        let hermes_yaml = text(&hermes, "okf-hermes-mcp.yaml");
+        assert!(
+            hermes_yaml.contains(&format!("url: \"{url}\"")),
+            "{hermes_yaml}"
+        );
+        assert!(hermes_yaml.contains("Authorization: \"Bearer ${OKF_MCP_TOKEN}\""));
+
+        // The Agent Plugins specification forbids a credential in a package
+        // and defines no way to reference one, so the entry names the
+        // endpoint and nothing else.
+        let plugin_entry = entry(&plugin, "ops-runbooks/mcp.json");
+        assert_eq!(plugin_entry["type"], "streamable-http");
+        assert_eq!(plugin_entry["url"], url);
+        assert!(plugin_entry.get("headers").is_none());
+
+        // Nothing anywhere carries a tenant or a connection string, and the
+        // guide says how the token gets there.
+        for (built, path) in [
+            (&claude, ".mcp.json"),
+            (&cursor, ".cursor/mcp.json"),
+            (&gemini, ".gemini/settings.json"),
+        ] {
+            let written = text(built, path);
+            assert!(!written.contains("OKF_PG_URL"), "{path}");
+            assert!(!written.contains("acme"), "{path}: no tenant over HTTP");
+        }
+        let guide = text(
+            &claude,
+            ".claude/skills/ops-runbooks/references/USING-THE-CATALOG.md",
+        );
+        assert!(guide.contains(url));
+        assert!(guide.contains("set `OKF_MCP_TOKEN` in the environment"));
+        assert!(guide.contains("a `reader` token is offered the five reading tools"));
+    }
+
+    #[test]
+    fn a_harness_that_cannot_reference_a_secret_gets_a_fragment_to_merge() {
+        // Arrange
+        let records = vec![record(1, "a", "Alpha", "human-reviewed", "Do A.")];
+        let with = |target: Target, url: Option<&str>| BuildOptions {
+            components: vec![Component::Mcp, Component::Guide],
+            mcp_url: url.map(str::to_owned),
+            ..options(target)
+        };
+        let paths = |p: &Plugin| p.files.iter().map(|f| f.path.clone()).collect::<Vec<_>>();
+        let build = |target: Target, url: Option<&str>| {
+            assemble(&with(target, url), &selection(), &snapshot(), &records).expect("builds")
+        };
+        let endpoint = Some("https://catalog.example/mcp");
+
+        // Act
+        let local = build(Target::Copilot, None);
+        let remote = build(Target::Copilot, endpoint);
+        let referenced = build(Target::ClaudeCode, endpoint);
+
+        // Assert: the harness's own file only holds an entry it can fill
+        // from the environment; otherwise the entry is a fragment.
+        assert!(paths(&local).contains(&".github/mcp.json".to_owned()));
+        assert!(!paths(&remote).contains(&".github/mcp.json".to_owned()));
+        assert!(paths(&remote).contains(&"okf-mcp.json".to_owned()));
+        assert!(
+            paths(&referenced).contains(&".mcp.json".to_owned()),
+            "a harness that can reference the token keeps its own file"
+        );
+        let guide = String::from_utf8_lossy(
+            &remote
+                .files
+                .iter()
+                .find(|f| f.path.ends_with("USING-THE-CATALOG.md"))
+                .expect("guide")
+                .bytes,
+        )
+        .into_owned();
+        assert!(guide.contains("keep that file out of version control"));
+        assert!(
+            guide.contains("`.github/mcp.json`"),
+            "the guide names the file to merge into: {guide}"
+        );
+    }
+
+    #[test]
+    fn the_manifest_records_the_endpoint_a_build_points_at() {
+        // Arrange / Act
+        let local = manifest_yaml("ops", Target::Cursor, None, &selection(), &[], None);
+        let remote = manifest_yaml(
+            "ops",
+            Target::Cursor,
+            None,
+            &selection(),
+            &[],
+            Some("https://catalog.example/mcp"),
+        );
+
+        // Assert
+        assert!(local.contains("catalog:\n  url_env: OKF_PG_URL"));
+        assert!(remote.contains("mcp_url: \"https://catalog.example/mcp\""));
+        assert!(remote.contains("token_env: OKF_MCP_TOKEN"));
+        assert!(!remote.contains("url_env: OKF_PG_URL"));
+    }
+
+    #[test]
     fn manifest_reproduces_the_selection() {
         // Arrange
         let selection = Selection {
@@ -2196,7 +2897,14 @@ mod tests {
         };
 
         // Act
-        let yaml = manifest_yaml("ops", Target::Cursor, None, &selection, &[Component::Mcp]);
+        let yaml = manifest_yaml(
+            "ops",
+            Target::Cursor,
+            None,
+            &selection,
+            &[Component::Mcp],
+            None,
+        );
 
         // Assert
         assert!(yaml.contains("targets: [cursor]\ncomponents: [mcp]\n"));
@@ -2823,7 +3531,7 @@ mod tests {
         };
 
         // Act
-        let manifest = manifest_yaml("kit", Target::Generic, None, &selection, &[]);
+        let manifest = manifest_yaml("kit", Target::Generic, None, &selection, &[], None);
 
         // Assert
         assert!(
@@ -2845,7 +3553,7 @@ mod tests {
         };
 
         // Act
-        let manifest = manifest_yaml("kit", Target::AgentPlugin, None, &selection, &[]);
+        let manifest = manifest_yaml("kit", Target::AgentPlugin, None, &selection, &[], None);
 
         // Assert
         assert!(

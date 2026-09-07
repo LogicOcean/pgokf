@@ -84,12 +84,14 @@ Three optional components make the package more than a skills directory:
 
 | Component | What it adds | Where |
 | --------- | ------------ | ----- |
-| `mcp` | the harness's MCP server entry for `pgokf-mcp`, so the agent can query the catalog live; the connection string is never written into the tree (Claude Code and Gemini CLI expand `${OKF_PG_URL}`, Cursor `${env:OKF_PG_URL}`, Codex forwards it through `env_vars`, Hermes gets a snippet to merge into its user config with a placeholder) | `.mcp.json`, `.cursor/mcp.json`, `.codex/config.toml`, `.gemini/settings.json`, `.kimi/mcp.json`, `okf-hermes-mcp.yaml`, or `okf-mcp.json` for the generic shapes; each location is documented in the profile |
+| `mcp` | the harness's MCP server entry for `pgokf-mcp`, so the agent can query the catalog live - a server it starts, or with `mcp_url` an HTTP endpoint it calls. No secret is ever written into the tree: for a local server the connection string is referenced (Claude Code, Gemini CLI, Kimi and Hermes expand `${OKF_PG_URL}`, Cursor `${env:OKF_PG_URL}`, Codex forwards it through `env_vars`, Copilot inherits its own environment); for an endpoint the bearer token is (see [Pointing at an HTTP endpoint](#pointing-at-an-http-endpoint)) | `.mcp.json`, `.cursor/mcp.json`, `.codex/config.toml`, `.gemini/settings.json`, `.kimi/mcp.json`, `okf-hermes-mcp.yaml`, or `okf-mcp.json` for the generic shapes; each location is documented in the profile |
 | `guide` | `USING-THE-CATALOG.md`: identities, trust tiers, the MCP tools, the JSON API, how to rebuild the package | beside the references (`references/`, `knowledge/`) |
-| `tools` | `okf.sh`, a POSIX helper over the JSON API (`search`, `get`, `graph`, `bundles`, `health`) for harnesses without MCP; marked executable | `scripts/` in a skill, `tools/` elsewhere | Every tree also carries `okf-workspace.yaml`,
-the manifest that reproduces the selection, and `okf-workspace.lock`, which
-records the catalog snapshot and a content hash per file. A build against
-an unchanged catalog is byte-identical.
+| `tools` | `okf.sh`, a POSIX helper over the JSON API (`search`, `get`, `graph`, `bundles`, `health`) for harnesses without MCP; marked executable | `scripts/` in a skill, `tools/` elsewhere |
+
+Every tree also carries `okf-workspace.yaml`, the manifest that reproduces
+the selection, and `okf-workspace.lock`, which records the catalog snapshot
+and a content hash per file. A build against an unchanged catalog is
+byte-identical.
 
 Selectors (`bundle_ids`, `types`, `tags`, `concept_ids`, `query`,
 `verified_only`, `limit` up to 500) resolve through the reader API, so what
@@ -106,6 +108,43 @@ symbolic link, and refuses existing files unless told to overwrite. Reading a co
 build goes through the audited `get_concept_source()` (or the package
 readers above), which is what that log is for.
 
+## Pointing at an HTTP endpoint
+
+By default the `mcp` component configures a **local** server the harness
+starts (`pgokf-mcp`, reading its connection string from the environment).
+`mcp_url` points it at a `pgokf-mcp --http` endpoint instead - a hosted
+agent, or a fleet of agents sharing one connection to the catalog. The
+arguments to `build_workspace_plugin`:
+
+```json
+{ "target": "claude-code", "mcp_url": "https://catalog.example/mcp" }
+```
+
+That endpoint needs a bearer token on every request, and a token is a
+secret, so it is treated exactly as the connection string is: **referenced,
+never written**. Each harness's remote form was read from its own
+documentation and is recorded with its source in the profile:
+
+| Target | Entry | The token |
+| ------ | ----- | --------- |
+| `claude-code` | `.mcp.json`: `type: http`, `url`, `headers` | `Bearer ${OKF_MCP_TOKEN}`, expanded by the harness |
+| `gemini-cli` | `.gemini/settings.json`: `type: http`, `url`, `headers` (`httpUrl` is deprecated) | `Bearer ${OKF_MCP_TOKEN}` - it expands variables in header values |
+| `cursor` | `.cursor/mcp.json`: `url`, `headers` | `Bearer ${env:OKF_MCP_TOKEN}` |
+| `codex` | `.codex/config.toml`: `url`, `bearer_token_env_var` | the harness reads `OKF_MCP_TOKEN` itself; no header is written |
+| `hermes-agent` | `okf-hermes-mcp.yaml`, merged into `~/.hermes/config.yaml` | `Bearer ${OKF_MCP_TOKEN}` |
+| `agent-plugin` | `mcp.json`: `type: streamable-http`, `url` | the specification forbids a credential in a package and defines no way to reference one, so the entry names the endpoint only and the client is given the token. It also requires HTTPS for anything but a loopback endpoint, which the build enforces |
+| `copilot`, `kimi` | a fragment: `okf-mcp.json` | these document header values as literals, so the entry holds the placeholder `Bearer TOKEN` **and is not written into the harness's own file**: merge it into `.github/mcp.json` / `~/.kimi/mcp.json` and put the token there, out of version control |
+| `agents`, `agents-md`, `generic` | `okf-mcp.json`: the shape most clients share | `Bearer ${OKF_MCP_TOKEN}` |
+
+`mcp_url` and `mcp_command` are alternatives - an endpoint is reached, not
+started. A URL carrying credentials, a query string, or a fragment is
+refused: the endpoint is a path, and a token put anywhere but the header
+would be written into files meant to be committed (and into every access log
+between the client and the server). Over
+HTTP the token's role decides which tools the agent is offered, so a
+`reader` token sees the five reading tools and a `builder` token those and
+the two plugin tools; the guide says so.
+
 Use it from the web UI (**Plugins** page) or the MCP server
-(`build_workspace_plugin` with `components`, `mcp_command`, `web_url`;
-`list_plugin_targets`); both call the same [`build`] function.
+(`build_workspace_plugin` with `components`, `mcp_command` or `mcp_url`,
+`web_url`; `list_plugin_targets`); both call the same [`build`] function.

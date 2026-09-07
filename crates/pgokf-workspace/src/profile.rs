@@ -182,6 +182,62 @@ pub enum EnvRef {
     Inherit,
 }
 
+/// How a harness's MCP configuration names the bearer token of an HTTP
+/// endpoint. The token is a secret, so - exactly as for the connection
+/// string - it never enters the built tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenRef {
+    /// `Bearer ${OKF_MCP_TOKEN}` in the header: the harness expands it.
+    Dollar,
+    /// Cursor's interpolation form, `Bearer ${env:OKF_MCP_TOKEN}`.
+    DollarEnv,
+    /// The harness names the variable itself and reads the token from it
+    /// (Codex `bearer_token_env_var`), so no header is written at all.
+    NamedEnvVar,
+    /// The harness documents no expansion for a header value. The entry is
+    /// written as a fragment to merge into the harness's own configuration,
+    /// outside the workspace, where the token can be typed - never as a
+    /// file in the tree whose intended use is to hold a secret.
+    Merge,
+    /// The format forbids credentials outright (Agent Plugins 1.0.0 §7.2:
+    /// "Plugins MUST NOT embed credentials or other secrets in `headers`")
+    /// and defines no reference form, so the entry carries the endpoint and
+    /// nothing else; the client is given the token.
+    Forbidden,
+}
+
+impl TokenRef {
+    /// A stable name for this reference form, for the tool that lists what
+    /// each target would do with an endpoint.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Dollar => "dollar",
+            Self::DollarEnv => "dollar-env",
+            Self::NamedEnvVar => "named-env-var",
+            Self::Merge => "merge",
+            Self::Forbidden => "forbidden",
+        }
+    }
+}
+
+/// The environment variable a generated configuration reads the bearer
+/// token from, where the harness can reference one.
+pub const TOKEN_ENV: &str = "OKF_MCP_TOKEN";
+
+/// How a harness's MCP configuration describes a **remote** server, as its
+/// own documentation states it. `None` for a harness whose remote form has
+/// not been read: the injector refuses to guess one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoteSpec {
+    /// The key that names the endpoint (`url`, or Gemini CLI's `httpUrl`).
+    pub url_key: &'static str,
+    /// The transport word the entry declares, where the harness uses one.
+    pub type_word: Option<&'static str>,
+    pub token_ref: TokenRef,
+    pub source: &'static str,
+}
+
 /// The file format of a harness's MCP configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpFormat {
@@ -198,6 +254,21 @@ pub enum McpFormat {
     AgentPluginJson,
 }
 
+impl McpFormat {
+    /// Where a fragment of this format is written when the harness's own
+    /// file cannot safely hold the entry - because the entry would have to
+    /// carry a token. One target is built per tree, so one name per format
+    /// is unambiguous.
+    #[must_use]
+    pub const fn fragment_path(self) -> &'static str {
+        match self {
+            Self::CodexToml => "okf-mcp.toml",
+            Self::HermesYaml => "okf-hermes-mcp.yaml",
+            Self::McpServersJson | Self::CopilotJson | Self::AgentPluginJson => "okf-mcp.json",
+        }
+    }
+}
+
 /// Where a harness reads MCP servers from, as its documentation states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct McpSpec {
@@ -209,6 +280,62 @@ pub struct McpSpec {
     /// own; otherwise the guide tells the user where to merge it.
     pub auto_loaded: bool,
     pub source: &'static str,
+    /// The harness's own configuration file, where this is a fragment to
+    /// merge and that file is not [`McpSpec::path`] itself (a user-level
+    /// file, say). The guide names it, so "merge it" says where.
+    pub merge_into: Option<&'static str>,
+    /// The remote (HTTP) form of this configuration, where the harness
+    /// documents one.
+    pub remote: Option<RemoteSpec>,
+}
+
+impl McpSpec {
+    /// Where this configuration is written, and whether the harness loads
+    /// it from the workspace, for an endpoint of the given kind.
+    ///
+    /// A remote entry whose token can only be typed in becomes a fragment
+    /// to merge, so no file in the tree is meant to hold a secret.
+    #[must_use]
+    pub const fn location(&self, remote: bool) -> (&'static str, bool) {
+        match self.remote {
+            Some(spec) if remote && matches!(spec.token_ref, TokenRef::Merge) => {
+                (self.format.fragment_path(), false)
+            }
+            _ => (self.path, self.auto_loaded),
+        }
+    }
+
+    /// The harness's own configuration file, for a fragment that has to be
+    /// merged into one. `None` when the harness loads the file itself.
+    #[must_use]
+    pub const fn merge_target(&self, remote: bool) -> Option<&'static str> {
+        let (path, auto_loaded) = self.location(remote);
+        if auto_loaded {
+            return None;
+        }
+        match self.merge_into {
+            Some(named) => Some(named),
+            // A relocated entry names the file the harness would have read.
+            None if !const_str_eq(path, self.path) => Some(self.path),
+            None => None,
+        }
+    }
+}
+
+/// `str` equality in a const context, which `==` is not.
+const fn const_str_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
 }
 
 /// What a target expects, as documented by its own client. Registry
@@ -408,6 +535,13 @@ const PROFILES: &[Profile<'static>] = &[
             env_ref: EnvRef::PluginData,
             auto_loaded: true,
             source: "https://github.com/agentplugins/agent-plugins-spec (spec/1.0.0.md §7.2: mcp.json, stdio command as one token, ${PLUGIN_DATA} expansion in args)",
+            merge_into: None,
+            remote: Some(RemoteSpec {
+                url_key: "url",
+                type_word: Some("streamable-http"),
+                token_ref: TokenRef::Forbidden,
+                source: "https://github.com/agentplugins/agent-plugins-spec (spec/1.0.0.md §7.2: types stdio, streamable-http, sse; url and headers for the remote ones; \"Plugins MUST NOT embed credentials or other secrets in headers\" and no credential-reference field is defined)",
+            }),
         }),
     },
     Profile {
@@ -425,6 +559,13 @@ const PROFILES: &[Profile<'static>] = &[
             env_ref: EnvRef::Dollar,
             auto_loaded: true,
             source: "https://code.claude.com/docs/en/mcp (project scope .mcp.json; ${VAR} expansion)",
+            merge_into: None,
+            remote: Some(RemoteSpec {
+                url_key: "url",
+                type_word: Some("http"),
+                token_ref: TokenRef::Dollar,
+                source: "https://code.claude.com/docs/en/mcp (type http with url and headers; ${VAR} expansion in url and headers)",
+            }),
         }),
     },
     Profile {
@@ -442,6 +583,13 @@ const PROFILES: &[Profile<'static>] = &[
             env_ref: EnvRef::Forward,
             auto_loaded: true,
             source: "https://learn.chatgpt.com/docs/extend/mcp?surface=cli (project .codex/config.toml, [mcp_servers.<name>], env_vars)",
+            merge_into: None,
+            remote: Some(RemoteSpec {
+                url_key: "url",
+                type_word: None,
+                token_ref: TokenRef::NamedEnvVar,
+                source: "https://learn.chatgpt.com/docs/extend/mcp?surface=cli (streamable HTTP: url, bearer_token_env_var, http_headers)",
+            }),
         }),
     },
     Profile {
@@ -456,9 +604,16 @@ const PROFILES: &[Profile<'static>] = &[
         mcp: Some(McpSpec {
             path: "okf-hermes-mcp.yaml",
             format: McpFormat::HermesYaml,
-            env_ref: EnvRef::Placeholder,
+            env_ref: EnvRef::Dollar,
             auto_loaded: false,
-            source: "https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp (mcp_servers in ~/.hermes/config.yaml only)",
+            source: "https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp (mcp_servers in ~/.hermes/config.yaml only) and docs/reference/mcp-config-reference.md (\"String values anywhere in a server entry (env, headers, args, url, ...) may reference environment variables with ${VAR}\")",
+            merge_into: Some("~/.hermes/config.yaml"),
+            remote: Some(RemoteSpec {
+                url_key: "url",
+                type_word: None,
+                token_ref: TokenRef::Dollar,
+                source: "https://hermes-agent.nousresearch.com/docs/reference/mcp-config-reference.md (HTTP servers: url plus headers; ${VAR} references in any string value of a server entry, headers included)",
+            }),
         }),
     },
     Profile {
@@ -471,11 +626,18 @@ const PROFILES: &[Profile<'static>] = &[
         verified: "2026-09-06",
         notes: "Unzip at the project root; Kimi also reads .claude/skills/ and .agents/skills/.",
         mcp: Some(McpSpec {
-            path: ".kimi/mcp.json",
+            path: "okf-mcp.json",
             format: McpFormat::McpServersJson,
             env_ref: EnvRef::Dollar,
-            auto_loaded: true,
-            source: "https://moonshotai.github.io/kimi-cli/en/customization/mcp.html (project .kimi/mcp.json)",
+            auto_loaded: false,
+            source: "https://moonshotai.github.io/kimi-cli/en/customization/mcp.html (\"MCP server configuration is stored in ~/.kimi/mcp.json\": user-level only, with no project file, so this is a fragment to merge)",
+            merge_into: Some("~/.kimi/mcp.json"),
+            remote: Some(RemoteSpec {
+                url_key: "url",
+                type_word: None,
+                token_ref: TokenRef::Merge,
+                source: "https://moonshotai.github.io/kimi-cli/en/customization/mcp.html (remote servers: url plus headers of static values; no expansion form is documented for a header value)",
+            }),
         }),
     },
     Profile {
@@ -493,6 +655,13 @@ const PROFILES: &[Profile<'static>] = &[
             env_ref: EnvRef::Dollar,
             auto_loaded: true,
             source: "https://geminicli.com/docs/tools/mcp-server/ (.gemini/settings.json mcpServers; $VAR expansion)",
+            merge_into: None,
+            remote: Some(RemoteSpec {
+                url_key: "url",
+                type_word: Some("http"),
+                token_ref: TokenRef::Dollar,
+                source: "https://geminicli.com/docs/tools/mcp-server/ and packages/core/src/tools/mcp-client.ts (url with type http; httpUrl is deprecated - \"Please migrate to 'url' with 'type: \\\"http\\\"'\"; header values are expanded: expandedHeaders[key] = expandEnvVars(value, sanitizedEnv))",
+            }),
         }),
     },
     Profile {
@@ -509,7 +678,14 @@ const PROFILES: &[Profile<'static>] = &[
             format: McpFormat::McpServersJson,
             env_ref: EnvRef::DollarEnv,
             auto_loaded: true,
-            source: "https://cursor.com/docs/context/mcp (.cursor/mcp.json; ${env:NAME} interpolation)",
+            source: "https://cursor.com/docs/mcp (.cursor/mcp.json; ${env:NAME} interpolation)",
+            merge_into: None,
+            remote: Some(RemoteSpec {
+                url_key: "url",
+                type_word: None,
+                token_ref: TokenRef::DollarEnv,
+                source: "https://cursor.com/docs/mcp (remote servers: url plus headers; ${env:NAME} interpolation in url and headers)",
+            }),
         }),
     },
     Profile {
@@ -527,6 +703,13 @@ const PROFILES: &[Profile<'static>] = &[
             env_ref: EnvRef::Inherit,
             auto_loaded: true,
             source: "https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers (project-level .mcp.json or .github/mcp.json; mcpServers entries with type local, command, args, env, tools; no expansion form is documented, so OKF_PG_URL is set where Copilot starts)",
+            merge_into: None,
+            remote: Some(RemoteSpec {
+                url_key: "url",
+                type_word: Some("http"),
+                token_ref: TokenRef::Merge,
+                source: "https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers (type http with url, headers and tools; header values are documented as literals for the CLI - the COPILOT_MCP_-prefixed substitution form is the repository-level and coding-agent configuration, not this one)",
+            }),
         }),
     },
     Profile {
@@ -544,6 +727,13 @@ const PROFILES: &[Profile<'static>] = &[
             env_ref: EnvRef::Dollar,
             auto_loaded: false,
             source: "The mcpServers shape shared by Claude Code, Cursor, Gemini CLI, and Kimi; merge it into the harness's own file",
+            merge_into: None,
+            remote: Some(RemoteSpec {
+                url_key: "url",
+                type_word: Some("http"),
+                token_ref: TokenRef::Dollar,
+                source: "The remote mcpServers shape shared by those clients (type http, url, headers); the expansion form is the one most of them share, so check your harness's own",
+            }),
         }),
     },
     Profile {
@@ -561,6 +751,13 @@ const PROFILES: &[Profile<'static>] = &[
             env_ref: EnvRef::Dollar,
             auto_loaded: false,
             source: "The mcpServers shape shared by most clients; merge it into the harness's own file",
+            merge_into: None,
+            remote: Some(RemoteSpec {
+                url_key: "url",
+                type_word: Some("http"),
+                token_ref: TokenRef::Dollar,
+                source: "The remote mcpServers shape shared by most clients (type http, url, headers); the expansion form is the one most of them share, so check your harness's own",
+            }),
         }),
     },
     Profile {
@@ -589,6 +786,13 @@ const PROFILES: &[Profile<'static>] = &[
             env_ref: EnvRef::Dollar,
             auto_loaded: false,
             source: "The mcpServers shape shared by most clients; merge it into the harness's own file",
+            merge_into: None,
+            remote: Some(RemoteSpec {
+                url_key: "url",
+                type_word: Some("http"),
+                token_ref: TokenRef::Dollar,
+                source: "The remote mcpServers shape shared by most clients (type http, url, headers); the expansion form is the one most of them share, so check your harness's own",
+            }),
         }),
     },
 ];
@@ -623,6 +827,57 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn every_mcp_profile_records_where_it_read_the_remote_form() {
+        // Arrange / Act / Assert: the remote form is documentation like the
+        // local one, and a harness whose form has not been read carries
+        // `None` so a build refuses rather than guesses.
+        let mut read = 0;
+        for p in Profile::all() {
+            let Some(mcp) = p.mcp else { continue };
+            // `None` is a legitimate state - it is how a harness whose
+            // remote form has not been read refuses instead of guessing -
+            // so this asserts the shape of one that is there.
+            let Some(remote) = mcp.remote else { continue };
+            read += 1;
+            assert!(!remote.source.is_empty(), "{} remote source", p.id);
+            assert!(
+                matches!(remote.url_key, "url" | "httpUrl"),
+                "{} url key {}",
+                p.id,
+                remote.url_key
+            );
+        }
+        assert!(read > 0, "no remote form is recorded at all");
+    }
+
+    #[test]
+    fn an_entry_that_would_have_to_hold_a_token_becomes_a_fragment() {
+        // Arrange
+        let mcp = |target| Profile::of(target).expect("profile").mcp.expect("mcp");
+        let claude = mcp(Target::ClaudeCode);
+        let gemini = mcp(Target::GeminiCli);
+        let copilot = mcp(Target::Copilot);
+        let kimi = mcp(Target::Kimi);
+
+        // Act / Assert: a harness that can reference the token keeps its own
+        // file; one that cannot gets a fragment to merge, so no file in the
+        // tree is meant to hold a secret.
+        assert_eq!(claude.location(false), (".mcp.json", true));
+        assert_eq!(claude.location(true), (".mcp.json", true));
+        assert_eq!(claude.merge_target(true), None, "the harness loads it");
+        // Gemini CLI expands ${VAR} in a header value, so it keeps its own
+        // file; Copilot documents literal header values, so it does not.
+        assert_eq!(gemini.location(true), (".gemini/settings.json", true));
+        assert_eq!(copilot.location(false), (".github/mcp.json", true));
+        assert_eq!(copilot.location(true), ("okf-mcp.json", false));
+        assert_eq!(copilot.merge_target(true), Some(".github/mcp.json"));
+        // Kimi reads one user-level file, so its entry is always a fragment
+        // and the guide names where it goes.
+        assert_eq!(kimi.location(false), ("okf-mcp.json", false));
+        assert_eq!(kimi.merge_target(false), Some("~/.kimi/mcp.json"));
     }
 
     #[test]
