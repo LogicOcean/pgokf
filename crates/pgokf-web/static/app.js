@@ -163,9 +163,13 @@
         var li = document.createElement('li');
         var details = document.createElement('details');
         details.setAttribute('data-dir', dir);
+        // A directory the user toggled keeps its state; otherwise it opens
+        // when filtering, when the tree is short, or when it holds a pick,
+        // so a ticked file is never hidden behind a closed directory.
+        var holdsPick = dirs[dir].some(function (entry) { return !!set[refOf(entry)]; });
         details.open = Object.prototype.hasOwnProperty.call(openDirs, dir)
           ? openDirs[dir]
-          : (!!needle || order.length <= 6);
+          : (!!needle || order.length <= 6 || holdsPick);
         var summary = document.createElement('summary');
         summary.textContent = (dir || '(bundle root)') + ' ';
         var count = document.createElement('span');
