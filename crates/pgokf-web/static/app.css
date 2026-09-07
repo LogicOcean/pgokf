@@ -314,7 +314,7 @@ html:not([data-js]) .tabs [role=tabpanel] { margin-bottom: 1.5rem; }
 .graph3d-legend .h0 { background: var(--graph-h0); } .graph3d-legend .h1 { background: var(--graph-h1); }
 .graph3d-legend .h2 { background: var(--graph-h2); } .graph3d-legend .h3 { background: var(--graph-h3); }
 .graph3d-card { position: absolute; right: .6rem; top: .6rem; max-width: 300px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: .6rem .75rem; box-shadow: var(--shadow); font-size: .85rem; }
-.graph3d-card .graph3d-actions { display: flex; gap: .4rem; margin-top: .5rem; }
+.graph3d-card .graph3d-actions { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .5rem; }
 .graph3d-status { position: absolute; inset: 0; display: grid; place-items: center; margin: 0; pointer-events: none; }
 .graph-toolbar { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin-top: .6rem; }
 .graph-toolbar .graph-hint { flex-basis: 100%; }

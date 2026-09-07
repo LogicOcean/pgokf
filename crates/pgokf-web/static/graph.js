@@ -345,7 +345,7 @@
       '<div class="graph3d-actions">' +
       '<a class="btn small" href="' + escapeHtml(from.href) + '#tab-links">Open source</a>' +
       '<a class="btn small" href="' + escapeHtml(to.href) + '">Open target</a>' +
-      '<button type="button" class="btn small ghost" data-explore="' + escapeHtml(to.graph_href) + '">Explore the target</button>' +
+      '<button type="button" class="btn small ghost" data-explore="' + escapeHtml(to.graph_href) + '">Explore</button>' +
       '</div>';
     card.hidden = false;
     var mid = { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2, z: ((from.z || 0) + (to.z || 0)) / 2 };
