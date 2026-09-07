@@ -249,14 +249,15 @@ file line per person (roles: `viewer`, `uploader`, `editor`, `approver`,
 
 ```sh
 mkdir -p ui-auth
-printf '%s' 'a long password' | docker compose run --rm -T ui pgokf-web hash-password --user alice --role approver >> ui-auth/users
-chmod 755 ui-auth && chmod 644 ui-auth/users   # hashes only; the container reads it as uid 10001
+printf '%s' 'a long password' | docker compose run --rm -T ui pgokf-web hash-password --user alice --role admin >> ui-auth/users
+chown -R "${OKF_UI_UID:-10001}" ui-auth && chmod 700 ui-auth   # the UI writes it: the Admin page manages people
 docker compose --profile ui up -d ui
 ```
 
-Keep the passwords themselves elsewhere (a password manager, or a file
-outside `ui-auth/` with mode 600): the mounted directory holds only the
-Argon2id hashes, and the file is re-read whenever it changes.
+One admin is enough to start: the Admin page adds everyone else. Keep the
+passwords themselves elsewhere (a password manager, or a file outside
+`ui-auth/` with mode 600): the directory holds only the Argon2id hashes,
+and the file is re-read whenever it changes.
 
 Uploaders add documents, editors change them (which sends them back to
 review), approvers record the human verification the trust tier derives

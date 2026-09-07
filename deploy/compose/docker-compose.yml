@@ -216,9 +216,11 @@ services:
       # mount the bundles read-write (OKF_UI_BUNDLES_MODE=rw).
       OKF_WEB_BUNDLES_DIR: ${OKF_UI_BUNDLES_DIR:-}
     volumes:
-      # Read-only home for the users file (OKF_UI_USERS_FILE names a file
-      # inside it, for example /etc/pgokf/ui/users).
-      - ${OKF_UI_AUTH_DIR:-./ui-auth}:/etc/pgokf/ui:ro
+      # Home of the users file (OKF_UI_USERS_FILE names a file inside it,
+      # for example /etc/pgokf/ui/users). Writable, so the Admin page can
+      # add, change, and remove people; the directory must belong to the
+      # user the UI runs as (OKF_UI_UID).
+      - ${OKF_UI_AUTH_DIR:-./ui-auth}:/etc/pgokf/ui
       # The same bundles the database reads, at the same path; read-only
       # unless editors are to change them from the UI.
       - ${PGOKF_BUNDLES_DIR:?PGOKF_BUNDLES_DIR is required}:/bundles:${OKF_UI_BUNDLES_MODE:-ro}
