@@ -131,6 +131,18 @@ impl Catalog {
                 }
             },
             {
+                "name": "get_skill",
+                "description": "Fetch an Agent Skills package stored in the catalog: its name, description, package directory and hash, the complete SKILL.md frontmatter, the exact SKILL.md text, and the list of scripts, references, and assets it owns (build_workspace_plugin materializes the whole package byte for byte).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "bundle_id": {"type": "integer", "description": "The bundle id."},
+                        "concept_id": {"type": "string", "description": "The skill's concept id (its SKILL.md path without .md, e.g. skills/deploy/SKILL)."}
+                    },
+                    "required": ["bundle_id", "concept_id"]
+                }
+            },
+            {
                 "name": "list_plugin_targets",
                 "description": "List the agent harnesses a workspace plugin can be built for (claude-code, codex, hermes-agent, kimi, gemini-cli, cursor, agents, agents-md, ollama, generic) with the documented directory each one reads.",
                 "inputSchema": {"type": "object", "properties": {}}
@@ -178,6 +190,7 @@ impl Catalog {
             "find_similar" => self.find_similar(arguments).await,
             "concept_neighbors" => self.concept_neighbors(arguments).await,
             "get_concept" => self.get_concept(arguments).await,
+            "get_skill" => self.get_skill(arguments).await,
             "list_plugin_targets" => Ok(Self::list_plugin_targets()),
             "build_workspace_plugin" => self.build_workspace_plugin(arguments).await,
             other => bail!("unknown tool '{other}'"),
@@ -248,6 +261,22 @@ impl Catalog {
                  WHERE id = $1 AND ($2::bigint IS NULL OR bundle_id = $2)
              ) c",
             &[&concept_id, &bundle_id],
+        )
+        .await
+    }
+
+    /// `pgokf.get_skill`: the package's metadata, resource listing, and the
+    /// exact `SKILL.md` as text (it is UTF-8 by construction). An audited
+    /// read, like every exact-byte retrieval.
+    async fn get_skill(&self, args: &Value) -> Result<Value> {
+        let bundle_id = opt_i64(args, "bundle_id")?
+            .ok_or_else(|| anyhow!("missing required integer argument 'bundle_id'"))?;
+        let concept_id = require_str(args, "concept_id")?;
+        self.fetch_json(
+            "SELECT (to_jsonb(s) - 'skill_md')
+                    || jsonb_build_object('skill_md', convert_from(s.skill_md, 'UTF8'))
+             FROM pgokf.get_skill($1, $2) AS s",
+            &[&bundle_id, &concept_id],
         )
         .await
     }
@@ -374,12 +403,7 @@ impl Catalog {
                     plugin
                         .files
                         .iter()
-                        .map(|f| {
-                            (
-                                f.path.clone(),
-                                Value::String(String::from_utf8_lossy(&f.bytes).into_owned()),
-                            )
-                        })
+                        .map(|f| (f.path.clone(), inline_content(&f.bytes)))
                         .collect(),
                 );
             }
@@ -403,6 +427,38 @@ impl Catalog {
             .context("catalog query failed")?;
         Ok(row.get(0))
     }
+}
+
+/// A file's content for the inline result: UTF-8 text as a string, anything
+/// else as `{"encoding": "base64", "data": ...}` so a binary asset (a PNG in
+/// a skill package) comes back byte-exact instead of with replacement
+/// characters.
+fn inline_content(bytes: &[u8]) -> Value {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => Value::String(text.to_owned()),
+        Err(_) => json!({ "encoding": "base64", "data": base64_encode(bytes) }),
+    }
+}
+
+/// Standard base64 (RFC 4648 §4, with padding).
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let word = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |acc, (i, b)| acc | (u32::from(*b) << (16 - 8 * i)));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                let index = ((word >> (18 - 6 * i)) & 0x3f) as usize;
+                out.push(char::from(ALPHABET[index]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }
 
 /// Read a required string argument.
@@ -473,6 +529,28 @@ fn opt_string_vec(args: &Value, key: &str) -> Result<Option<Vec<String>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inline_content_keeps_text_and_base64_encodes_binary() {
+        // Arrange / Act
+        let text = inline_content(b"echo ok\n");
+        let binary = inline_content(b"\x89PNG\r\n\x1a\n");
+
+        // Assert
+        assert_eq!(text, Value::String("echo ok\n".to_owned()));
+        assert_eq!(binary["encoding"], "base64");
+        assert_eq!(binary["data"], "iVBORw0KGgo=");
+    }
+
+    #[test]
+    fn base64_encode_matches_rfc_4648_vectors() {
+        // Arrange / Act / Assert
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
 
     #[test]
     fn require_str_reads_a_present_string() {
@@ -582,6 +660,7 @@ mod tests {
                 "find_similar",
                 "concept_neighbors",
                 "get_concept",
+                "get_skill",
                 "list_plugin_targets",
                 "build_workspace_plugin",
             ],

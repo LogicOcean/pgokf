@@ -205,6 +205,59 @@ pub(crate) struct ProvenanceSource {
     pub last_modified: Option<String>,
 }
 
+/// A skill package (`pgokf.skills`) with the resources it owns.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct PackageInfo {
+    /// The Agent Skills `name`.
+    pub name: String,
+    /// Bundle-relative package directory (`""` for a root package).
+    pub root: String,
+    pub hash: String,
+    pub visibility: String,
+    pub resources: Vec<ResourceInfo>,
+}
+
+/// One package resource: a row of `pgokf.scripts` or
+/// `pgokf.reference_documents`.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ResourceInfo {
+    pub concept_id: String,
+    /// `script`, `reference`, or `asset`.
+    pub class: String,
+    /// Package-relative path.
+    pub path: String,
+    pub byte_size: i64,
+    pub sha256: String,
+    /// The script's language, or the reference's media type.
+    pub detail: String,
+    pub package_concept_id: String,
+    /// Whether the catalog holds the bytes as text (a script, or a textual
+    /// reference); a binary asset has no readable body.
+    pub textual: bool,
+    /// The exact stored text of a textual reference (`text_body`), so the
+    /// page can render the document rather than its search text. `None` for
+    /// a script (its body text is already exact) or a binary.
+    #[serde(skip)]
+    pub text: Option<String>,
+}
+
+impl ResourceInfo {
+    /// Whether the resource is a Markdown document, rendered like a concept
+    /// body; anything else textual is shown verbatim.
+    pub(crate) fn is_markdown(&self) -> bool {
+        self.detail == "text/markdown"
+    }
+}
+
+/// A package file's exact bytes for a download.
+pub(crate) struct ExactBytes {
+    pub bytes: Vec<u8>,
+    pub media_type: String,
+    /// The file is a `SKILL.md` (named so on download; a resource keeps its
+    /// own name).
+    pub is_manifest: bool,
+}
+
 /// One edge of the link graph, as stored.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct Link {
@@ -1166,6 +1219,151 @@ impl Db {
         .await
     }
 
+    /// The skill package a concept is the manifest of, with its resources,
+    /// from the projection tables (an unaudited read: no bytes).
+    pub(crate) async fn package(
+        &self,
+        bundle_id: i64,
+        concept_id: &str,
+    ) -> Result<Option<PackageInfo>> {
+        let Some(row) = self
+            .query_opt(
+                "SELECT coalesce(agent_skill->>'name', ''), package_root, package_hash, visibility
+                 FROM pgokf.skills WHERE bundle_id = $1 AND concept_id = $2",
+                &[&bundle_id, &concept_id],
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        let resources = self
+            .query_map(
+                &format!(
+                    "SELECT x.concept_id, x.class, x.path, x.byte_size, x.sha256, x.detail,
+                            x.package_concept_id, x.textual, NULL::text
+                     FROM ({RESOURCE_ROWS} WHERE r.bundle_id = $1 AND r.package_concept_id = $2) x
+                     ORDER BY x.path"
+                ),
+                &[&bundle_id, &concept_id],
+                resource,
+            )
+            .await?;
+        Ok(Some(PackageInfo {
+            name: col(&row, 0)?,
+            root: col(&row, 1)?,
+            hash: col(&row, 2)?,
+            visibility: col(&row, 3)?,
+            resources,
+        }))
+    }
+
+    /// The resources of several packages at once (one query), keyed by
+    /// `(bundle_id, skill concept id)`, without the text: what a preview
+    /// needs to list every file of every selected package.
+    pub(crate) async fn package_resources(
+        &self,
+        packages: &[(i64, String)],
+    ) -> Result<BTreeMap<(i64, String), Vec<ResourceInfo>>> {
+        let bundle_ids: Vec<i64> = packages.iter().map(|(b, _)| *b).collect();
+        let skill_ids: Vec<String> = packages.iter().map(|(_, id)| id.clone()).collect();
+        let rows = self
+            .query_map(
+                &format!(
+                    "SELECT x.concept_id, x.class, x.path, x.byte_size, x.sha256, x.detail,
+                            x.package_concept_id, x.textual, NULL::text, x.bundle_id
+                     FROM ({RESOURCE_ROWS}
+                           JOIN ROWS FROM (unnest($1::bigint[]), unnest($2::text[])) AS k(b, id)
+                             ON k.b = r.bundle_id AND k.id = r.package_concept_id) x
+                     ORDER BY x.bundle_id, x.package_concept_id, x.path"
+                ),
+                &[&bundle_ids, &skill_ids],
+                |row| Ok((col::<i64>(row, 9)?, resource(row)?)),
+            )
+            .await?;
+        let mut grouped: BTreeMap<(i64, String), Vec<ResourceInfo>> = BTreeMap::new();
+        for (bundle_id, info) in rows {
+            grouped
+                .entry((bundle_id, info.package_concept_id.clone()))
+                .or_default()
+                .push(info);
+        }
+        Ok(grouped)
+    }
+
+    /// The package resource a concept is, when it is one.
+    pub(crate) async fn resource(
+        &self,
+        bundle_id: i64,
+        concept_id: &str,
+    ) -> Result<Option<ResourceInfo>> {
+        self.query_opt(
+            &format!("{RESOURCE_ROWS} WHERE r.bundle_id = $1 AND r.concept_id = $2"),
+            &[&bundle_id, &concept_id],
+        )
+        .await?
+        .as_ref()
+        .map(resource)
+        .transpose()
+    }
+
+    /// The exact stored bytes of a package manifest, script, reference, or
+    /// asset with its media type, through the audited readers (`get_skill`,
+    /// `get_script`, `get_reference`); `None` when the concept is none of
+    /// those, or its bundle is retired (the page rule). This is the download
+    /// path, not the page path.
+    pub(crate) async fn exact_bytes(
+        &self,
+        bundle_id: i64,
+        concept_id: &str,
+    ) -> Result<Option<ExactBytes>> {
+        let Some(row) = self
+            .query_opt(
+                "SELECT CASE WHEN sk.concept_id IS NOT NULL THEN 'skill'
+                             WHEN s.concept_id IS NOT NULL THEN 'script'
+                             WHEN d.concept_id IS NOT NULL THEN 'reference' END,
+                        coalesce(d.media_type, 'text/plain')
+                 FROM pgokf.concepts c
+                 JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.retired_at IS NULL
+                 LEFT JOIN pgokf.skills sk ON sk.bundle_id = c.bundle_id AND sk.concept_id = c.id
+                 LEFT JOIN pgokf.scripts s ON s.bundle_id = c.bundle_id AND s.concept_id = c.id
+                 LEFT JOIN pgokf.reference_documents d
+                        ON d.bundle_id = c.bundle_id AND d.concept_id = c.id
+                 WHERE c.bundle_id = $1 AND c.id = $2",
+                &[&bundle_id, &concept_id],
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        let (sql, media_type, is_manifest) = match col::<Option<String>>(&row, 0)?.as_deref() {
+            Some("skill") => (
+                "SELECT (pgokf.get_skill($1, $2)).skill_md",
+                "text/markdown".to_owned(),
+                true,
+            ),
+            Some("script") => (
+                "SELECT (pgokf.get_script($1, $2)).exact_bytes",
+                "text/plain".to_owned(),
+                false,
+            ),
+            Some("reference") => (
+                "SELECT (pgokf.get_reference($1, $2)).exact_bytes",
+                col::<String>(&row, 1)?,
+                false,
+            ),
+            _ => return Ok(None),
+        };
+        let row = self
+            .query_opt(sql, &[&bundle_id, &concept_id])
+            .await?
+            .ok_or_else(|| anyhow!("the package reader returned no row"))?;
+        Ok(Some(ExactBytes {
+            bytes: col(&row, 0)?,
+            media_type,
+            is_manifest,
+        }))
+    }
+
     /// `pgokf.get_concept_source(bundle_id, concept_id)`: the exact stored
     /// bytes for a download. This is the audited read (the extension logs
     /// it), which is why page rendering does not use it.
@@ -1314,6 +1512,37 @@ fn facet_row(r: &Row) -> Result<Facet> {
     Ok(Facet {
         value: col(r, 0)?,
         count: col(r, 1)?,
+    })
+}
+
+/// The union of both resource tables in one column shape (the nine columns
+/// [`resource`] reads, then `bundle_id` for grouping).
+const RESOURCE_ROWS: &str = "SELECT r.concept_id, r.class, r.path, r.byte_size, r.sha256, r.detail,
+                                    r.package_concept_id, r.textual, r.text, r.bundle_id
+                             FROM (
+                                 SELECT bundle_id, concept_id, 'script' AS class, source_path AS path,
+                                        byte_size, executable_sha256 AS sha256, language AS detail,
+                                        package_concept_id, true AS textual, NULL::text AS text
+                                 FROM pgokf.scripts
+                                 UNION ALL
+                                 SELECT bundle_id, concept_id,
+                                        CASE WHEN source_path LIKE 'assets/%' THEN 'asset' ELSE 'reference' END,
+                                        source_path, byte_size, content_sha256, media_type,
+                                        package_concept_id, text_body IS NOT NULL, text_body
+                                 FROM pgokf.reference_documents
+                             ) AS r";
+
+fn resource(r: &Row) -> Result<ResourceInfo> {
+    Ok(ResourceInfo {
+        concept_id: col(r, 0)?,
+        class: col(r, 1)?,
+        path: col(r, 2)?,
+        byte_size: col::<Option<i64>>(r, 3)?.unwrap_or(0),
+        sha256: col(r, 4)?,
+        detail: col::<Option<String>>(r, 5)?.unwrap_or_default(),
+        package_concept_id: col::<Option<String>>(r, 6)?.unwrap_or_default(),
+        textual: col::<Option<bool>>(r, 7)?.unwrap_or(false),
+        text: col(r, 8)?,
     })
 }
 

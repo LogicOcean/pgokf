@@ -24,8 +24,10 @@
 //!    internal links are retained (OKF permits broken links). External links
 //!    carry `target_id = NULL` and `resolved = false`.
 //! 3. In [`reresolve_bundle`], run once by the sync engine after the concept
-//!    set is finalized, recomputes `resolved` bundle-wide against the current
-//!    concepts. Because [`project`] only reprojects *staged* sources, this pass
+//!    set is finalized, retargets edges whose target *path* names a concept
+//!    under a different id (a package resource keeps its extension in its
+//!    id, a Markdown link derives the stem) and recomputes `resolved`
+//!    bundle-wide against the current concepts. Because [`project`] only reprojects *staged* sources, this pass
 //!    is what keeps the inbound edges of *unchanged* concepts correct: an edge
 //!    to a target added this sync flips `false` → `true`, and an edge to a
 //!    target removed this sync flips `true` → `false` - so the graph
@@ -89,13 +91,13 @@ COMMENT ON TABLE pgokf.links IS
 COMMENT ON COLUMN pgokf.links.source_id IS
     'Concept ID of the document the link was extracted from (references pgokf.concepts.id in the same bundle).';
 COMMENT ON COLUMN pgokf.links.target_id IS
-    'Concept ID of an internal destination (target_path without .md); NULL for external destinations.';
+    'Concept ID of an internal destination: target_path without .md, or, when a concept exists at exactly target_path under another id (a skill package resource keeps its extension), that concept''s id; NULL for external destinations.';
 COMMENT ON COLUMN pgokf.links.link_text IS
     'Plain-text label of the Markdown link.';
 COMMENT ON COLUMN pgokf.links.target_path IS
     'Normalized bundle-relative destination path (with .md) for internal links; NULL for external ones.';
 COMMENT ON COLUMN pgokf.links.link_kind IS
-    'Markdown construct that produced the link: inline, reference, autolink, email, or image.';
+    'Markdown construct that produced the link: inline, reference, autolink, email, or image; or package for a skill package''s membership edge to a resource it owns (no Markdown construct, the relation is in link_relation).';
 COMMENT ON COLUMN pgokf.links.resolved IS
     'True only for an internal link whose target_id matches an existing concept in the same bundle; recomputed bundle-wide after every sync so it stays correct as targets are added or removed.';
 COMMENT ON COLUMN pgokf.links.is_external IS
@@ -103,7 +105,7 @@ COMMENT ON COLUMN pgokf.links.is_external IS
 COMMENT ON COLUMN pgokf.links.ordinal IS
     'Zero-based position of the link within its source document, in document order. Frontmatter-derived attestation edges are numbered after the body links of the same source (from the body link count upward), so they never collide on the (bundle_id, source_id, ordinal) key.';
 COMMENT ON COLUMN pgokf.links.link_relation IS
-    'Semantic relation the edge represents, distinct from the Markdown construct in link_kind. ''reference'' (the default) for every ordinary Markdown link; for an Attested Computation concept''s type-specific reference fields, ''attestation:computation'', ''attestation:executor'', or ''attestation:attester'', so a reader can SELECT the typed edges while concept_neighbors traverses them like any resolved internal edge.';
+    'Semantic relation the edge represents, distinct from the Markdown construct in link_kind. ''reference'' (the default) for every ordinary Markdown link; for an Attested Computation concept''s type-specific reference fields, ''attestation:computation'', ''attestation:executor'', or ''attestation:attester''; for a skill package, USES (skill -> script) and REFERENCES (skill -> reference or asset), on both the membership edges and the manifest''s own Markdown links to those resources, so a reader can SELECT the typed edges while concept_neighbors traverses them like any resolved internal edge.';
 COMMENT ON COLUMN pgokf.links.tenant_id IS
     'Multi-tenant owner, denormalized from the edge''s bundle for a local row-level-security predicate; always equals the bundle''s tenant_id.';
 
@@ -173,11 +175,17 @@ fn insert_staged_links(bundle_id: i64, staged: &[StagedConcept]) -> Result<(), C
         SELECT
             $1,
             (SELECT b.tenant_id FROM pgokf.bundles b WHERE b.id = $1),
-            d.source_id, d.target_id, d.link_text, d.target_path,
+            d.source_id,
+            coalesce(
+                (SELECT c.id FROM pgokf.concepts c
+                 WHERE c.bundle_id = $1 AND c.path = d.target_path),
+                d.target_id),
+            d.link_text, d.target_path,
             d.link_kind,
             (d.target_id IS NOT NULL AND NOT d.is_external AND EXISTS (
                  SELECT 1 FROM pgokf.concepts c
-                 WHERE c.bundle_id = $1 AND c.id = d.target_id)),
+                 WHERE c.bundle_id = $1
+                   AND (c.id = d.target_id OR c.path = d.target_path))),
             d.is_external, d.ordinal
         FROM unnest(
                  $2::text[], $3::text[], $4::text[], $5::text[],
@@ -428,6 +436,13 @@ pub fn project(bundle_id: i64, staged: &[StagedConcept]) -> Result<(), CatalogEr
 /// Returns a [`CatalogError`] on any SPI failure so a partial projection aborts
 /// the surrounding sync transaction.
 pub fn reresolve_bundle(bundle_id: i64) -> Result<(), CatalogError> {
+    // A concept is addressed by its path as well as by its id: a package
+    // resource keeps its extension in its id (`references/guide.md`), while a
+    // Markdown link to it derives the document stem (`references/guide`).
+    // When a concept exists at the link's target path under a different id
+    // (the file became a package reference, or was one all along), the edge
+    // is pointed at that id, so the graph follows the file rather than the
+    // naming convention. Only internal edges with a differing id are touched.
     // The desired `resolved` value for a link row. Written once here and
     // interpolated into both the `SET` and the guard so the two can never
     // drift: the guard restricts the write to rows whose value actually
@@ -439,12 +454,24 @@ pub fn reresolve_bundle(bundle_id: i64) -> Result<(), CatalogError> {
             AND EXISTS (
                 SELECT 1 FROM pgokf.concepts c
                 WHERE c.bundle_id = links.bundle_id
-                  AND c.id = links.target_id))";
+                  AND (c.id = links.target_id OR c.path = links.target_path)))";
 
     // Only rewrite rows whose resolution flips (F1/F14: adding a target flips
     // false -> true, removing one flips true -> false). A no-op re-resolution
     // touches zero rows, which avoids rewriting the whole heap (dead-tuple
     // bloat) and keeps the statement's planner cost below the JIT threshold.
+    const RETARGET: &str = "
+        UPDATE pgokf.links
+        SET target_id = c.id
+        FROM pgokf.concepts c
+        WHERE links.bundle_id = $1
+          AND c.bundle_id = links.bundle_id
+          AND links.target_path IS NOT NULL
+          AND c.path = links.target_path
+          AND links.target_id IS DISTINCT FROM c.id";
+    Spi::run_with_args(RETARGET, &[bundle_id.into()])
+        .map_err(|error| spi_error("failed to retarget concept links by path", &error))?;
+
     let reresolve = format!(
         "UPDATE pgokf.links
          SET resolved = {RESOLVED_EXPR}
@@ -472,6 +499,7 @@ mod tests {
             file_hash: format!("hash-{path}"),
             modified_at_epoch: Some(1.5),
             raw_content: None,
+            typed: None,
         }
     }
 

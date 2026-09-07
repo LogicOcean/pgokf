@@ -41,7 +41,7 @@ impl From<&SyncPlan> for SyncReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{FileMetadata, UpdatedFile};
+    use crate::{FileClass, FileMetadata, UpdatedFile};
 
     fn metadata(path: &str, contents: &[u8]) -> FileMetadata {
         FileMetadata {
@@ -49,6 +49,7 @@ mod tests {
             hash: crate::hash_bytes(contents),
             size_bytes: contents.len() as u64,
             modified_at: None,
+            class: FileClass::OkfDocument,
         }
     }
 

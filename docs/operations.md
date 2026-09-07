@@ -453,7 +453,7 @@ SELECT pgokf.version();   -- the loaded library's version
 
 `pgokf` ships an explicit migration chain, so PostgreSQL can walk intermediate
 steps for you: the packaged scripts step one minor at a time from `0.1.0`
-through `0.1.16` (`0.1.0 -> 0.1.1 -> ... -> 0.1.15 -> 0.1.16`), alongside a full
+through `0.2.0` (`0.1.0 -> 0.1.1 -> ... -> 0.1.16 -> 0.2.0`), alongside a full
 base install for the current version. `ALTER EXTENSION pgokf UPDATE` applies the
 necessary steps in order.
 

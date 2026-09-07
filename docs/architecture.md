@@ -83,7 +83,7 @@ OKF bundle directory                     object store (S3-compatible)
     + sync audit log, change manifest, NOTIFY    (pgokf_private.sync_log[_change])
           |
           v
-SQL API under schema pgokf (40 functions; exact signatures in sql-api.md):
+SQL API under schema pgokf (43 functions; exact signatures in sql-api.md):
   ingestion   register_bundle / register_bundle_content / refresh_bundle /
               unregister_bundle / set_bundle_enabled / retire_bundle /
               unretire_bundle / set_concept_embedding      (writer tier)
@@ -94,7 +94,7 @@ SQL API under schema pgokf (40 functions; exact signatures in sql-api.md):
   read/ops    list_bundles / bundle_info / get_config / list_sync_log /
               list_sync_changes / list_bundle_log / catalog_stats / health /
               stale_concepts / duplicate_concepts / get_concept_source /
-              version                                      (reader tier)
+              get_skill / get_script / get_reference / version (reader tier)
   admin       set_config / reset_config / purge_retired /
               schedule_refresh / unschedule_refresh /
               rebuild_search_index / rebuild_embedding_index / list_access_log /
@@ -112,8 +112,8 @@ table. A `bootstrap` SQL block creates the `pgokf` and `pgokf_private` schemas
 and the `pgokf_reader` < `pgokf_writer` < `pgokf_admin` role tier, and hardens
 schema access, before the feature SQL blocks run. Public entry points are
 schema-qualified everywhere in documentation and examples. See
-[sql-api.md](sql-api.md) for exact signatures: 40 public functions, 11 public
-and 4 private tables, and 14 composite types, locked by the stable-API
+[sql-api.md](sql-api.md) for exact signatures: 43 public functions, 14 public
+and 4 private tables, and 17 composite types, locked by the stable-API
 guardrail tests in `crates/extension/tests/api_stability.rs` (see
 [api-stability.md](api-stability.md)).
 
@@ -187,6 +187,16 @@ The physical model (full column detail in [sql-api.md](sql-api.md)):
   log in a bundle, one row per parsed entry, read via `list_bundle_log`.
 - **`pgokf.concept_history`** is the opt-in (`track_history`) append-only
   version history behind `concept_history` and `concept_as_of`.
+- **`pgokf.skills`**, **`pgokf.scripts`**, and **`pgokf.reference_documents`**
+  are the exact projections of Agent Skills packages found in a bundle (a
+  `SKILL.md` directory with `scripts/`, `references/`, `assets/`): the
+  manifest's bytes, frontmatter, and package hash; each script's and each
+  reference's exact bytes, identity, and typed metadata. Kept regardless of
+  `store_source`, read through the audited `get_skill` / `get_script` /
+  `get_reference`, so a workspace plugin can be rebuilt byte for byte. The
+  sync classifies every file (`okf_sync::FileClass`), re-projects a package
+  whenever any member changes, and links the skill to its members
+  (`link_kind = 'package'`, `USES` / `REFERENCES`).
 
 Four private tables live in `pgokf_private`: the singleton `config` policy row,
 the append-only `sync_log` audit trail with its per-file `sync_log_change`
@@ -194,7 +204,7 @@ manifest, and the `access_log` exfiltration audit (read via the admin-only
 `list_access_log`).
 
 `(bundle_id, id)` is the concept key, so concepts with the same path in different
-bundles stay distinct. The 14 composite result types (`bundle_sync_result`,
+bundles stay distinct. The 17 composite result types (`bundle_sync_result`,
 `concept_search_result`, `concept_neighbor`, `bundle_info`, `export_result`,
 `sync_log_entry`, `catalog_stat`, `stale_concept`, `sync_change`,
 `access_log_entry`, `duplicate_group`, `search_facet`, `bundle_log_entry`, and

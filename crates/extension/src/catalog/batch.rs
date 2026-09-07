@@ -344,6 +344,7 @@ mod tests {
             file_hash: format!("hash-{path}"),
             modified_at_epoch: Some(1.5),
             raw_content: None,
+            typed: None,
         }
     }
 
@@ -359,6 +360,7 @@ mod tests {
             file_hash: format!("hash-{path}"),
             modified_at_epoch: Some(1.5),
             raw_content: None,
+            typed: None,
         }
     }
 

@@ -27,6 +27,22 @@ concept under `references/`, the concept's exact stored source when the
 catalog keeps source, otherwise a document reconstructed from the indexed
 fields and marked as such.
 
+Skill packages stored in the catalog (a bundle's own `SKILL.md`
+directories, ingested since pgokf 0.2.0 with their `scripts/`,
+`references/`, and `assets/`) are not re-described: a selected `Skill`
+concept is copied **whole and byte for byte** from the typed projections,
+through the audited `get_skill()`, `get_script()`, and `get_reference()`
+readers. For a native Agent Skills consumer the package lands beside the
+knowledge skill under its own name (`.claude/skills/<name>/SKILL.md`,
+`scripts/` executable, `references/`, `assets/`), so the harness loads it
+like any skill; the other shapes put it under `knowledge/skills/<name>/`
+(or `<root>/skills/<name>/`). Two packages that share a name get the
+bundle id appended, and the index lists the packages under a **Skills**
+heading. A script or reference selected without its package is written at
+its catalog path (scripts under the skill's `scripts/`, executable); one
+whose package is also selected is dropped, since the package carries it.
+The lockfile records the package hash beside each package file.
+
 Three optional components make the package more than a skills directory:
 
 | Component | What it adds | Where |
@@ -46,8 +62,8 @@ original beside the file name), bundles that slug alike get their id
 appended, and a build that would write two files at one path is refused.
 Writing into a directory validates every path first, never follows a
 symbolic link, and refuses existing files unless told to overwrite. Reading a concept's source for a
-build goes through the audited `get_concept_source()`, which is what that
-log is for.
+build goes through the audited `get_concept_source()` (or the package
+readers above), which is what that log is for.
 
 Use it from the web UI (**Plugins** page) or the MCP server
 (`build_workspace_plugin` with `components`, `mcp_command`, `web_url`;

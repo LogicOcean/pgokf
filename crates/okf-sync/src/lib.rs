@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Filesystem-backed incremental synchronization for Open Knowledge Format bundles.
 //!
-//! This crate deliberately has no database dependency. It discovers Markdown files,
-//! snapshots their contents and metadata, then compares snapshots to produce a
-//! deterministic [`SyncPlan`]; a [`SyncReport`] condenses the plan into the counts
-//! surfaced to end users. Application binaries can initialize configuration and
+//! This crate deliberately has no database dependency. It discovers the content
+//! of a bundle - Markdown documents and, for Agent Skills packages, the manifest
+//! and its resources ([`FileClass`]) - snapshots their contents and metadata,
+//! then compares snapshots to produce a deterministic [`SyncPlan`]; a
+//! [`SyncReport`] condenses the plan into the counts surfaced to end users. Application binaries can initialize configuration and
 //! logging with `stratify`; the planner itself is synchronous and side-effect free
 //! apart from reading its configured bundle directory.
 //!
@@ -18,7 +19,8 @@
 //! # Module layout
 //!
 //! - [`config`](SyncConfig): what to scan and which limits apply
-//! - [`discover`]: walking the bundle and snapshotting its documents
+//! - [`discover`]: walking the bundle and snapshotting its documents and resources
+//! - [`PackageIndex`]/[`FileClass`]: skill-package ownership and file classification
 //! - [`plan`]/[`build_plan`]: comparing snapshots into incremental work
 //! - [`SyncReport`]: count-only summary of a plan
 //! - [`hash_bytes`]/[`hash_file`]: BLAKE3 content hashing helpers
@@ -28,6 +30,7 @@ mod config;
 mod discover;
 mod error;
 mod hash;
+mod package;
 mod plan;
 mod report;
 
@@ -35,6 +38,7 @@ pub use config::SyncConfig;
 pub use discover::{FileMetadata, Snapshot, discover};
 pub use error::SyncError;
 pub use hash::{hash_bytes, hash_file};
+pub use package::{FileClass, PackageIndex, RESOURCE_DIRECTORIES, SKILL_MANIFEST};
 pub use plan::{SyncPlan, UpdatedFile, build_plan, plan};
 pub use report::SyncReport;
 

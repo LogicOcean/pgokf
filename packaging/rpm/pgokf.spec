@@ -33,7 +33,7 @@ Name:           %{sname}_%{pgmajorversion}
 # single source of truth for the extension version. build-deb.sh and the Docker
 # job read that file directly; a spec is parsed before Source0 is unpacked, so
 # this one cannot -- bump it by hand with every release.
-Version:        0.1.16
+Version:        0.2.0
 Release:        1%{?dist}
 Summary:        Materialized PostgreSQL catalog for Open Knowledge Format bundles
 
@@ -101,6 +101,14 @@ cp -a target/release/%{sname}-pg%{pgmajorversion}/. %{buildroot}/
 %{pginstdir}/share/extension/%{sname}--*--*.sql
 
 %changelog
+* Sun Sep 06 2026 David Saroka <david.saroka@gmail.com> - 0.2.0-1
+- Release 0.2.0: Agent Skills packages (SKILL.md with scripts/, references/,
+  assets/) are catalog content: virtual Skill/Script/Reference concepts, exact
+  bytes in pgokf.skills / pgokf.scripts / pgokf.reference_documents, package
+  membership edges, and the audited readers get_skill / get_script /
+  get_reference. Upgrade script pgokf--0.1.16--0.2.0.sql adds the tables,
+  types, functions, and the widened access-log operation check.
+
 * Sat Sep 05 2026 David Saroka <david.saroka@gmail.com> - 0.1.16-1
 - Release 0.1.16: require_tenant policy key (deny-by-default tenancy on
   demand), pgokf.tenant_required(), tenant scope for every companion.

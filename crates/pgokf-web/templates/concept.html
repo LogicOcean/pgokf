@@ -17,13 +17,15 @@
   </div>
   <div class="hero-status">
     <button type="button" class="btn ghost js-only" data-copy="{{ c.bundle_id }}:{{ c.concept_id }}" title="Copy the (bundle_id, concept_id) identity">Copy identity</button>
-    {% if c.has_source %}<a class="btn" href="/source/{{ c.bundle_id }}/{{ c.concept_id|urlencode_path }}" download>Download source</a>{% endif %}
+    {% if package.is_some() || resource.is_some() %}<a class="btn" href="/resource/{{ c.bundle_id }}/{{ c.concept_id|urlencode_path }}" download title="The exact stored bytes, through the audited reader">Download file</a>{% else if c.has_source %}<a class="btn" href="/source/{{ c.bundle_id }}/{{ c.concept_id|urlencode_path }}" download>Download source</a>{% endif %}
   </div>
 </section>
 
 <div class="tabs" data-tabs>
   <div class="tablist" role="tablist" aria-label="Concept views">
     <button role="tab" id="tab-body" aria-controls="panel-body" aria-selected="true" data-tab="body">Body</button>
+    {% if let Some(pkg) = package %}<button role="tab" id="tab-package" aria-controls="panel-package" aria-selected="false" data-tab="package">Package <span class="count">{{ pkg.resources.len() }}</span></button>{% endif %}
+    {% if resource.is_some() %}<button role="tab" id="tab-package" aria-controls="panel-package" aria-selected="false" data-tab="package">Package</button>{% endif %}
     <button role="tab" id="tab-provenance" aria-controls="panel-provenance" aria-selected="false" data-tab="provenance">Provenance</button>
     <button role="tab" id="tab-links" aria-controls="panel-links" aria-selected="false" data-tab="links">Links &amp; graph{% if !neighbors.is_empty() %} <span class="count">{{ neighbors.len() }}</span>{% endif %}</button>
     <button role="tab" id="tab-metadata" aria-controls="panel-metadata" aria-selected="false" data-tab="metadata">Metadata{% if !metadata.is_empty() %} <span class="count">{{ metadata.len() }}</span>{% endif %}</button>
@@ -33,8 +35,41 @@
 
   <section role="tabpanel" id="panel-body" aria-labelledby="tab-body" data-panel="body" class="panel prose-wrap active">
     <h2 class="nojs">Body</h2>
-    {% if body_html.trim().is_empty() %}<p class="empty">This concept has no body.</p>{% else %}<article class="prose">{{ body_html|safe }}</article>{% endif %}
+    {% if body_html.trim().is_empty() %}<p class="empty">{% if let Some(r) = resource %}{% if !r.textual %}This is a binary {{ r.class }} ({{ r.detail }}, {{ r.byte_size }} bytes); download it to view.{% else %}This file is empty.{% endif %}{% else %}This concept has no body.{% endif %}</p>{% else %}<article class="prose">{{ body_html|safe }}</article>{% endif %}
   </section>
+
+  {% if let Some(pkg) = package %}
+  <section role="tabpanel" id="panel-package" aria-labelledby="tab-package" data-panel="package" class="panel">
+    <h2 class="nojs">Package</h2>
+    <p class="muted small">An Agent Skills package stored in the catalog: the plugin builder copies it into a workspace byte for byte, and <code>get_skill</code> returns it to agents.</p>
+    <dl class="kv wide">
+      <dt>Skill name</dt><dd><code>{{ pkg.name }}</code></dd>
+      <dt>Package root</dt><dd><code>{% if pkg.root.is_empty() %}(bundle root){% else %}{{ pkg.root }}{% endif %}</code></dd>
+      <dt>Package hash</dt><dd><code class="hash">{{ pkg.hash }}</code></dd>
+      <dt>Visibility</dt><dd>{{ pkg.visibility }}</dd>
+    </dl>
+    <h3>Resources</h3>
+    {% if pkg.resources.is_empty() %}<p class="empty">This package has no scripts, references, or assets.</p>{% else %}
+    <table class="table compact"><thead><tr><th>Kind</th><th>Path</th><th>Detail</th><th class="num">Bytes</th><th>SHA-256</th><th></th></tr></thead><tbody>
+    {% for r in pkg.resources %}<tr><td><span class="pill muted">{{ r.class }}</span></td><td><a href="/concepts/{{ c.bundle_id }}/{{ r.concept_id|urlencode_path }}"><code>{{ r.path }}</code></a></td><td>{{ r.detail }}</td><td class="num">{{ r.byte_size }}</td><td><code class="hash">{{ r.sha256 }}</code></td><td><a href="/resource/{{ c.bundle_id }}/{{ r.concept_id|urlencode_path }}" download>Download</a></td></tr>{% endfor %}
+    </tbody></table>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  {% if let Some(r) = resource %}
+  <section role="tabpanel" id="panel-package" aria-labelledby="tab-package" data-panel="package" class="panel">
+    <h2 class="nojs">Package</h2>
+    <p class="muted small">A {{ r.class }} of an Agent Skills package stored in the catalog; the plugin builder copies the whole package into a workspace byte for byte.</p>
+    <dl class="kv wide">
+      <dt>Skill</dt><dd><a href="/concepts/{{ c.bundle_id }}/{{ r.package_concept_id|urlencode_path }}"><code>{{ r.package_concept_id }}</code></a></dd>
+      <dt>Path in package</dt><dd><code>{{ r.path }}</code></dd>
+      <dt>{% if r.class == "script" %}Language{% else %}Media type{% endif %}</dt><dd>{{ r.detail }}</dd>
+      <dt>Size</dt><dd>{{ r.byte_size }} bytes</dd>
+      <dt>SHA-256</dt><dd><code class="hash">{{ r.sha256 }}</code></dd>
+    </dl>
+  </section>
+  {% endif %}
 
   <section role="tabpanel" id="panel-provenance" aria-labelledby="tab-provenance" data-panel="provenance" class="panel">
     <h2 class="nojs">Provenance</h2>

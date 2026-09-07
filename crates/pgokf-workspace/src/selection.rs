@@ -3,6 +3,8 @@
 //! reader API, so tenant scope, visibility, retirement, and non-disclosure
 //! are the database's decisions, never this crate's.
 
+use std::collections::BTreeSet;
+
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use tokio_postgres::GenericClient;
@@ -106,8 +108,72 @@ pub struct ConceptRecord {
     /// indexed text.
     pub exact: bool,
     /// The document as written to the workspace (empty until sources load).
+    /// For a skill this is the exact `SKILL.md`; for a package resource its
+    /// exact bytes.
     #[serde(skip)]
     pub bytes: Vec<u8>,
+    /// Present when the concept is an Agent Skills package manifest: the
+    /// package identity from `pgokf.skills`, and its resources with their
+    /// bytes once sources load. The whole package is materialized under one
+    /// directory, byte for byte.
+    pub package: Option<PackageRecord>,
+    /// Present when the concept is a package resource (a script, reference,
+    /// or asset) selected on its own; dropped when its package is selected
+    /// too, because the package already carries it.
+    pub resource: Option<ResourceRecord>,
+}
+
+/// A skill package: what `pgokf.skills` records plus, after loading, every
+/// resource the package owns.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PackageRecord {
+    /// The Agent Skills `name` (the directory the harness expects).
+    pub name: String,
+    /// Bundle-relative package directory (`""` for a root package).
+    pub root: String,
+    /// The catalog's package hash over the manifest and every member.
+    pub hash: String,
+    /// The package's scripts, references, and assets, in path order.
+    pub resources: Vec<ResourceFile>,
+}
+
+/// One file of a skill package.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ResourceFile {
+    /// The resource's own concept id (its bundle-relative path).
+    pub concept_id: String,
+    /// `script`, `reference`, or `asset`.
+    pub class: String,
+    /// Package-relative path (`scripts/check.sh`).
+    pub path: String,
+    /// SHA-256 of the exact bytes, as the catalog records it.
+    pub sha256: String,
+    /// The catalog's BLAKE3 `file_hash` of the resource's own concept.
+    pub file_hash: String,
+    /// The exact bytes (empty until sources load).
+    #[serde(skip)]
+    pub bytes: Vec<u8>,
+}
+
+impl ResourceFile {
+    /// Scripts keep their executable bit in the workspace.
+    #[must_use]
+    pub fn is_script(&self) -> bool {
+        self.class == "script"
+    }
+}
+
+/// A package resource selected as a concept of its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ResourceRecord {
+    /// `script`, `reference`, or `asset`.
+    pub class: String,
+    /// Package-relative path.
+    pub source_path: String,
+    /// The owning skill's concept id.
+    pub package_concept_id: String,
+    /// SHA-256 of the exact bytes, as the catalog records it.
+    pub sha256: String,
 }
 
 /// The catalog identity a lockfile records: versions and the state of each
@@ -163,11 +229,22 @@ pub async fn resolve<C: GenericClient>(
     let sql = "SELECT c.bundle_id, coalesce(b.name, regexp_replace(b.path, '^.*/', '')),
                       c.id, c.path, c.title, c.description, c.type, coalesce(c.tags, '{}'),
                       c.file_hash, coalesce(p.trust_tier, 'unverified'), coalesce(p.status, 'stable'),
-                      r.ord
+                      r.ord,
+                      sk.agent_skill->>'name', sk.package_root, sk.package_hash,
+                      CASE WHEN s.concept_id IS NOT NULL THEN 'script'
+                           WHEN d.source_path LIKE 'assets/%' THEN 'asset'
+                           WHEN d.concept_id IS NOT NULL THEN 'reference' END,
+                      coalesce(s.source_path, d.source_path),
+                      coalesce(s.package_concept_id, d.package_concept_id),
+                      coalesce(s.executable_sha256, d.content_sha256)
                FROM pgokf.concepts c
                JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled AND b.retired_at IS NULL
                LEFT JOIN pgokf.concept_provenance p
                       ON p.bundle_id = c.bundle_id AND p.concept_id = c.id
+               LEFT JOIN pgokf.skills sk ON sk.bundle_id = c.bundle_id AND sk.concept_id = c.id
+               LEFT JOIN pgokf.scripts s ON s.bundle_id = c.bundle_id AND s.concept_id = c.id
+               LEFT JOIN pgokf.reference_documents d
+                      ON d.bundle_id = c.bundle_id AND d.concept_id = c.id
                LEFT JOIN (
                    SELECT o.b, o.id, min(o.ord) AS ord
                    FROM ROWS FROM (unnest($6::bigint[]), unnest($7::text[])) WITH ORDINALITY AS o(b, id, ord)
@@ -195,25 +272,67 @@ pub async fn resolve<C: GenericClient>(
         .query(sql, &params)
         .await
         .context("resolving the selection")?;
-    rows.iter()
-        .map(|r| {
-            Ok(ConceptRecord {
-                bundle_id: r.try_get(0)?,
-                bundle_name: r.try_get(1)?,
-                concept_id: r.try_get(2)?,
-                path: r.try_get(3)?,
-                title: r.try_get(4)?,
-                description: r.try_get(5)?,
-                concept_type: r.try_get(6)?,
-                tags: r.try_get(7)?,
-                file_hash: r.try_get(8)?,
-                trust_tier: r.try_get(9)?,
-                status: r.try_get(10)?,
-                exact: false,
-                bytes: Vec::new(),
+    rows.iter().map(record_from_row).collect()
+}
+
+/// One resolved row as a [`ConceptRecord`] (without content).
+fn record_from_row(r: &tokio_postgres::Row) -> Result<ConceptRecord> {
+    Ok(ConceptRecord {
+        bundle_id: r.try_get(0)?,
+        bundle_name: r.try_get(1)?,
+        concept_id: r.try_get(2)?,
+        path: r.try_get(3)?,
+        title: r.try_get(4)?,
+        description: r.try_get(5)?,
+        concept_type: r.try_get(6)?,
+        tags: r.try_get(7)?,
+        file_hash: r.try_get(8)?,
+        trust_tier: r.try_get(9)?,
+        status: r.try_get(10)?,
+        exact: false,
+        bytes: Vec::new(),
+        package: package_from_row(r)?,
+        resource: resource_from_row(r)?,
+    })
+}
+
+/// The `pgokf.skills` columns of a resolved row, when the concept is a
+/// manifest.
+fn package_from_row(r: &tokio_postgres::Row) -> Result<Option<PackageRecord>> {
+    let name: Option<String> = r.try_get(12)?;
+    let root: Option<String> = r.try_get(13)?;
+    let hash: Option<String> = r.try_get(14)?;
+    Ok(match (root, hash) {
+        (Some(root), Some(hash)) => Some(PackageRecord {
+            // A manifest always has a name; fall back to the directory only
+            // if the frontmatter is somehow unnamed.
+            name: name.unwrap_or_else(|| root.rsplit('/').next().unwrap_or("skill").to_owned()),
+            root,
+            hash,
+            resources: Vec::new(),
+        }),
+        _ => None,
+    })
+}
+
+/// The resource columns of a resolved row, when the concept is a package
+/// script, reference, or asset.
+fn resource_from_row(r: &tokio_postgres::Row) -> Result<Option<ResourceRecord>> {
+    let class: Option<String> = r.try_get(15)?;
+    let source_path: Option<String> = r.try_get(16)?;
+    let package_concept_id: Option<String> = r.try_get(17)?;
+    let sha256: Option<String> = r.try_get(18)?;
+    Ok(match (class, source_path, package_concept_id, sha256) {
+        (Some(class), Some(source_path), Some(package_concept_id), Some(sha256)) => {
+            Some(ResourceRecord {
+                class,
+                source_path,
+                package_concept_id,
+                sha256,
             })
-        })
-        .collect()
+        }
+        _ => None,
+    })
 }
 
 /// For a query selection, the `(bundle_id, concept_id)` pairs
@@ -264,11 +383,16 @@ async fn ranked_ids<C: GenericClient>(
     Ok(Some(ids))
 }
 
-/// Load each record's content: the exact stored source through the audited
-/// `get_concept_source()` (an export is exactly what that log is for), or a
-/// document reconstructed from the indexed fields when the catalog keeps
-/// no source. A concept that disappeared (or was hidden) between resolving
-/// and loading is dropped from the list.
+/// Load each record's content, always through the audited readers (an
+/// export is exactly what that log is for): a skill package through
+/// `get_skill()` (the exact `SKILL.md`) plus `get_script()` /
+/// `get_reference()` for each resource it owns; a resource selected on its
+/// own through the same two; any other concept through
+/// `get_concept_source()`, or a document reconstructed from the indexed
+/// fields when the catalog keeps no source. A concept that disappeared (or
+/// was hidden) between resolving and loading is dropped from the list, and
+/// so is a resource whose package is in the selection, since the package
+/// carries it.
 ///
 /// # Errors
 ///
@@ -277,7 +401,31 @@ pub async fn load_sources<C: GenericClient>(
     client: &C,
     records: &mut Vec<ConceptRecord>,
 ) -> Result<()> {
-    for record in records.iter_mut() {
+    drop_packaged_resources(records);
+    let mut vanished: Vec<bool> = vec![false; records.len()];
+    for (index, record) in records.iter_mut().enumerate() {
+        if record.package.is_some() {
+            vanished[index] = !load_package(client, record).await?;
+            continue;
+        }
+        if let Some(resource) = record.resource.clone() {
+            match resource_bytes(
+                client,
+                record.bundle_id,
+                &record.concept_id,
+                &resource.class,
+            )
+            .await?
+            {
+                Some(bytes) => {
+                    verify_sha256(&bytes, &resource.sha256, &record.concept_id)?;
+                    record.bytes = bytes;
+                    record.exact = true;
+                }
+                None => vanished[index] = true,
+            }
+            continue;
+        }
         let source = client
             .query_opt(
                 "SELECT pgokf.get_concept_source($1, $2)",
@@ -315,8 +463,158 @@ pub async fn load_sources<C: GenericClient>(
                 .unwrap_or_default();
         }
     }
-    records.retain(|r| !r.bytes.is_empty());
+    let mut index = 0;
+    records.retain(|r| {
+        // A document that loaded nothing vanished; a resource may legitimately
+        // be empty, so only the explicit flag drops it.
+        let keep = !vanished[index] && (r.resource.is_some() || !r.bytes.is_empty());
+        index += 1;
+        keep
+    });
     Ok(())
+}
+
+/// Drop every resource whose package is in the selection: the package
+/// carries it, byte for byte, so writing it again would duplicate the file.
+/// Applied to previews and builds alike so both show the same tree.
+pub fn drop_packaged_resources(records: &mut Vec<ConceptRecord>) {
+    let owned: BTreeSet<(i64, String)> = records
+        .iter()
+        .filter(|r| r.package.is_some())
+        .map(|r| (r.bundle_id, r.concept_id.clone()))
+        .collect();
+    records.retain(|r| {
+        r.resource
+            .as_ref()
+            .is_none_or(|res| !owned.contains(&(r.bundle_id, res.package_concept_id.clone())))
+    });
+}
+
+/// The bytes a reader returned must hash to what the listing promised;
+/// otherwise the catalog changed between the two reads and the tree would
+/// mix versions.
+fn verify_sha256(bytes: &[u8], expected: &str, concept_id: &str) -> Result<()> {
+    let actual = sha256_hex(bytes);
+    if !expected.is_empty() && actual != expected {
+        return Err(anyhow!(
+            "resource {concept_id} changed while the plugin was being built (expected \
+             sha256 {expected}, read {actual}); build again"
+        ));
+    }
+    Ok(())
+}
+
+/// Lowercase hex SHA-256 of a buffer.
+#[must_use]
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+    Sha256::digest(bytes)
+        .iter()
+        .fold(String::with_capacity(64), |mut out, b| {
+            let _ = write!(out, "{b:02x}");
+            out
+        })
+}
+
+/// Fill a skill record with its exact manifest and every resource's bytes.
+/// Returns `false` when the package vanished (or was hidden) between
+/// resolving and loading, so the caller drops the record. A listed member
+/// that cannot be read, or whose bytes no longer hash as listed, is an error:
+/// the catalog changed under the build and the tree would mix versions.
+async fn load_package<C: GenericClient>(client: &C, record: &mut ConceptRecord) -> Result<bool> {
+    let row = match client
+        .query_opt(
+            "SELECT s.skill_md, s.package_root, s.package_hash, s.agent_skill->>'name', s.resources
+             FROM pgokf.get_skill($1, $2) AS s",
+            &[&record.bundle_id, &record.concept_id],
+        )
+        .await
+    {
+        Ok(row) => row,
+        Err(error) if is_invalid_parameter(&error) => None,
+        Err(error) => return Err(error).context("reading a skill package"),
+    };
+    let Some(row) = row else {
+        record.bytes.clear();
+        return Ok(false);
+    };
+    let skill_md: Vec<u8> = row.try_get(0)?;
+    let root: String = row.try_get(1)?;
+    let hash: String = row.try_get(2)?;
+    let name: Option<String> = row.try_get(3)?;
+    let listing: serde_json::Value = row.try_get(4)?;
+    let mut resources = Vec::new();
+    for entry in listing.as_array().into_iter().flatten() {
+        let concept_id = entry["concept_id"].as_str().unwrap_or_default().to_owned();
+        let class = entry["class"].as_str().unwrap_or("reference").to_owned();
+        let path = entry["path"].as_str().unwrap_or_default().to_owned();
+        let sha256 = entry["sha256"].as_str().unwrap_or_default().to_owned();
+        let file_hash = entry["file_hash"].as_str().unwrap_or_default().to_owned();
+        if concept_id.is_empty() || path.is_empty() {
+            continue;
+        }
+        let Some(bytes) = resource_bytes(client, record.bundle_id, &concept_id, &class).await?
+        else {
+            return Err(anyhow!(
+                "package {} lists {concept_id} but it could not be read (the catalog changed \
+                 while the plugin was being built); build again",
+                record.concept_id
+            ));
+        };
+        verify_sha256(&bytes, &sha256, &concept_id)?;
+        resources.push(ResourceFile {
+            concept_id,
+            class,
+            path,
+            sha256,
+            file_hash,
+            bytes,
+        });
+    }
+    let package = record.package.get_or_insert_with(|| PackageRecord {
+        name: String::new(),
+        root: String::new(),
+        hash: String::new(),
+        resources: Vec::new(),
+    });
+    if let Some(name) = name {
+        package.name = name;
+    }
+    package.root = root;
+    package.hash = hash;
+    package.resources = resources;
+    record.bytes = skill_md;
+    record.exact = true;
+    Ok(true)
+}
+
+/// The exact bytes of one package resource through the audited reader for
+/// its class; `None` when it vanished or is hidden.
+async fn resource_bytes<C: GenericClient>(
+    client: &C,
+    bundle_id: i64,
+    concept_id: &str,
+    class: &str,
+) -> Result<Option<Vec<u8>>> {
+    let sql = if class == "script" {
+        "SELECT (pgokf.get_script($1, $2)).exact_bytes"
+    } else {
+        "SELECT (pgokf.get_reference($1, $2)).exact_bytes"
+    };
+    match client.query_opt(sql, &[&bundle_id, &concept_id]).await {
+        Ok(Some(row)) => Ok(row.try_get::<_, Option<Vec<u8>>>(0)?),
+        Ok(None) => Ok(None),
+        Err(error) if is_invalid_parameter(&error) => Ok(None),
+        Err(error) => Err(error).context("reading a package resource"),
+    }
+}
+
+/// SQLSTATE 22023: the catalog's "no such (visible) concept".
+fn is_invalid_parameter(error: &tokio_postgres::Error) -> bool {
+    error
+        .as_db_error()
+        .is_some_and(|e| e.code().code() == "22023")
 }
 
 /// A document for a concept whose source the catalog does not keep: the
@@ -416,7 +714,72 @@ mod tests {
             status: "stable".to_owned(),
             exact: false,
             bytes: Vec::new(),
+            package: None,
+            resource: None,
         }
+    }
+
+    #[test]
+    fn drop_packaged_resources_keeps_only_resources_of_absent_packages() {
+        // Arrange: a package, one of its scripts, and a script of a package
+        // that is not selected (and one in another bundle with the same id).
+        let mut package = record();
+        package.concept_id = "skills/deploy/SKILL".to_owned();
+        package.package = Some(PackageRecord {
+            name: "deploy".to_owned(),
+            root: "skills/deploy".to_owned(),
+            hash: "p".repeat(64),
+            resources: Vec::new(),
+        });
+        let mut owned = record();
+        owned.concept_id = "skills/deploy/scripts/a.sh".to_owned();
+        owned.resource = Some(ResourceRecord {
+            class: "script".to_owned(),
+            source_path: "scripts/a.sh".to_owned(),
+            package_concept_id: "skills/deploy/SKILL".to_owned(),
+            sha256: String::new(),
+        });
+        let mut other_bundle = owned.clone();
+        other_bundle.bundle_id = 2;
+        let mut orphan = owned.clone();
+        orphan.concept_id = "skills/other/scripts/b.sh".to_owned();
+        orphan.resource.as_mut().unwrap().package_concept_id = "skills/other/SKILL".to_owned();
+        let mut records = vec![package, owned, other_bundle, orphan];
+
+        // Act
+        drop_packaged_resources(&mut records);
+
+        // Assert
+        let ids: Vec<(i64, &str)> = records
+            .iter()
+            .map(|r| (r.bundle_id, r.concept_id.as_str()))
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                (1, "skills/deploy/SKILL"),
+                (2, "skills/deploy/scripts/a.sh"),
+                (1, "skills/other/scripts/b.sh")
+            ]
+        );
+    }
+
+    #[test]
+    fn verify_sha256_accepts_a_match_or_an_unknown_digest_and_refuses_drift() {
+        // Arrange
+        let bytes = b"echo ok\n";
+        let digest = sha256_hex(bytes);
+
+        // Act / Assert
+        assert!(verify_sha256(bytes, &digest, "x").is_ok());
+        assert!(verify_sha256(bytes, "", "x").is_ok());
+        let error = verify_sha256(bytes, &"0".repeat(64), "skills/deploy/scripts/a.sh")
+            .expect_err("a different digest is refused");
+        assert!(
+            error
+                .to_string()
+                .contains("changed while the plugin was being built")
+        );
     }
 
     #[test]

@@ -59,7 +59,9 @@ CREATE TABLE pgokf_private.access_log (
     tenant_id  text NOT NULL DEFAULT 'default',
     actor      text NOT NULL DEFAULT session_user,
     at         timestamptz NOT NULL DEFAULT now(),
-    op         text CHECK (op IN ('export_parquet', 'export_sources', 'get_concept_source')),
+    op         text CONSTRAINT access_log_op_check
+                    CHECK (op IN ('export_parquet', 'export_sources', 'get_concept_source',
+                                  'get_skill', 'get_script', 'get_reference')),
     bundle_id  bigint,
     concept_id text,
     detail     text
@@ -97,7 +99,7 @@ COMMENT ON COLUMN pgokf_private.access_log.actor IS
 COMMENT ON COLUMN pgokf_private.access_log.at IS
     'When the operation committed (transaction now()); the pruning compares against sync_log_retention_days.';
 COMMENT ON COLUMN pgokf_private.access_log.op IS
-    'The exfiltration operation: export_parquet / export_sources / get_concept_source.';
+    'The exfiltration operation: export_parquet / export_sources / get_concept_source / get_skill / get_script / get_reference.';
 COMMENT ON COLUMN pgokf_private.access_log.bundle_id IS
     'Identity of the bundle whose content was read or exported. FK-free so the row survives the bundle''s later deletion.';
 COMMENT ON COLUMN pgokf_private.access_log.concept_id IS

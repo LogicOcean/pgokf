@@ -1,7 +1,7 @@
 {% if let Some(e) = error %}<p class="notice bad">{{ e }}</p>{% endif %}
 {% if let Some(p) = preview %}
 <div class="results-head">
-  <h2>{{ p.concepts.len() }} concept{{ p.concepts.len()|pluralize }} {{ p.description }}</h2>
+  <h2>{{ p.concepts.len() }} concept{{ p.concepts.len()|pluralize }} {{ p.description }}{% if p.package_count > 0 %} <span class="muted">· {{ p.package_count }} skill package{{ p.package_count|pluralize }} copied whole</span>{% endif %}</h2>
   <p class="muted">{% if p.truncated %}The selection hit its limit; raise it or narrow the selection. {% endif %}{{ p.manifest_hint }}</p>
 </div>
 {% if p.concepts.is_empty() %}
@@ -17,7 +17,7 @@
     <ol class="hits compact">
       {% for c in p.concepts %}
       <li class="hit">
-        <div class="hit-head"><a class="hit-title" href="/concepts/{{ c.bundle_id }}/{{ c.concept_id|urlencode_path }}">{{ c.title.as_deref().unwrap_or(c.concept_id.as_str()) }}</a>{% if let Some(t) = c.concept_type %}<span class="pill type">{{ t }}</span>{% endif %}<span class="pill trust-{{ c.trust_tier }}">{{ c.trust_tier }}</span></div>
+        <div class="hit-head"><a class="hit-title" href="/concepts/{{ c.bundle_id }}/{{ c.concept_id|urlencode_path }}">{{ c.title.as_deref().unwrap_or(c.concept_id.as_str()) }}</a>{% if let Some(t) = c.concept_type %}<span class="pill type">{{ t }}</span>{% endif %}{% if let Some(pkg) = c.package %}<span class="pill muted" title="An Agent Skills package: SKILL.md and its resources are copied byte for byte">package · {{ pkg.resources.len() }} file{{ pkg.resources.len()|pluralize }}</span>{% endif %}{% if let Some(r) = c.resource %}<span class="pill muted">{{ r.class }} of {{ r.package_concept_id }}</span>{% endif %}<span class="pill trust-{{ c.trust_tier }}">{{ c.trust_tier }}</span></div>
         <div class="hit-meta">{{ c.bundle_name }} <span class="muted">/ {{ c.path }}</span></div>
       </li>
       {% endfor %}

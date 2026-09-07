@@ -147,6 +147,22 @@ pub fn parent_directory(normalized_path: &str) -> &str {
 /// links use `/` separators.
 #[must_use]
 pub fn resolve_link_target(target: &str, source_path: &str) -> Option<String> {
+    let resolved = resolve_link_path(target, source_path)?;
+    apply_markdown_extension(resolved).ok()
+}
+
+/// Resolve an internal Markdown link destination to a normalized
+/// bundle-relative *file* path without applying the concept extension rule.
+///
+/// This is [`resolve_link_target`] minus its last step: the same fragment,
+/// separator, rooting, and traversal rules, but the destination keeps
+/// whatever extension it has (or none). Skill packages need it because a
+/// `SKILL.md` legitimately links to `scripts/check.sh` or
+/// `assets/topology.png`, which are catalog resources but not concepts in the
+/// Markdown sense. Returns `None` for an empty destination or one that
+/// escapes the bundle root.
+#[must_use]
+pub fn resolve_link_path(target: &str, source_path: &str) -> Option<String> {
     let folded = target.replace('\\', "/");
     let without_fragment = folded.split('#').next().unwrap_or_default();
     if without_fragment.is_empty() {
@@ -174,7 +190,7 @@ pub fn resolve_link_target(target: &str, source_path: &str) -> Option<String> {
         return None;
     }
 
-    apply_markdown_extension(parts.join("/")).ok()
+    Some(parts.join("/"))
 }
 
 /// Enforce the concept extension rule: append `.md` when the path has no

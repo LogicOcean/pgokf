@@ -12,6 +12,52 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 ### Added
 
+- **Skill packages are catalog content, and plugins are built from them
+  byte for byte** (specification §5.3, §15-§18, §21; the schema step to
+  **0.2.0**). A bundle may carry [Agent Skills](https://agentskills.io/)
+  packages: a directory with a `SKILL.md` and optional `scripts/`,
+  `references/`, and `assets/`. Discovery (`okf-sync`) now classifies every
+  file (`FileClass`: document, skill manifest, script, reference, asset,
+  reserved) with the specification's precedence and the nearest-manifest
+  ownership rule, and reads package resources whatever their extension.
+  `okf-parser` gains `parse_skill_manifest`, which projects the portable
+  Agent Skills frontmatter onto a virtual `type: Skill` concept (`title` =
+  `name`, the `tags` extension, the complete frontmatter under
+  `metadata.agent_skill`) and resolves the manifest's links to its own
+  resources; structural findings against the standard are warnings. The
+  extension stages scripts (UTF-8 required) and references/assets as
+  virtual `Script` / `Reference` concepts whose ids are their full paths,
+  keeps their **exact bytes** in three new tables (`pgokf.skills`,
+  `pgokf.scripts`, `pgokf.reference_documents`) regardless of
+  `store_source`, re-projects a package whenever any member changes (the
+  §9 package hash), projects membership edges (`link_kind = 'package'`,
+  `USES` / `REFERENCES`) and relabels the manifest's own links, and
+  re-identifies a file whose class changes when a `SKILL.md` appears or
+  disappears beside it. Three reader-level, tenant-scoped, audited readers
+  return the bytes: `get_skill`, `get_script`, `get_reference` (composite
+  types `skill_result`, `script_result`, `reference_result`; the access log
+  records the three operations). `register_bundle_content` accepts a
+  package in memory and refuses a loose non-Markdown path. Links resolve by
+  target path as well as by id, so a document's link to a package's `.md`
+  reference is an edge and survives the file becoming (or ceasing to be) a
+  resource. Upgrade script `pgokf--0.1.16--0.2.0.sql`. Deferred to a later
+  release: the `.okf-package.yaml` sidecar, standalone `type: Script` and
+  typed `Reference` documents, the diagnostics table, `relationships`
+  frontmatter, and visibility enforcement in search (the columns are
+  projected and propagated, not yet consulted).
+- The plugin builder (`pgokf-workspace`, the web **Plugins** page, the MCP
+  `build_workspace_plugin`) copies a selected skill package **whole**
+  through the audited readers: `SKILL.md` unchanged, scripts executable,
+  references and assets byte-identical, beside the knowledge skill for a
+  native Agent Skills consumer (`.claude/skills/<name>/`) or under
+  `knowledge/skills/<name>/` for the other shapes, with the package hash
+  in the lockfile and a **Skills** section in every index; a resource
+  selected on its own is written at its catalog path. The concept page
+  gains a **Package** tab (resources with sizes and SHA-256s, exact-byte
+  downloads through `/resource/...`), scripts and plain-text references
+  render verbatim, binary assets say so, and the JSON API reports
+  `package` / `resource`. New MCP tool `get_skill`.
+
 - **`pgokf-web`, a web UI and JSON API companion.** Search (lexical on the
   configured backend, plus semantic and hybrid when an embeddings endpoint is
   configured) with facets and keyset paging, bundle browsing, concept pages

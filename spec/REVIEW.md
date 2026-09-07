@@ -214,7 +214,13 @@ order that produces value earliest:
 2. **Skill packages, Script, Reference** (§15 to §18, §5.4 classification, the
    `links` migration): this is what makes agent skills, runbooks-as-code, and
    supporting material first-class, and it exercises the raw-staging pipeline
-   every later type depends on.
+   every later type depends on. *Shipped in 0.2.0 (2026-09-06) for the
+   package-derived forms: `FileClass` classification, virtual Skill / Script /
+   Reference concepts, the three exact tables, package invalidation, the
+   membership edges, and the audited readers; the builder copies packages
+   byte for byte. Deferred: the `.okf-package.yaml` sidecar, standalone
+   `type: Script` / typed `Reference` documents, the diagnostics table, and
+   the `relationships` frontmatter migration.*
 3. **Code Snippet** (§3): small once the typed-projection machinery exists.
 4. **Unified `catalogue_search`, facets, diagnostics retrieval** (§7, §5.5).
 5. **Scaffold Template and the CTL1 renderer** (§4, §8.3, §8.4): the largest

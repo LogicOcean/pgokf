@@ -18,11 +18,14 @@ so it adds nothing new to the workspace's `cargo deny` surface.
 | `find_similar` | `concept_id` (required), `bundle_id?`, `limit?` | `pgokf.find_similar` |
 | `concept_neighbors` | `concept_id` (required), `max_hops?`, `bundle_id?` | `pgokf.concept_neighbors` |
 | `get_concept` | `concept_id` (required), `bundle_id?` | `pgokf.concepts` projection |
+| `get_skill` | `bundle_id` (required), `concept_id` (required) | `pgokf.get_skill`: an Agent Skills package stored in the catalog (metadata, the exact `SKILL.md` text, and the scripts, references, and assets it owns); audited |
 | `list_plugin_targets` | none | the `pgokf-workspace` target registry: each harness's documented skills directory |
-| `build_workspace_plugin` | `target` (required), `name?`, `title?`, `bundle_ids?`, `concept_ids?`, `tags?`, `types?`, `query?`, `verified_only?`, `limit?`, `base_model?`, `components?` (`mcp`, `guide`, `tools`; default all), `mcp_command?`, `web_url?`, `output_dir?`, `overwrite?` | `pgokf-workspace`: an Agent Skills package (`SKILL.md` + `references/`), an `AGENTS.md` instruction file, an Ollama prompt bundle, or a generic tree, with `okf-workspace.yaml` and `okf-workspace.lock`; with `output_dir` the tree is written into the workspace, otherwise the files are returned inline (up to 1 MiB) |
+| `build_workspace_plugin` | `target` (required), `name?`, `title?`, `bundle_ids?`, `concept_ids?`, `tags?`, `types?`, `query?`, `verified_only?`, `limit?`, `base_model?`, `components?` (`mcp`, `guide`, `tools`; default all), `mcp_command?`, `web_url?`, `output_dir?`, `overwrite?` | `pgokf-workspace`: an Agent Skills package (`SKILL.md` + `references/`), an `AGENTS.md` instruction file, an Ollama prompt bundle, or a generic tree, with `okf-workspace.yaml` and `okf-workspace.lock`; skill packages stored in the catalog (`type: Skill`, select them with `types: ["Skill"]` or by id) are copied whole and byte for byte, scripts executable; with `output_dir` the tree is written into the workspace, otherwise the files are returned inline (up to 1 MiB; UTF-8 files as text, binary files as `{"encoding": "base64", "data": ...}`) |
 
 Each tool returns an MCP tool result whose single text content block holds the
-JSON array of rows exactly as the SQL function produced them.
+JSON the query produced: an array of rows for the search, graph, and concept
+tools, one object for `get_skill` and `build_workspace_plugin`. A missing or
+hidden skill surfaces as the catalog's own `22023` error text.
 
 ## Configuration
 
@@ -57,7 +60,7 @@ style client config:
 }
 ```
 
-The agent then sees the four tools above and can search, expand, and read the
+The agent then sees the tools above and can search, expand, and read the
 catalog. Prefer supplying the connection string through `OKF_PG_URL` in `env`
 rather than on the command line.
 

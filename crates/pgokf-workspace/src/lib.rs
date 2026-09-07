@@ -29,8 +29,8 @@ pub use plugin::{
 };
 pub use profile::{EnvRef, McpFormat, McpSpec, Profile, Shape, Target};
 pub use selection::{
-    BundleState, ConceptRecord, DEFAULT_LIMIT, MAX_CONCEPTS, Selection, Snapshot, load_sources,
-    resolve, snapshot,
+    BundleState, ConceptRecord, DEFAULT_LIMIT, MAX_CONCEPTS, PackageRecord, ResourceFile,
+    ResourceRecord, Selection, Snapshot, drop_packaged_resources, load_sources, resolve, snapshot,
 };
 
 /// Resolve a selection, load its content, and assemble the tree for a target.

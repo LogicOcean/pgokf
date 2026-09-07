@@ -93,6 +93,7 @@ pub mod history;
 mod iso8601;
 pub mod links;
 pub mod neighbors;
+pub mod packages;
 pub mod provenance;
 pub mod schedule;
 pub mod schema;

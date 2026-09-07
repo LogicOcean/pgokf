@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! PostgreSQL-independent parser for Open Knowledge Format Markdown concepts.
+//!
+//! [`parse_concept`] reads an ordinary OKF document. [`parse_skill_manifest`]
+//! reads an Agent Skills `SKILL.md` and projects it onto the same
+//! [`ParsedConcept`] shape as a virtual `type: Skill` concept, so a skill
+//! package flows through every downstream projection unchanged.
 
 pub mod error;
 pub mod frontmatter;
@@ -8,6 +13,7 @@ pub mod links;
 pub mod markdown;
 pub mod model;
 pub mod normalize;
+pub mod skill;
 pub mod version;
 
 pub use error::{Error, ErrorCategory, Result};
@@ -17,8 +23,9 @@ pub use links::{Link, LinkKind, ResolvedReference, resolve_reference};
 pub use model::ParsedConcept;
 pub use normalize::{
     concept_id, is_reserved_log, is_reserved_path, normalize_path, parent_directory,
-    resolve_link_target,
+    resolve_link_path, resolve_link_target,
 };
+pub use skill::{SKILL_TYPE, SkillDiagnostic, parse_skill_manifest, validate_skill};
 pub use version::{SUPPORTED_OKF_VERSIONS, is_supported_okf_version};
 // The parsed frontmatter's producer metadata is already exposed as
 // `ParsedConcept::metadata: serde_json::Map<String, Value>`, so these JSON

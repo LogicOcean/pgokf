@@ -60,12 +60,15 @@ use okf_parser::{
     ParserLimits, index_okf_version, is_reserved_log, is_reserved_path, is_supported_okf_version,
     parent_directory, parse_concept,
 };
-use okf_sync::{FileMetadata, SyncConfig, SyncReport, discover, hash_bytes};
+use okf_sync::{
+    FileClass, FileMetadata, PackageIndex, SyncConfig, SyncReport, discover, hash_bytes,
+};
 use pgrx::Spi;
 
 use crate::catalog::batch::{self, BATCH_SIZE};
+use crate::catalog::packages::{self, ResourceContext};
 use crate::catalog::spi_read;
-use crate::catalog::types::{StagedConcept, count_to_i32};
+use crate::catalog::types::{StagedConcept, TypedPayload, count_to_i32};
 use crate::errors::CatalogError;
 use crate::guc;
 use crate::security;
@@ -124,7 +127,7 @@ impl SyncOp {
 /// full.
 const TITLE_TSV_CHAR_LIMIT: i32 = 4_000;
 const META_TSV_CHAR_LIMIT: i32 = 16_000;
-const BODY_TSV_CHAR_LIMIT: i32 = 200_000;
+pub(crate) const BODY_TSV_CHAR_LIMIT: i32 = 200_000;
 
 /// Derive the stable, bundle-scoped `pg_advisory_xact_lock` key for a
 /// canonical bundle path.
@@ -164,12 +167,22 @@ pub struct BundleDelta {
 ///
 /// Reserved OKF files (`index.md` / `log.md`) are never concepts: they are
 /// skipped entirely and count toward no bucket. A file whose stored BLAKE3
-/// hash matches its current hash is unchanged and will not be rewritten.
+/// hash matches its current hash is unchanged and will not be rewritten -
+/// unless its identity changed: the stored concept id (`projection.ids`)
+/// lets the classifier notice that a file which used to be, say, an ordinary
+/// document is now a package resource (a `SKILL.md` appeared beside it) or
+/// the reverse, because the two classes derive different IDs from the same
+/// path; and the stored owner (`projection.owners`) notices a resource that
+/// moved between packages (a nested `SKILL.md` came or went), because its
+/// typed row names the wrong skill. Such a file is `updated` even with
+/// identical bytes, so its rows are rewritten under the new identity.
 #[must_use]
 pub fn classify_changes(
-    stored: &BTreeMap<String, String>,
+    projection: &StoredProjection,
+    packages: &PackageIndex,
     current: &[FileMetadata],
 ) -> BundleDelta {
+    let stored = &projection.hashes;
     let mut delta = BundleDelta::default();
     let mut current_paths = BTreeSet::new();
 
@@ -178,12 +191,23 @@ pub fn classify_changes(
         if is_reserved_path(&path_text) {
             continue;
         }
+        let same_id = projection
+            .ids
+            .get(&path_text)
+            .is_none_or(|id| *id == metadata.class.concept_id(&path_text));
+        let same_owner = !metadata.class.is_resource()
+            || projection.owners.get(&path_text).is_some_and(|owner| {
+                packages
+                    .owner_of(&path_text)
+                    .is_some_and(|root| packages::skill_concept_id_of(root) == *owner)
+            });
+        let same_identity = same_id && same_owner;
         match stored.get(&path_text) {
             None => {
                 delta.report.added += 1;
                 delta.to_parse.push(metadata.clone());
             }
-            Some(stored_hash) if *stored_hash == metadata.hash => {
+            Some(stored_hash) if *stored_hash == metadata.hash && same_identity => {
                 delta.report.unchanged += 1;
             }
             Some(_) => {
@@ -272,16 +296,27 @@ pub(crate) fn acquire_bundle_lock(canonical_path: &str) -> Result<(), CatalogErr
         .map_err(|error| spi_error("failed to acquire bundle advisory lock", &error))
 }
 
-fn load_stored_hashes(bundle_id: i64) -> Result<BTreeMap<String, String>, CatalogError> {
-    Spi::connect(|client| {
+/// The stored projection of a bundle: `path -> file_hash` (what the diff is
+/// computed against), `path -> concept id` (what a class change is detected
+/// against), and, for package resources, `path -> owning skill id` (what an
+/// ownership change is detected against).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct StoredProjection {
+    pub hashes: BTreeMap<String, String>,
+    pub ids: BTreeMap<String, String>,
+    pub owners: BTreeMap<String, String>,
+}
+
+fn load_stored_projection(bundle_id: i64) -> Result<StoredProjection, CatalogError> {
+    let mut projection = Spi::connect(|client| {
         let table = client
             .select(
-                "SELECT path, file_hash FROM pgokf.concepts WHERE bundle_id = $1",
+                "SELECT path, file_hash, id FROM pgokf.concepts WHERE bundle_id = $1",
                 None,
                 &[bundle_id.into()],
             )
             .map_err(|error| spi_error("failed to load stored concept hashes", &error))?;
-        let mut stored = BTreeMap::new();
+        let mut projection = StoredProjection::default();
         for row in table {
             let path: String = spi_read::required_column(
                 &row,
@@ -295,9 +330,71 @@ fn load_stored_hashes(bundle_id: i64) -> Result<BTreeMap<String, String>, Catalo
                 "failed to read stored concept hash",
                 "stored concept hash is NULL",
             )?;
-            stored.insert(path, file_hash);
+            let id: String = spi_read::required_column(
+                &row,
+                3,
+                "failed to read stored concept id",
+                "stored concept id is NULL",
+            )?;
+            projection.ids.insert(path.clone(), id);
+            projection.hashes.insert(path, file_hash);
         }
-        Ok(stored)
+        Ok::<_, CatalogError>(projection)
+    })?;
+    projection.owners = load_stored_owners(bundle_id)?;
+    Ok(projection)
+}
+
+/// The owning skill of every stored package resource (`path -> skill id`),
+/// from the typed projections.
+///
+/// The typed tables arrived in 0.2.0. A catalog whose SQL objects are still
+/// at an earlier version while this library is already loaded (the interim
+/// state of an upgrade, and how the release rehearsal populates a catalog
+/// before `ALTER EXTENSION ... UPDATE`) has no packages to reconcile, so the
+/// load is skipped rather than failing every sync until the update runs.
+fn load_stored_owners(bundle_id: i64) -> Result<BTreeMap<String, String>, CatalogError> {
+    let typed_tables_exist = Spi::get_one::<bool>(
+        "SELECT pg_catalog.to_regclass('pgokf.scripts') IS NOT NULL
+            AND pg_catalog.to_regclass('pgokf.reference_documents') IS NOT NULL",
+    )
+    .map_err(|error| spi_error("failed to probe the typed projections", &error))?
+    .unwrap_or(false);
+    if !typed_tables_exist {
+        return Ok(BTreeMap::new());
+    }
+    Spi::connect(|client| {
+        let table = client
+            .select(
+                "SELECT c.path, r.package_concept_id
+                 FROM pgokf.concepts c
+                 JOIN (SELECT bundle_id, concept_id, package_concept_id FROM pgokf.scripts
+                       UNION ALL
+                       SELECT bundle_id, concept_id, package_concept_id
+                       FROM pgokf.reference_documents) r
+                   ON r.bundle_id = c.bundle_id AND r.concept_id = c.id
+                 WHERE c.bundle_id = $1 AND r.package_concept_id IS NOT NULL",
+                None,
+                &[bundle_id.into()],
+            )
+            .map_err(|error| spi_error("failed to load stored package owners", &error))?;
+        let mut owners = BTreeMap::new();
+        for row in table {
+            let path: String = spi_read::required_column(
+                &row,
+                1,
+                "failed to read stored resource path",
+                "stored resource path is NULL",
+            )?;
+            let owner: String = spi_read::required_column(
+                &row,
+                2,
+                "failed to read stored package owner",
+                "stored package owner is NULL",
+            )?;
+            owners.insert(path, owner);
+        }
+        Ok(owners)
     })
 }
 
@@ -423,10 +520,32 @@ impl ContentSource {
     /// traversing paths and enforced the `pgokf.max_bundle_files` /
     /// `pgokf.max_file_bytes` ceilings; this constructor only hashes each
     /// content and materializes the snapshot.
-    pub(crate) fn new(paths: Vec<String>, contents: Vec<Vec<u8>>) -> Self {
+    ///
+    /// Every path is classified against the packages the set declares
+    /// ([`PackageIndex`]), exactly as the filesystem scan classifies files: a
+    /// path that is neither a Markdown document, a `SKILL.md`, a reserved
+    /// file, nor a resource of a provided package is not catalog content, and
+    /// is refused with SQLSTATE `22023` rather than silently ignored (the
+    /// caller asked for it to be stored).
+    ///
+    /// # Errors
+    ///
+    /// A path that classifies to nothing.
+    pub(crate) fn new(paths: Vec<String>, contents: Vec<Vec<u8>>) -> Result<Self, CatalogError> {
+        let index = PackageIndex::from_paths(paths.iter().map(String::as_str));
         let mut entries = Vec::with_capacity(paths.len());
         let mut map = BTreeMap::new();
         for (path, content) in paths.into_iter().zip(contents) {
+            let class = index.classify(&path).ok_or_else(|| {
+                CatalogError::invalid_parameter(
+                    format!(
+                        "content path {path} is not catalog content: only Markdown documents, \
+                         SKILL.md manifests, and files below a provided package's scripts/, \
+                         references/, or assets/ can be stored"
+                    ),
+                    Path::new(&path),
+                )
+            })?;
             let hash = hash_bytes(&content);
             let size_bytes = u64::try_from(content.len()).unwrap_or(u64::MAX);
             let path_buf = PathBuf::from(path);
@@ -435,14 +554,15 @@ impl ContentSource {
                 hash,
                 size_bytes,
                 modified_at: None,
+                class,
             });
             map.insert(path_buf, content);
         }
         entries.sort_by(|left, right| left.path.cmp(&right.path));
-        Self {
+        Ok(Self {
             entries,
             contents: map,
-        }
+        })
     }
 }
 
@@ -491,6 +611,16 @@ struct StagingOutcome {
 ///   still registers. A file that cannot be *read* (an I/O failure, not a parse
 ///   failure) remains a hard error in both modes.
 ///
+/// Each entry is staged according to its [`FileClass`]: an ordinary document
+/// through [`parse_concept`]; a `SKILL.md` through the Agent Skills manifest
+/// parser with the package's current membership (from `current`, the whole
+/// snapshot) so its package hash is exact; a script, reference, or asset as a
+/// virtual concept built from its bytes. Manifests are staged before
+/// resources so a resource can inherit its owning skill's visibility - and
+/// a resource is only ever staged in the same sync as its (invalidated)
+/// manifest, see [`packages::invalidate_packages`]. A binary file below
+/// `scripts/` is a malformed file under the policy above.
+///
 /// The staged concepts are fully materialized rather than streamed: the
 /// ordered projection seam ([`crate::catalog::links::project`] /
 /// [`crate::catalog::provenance::project`]) consumes the complete slice after
@@ -503,49 +633,193 @@ struct StagingOutcome {
 fn stage_changed_concepts<S: ByteSource>(
     source: &S,
     delta: &BundleDelta,
+    current: &[FileMetadata],
     strict: bool,
     store_source: bool,
 ) -> Result<StagingOutcome, CatalogError> {
     let limits = parser_limits_from_gucs();
-    let mut staged = Vec::with_capacity(delta.to_parse.len());
-    let mut skipped = Vec::new();
-    for metadata in &delta.to_parse {
+    let index = PackageIndex::from_paths(
+        current
+            .iter()
+            .filter(|entry| entry.class == FileClass::SkillManifest)
+            .filter_map(|entry| entry.path.to_str()),
+    );
+    let mut staging = Staging {
+        staged: Vec::with_capacity(delta.to_parse.len()),
+        skipped: Vec::new(),
+        strict,
+        store_source,
+        limits,
+    };
+    // Manifests first: a resource inherits its owning skill's visibility.
+    let (manifests, others): (Vec<&FileMetadata>, Vec<&FileMetadata>) = delta
+        .to_parse
+        .iter()
+        .partition(|entry| entry.class == FileClass::SkillManifest);
+    let mut visibilities: BTreeMap<String, String> = BTreeMap::new();
+    let mut skipped_roots: BTreeSet<String> = BTreeSet::new();
+    for metadata in manifests {
         let bytes = source.read_bytes(&metadata.path)?;
-        let concept = match parse_concept(&bytes, &metadata.path, limits) {
-            Ok(concept) => concept,
-            Err(error) if strict => {
-                return Err(CatalogError::invalid_parameter(
-                    format!("failed to parse OKF concept: {error}"),
-                    &metadata.path,
-                ));
+        let root = metadata
+            .path
+            .to_str()
+            .and_then(PackageIndex::manifest_directory)
+            .unwrap_or_default()
+            .to_owned();
+        let members = packages::package_members(&root, &index, current);
+        match packages::stage_manifest(
+            bytes,
+            &metadata.path,
+            &metadata.hash,
+            modified_at_epoch(metadata),
+            members,
+            limits,
+            store_source,
+        ) {
+            Ok((staged, findings)) => {
+                for finding in findings {
+                    pgrx::warning!(
+                        "pgokf: skill {} does not follow the Agent Skills standard: {finding}",
+                        metadata.path.display()
+                    );
+                }
+                if let Some(TypedPayload::Skill(payload)) = &staged.typed {
+                    visibilities.insert(root, payload.visibility.clone());
+                }
+                staging.staged.push(staged);
             }
             Err(error) => {
-                pgrx::warning!(
-                    "pgokf: skipping malformed OKF concept {} (default_strict is off): {error}",
-                    metadata.path.display()
-                );
-                skipped.push(metadata.path.clone());
-                continue;
+                staging.malformed(metadata, &format!("{error}"))?;
+                skipped_roots.insert(root);
             }
-        };
-        let modified_at_epoch = metadata
-            .modified_at
-            .and_then(|instant| instant.duration_since(UNIX_EPOCH).ok())
-            .map(|duration| duration.as_secs_f64());
-        // Retain the already-read source buffer only under the small-install
-        // `store_source` tier; otherwise drop it so default behavior is
-        // byte-for-byte unchanged and no source bytes are held or persisted.
-        // The buffer is moved rather than cloned - after `parse_concept`
-        // returns the borrow is released, so no extra allocation or I/O occurs.
-        let raw_content = if store_source { Some(bytes) } else { None };
-        staged.push(StagedConcept {
-            concept,
-            file_hash: metadata.hash.clone(),
-            modified_at_epoch,
-            raw_content,
-        });
+        }
     }
-    Ok(StagingOutcome { staged, skipped })
+    for metadata in others {
+        // A resource whose manifest was skipped this sync (warn mode) has no
+        // skill row to belong to; it is skipped with it rather than projected
+        // as an orphan.
+        if metadata.class.is_resource()
+            && let Some(path) = metadata.path.to_str()
+            && index
+                .owner_of(path)
+                .is_some_and(|root| skipped_roots.contains(root))
+        {
+            staging.skipped.push(metadata.path.clone());
+            continue;
+        }
+        let bytes = source.read_bytes(&metadata.path)?;
+        match metadata.class {
+            FileClass::OkfDocument => match parse_concept(&bytes, &metadata.path, limits) {
+                Ok(concept) => staging.staged.push(StagedConcept {
+                    concept,
+                    file_hash: metadata.hash.clone(),
+                    modified_at_epoch: modified_at_epoch(metadata),
+                    // Retain the already-read source buffer only under the
+                    // small-install `store_source` tier; otherwise drop it so
+                    // default behavior is byte-for-byte unchanged and no source
+                    // bytes are held or persisted. The buffer is moved rather
+                    // than cloned - after `parse_concept` returns the borrow is
+                    // released, so no extra allocation or I/O occurs.
+                    raw_content: store_source.then_some(bytes),
+                    typed: None,
+                }),
+                Err(error) => staging.malformed(metadata, &format!("{error}"))?,
+            },
+            FileClass::SkillScript | FileClass::SkillReference | FileClass::SkillAsset => {
+                stage_resource(&mut staging, metadata, bytes, &index, &visibilities)?;
+            }
+            // Manifests were staged above; reserved files never reach the
+            // delta (classify_changes skips them).
+            FileClass::SkillManifest | FileClass::Reserved => {}
+        }
+    }
+    Ok(StagingOutcome {
+        staged: staging.staged,
+        skipped: staging.skipped,
+    })
+}
+
+/// The mutable state of one staging pass plus the policy it applies.
+struct Staging {
+    staged: Vec<StagedConcept>,
+    skipped: Vec<PathBuf>,
+    strict: bool,
+    store_source: bool,
+    limits: ParserLimits,
+}
+
+impl Staging {
+    /// Apply the strict/warn policy to a file that failed to parse.
+    fn malformed(&mut self, metadata: &FileMetadata, error: &str) -> Result<(), CatalogError> {
+        if self.strict {
+            return Err(CatalogError::invalid_parameter(
+                format!("failed to parse OKF concept: {error}"),
+                &metadata.path,
+            ));
+        }
+        pgrx::warning!(
+            "pgokf: skipping malformed OKF concept {} (default_strict is off): {error}",
+            metadata.path.display()
+        );
+        self.skipped.push(metadata.path.clone());
+        Ok(())
+    }
+}
+
+/// Stage one package resource as a virtual `Script` or `Reference` concept.
+fn stage_resource(
+    staging: &mut Staging,
+    metadata: &FileMetadata,
+    bytes: Vec<u8>,
+    index: &PackageIndex,
+    visibilities: &BTreeMap<String, String>,
+) -> Result<(), CatalogError> {
+    let path = metadata.path.to_str().ok_or_else(|| {
+        CatalogError::invalid_parameter("bundle path is not valid UTF-8", &metadata.path)
+    })?;
+    let (root, package_path) = index
+        .owner_of(path)
+        .zip(index.package_relative(path))
+        .ok_or_else(|| {
+            CatalogError::internal(
+                format!("resource {path} has no owning skill package in the snapshot"),
+                &metadata.path,
+            )
+        })?;
+    let package_concept_id = packages::skill_concept_id_of(root);
+    let visibility = visibilities
+        .get(root)
+        .map_or(packages::DEFAULT_VISIBILITY, String::as_str);
+    let context = ResourceContext {
+        path,
+        package_path,
+        package_concept_id: &package_concept_id,
+        visibility,
+        file_hash: &metadata.hash,
+        modified_at_epoch: modified_at_epoch(metadata),
+    };
+    let _ = staging.limits;
+    if metadata.class == FileClass::SkillScript {
+        match packages::stage_script(bytes, &context, staging.store_source) {
+            Ok(staged) => staging.staged.push(staged),
+            Err(error) => staging.malformed(metadata, error.message())?,
+        }
+    } else {
+        staging.staged.push(packages::stage_reference(
+            bytes,
+            &context,
+            staging.store_source,
+        ));
+    }
+    Ok(())
+}
+
+/// A snapshot entry's modification time as seconds since the Unix epoch.
+fn modified_at_epoch(metadata: &FileMetadata) -> Option<f64> {
+    metadata
+        .modified_at
+        .and_then(|instant| instant.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs_f64())
 }
 
 /// Reconcile the sync report with the files skipped under the non-strict
@@ -646,6 +920,33 @@ fn delete_removed_concepts(bundle_id: i64, removed_paths: &[String]) -> Result<(
         &[bundle_id.into(), removed_paths.to_vec().into()],
     )
     .map_err(|error| spi_error("failed to delete removed concepts", &error))
+}
+
+/// Drop the row of any staged path whose concept ID changed.
+///
+/// A file keeps its path but changes class when a `SKILL.md` appears beside it
+/// (an ordinary `references/guide.md` document becomes a package reference) or
+/// disappears (the reverse). The two classes derive different IDs from the
+/// same path, and `pgokf.concepts` is unique on `(bundle_id, path)` as well as
+/// `(bundle_id, id)`, so the upsert - which conflicts on the ID - would trip
+/// the path key. Deleting the stale identity first lets the file re-register
+/// under its new one; every dependent row cascades from the concept.
+fn delete_reclassified_concepts(
+    bundle_id: i64,
+    staged: &[StagedConcept],
+) -> Result<(), CatalogError> {
+    for chunk in staged.chunks(BATCH_SIZE) {
+        let paths: Vec<&str> = chunk.iter().map(|e| e.concept.path.as_str()).collect();
+        let ids: Vec<&str> = chunk.iter().map(|e| e.concept.id.as_str()).collect();
+        Spi::run_with_args(
+            "DELETE FROM pgokf.concepts c
+             USING unnest($2::text[], $3::text[]) AS d(path, id)
+             WHERE c.bundle_id = $1 AND c.path = d.path AND c.id <> d.id",
+            &[bundle_id.into(), paths.into(), ids.into()],
+        )
+        .map_err(|error| spi_error("failed to delete reclassified concepts", &error))?;
+    }
+    Ok(())
 }
 
 /// Bulk-upsert every staged concept in bounded batches, recomputing each
@@ -919,8 +1220,13 @@ fn emit_change_notification(
 /// nothing under the default `store_source`-off policy (every staged concept
 /// carries `raw_content = None`); its order relative to links/provenance is
 /// irrelevant since it only depends on the concept rows existing.
-fn run_projection_seam(bundle_id: i64, staged: &[StagedConcept]) -> Result<(), CatalogError> {
+fn run_projection_seam(
+    bundle_id: i64,
+    staged: &[StagedConcept],
+    text_search_config: &str,
+) -> Result<(), CatalogError> {
     crate::catalog::links::project(bundle_id, staged)?;
+    packages::project(bundle_id, staged, text_search_config)?;
     crate::catalog::links::reresolve_bundle(bundle_id)?;
     crate::catalog::provenance::project(bundle_id, staged)?;
     crate::catalog::source::project(bundle_id, staged)?;
@@ -988,27 +1294,75 @@ pub(crate) fn run_bundle_sync<S: ByteSource>(
     bundle_path: &str,
 ) -> Result<SyncReport, CatalogError> {
     let defaults = crate::catalog::config::sync_defaults()?;
-    let stored = load_stored_hashes(bundle_id)?;
+    let projection = load_stored_projection(bundle_id)?;
     let current = source.snapshot(&defaults.exclude)?;
-    let mut delta = classify_changes(&stored, &current);
-    let outcome = stage_changed_concepts(source, &delta, defaults.strict, defaults.store_source)?;
+    let packages_index = PackageIndex::from_paths(
+        current
+            .iter()
+            .filter(|entry| entry.class == FileClass::SkillManifest)
+            .filter_map(|entry| entry.path.to_str()),
+    );
+    let mut delta = classify_changes(&projection, &packages_index, &current);
+    // A skill package is one unit: any member change re-stages its manifest
+    // so the package hash and membership edges follow the snapshot.
+    packages::invalidate_packages(
+        &mut delta.to_parse,
+        &delta.removed_paths,
+        &current,
+        &projection.owners,
+    );
+    let outcome = stage_changed_concepts(
+        source,
+        &delta,
+        &current,
+        defaults.strict,
+        defaults.store_source,
+    )?;
     // Keep the report honest: files skipped under the non-strict policy were
     // classified but never written.
-    adjust_report_for_skips(&mut delta, &stored, &outcome.skipped);
+    adjust_report_for_skips(&mut delta, &projection.hashes, &outcome.skipped);
     let staged = outcome.staged;
+
+    // A file re-identified this sync (its class changed with its bytes
+    // intact) leaves behind the concept it used to be: that old id is a
+    // removal for the change manifest and the version history, and the new
+    // id is an addition, so `stored` is viewed without those paths from here
+    // on. `delete_reclassified_concepts` drops the old rows below.
+    let reclassified_ids: Vec<String> = staged
+        .iter()
+        .filter_map(|entry| {
+            projection
+                .ids
+                .get(&entry.concept.path)
+                .filter(|old| **old != entry.concept.id)
+                .cloned()
+        })
+        .collect();
+    let mut stored = projection.hashes;
+    for entry in &staged {
+        if projection
+            .ids
+            .get(&entry.concept.path)
+            .is_some_and(|old| *old != entry.concept.id)
+        {
+            stored.remove(&entry.concept.path);
+        }
+    }
 
     // Capture the removed concepts' ids for the change manifest before the
     // delete drops the rows they are read from.
-    let removed_ids = load_removed_concept_ids(bundle_id, &delta.removed_paths)?;
+    let mut removed_ids = load_removed_concept_ids(bundle_id, &delta.removed_paths)?;
+    removed_ids.extend(reclassified_ids);
 
     delete_removed_concepts(bundle_id, &delta.removed_paths)?;
+    delete_reclassified_concepts(bundle_id, &staged)?;
     upsert_concepts(bundle_id, &staged, &defaults.text_search_config)?;
     replace_concept_metadata(bundle_id, &staged)?;
 
     // Ordered projection seam: feature modules observe the staged concepts
-    // here (link graph and its bundle-wide re-resolution, provenance, then
-    // opt-in source-byte storage).
-    run_projection_seam(bundle_id, &staged)?;
+    // here (link graph, skill packages and their edges, the bundle-wide
+    // re-resolution, provenance, then opt-in source-byte storage).
+    run_projection_seam(bundle_id, &staged, &defaults.text_search_config)?;
 
     // Reserved log.md activity logs are not concepts, so they are reconciled
     // separately from the whole snapshot (which includes reserved files),
@@ -1341,7 +1695,11 @@ mod tests {
         let current = bundle.snapshot();
 
         // Act
-        let delta = classify_changes(&BTreeMap::new(), &current);
+        let delta = classify_changes(
+            &StoredProjection::default(),
+            &PackageIndex::default(),
+            &current,
+        );
 
         // Assert
         assert_eq!(delta.report.added, 2);
@@ -1360,14 +1718,17 @@ mod tests {
         bundle.write("updated.md", "after");
         bundle.write("added.md", "new");
         let current = bundle.snapshot();
-        let stored = BTreeMap::from([
-            ("unchanged.md".to_owned(), hash_bytes(b"same")),
-            ("updated.md".to_owned(), hash_bytes(b"before")),
-            ("removed.md".to_owned(), hash_bytes(b"gone")),
-        ]);
+        let stored = StoredProjection {
+            hashes: BTreeMap::from([
+                ("unchanged.md".to_owned(), hash_bytes(b"same")),
+                ("updated.md".to_owned(), hash_bytes(b"before")),
+                ("removed.md".to_owned(), hash_bytes(b"gone")),
+            ]),
+            ..StoredProjection::default()
+        };
 
         // Act
-        let delta = classify_changes(&stored, &current);
+        let delta = classify_changes(&stored, &PackageIndex::default(), &current);
 
         // Assert
         assert_eq!(delta.report.added, 1);
@@ -1393,7 +1754,11 @@ mod tests {
         let current = bundle.snapshot();
 
         // Act
-        let delta = classify_changes(&BTreeMap::new(), &current);
+        let delta = classify_changes(
+            &StoredProjection::default(),
+            &PackageIndex::default(),
+            &current,
+        );
 
         // Assert
         assert_eq!(delta.report.added, 1);

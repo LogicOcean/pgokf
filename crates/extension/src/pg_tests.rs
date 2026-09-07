@@ -5649,4 +5649,1046 @@ The anchor concept never changes across the runbook's revisions.\n";
         .expect("count is not NULL");
         assert_eq!(dropped_rows, 0, "the still-retired bundle is hard-deleted");
     }
+
+    // ---- Skill packages (Agent Skills SKILL.md + scripts/references/assets) -
+
+    /// A portable Agent Skills manifest: standard fields plus the `tags`
+    /// extension, linking to its own script and reference.
+    const PACKAGE_MANIFEST: &str = "---\n\
+name: deploy\n\
+description: Deploy the widget service safely with the bundled preflight checks.\n\
+license: Apache-2.0\n\
+metadata:\n\
+\x20\x20portable: \"true\"\n\
+tags: [deploy, widgets]\n\
+---\n\
+\n\
+# When to Use\n\
+\n\
+Run [the preflight check](scripts/check.sh) before reading [the guide](references/guide.md).\n";
+
+    /// A UTF-8 shell helper with a shebang and a leading comment.
+    const PACKAGE_SCRIPT: &str = "#!/usr/bin/env bash\n\
+# Preflight check for the widget deploy.\n\
+set -euo pipefail\n\
+echo ok\n";
+
+    /// A Markdown reference that also happens to be a valid OKF document, so
+    /// it can be re-classified as one when its package disappears.
+    const PACKAGE_GUIDE: &str = "---\n\
+type: Reference\n\
+title: Deploy guide\n\
+---\n\
+\n\
+# Deploy guide\n\
+\n\
+Steps for deploying widgets with the marmoset rollout strategy.\n";
+
+    /// PNG magic bytes followed by arbitrary binary content.
+    const PACKAGE_LOGO: &[u8] = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\xff\xfe";
+
+    /// The package's bundle-relative directory inside the fixture.
+    const PACKAGE_ROOT: &str = "skills/deploy";
+    /// The virtual skill concept's id.
+    const SKILL_ID: &str = "skills/deploy/SKILL";
+    const SCRIPT_ID: &str = "skills/deploy/scripts/check.sh";
+    const GUIDE_ID: &str = "skills/deploy/references/guide.md";
+    const LOGO_ID: &str = "skills/deploy/assets/logo.png";
+
+    /// Write the skill package into a fixture bundle beside alpha and beta.
+    fn add_package(bundle: &FixtureBundle) {
+        let root = bundle.root.join(PACKAGE_ROOT);
+        for dir in ["scripts", "references", "assets"] {
+            fs::create_dir_all(root.join(dir)).expect("package directories are creatable");
+        }
+        fs::write(root.join("SKILL.md"), PACKAGE_MANIFEST).expect("manifest is writable");
+        fs::write(root.join("scripts/check.sh"), PACKAGE_SCRIPT).expect("script is writable");
+        fs::write(root.join("references/guide.md"), PACKAGE_GUIDE).expect("guide is writable");
+        fs::write(root.join("assets/logo.png"), PACKAGE_LOGO).expect("logo is writable");
+    }
+
+    /// Register a fixture bundle that carries the skill package, asserting
+    /// the six files (alpha, beta, manifest, script, guide, logo) all added.
+    fn register_package_bundle(bundle: &FixtureBundle) -> i64 {
+        add_package(bundle);
+        Spi::connect(|client| {
+            let row = client
+                .select(
+                    "SELECT bundle_id, added FROM pgokf.register_bundle($1) AS r",
+                    Some(1),
+                    &[bundle.path().into()],
+                )
+                .expect("register_bundle executes")
+                .first();
+            let bundle_id = row
+                .get::<i64>(1)
+                .expect("bundle_id readable")
+                .expect("bundle_id not NULL");
+            let added = row
+                .get::<i32>(2)
+                .expect("added readable")
+                .expect("added not NULL");
+            assert_eq!(
+                added, 6,
+                "alpha, beta, and the four package files are added"
+            );
+            bundle_id
+        })
+    }
+
+    /// `(added, updated, removed, unchanged)` of a refresh.
+    fn refresh_counts(bundle_id: i64) -> (i32, i32, i32, i32) {
+        Spi::connect(|client| {
+            let row = client
+                .select(
+                    "SELECT added, updated, removed, unchanged FROM pgokf.refresh_bundle($1) AS r",
+                    Some(1),
+                    &[bundle_id.into()],
+                )
+                .expect("refresh_bundle executes")
+                .first();
+            let read = |ord| {
+                row.get::<i32>(ord)
+                    .expect("count readable")
+                    .expect("count not NULL")
+            };
+            (read(1), read(2), read(3), read(4))
+        })
+    }
+
+    /// The `type` column of one concept, or `None` when no such concept
+    /// exists (`Spi::get_one` raises on an empty result, so this goes
+    /// through `is_empty` like the catalog's own lookups).
+    fn concept_type_of(bundle_id: i64, concept_id: &str) -> Option<String> {
+        Spi::connect(|client| {
+            let table = client
+                .select(
+                    "SELECT type FROM pgokf.concepts WHERE bundle_id = $1 AND id = $2",
+                    Some(1),
+                    &[bundle_id.into(), concept_id.into()],
+                )
+                .expect("concept type query executes");
+            if table.is_empty() {
+                None
+            } else {
+                table
+                    .first()
+                    .get_one::<String>()
+                    .expect("concept type is readable")
+            }
+        })
+    }
+
+    #[pg_test]
+    fn skill_package_projects_virtual_concepts_typed_rows_and_edges() {
+        // Arrange / Act
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_package_bundle(&bundle);
+
+        // Assert: one virtual concept per package file, typed by class, with
+        // the manifest's id stripped of .md and the resources' ids keeping
+        // their full path.
+        assert_eq!(
+            concept_type_of(bundle_id, SKILL_ID).as_deref(),
+            Some("Skill")
+        );
+        assert_eq!(
+            concept_type_of(bundle_id, SCRIPT_ID).as_deref(),
+            Some("Script")
+        );
+        assert_eq!(
+            concept_type_of(bundle_id, GUIDE_ID).as_deref(),
+            Some("Reference")
+        );
+        assert_eq!(
+            concept_type_of(bundle_id, LOGO_ID).as_deref(),
+            Some("Reference")
+        );
+        let (title, description, tags) = Spi::connect(|client| {
+            let row = client
+                .select(
+                    "SELECT title, description, tags FROM pgokf.concepts
+                     WHERE bundle_id = $1 AND id = $2",
+                    Some(1),
+                    &[bundle_id.into(), SKILL_ID.into()],
+                )
+                .expect("skill concept query executes")
+                .first();
+            (
+                row.get::<String>(1).expect("title readable"),
+                row.get::<String>(2).expect("description readable"),
+                row.get::<Vec<String>>(3).expect("tags readable"),
+            )
+        });
+        assert_eq!(
+            title.as_deref(),
+            Some("deploy"),
+            "the skill's title is its name"
+        );
+        assert!(
+            description.is_some_and(|d| d.starts_with("Deploy the widget service")),
+            "the skill's description comes from the manifest"
+        );
+        assert_eq!(
+            tags,
+            Some(vec!["deploy".to_owned(), "widgets".to_owned()]),
+            "the tags extension is honored"
+        );
+
+        // Assert: the skills row keeps the exact manifest bytes, the complete
+        // frontmatter, and the package identity.
+        let (skill_md, package_root, license, frontmatter_keys) = Spi::connect(|client| {
+            let row = client
+                .select(
+                    "SELECT skill_md, package_root, agent_skill->>'license',
+                            (SELECT count(*) FROM jsonb_object_keys(agent_skill))
+                     FROM pgokf.skills WHERE bundle_id = $1 AND concept_id = $2",
+                    Some(1),
+                    &[bundle_id.into(), SKILL_ID.into()],
+                )
+                .expect("skills query executes")
+                .first();
+            (
+                row.get::<Vec<u8>>(1).expect("skill_md readable"),
+                row.get::<String>(2).expect("package_root readable"),
+                row.get::<String>(3).expect("license readable"),
+                row.get::<i64>(4).expect("key count readable"),
+            )
+        });
+        assert_eq!(skill_md.as_deref(), Some(PACKAGE_MANIFEST.as_bytes()));
+        assert_eq!(package_root.as_deref(), Some(PACKAGE_ROOT));
+        assert_eq!(license.as_deref(), Some("Apache-2.0"));
+        assert_eq!(
+            frontmatter_keys,
+            Some(5),
+            "name, description, license, metadata, tags"
+        );
+
+        // Assert: the script row is exact and typed.
+        let (language, executable, size, sha_matches, package) = Spi::connect(|client| {
+            let row = client
+                .select(
+                    "SELECT language, runtime->>'executable', byte_size,
+                            executable_sha256 = encode(sha256(exact_bytes), 'hex'),
+                            package_concept_id
+                     FROM pgokf.scripts WHERE bundle_id = $1 AND concept_id = $2",
+                    Some(1),
+                    &[bundle_id.into(), SCRIPT_ID.into()],
+                )
+                .expect("scripts query executes")
+                .first();
+            (
+                row.get::<String>(1).expect("language readable"),
+                row.get::<String>(2).expect("executable readable"),
+                row.get::<i64>(3).expect("byte_size readable"),
+                row.get::<bool>(4).expect("sha check readable"),
+                row.get::<String>(5).expect("package readable"),
+            )
+        });
+        assert_eq!(language.as_deref(), Some("bash"));
+        assert_eq!(executable.as_deref(), Some("/usr/bin/env bash"));
+        assert_eq!(size, Some(PACKAGE_SCRIPT.len() as i64));
+        assert_eq!(sha_matches, Some(true));
+        assert_eq!(package.as_deref(), Some(SKILL_ID));
+
+        // Assert: the Markdown reference keeps its text, the PNG is binary.
+        let guide = Spi::get_one_with_args::<String>(
+            "SELECT format || ' ' || media_type || ' ' || (text_body IS NOT NULL)::text
+             FROM pgokf.reference_documents WHERE bundle_id = $1 AND concept_id = $2",
+            &[bundle_id.into(), GUIDE_ID.into()],
+        )
+        .expect("guide query executes");
+        assert_eq!(guide.as_deref(), Some("markdown text/markdown true"));
+        let logo = Spi::get_one_with_args::<String>(
+            "SELECT format || ' ' || media_type || ' ' || (text_body IS NULL)::text
+             FROM pgokf.reference_documents WHERE bundle_id = $1 AND concept_id = $2",
+            &[bundle_id.into(), LOGO_ID.into()],
+        )
+        .expect("logo query executes");
+        assert_eq!(logo.as_deref(), Some("image image/png true"));
+        let logo_title = Spi::get_one_with_args::<String>(
+            "SELECT title FROM pgokf.concepts WHERE bundle_id = $1 AND id = $2",
+            &[bundle_id.into(), LOGO_ID.into()],
+        )
+        .expect("logo title query executes");
+        assert_eq!(logo_title.as_deref(), Some("logo.png"));
+
+        // Assert: the graph. The manifest's two body links resolve to the
+        // resources and carry the typed relation; every resource also gets a
+        // membership edge; all of them resolve.
+        let edges = Spi::connect(|client| {
+            let table = client
+                .select(
+                    "SELECT target_id, link_kind, link_relation, resolved
+                     FROM pgokf.links WHERE bundle_id = $1 AND source_id = $2
+                     ORDER BY ordinal",
+                    None,
+                    &[bundle_id.into(), SKILL_ID.into()],
+                )
+                .expect("links query executes");
+            table
+                .into_iter()
+                .map(|row| {
+                    format!(
+                        "{} {} {} {}",
+                        row.get::<String>(1).unwrap().unwrap(),
+                        row.get::<String>(2).unwrap().unwrap(),
+                        row.get::<String>(3).unwrap().unwrap(),
+                        row.get::<bool>(4).unwrap().unwrap()
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            edges,
+            [
+                format!("{SCRIPT_ID} inline USES true"),
+                format!("{GUIDE_ID} inline REFERENCES true"),
+                format!("{LOGO_ID} package REFERENCES true"),
+                format!("{GUIDE_ID} package REFERENCES true"),
+                format!("{SCRIPT_ID} package USES true"),
+            ]
+        );
+        let neighbors = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concept_neighbors($2, 1, $1)",
+            &[bundle_id.into(), SKILL_ID.into()],
+        )
+        .expect("concept_neighbors executes")
+        .expect("count is not NULL");
+        assert_eq!(
+            neighbors, 3,
+            "the skill's neighbors are its three resources"
+        );
+
+        // Assert: search reaches the package by type.
+        let by_type = Spi::get_one::<String>(
+            "SELECT concept_id FROM pgokf.concept_search('preflight', NULL, 5, 'Script') LIMIT 1",
+        )
+        .expect("typed search executes")
+        .expect("the script's text is indexed");
+        assert_eq!(by_type, SCRIPT_ID);
+        let guide_hit = Spi::get_one::<String>(
+            "SELECT concept_id FROM pgokf.concept_search('marmoset', NULL, 5, 'Reference') LIMIT 1",
+        )
+        .expect("reference search executes")
+        .expect("the reference's text is indexed");
+        assert_eq!(guide_hit, GUIDE_ID);
+    }
+
+    #[pg_test]
+    fn get_skill_script_and_reference_return_exact_bytes_and_are_audited() {
+        // Arrange
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_package_bundle(&bundle);
+
+        // Act: read the package through the retrieval surface.
+        let (skill_md, resources, package_hash) = Spi::connect(|client| {
+            let row = client
+                .select(
+                    "SELECT s.skill_md, s.resources, s.package_hash FROM pgokf.get_skill($1, $2) AS s",
+                    Some(1),
+                    &[bundle_id.into(), SKILL_ID.into()],
+                )
+                .expect("get_skill executes")
+                .first();
+            (
+                row.get::<Vec<u8>>(1)
+                    .expect("skill_md readable")
+                    .expect("skill_md not NULL"),
+                row.get::<pgrx::JsonB>(2)
+                    .expect("resources readable")
+                    .expect("resources not NULL"),
+                row.get::<String>(3)
+                    .expect("package_hash readable")
+                    .expect("package_hash not NULL"),
+            )
+        });
+        let script_bytes = Spi::get_one_with_args::<Vec<u8>>(
+            "SELECT (pgokf.get_script($1, $2)).exact_bytes",
+            &[bundle_id.into(), SCRIPT_ID.into()],
+        )
+        .expect("get_script executes")
+        .expect("exact_bytes not NULL");
+        let (logo_bytes, logo_media) = Spi::connect(|client| {
+            let row = client
+                .select(
+                    "SELECT r.exact_bytes, r.media_type FROM pgokf.get_reference($1, $2) AS r",
+                    Some(1),
+                    &[bundle_id.into(), LOGO_ID.into()],
+                )
+                .expect("get_reference executes")
+                .first();
+            (
+                row.get::<Vec<u8>>(1)
+                    .expect("bytes readable")
+                    .expect("bytes not NULL"),
+                row.get::<String>(2)
+                    .expect("media readable")
+                    .expect("media not NULL"),
+            )
+        });
+        let metadata_only = Spi::get_one_with_args::<bool>(
+            "SELECT (pgokf.get_reference($1, $2, false)).exact_bytes IS NULL",
+            &[bundle_id.into(), GUIDE_ID.into()],
+        )
+        .expect("metadata-only get_reference executes")
+        .expect("null check not NULL");
+
+        // Assert: exact bytes and a complete, ordered resource listing.
+        assert_eq!(skill_md, PACKAGE_MANIFEST.as_bytes());
+        assert_eq!(script_bytes, PACKAGE_SCRIPT.as_bytes());
+        assert_eq!(logo_bytes, PACKAGE_LOGO);
+        assert_eq!(logo_media, "image/png");
+        assert!(metadata_only, "include_bytes => false returns no bytes");
+        assert_eq!(
+            package_hash.len(),
+            64,
+            "the package hash is a BLAKE3 hex digest"
+        );
+        let listing: Vec<String> = resources
+            .0
+            .as_array()
+            .expect("resources is a JSON array")
+            .iter()
+            .map(|r| {
+                format!(
+                    "{} {}",
+                    r["class"].as_str().unwrap(),
+                    r["path"].as_str().unwrap()
+                )
+            })
+            .collect();
+        assert_eq!(
+            listing,
+            [
+                "asset assets/logo.png",
+                "reference references/guide.md",
+                "script scripts/check.sh"
+            ]
+        );
+
+        // Assert: one audit row per read, the metadata-only read included
+        // (a textual reference's text_body is its whole content), marked by
+        // its detail.
+        let audited = Spi::get_one_with_args::<String>(
+            "SELECT string_agg(op || ':' || concept_id || coalesce(':' || detail, ''), ','
+                               ORDER BY op, concept_id)
+             FROM pgokf_private.access_log WHERE bundle_id = $1",
+            &[bundle_id.into()],
+        )
+        .expect("access_log query executes")
+        .expect("audit rows exist");
+        assert_eq!(
+            audited,
+            format!(
+                "get_reference:{LOGO_ID},get_reference:{GUIDE_ID}:metadata,\
+                 get_script:{SCRIPT_ID},get_skill:{SKILL_ID}"
+            )
+        );
+
+        // Assert: an unknown id, a non-skill id, and a foreign tenant all get
+        // the same 22023 from every reader.
+        Spi::run(
+            "CREATE FUNCTION pg_temp.reader_sqlstate(f text, b bigint, c text, t text) RETURNS text
+             LANGUAGE plpgsql AS $probe$
+             BEGIN
+                 PERFORM set_config('pgokf.tenant', t, true);
+                 EXECUTE format('SELECT pgokf.%I($1, $2)', f) USING b, c;
+                 RETURN 'found';
+             EXCEPTION WHEN invalid_parameter_value THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("probe is creatable");
+        for (reader, concept, tenant) in [
+            ("get_skill", "nope", ""),
+            ("get_skill", "alpha", ""),
+            ("get_skill", SKILL_ID, "other-tenant"),
+            ("get_script", SCRIPT_ID, "other-tenant"),
+            ("get_script", GUIDE_ID, ""),
+            ("get_reference", LOGO_ID, "other-tenant"),
+            ("get_reference", SCRIPT_ID, ""),
+        ] {
+            let state = Spi::get_one_with_args::<String>(
+                "SELECT pg_temp.reader_sqlstate($1, $2, $3, $4)",
+                &[
+                    reader.into(),
+                    bundle_id.into(),
+                    concept.into(),
+                    tenant.into(),
+                ],
+            )
+            .expect("probe executes")
+            .expect("probe reports");
+            assert_eq!(
+                state, "22023",
+                "{reader}({concept}) as tenant {tenant:?} is not disclosed"
+            );
+        }
+    }
+
+    #[pg_test]
+    fn a_reader_role_can_retrieve_a_package_script() {
+        // Arrange: a registered package and a role granted only pgokf_reader.
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_package_bundle(&bundle);
+        Spi::run("CREATE ROLE pgokf_pkg_reader").expect("reader role is creatable");
+        Spi::run("GRANT pgokf_reader TO pgokf_pkg_reader").expect("reader role is grantable");
+        Spi::run(
+            "CREATE FUNCTION pg_temp.reader_script_size(b bigint, c text) RETURNS bigint
+             LANGUAGE plpgsql SET role TO pgokf_pkg_reader AS $probe$
+             BEGIN
+                 RETURN length((pgokf.get_script(b, c)).exact_bytes);
+             END
+             $probe$;",
+        )
+        .expect("reader probe is creatable");
+
+        // Act
+        let size = Spi::get_one_with_args::<i64>(
+            "SELECT pg_temp.reader_script_size($1, $2)",
+            &[bundle_id.into(), SCRIPT_ID.into()],
+        )
+        .expect("reader probe executes")
+        .expect("size not NULL");
+
+        // Assert
+        assert_eq!(size, PACKAGE_SCRIPT.len() as i64);
+    }
+
+    #[pg_test]
+    fn refresh_reprojects_a_package_when_only_a_member_changes() {
+        // Arrange
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_package_bundle(&bundle);
+        let hash_before = Spi::get_one_with_args::<String>(
+            "SELECT package_hash FROM pgokf.skills WHERE bundle_id = $1 AND concept_id = $2",
+            &[bundle_id.into(), SKILL_ID.into()],
+        )
+        .expect("hash query executes")
+        .expect("hash not NULL");
+
+        // Act: edit only the script.
+        let edited = format!("{PACKAGE_SCRIPT}echo edited\n");
+        fs::write(
+            bundle.root.join(PACKAGE_ROOT).join("scripts/check.sh"),
+            &edited,
+        )
+        .expect("script edit is writable");
+        let counts = refresh_counts(bundle_id);
+
+        // Assert: one file updated; the manifest is unchanged as a file but
+        // re-projected as a dependency, so its package hash moves and the
+        // change manifest lists it.
+        assert_eq!(counts, (0, 1, 0, 5));
+        let hash_after = Spi::get_one_with_args::<String>(
+            "SELECT package_hash FROM pgokf.skills WHERE bundle_id = $1 AND concept_id = $2",
+            &[bundle_id.into(), SKILL_ID.into()],
+        )
+        .expect("hash query executes")
+        .expect("hash not NULL");
+        assert_ne!(
+            hash_before, hash_after,
+            "a member edit changes the package hash"
+        );
+        let stored = Spi::get_one_with_args::<Vec<u8>>(
+            "SELECT exact_bytes FROM pgokf.scripts WHERE bundle_id = $1 AND concept_id = $2",
+            &[bundle_id.into(), SCRIPT_ID.into()],
+        )
+        .expect("script query executes")
+        .expect("bytes not NULL");
+        assert_eq!(stored, edited.as_bytes());
+        let changed = Spi::get_one_with_args::<String>(
+            "SELECT string_agg(concept_id || ':' || change_kind, ',' ORDER BY concept_id)
+             FROM pgokf.list_sync_changes(
+                 (SELECT max(id) FROM pgokf_private.sync_log WHERE bundle_id = $1))",
+            &[bundle_id.into()],
+        )
+        .expect("change manifest query executes")
+        .expect("changes recorded");
+        assert_eq!(changed, format!("{SKILL_ID}:updated,{SCRIPT_ID}:updated"));
+
+        // Act: a second refresh with nothing changed is a no-op.
+        let idle = refresh_counts(bundle_id);
+
+        // Assert
+        assert_eq!(idle, (0, 0, 0, 6));
+    }
+
+    #[pg_test]
+    fn removing_the_manifest_dissolves_the_package_and_reclassifies_its_markdown() {
+        // Arrange
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_package_bundle(&bundle);
+
+        // Act: delete SKILL.md. The script and the PNG stop being content;
+        // guide.md is still a Markdown file and now parses as an ordinary
+        // OKF document under a new id.
+        fs::remove_file(bundle.root.join(PACKAGE_ROOT).join("SKILL.md"))
+            .expect("manifest delete succeeds");
+        let counts = refresh_counts(bundle_id);
+
+        // Assert: manifest, script, and logo removed; the guide updated in
+        // place (same bytes, new identity); alpha and beta unchanged.
+        assert_eq!(counts, (0, 1, 3, 2));
+        assert!(concept_type_of(bundle_id, SKILL_ID).is_none());
+        assert!(concept_type_of(bundle_id, SCRIPT_ID).is_none());
+        assert!(concept_type_of(bundle_id, GUIDE_ID).is_none());
+        assert_eq!(
+            concept_type_of(bundle_id, "skills/deploy/references/guide").as_deref(),
+            Some("Reference")
+        );
+        let typed_rows = Spi::get_one_with_args::<i64>(
+            "SELECT (SELECT count(*) FROM pgokf.skills WHERE bundle_id = $1)
+                  + (SELECT count(*) FROM pgokf.scripts WHERE bundle_id = $1)
+                  + (SELECT count(*) FROM pgokf.reference_documents WHERE bundle_id = $1)",
+            &[bundle_id.into()],
+        )
+        .expect("typed row count executes")
+        .expect("count not NULL");
+        assert_eq!(typed_rows, 0, "every typed row cascaded away");
+        let title = Spi::get_one_with_args::<String>(
+            "SELECT title FROM pgokf.concepts WHERE bundle_id = $1 AND id = $2",
+            &[bundle_id.into(), "skills/deploy/references/guide".into()],
+        )
+        .expect("title query executes")
+        .expect("title not NULL");
+        assert_eq!(
+            title, "Deploy guide",
+            "the document's own frontmatter now applies"
+        );
+
+        // Act: bring the manifest back; the guide becomes a resource again.
+        fs::write(
+            bundle.root.join(PACKAGE_ROOT).join("SKILL.md"),
+            PACKAGE_MANIFEST,
+        )
+        .expect("manifest restore is writable");
+        let restored = refresh_counts(bundle_id);
+
+        // Assert: manifest, script, and logo added; the guide updated back.
+        assert_eq!(restored, (3, 1, 0, 2));
+        assert_eq!(
+            concept_type_of(bundle_id, GUIDE_ID).as_deref(),
+            Some("Reference")
+        );
+        assert!(concept_type_of(bundle_id, "skills/deploy/references/guide").is_none());
+    }
+
+    #[pg_test]
+    fn a_binary_script_aborts_a_strict_sync_and_is_skipped_otherwise() {
+        // Arrange: a package whose scripts/ holds a binary.
+        let bundle = FixtureBundle::create();
+        add_package(&bundle);
+        fs::write(
+            bundle.root.join(PACKAGE_ROOT).join("scripts/tool.bin"),
+            b"\xff\xfe\x00\x01",
+        )
+        .expect("binary is writable");
+        Spi::run(
+            "CREATE FUNCTION pg_temp.register_sqlstate(p text) RETURNS text
+             LANGUAGE plpgsql AS $probe$
+             BEGIN
+                 PERFORM pgokf.register_bundle(p);
+                 RETURN 'registered';
+             EXCEPTION WHEN invalid_parameter_value THEN
+                 RETURN SQLSTATE || ' ' || SQLERRM;
+             END
+             $probe$;",
+        )
+        .expect("probe is creatable");
+
+        // Act: strict (the default).
+        let strict = Spi::get_one_with_args::<String>(
+            "SELECT pg_temp.register_sqlstate($1)",
+            &[bundle.path().into()],
+        )
+        .expect("probe executes")
+        .expect("probe reports");
+
+        // Assert
+        assert!(
+            strict.starts_with("22023") && strict.contains("tool.bin"),
+            "a binary script aborts a strict sync naming the file: {strict}"
+        );
+
+        // Act: warn mode registers everything else.
+        Spi::run("SELECT pgokf.set_config('default_strict', 'false')").expect("policy is settable");
+        let (bundle_id, added) = Spi::connect(|client| {
+            let row = client
+                .select(
+                    "SELECT bundle_id, added FROM pgokf.register_bundle($1) AS r",
+                    Some(1),
+                    &[bundle.path().into()],
+                )
+                .expect("register_bundle executes")
+                .first();
+            (
+                row.get::<i64>(1).unwrap().unwrap(),
+                row.get::<i32>(2).unwrap().unwrap(),
+            )
+        });
+
+        // Assert: the binary was skipped, the rest of the package registered
+        // and the skill's membership excludes the skipped file.
+        assert_eq!(added, 6, "the binary is not counted as added");
+        assert!(concept_type_of(bundle_id, "skills/deploy/scripts/tool.bin").is_none());
+        assert_eq!(
+            concept_type_of(bundle_id, SCRIPT_ID).as_deref(),
+            Some("Script")
+        );
+        let unresolved = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.links
+             WHERE bundle_id = $1 AND source_id = $2 AND NOT resolved",
+            &[bundle_id.into(), SKILL_ID.into()],
+        )
+        .expect("links query executes")
+        .expect("count not NULL");
+        assert_eq!(
+            unresolved, 1,
+            "the membership edge to the skipped binary stays unresolved"
+        );
+    }
+
+    #[pg_test]
+    fn register_bundle_content_accepts_a_root_package_and_refuses_loose_files() {
+        // Arrange / Act: the bundle root is the package.
+        let (bundle_id, added, _, _, _) = register_content(
+            "root-skill",
+            vec![
+                "SKILL.md".to_owned(),
+                "scripts/run.sh".to_owned(),
+                "assets/data.json".to_owned(),
+            ],
+            vec![
+                PACKAGE_MANIFEST.as_bytes().to_vec(),
+                PACKAGE_SCRIPT.as_bytes().to_vec(),
+                b"{\"ok\": true}".to_vec(),
+            ],
+        );
+
+        // Assert
+        assert_eq!(added, 3);
+        let (root, resource_count) = Spi::connect(|client| {
+            let row = client
+                .select(
+                    "SELECT s.package_root, jsonb_array_length(s.resources)
+                     FROM pgokf.get_skill($1, 'SKILL') AS s",
+                    Some(1),
+                    &[bundle_id.into()],
+                )
+                .expect("get_skill executes")
+                .first();
+            (
+                row.get::<String>(1).unwrap().unwrap(),
+                row.get::<i32>(2).unwrap().unwrap(),
+            )
+        });
+        assert_eq!(root, "", "a root package has an empty package_root");
+        assert_eq!(resource_count, 2);
+        let json_format = Spi::get_one_with_args::<String>(
+            "SELECT format FROM pgokf.reference_documents WHERE bundle_id = $1 AND concept_id = 'assets/data.json'",
+            &[bundle_id.into()],
+        )
+        .expect("format query executes")
+        .expect("format not NULL");
+        assert_eq!(json_format, "json");
+
+        // Act / Assert: a file that is neither a document nor a package
+        // resource is refused, not silently dropped.
+        Spi::run(
+            "CREATE FUNCTION pg_temp.loose_sqlstate() RETURNS text
+             LANGUAGE plpgsql AS $probe$
+             BEGIN
+                 PERFORM pgokf.register_bundle_content(
+                     'loose', ARRAY['a.md', 'notes.txt']::text[],
+                     ARRAY['---\ntype: T\ntitle: A\n---\n'::bytea, 'x'::bytea]::bytea[]);
+                 RETURN 'accepted';
+             EXCEPTION WHEN invalid_parameter_value THEN
+                 RETURN SQLSTATE || ' ' || SQLERRM;
+             END
+             $probe$;",
+        )
+        .expect("probe is creatable");
+        let loose = Spi::get_one::<String>("SELECT pg_temp.loose_sqlstate()")
+            .expect("probe executes")
+            .expect("probe reports");
+        assert!(
+            loose.starts_with("22023") && loose.contains("notes.txt"),
+            "a loose non-Markdown file is refused by name: {loose}"
+        );
+    }
+
+    #[pg_test]
+    fn removing_only_a_member_reprojects_the_package() {
+        // Arrange
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_package_bundle(&bundle);
+        let hash_before = Spi::get_one_with_args::<String>(
+            "SELECT package_hash FROM pgokf.skills WHERE bundle_id = $1 AND concept_id = $2",
+            &[bundle_id.into(), SKILL_ID.into()],
+        )
+        .expect("hash query executes")
+        .expect("hash not NULL");
+
+        // Act: delete the PNG and nothing else.
+        fs::remove_file(bundle.root.join(PACKAGE_ROOT).join("assets/logo.png"))
+            .expect("logo delete succeeds");
+        let counts = refresh_counts(bundle_id);
+
+        // Assert: one removal, the manifest re-projected (hash moved, the
+        // membership edge gone; the manifest never linked to the logo in
+        // prose), the change manifest names both.
+        assert_eq!(counts, (0, 0, 1, 5));
+        let hash_after = Spi::get_one_with_args::<String>(
+            "SELECT package_hash FROM pgokf.skills WHERE bundle_id = $1 AND concept_id = $2",
+            &[bundle_id.into(), SKILL_ID.into()],
+        )
+        .expect("hash query executes")
+        .expect("hash not NULL");
+        assert_ne!(hash_before, hash_after);
+        let logo_edges = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.links WHERE bundle_id = $1 AND target_id = $2",
+            &[bundle_id.into(), LOGO_ID.into()],
+        )
+        .expect("links query executes")
+        .expect("count not NULL");
+        assert_eq!(logo_edges, 0);
+        let changed = Spi::get_one_with_args::<String>(
+            "SELECT string_agg(concept_id || ':' || change_kind, ',' ORDER BY concept_id)
+             FROM pgokf.list_sync_changes(
+                 (SELECT max(id) FROM pgokf_private.sync_log WHERE bundle_id = $1))",
+            &[bundle_id.into()],
+        )
+        .expect("change manifest query executes")
+        .expect("changes recorded");
+        assert_eq!(changed, format!("{SKILL_ID}:updated,{LOGO_ID}:removed"));
+    }
+
+    #[pg_test]
+    fn a_nested_manifest_moves_resources_between_packages() {
+        // Arrange: the fixture package, plus a script that will be claimed
+        // by a nested package created below it.
+        let bundle = FixtureBundle::create();
+        add_package(&bundle);
+        let nested = bundle.root.join(PACKAGE_ROOT).join("scripts/inner");
+        fs::create_dir_all(nested.join("scripts")).expect("nested dirs are creatable");
+        fs::write(nested.join("scripts/x.sh"), "#!/bin/sh\necho x\n").expect("x.sh is writable");
+        let bundle_id = Spi::get_one_with_args::<i64>(
+            "SELECT bundle_id FROM pgokf.register_bundle($1) AS r",
+            &[bundle.path().into()],
+        )
+        .expect("register_bundle executes")
+        .expect("bundle_id not NULL");
+        let x_id = "skills/deploy/scripts/inner/scripts/x.sh";
+        let owner = |id: &str| -> Option<String> {
+            Spi::get_one_with_args::<String>(
+                "SELECT package_concept_id || ' ' || source_path FROM pgokf.scripts
+                 WHERE bundle_id = $1 AND concept_id = $2",
+                &[bundle_id.into(), id.into()],
+            )
+            .expect("owner query executes")
+        };
+        let package_hash = || -> String {
+            Spi::get_one_with_args::<String>(
+                "SELECT package_hash FROM pgokf.skills WHERE bundle_id = $1 AND concept_id = $2",
+                &[bundle_id.into(), SKILL_ID.into()],
+            )
+            .expect("hash query executes")
+            .expect("hash not NULL")
+        };
+        assert_eq!(
+            owner(x_id).as_deref(),
+            Some(format!("{SKILL_ID} scripts/inner/scripts/x.sh").as_str())
+        );
+        let outer_hash_before = package_hash();
+
+        // Act: a nested SKILL.md appears; x.sh is unchanged as a file.
+        fs::write(
+            nested.join("SKILL.md"),
+            "---\nname: inner\ndescription: nested\n---\n# Inner\n",
+        )
+        .expect("nested manifest is writable");
+        let counts = refresh_counts(bundle_id);
+
+        // Assert: the manifest is added, x.sh is updated (owner changed with
+        // identical bytes), the outer package is re-projected.
+        assert_eq!(counts, (1, 1, 0, 6));
+        let inner_id = "skills/deploy/scripts/inner/SKILL";
+        assert_eq!(
+            owner(x_id).as_deref(),
+            Some(format!("{inner_id} scripts/x.sh").as_str())
+        );
+        assert_ne!(
+            outer_hash_before,
+            package_hash(),
+            "the outer package lost a member"
+        );
+        let outer_edges_to_x = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.links
+             WHERE bundle_id = $1 AND source_id = $2 AND target_id = $3",
+            &[bundle_id.into(), SKILL_ID.into(), x_id.into()],
+        )
+        .expect("links query executes")
+        .expect("count not NULL");
+        assert_eq!(outer_edges_to_x, 0, "the outer skill no longer USES x.sh");
+        let inner_resources = Spi::get_one_with_args::<i32>(
+            "SELECT jsonb_array_length((pgokf.get_skill($1, $2)).resources)",
+            &[bundle_id.into(), inner_id.into()],
+        )
+        .expect("get_skill executes")
+        .expect("count not NULL");
+        assert_eq!(inner_resources, 1);
+
+        // Act: the nested manifest goes away again.
+        fs::remove_file(nested.join("SKILL.md")).expect("nested manifest delete succeeds");
+        let counts = refresh_counts(bundle_id);
+
+        // Assert: x.sh returns to the outer package with its outer path, and
+        // the outer hash is what it was at the start.
+        assert_eq!(counts, (0, 1, 1, 6));
+        assert_eq!(
+            owner(x_id).as_deref(),
+            Some(format!("{SKILL_ID} scripts/inner/scripts/x.sh").as_str())
+        );
+        assert_eq!(outer_hash_before, package_hash());
+    }
+
+    #[pg_test]
+    fn document_links_to_package_references_resolve_by_path() {
+        // Arrange: a document links to the guide before it is a package
+        // reference (no SKILL.md yet), so it resolves as a document.
+        let bundle = FixtureBundle::create();
+        add_package(&bundle);
+        fs::remove_file(bundle.root.join(PACKAGE_ROOT).join("SKILL.md"))
+            .expect("manifest delete succeeds");
+        fs::write(
+            bundle.root.join("howto.md"),
+            "---\ntype: Howto\ntitle: How to deploy\n---\n\n\
+             Read [the guide](skills/deploy/references/guide.md).\n",
+        )
+        .expect("howto is writable");
+        let bundle_id = Spi::get_one_with_args::<i64>(
+            "SELECT bundle_id FROM pgokf.register_bundle($1) AS r",
+            &[bundle.path().into()],
+        )
+        .expect("register_bundle executes")
+        .expect("bundle_id not NULL");
+        let edge = || -> String {
+            Spi::get_one_with_args::<String>(
+                "SELECT target_id || ' ' || resolved::text FROM pgokf.links
+                 WHERE bundle_id = $1 AND source_id = 'howto' AND ordinal = 0",
+                &[bundle_id.into()],
+            )
+            .expect("edge query executes")
+            .expect("edge exists")
+        };
+        assert_eq!(edge(), "skills/deploy/references/guide true");
+
+        // Act: the manifest appears; the guide becomes a package reference
+        // whose id keeps its extension.
+        fs::write(
+            bundle.root.join(PACKAGE_ROOT).join("SKILL.md"),
+            PACKAGE_MANIFEST,
+        )
+        .expect("manifest is writable");
+        refresh_counts(bundle_id);
+
+        // Assert: the untouched document's edge follows the file.
+        assert_eq!(edge(), format!("{GUIDE_ID} true"));
+        let neighbors = Spi::get_one_with_args::<String>(
+            "SELECT string_agg(neighbor_id, ',' ORDER BY neighbor_id)
+             FROM pgokf.concept_neighbors('howto', 1, $1)",
+            &[bundle_id.into()],
+        )
+        .expect("neighbors executes")
+        .expect("neighbors exist");
+        assert_eq!(neighbors, GUIDE_ID);
+    }
+
+    #[pg_test]
+    fn history_records_a_reclassified_file_as_removed_then_added() {
+        // Arrange: history on, the fixture package registered.
+        Spi::run("SELECT pgokf.set_config('track_history', 'true')").expect("history is settable");
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_package_bundle(&bundle);
+
+        // Act: dissolve the package; the guide is re-identified in place.
+        fs::remove_file(bundle.root.join(PACKAGE_ROOT).join("SKILL.md"))
+            .expect("manifest delete succeeds");
+        refresh_counts(bundle_id);
+
+        // Assert: the old identity is closed with a removal tombstone (no
+        // open version remains for it) and the new one starts at version 1
+        // as an addition; the change manifest agrees.
+        let old_versions = Spi::get_one_with_args::<String>(
+            "SELECT string_agg(change_kind, ',' ORDER BY version)
+                    || ' open=' || count(*) FILTER (WHERE valid_to IS NULL)
+             FROM pgokf.concept_history WHERE bundle_id = $1 AND concept_id = $2",
+            &[bundle_id.into(), GUIDE_ID.into()],
+        )
+        .expect("history query executes")
+        .expect("history exists");
+        assert_eq!(old_versions, "added,removed open=0");
+        let new_versions = Spi::get_one_with_args::<String>(
+            "SELECT string_agg(version || ':' || change_kind, ',' ORDER BY version)
+             FROM pgokf.concept_history WHERE bundle_id = $1 AND concept_id = $2",
+            &[bundle_id.into(), "skills/deploy/references/guide".into()],
+        )
+        .expect("history query executes")
+        .expect("history exists");
+        assert_eq!(new_versions, "1:added");
+        let changed = Spi::get_one_with_args::<String>(
+            "SELECT string_agg(concept_id || ':' || change_kind, ',' ORDER BY concept_id)
+             FROM pgokf.list_sync_changes(
+                 (SELECT max(id) FROM pgokf_private.sync_log WHERE bundle_id = $1))",
+            &[bundle_id.into()],
+        )
+        .expect("change manifest query executes")
+        .expect("changes recorded");
+        assert_eq!(
+            changed,
+            format!(
+                "{SKILL_ID}:removed,{LOGO_ID}:removed,skills/deploy/references/guide:added,\
+                 {GUIDE_ID}:removed,{SCRIPT_ID}:removed"
+            )
+        );
+    }
+
+    #[pg_test]
+    fn a_manifest_visibility_change_propagates_to_its_members() {
+        // Arrange
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_package_bundle(&bundle);
+        let visibilities = || -> String {
+            Spi::get_one_with_args::<String>(
+                "SELECT string_agg(v, ',' ORDER BY v) FROM (
+                     SELECT DISTINCT visibility AS v FROM pgokf.scripts WHERE bundle_id = $1
+                     UNION SELECT DISTINCT visibility FROM pgokf.reference_documents
+                           WHERE bundle_id = $1
+                     UNION SELECT DISTINCT value #>> '{}' FROM pgokf.concept_metadata
+                           WHERE bundle_id = $1 AND key = 'visibility') x",
+                &[bundle_id.into()],
+            )
+            .expect("visibility query executes")
+            .expect("visibilities exist")
+        };
+        assert_eq!(visibilities(), "internal");
+
+        // Act: only the manifest changes.
+        fs::write(
+            bundle.root.join(PACKAGE_ROOT).join("SKILL.md"),
+            PACKAGE_MANIFEST.replace(
+                "tags: [deploy, widgets]\n",
+                "tags: [deploy, widgets]\nvisibility: private\n",
+            ),
+        )
+        .expect("manifest edit is writable");
+        let counts = refresh_counts(bundle_id);
+
+        // Assert: one file updated, every member row follows.
+        assert_eq!(counts, (0, 1, 0, 5));
+        assert_eq!(visibilities(), "private");
+    }
 }

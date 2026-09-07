@@ -27,12 +27,13 @@ use tower::limit::ConcurrencyLimitLayer;
 
 use crate::db::{
     BundleInfo, BundleLogEntry, BundleStat, ConceptDetail, ConceptSummary, Cursor, Db,
-    DuplicateGroup, Facet, Failure, Graph, Hit, Link, Neighbor, SearchQuery, StaleConcept,
-    SyncLogEntry, Version,
+    DuplicateGroup, Facet, Failure, Graph, Hit, Link, Neighbor, PackageInfo, ResourceInfo,
+    SearchQuery, StaleConcept, SyncLogEntry, Version,
 };
 use crate::graph::{GraphEdge, GraphNode};
 use crate::links::Resolver;
 use crate::{graph, markdown};
+use pgokf_workspace::drop_packaged_resources;
 
 /// Shared application state.
 pub(crate) struct App {
@@ -76,6 +77,7 @@ pub(crate) fn router(app: Shared) -> Router {
         .route("/status", get(status_page))
         .route("/concepts/{bundle_id}/{*concept_id}", get(concept_page))
         .route("/source/{bundle_id}/{*concept_id}", get(concept_source))
+        .route("/resource/{bundle_id}/{*concept_id}", get(concept_resource))
         .route("/graph", get(graph_page))
         .route("/plugins", get(plugins_page))
         .route("/plugins/preview", get(plugins_preview))
@@ -664,6 +666,8 @@ pub(crate) struct PluginPreview {
     pub mcp_note: Option<String>,
     pub mcp_call: String,
     pub download_url: String,
+    /// How many of the concepts are skill packages copied whole.
+    pub package_count: usize,
 }
 
 /// One custom-metadata row, value pretty-printed.
@@ -874,6 +878,10 @@ struct ConceptPage {
     prov: ProvenanceView,
     similar: Vec<HitView>,
     history: Vec<Version>,
+    /// The skill package this concept is the manifest of, if any.
+    package: Option<PackageInfo>,
+    /// The package resource this concept is, if any.
+    resource: Option<ResourceInfo>,
 }
 
 #[derive(Template)]
@@ -1562,7 +1570,22 @@ async fn concept_page(
         .await?
         .ok_or_else(|| AppError::not_found("This concept"))?;
     let (outgoing, incoming) = app.db.links(bundle_id, &concept_id).await?;
-    let body_html = render_body(&c, &outgoing);
+    let package = match c.concept_type.as_deref() {
+        Some("Skill") => app.db.package(bundle_id, &concept_id).await?,
+        _ => None,
+    };
+    let resource = match c.concept_type.as_deref() {
+        Some("Script" | "Reference") => app.db.resource(bundle_id, &concept_id).await?,
+        _ => None,
+    };
+    let body_html = match &resource {
+        Some(r) if r.textual && !r.is_markdown() => verbatim_body(&c.body_text),
+        Some(r) if !r.textual => String::new(),
+        // A Markdown reference is stored exactly; render the document, not
+        // its search text.
+        Some(r) => render_source(&c, &outgoing, r.text.as_deref()),
+        None => render_body(&c, &outgoing),
+    };
     let outgoing = group_links(&outgoing, LinkDirection::Outgoing, &concept_id);
     let incoming = group_links(&incoming, LinkDirection::Incoming, &concept_id);
     let neighbors = app.db.neighbors(bundle_id, &concept_id, hops).await?;
@@ -1601,7 +1624,18 @@ async fn concept_page(
         hops_options: (1..=MAX_HOPS).map(|n| (n, n == hops)).collect(),
         similar,
         history,
+        package,
+        resource,
     })
+}
+
+/// A script or plain-text reference shown verbatim in a code block. The
+/// fence is longer than any backtick run in the text, so the content cannot
+/// close it; the Markdown renderer then escapes it like any code.
+fn verbatim_body(text: &str) -> String {
+    let longest_run = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest_run.max(2) + 1);
+    markdown::render(&format!("{fence}\n{text}\n{fence}\n"))
 }
 
 /// The body as HTML: the exact stored Markdown when the catalog keeps
@@ -1609,11 +1643,17 @@ async fn concept_page(
 /// since the header shows it, body links resolved through the catalog's
 /// own link table), else the search-normalized text.
 fn render_body(c: &ConceptDetail, outgoing: &[Link]) -> String {
-    let title = c.title.as_deref().unwrap_or(&c.concept_id);
     let source = c
         .source
         .as_deref()
         .and_then(|bytes| std::str::from_utf8(bytes).ok());
+    render_source(c, outgoing, source)
+}
+
+/// Render a concept's Markdown `source` (the exact stored document) with the
+/// catalog's link resolution, or its search text when there is none.
+fn render_source(c: &ConceptDetail, outgoing: &[Link], source: Option<&str>) -> String {
+    let title = c.title.as_deref().unwrap_or(&c.concept_id);
     let Some(source) = source else {
         return markdown::render(&c.body_text);
     };
@@ -1765,9 +1805,29 @@ fn neighbor_graph(seed: &ConceptDetail, neighbors: &[Neighbor]) -> String {
 /// `Content-Disposition` for a download named after the concept: an ASCII
 /// fallback plus the RFC 5987 `filename*` form for anything else.
 fn content_disposition(concept_id: &str) -> String {
+    attachment_disposition(&format!("{}.md", file_name_of(concept_id)))
+}
+
+/// A package file keeps its own name: resource ids carry their extension,
+/// and a manifest is `SKILL.md` (by its class, not its name, so a resource
+/// that happens to be called `SKILL` keeps that name).
+fn resource_disposition(concept_id: &str, is_manifest: bool) -> String {
+    if is_manifest {
+        attachment_disposition("SKILL.md")
+    } else {
+        attachment_disposition(file_name_of(concept_id))
+    }
+}
+
+/// The last path segment of a concept id, `concept` when it has none.
+fn file_name_of(concept_id: &str) -> &str {
     let base = concept_id.rsplit('/').next().unwrap_or("concept");
-    let base = if base.is_empty() { "concept" } else { base };
-    let ascii: String = base
+    if base.is_empty() { "concept" } else { base }
+}
+
+/// An attachment header with an ASCII fallback name and the RFC 5987 form.
+fn attachment_disposition(name: &str) -> String {
+    let ascii: String = name
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
@@ -1778,8 +1838,8 @@ fn content_disposition(concept_id: &str) -> String {
         })
         .collect();
     format!(
-        "attachment; filename=\"{ascii}.md\"; filename*=UTF-8''{}.md",
-        filters::percent_encode(base)
+        "attachment; filename=\"{ascii}\"; filename*=UTF-8''{}",
+        filters::percent_encode(name)
     )
 }
 
@@ -2294,11 +2354,10 @@ async fn plugin_preview(
         .map_err(workspace_error)?;
     client.finish();
     let truncated = concepts.len() >= selection.effective_limit();
-    // Placeholder content: the layout is what the preview shows; sources
-    // are only read (and audited) by the download.
-    for c in &mut concepts {
-        c.bytes = vec![b'\n'];
-    }
+    // The build drops a resource whose package is selected; the preview
+    // must show the same tree.
+    drop_packaged_resources(&mut concepts);
+    placeholder_contents(app, &mut concepts).await?;
     let options = build_options(app, form, target, base_model);
     let snapshot = pgokf_workspace::Snapshot {
         version: app.version.clone(),
@@ -2376,6 +2435,7 @@ async fn plugin_preview(
         }))
         .unwrap_or_default(),
         download_url: format!("/plugins/build.zip?{}", form.query_string),
+        package_count: plugin.as_ref().map_or(0, |p| p.package_count),
         concepts,
     })
 }
@@ -2430,6 +2490,103 @@ async fn plugins_preview(
     Ok(response)
 }
 
+/// The exact bytes of a package manifest, script, reference, or asset
+/// through the audited readers, as an attachment (never rendered inline:
+/// an HTML or SVG asset must not run as a page of this origin).
+async fn concept_resource(
+    State(app): State<Shared>,
+    Path((bundle_id, concept_id)): Path<(i64, String)>,
+) -> PageResult {
+    let found = match app.db.exact_bytes(bundle_id, &concept_id).await {
+        Ok(Some(found)) => found,
+        Ok(None) => return Err(AppError::not_found("The stored bytes of this concept")),
+        Err(error) if crate::db::classify(&error) == Failure::InvalidInput => {
+            return Err(AppError::not_found("The stored bytes of this concept"));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let content_type = safe_media_type(&found.media_type);
+    Ok((
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_str(&content_type)
+                    .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+            ),
+            (
+                header::CONTENT_DISPOSITION,
+                HeaderValue::from_str(&resource_disposition(&concept_id, found.is_manifest))
+                    .unwrap_or_else(|_| HeaderValue::from_static("attachment")),
+            ),
+        ],
+        found.bytes,
+    )
+        .into_response())
+}
+
+/// A media type from the catalog as a response header value: only the
+/// `type/subtype` grammar is trusted, text types get a charset, and anything
+/// else is served as an opaque stream.
+fn safe_media_type(media_type: &str) -> String {
+    let well_formed = media_type.len() <= 100
+        && media_type.split_once('/').is_some_and(|(t, sub)| {
+            !t.is_empty()
+                && !sub.is_empty()
+                && t.chars()
+                    .chain(sub.chars())
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '+' | '-'))
+        });
+    if !well_formed {
+        return "application/octet-stream".to_owned();
+    }
+    if media_type.starts_with("text/")
+        || matches!(
+            media_type,
+            "application/json" | "application/yaml" | "application/toml" | "application/xml"
+        )
+    {
+        format!("{media_type}; charset=utf-8")
+    } else {
+        media_type.to_owned()
+    }
+}
+
+/// Placeholder content for a preview: the layout is what the preview shows;
+/// sources are only read (and audited) by the download. A package's
+/// resource paths come from the projection tables so the file list is
+/// complete.
+async fn placeholder_contents(app: &App, concepts: &mut [ConceptRecord]) -> Result<(), AppError> {
+    let packages: Vec<(i64, String)> = concepts
+        .iter()
+        .filter(|c| c.package.is_some())
+        .map(|c| (c.bundle_id, c.concept_id.clone()))
+        .collect();
+    let mut listings = if packages.is_empty() {
+        BTreeMap::new()
+    } else {
+        app.db.package_resources(&packages).await?
+    };
+    for c in concepts.iter_mut() {
+        c.bytes = vec![b'\n'];
+        if let Some(package) = &mut c.package {
+            package.resources = listings
+                .remove(&(c.bundle_id, c.concept_id.clone()))
+                .unwrap_or_default()
+                .into_iter()
+                .map(|r| pgokf_workspace::ResourceFile {
+                    concept_id: r.concept_id,
+                    class: r.class,
+                    path: r.path,
+                    sha256: r.sha256,
+                    file_hash: String::new(),
+                    bytes: vec![b'\n'],
+                })
+                .collect();
+        }
+    }
+    Ok(())
+}
+
 /// Build the tree (sources read through the audited `get_concept_source`)
 /// and send it as a zip to unpack at the workspace root.
 async fn plugins_zip(State(app): State<Shared>, Query(params): Query<PluginParams>) -> PageResult {
@@ -2474,8 +2631,18 @@ async fn api_concept(
         .await?
         .ok_or_else(|| AppError::not_found("This concept"))?;
     let (outgoing, incoming) = app.db.links(bundle_id, &concept_id).await?;
+    let package = match c.concept_type.as_deref() {
+        Some("Skill") => app.db.package(bundle_id, &concept_id).await?,
+        _ => None,
+    };
+    let resource = match c.concept_type.as_deref() {
+        Some("Script" | "Reference") => app.db.resource(bundle_id, &concept_id).await?,
+        _ => None,
+    };
     let mut value = serde_json::to_value(&c).unwrap_or(Value::Null);
     value["links"] = serde_json::json!({ "outgoing": outgoing, "incoming": incoming });
+    value["package"] = serde_json::to_value(package).unwrap_or(Value::Null);
+    value["resource"] = serde_json::to_value(resource).unwrap_or(Value::Null);
     Ok(Json(value))
 }
 
@@ -3007,6 +3174,18 @@ mod tests {
     #[test]
     fn content_disposition_offers_an_ascii_fallback_and_an_encoded_name() {
         // Arrange & Act
+        assert_eq!(
+            resource_disposition("skills/deploy/scripts/check.sh", false),
+            "attachment; filename=\"check.sh\"; filename*=UTF-8''check.sh"
+        );
+        assert_eq!(
+            resource_disposition("skills/deploy/SKILL", true),
+            "attachment; filename=\"SKILL.md\"; filename*=UTF-8''SKILL.md"
+        );
+        assert_eq!(
+            resource_disposition("skills/deploy/references/SKILL", false),
+            "attachment; filename=\"SKILL\"; filename*=UTF-8''SKILL"
+        );
         let plain = content_disposition("runbooks/database-failover");
         let odd = content_disposition("notes/caf\u{e9} \"quoted\"");
 

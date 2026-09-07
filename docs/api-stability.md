@@ -21,7 +21,7 @@ the database. Complete comment coverage is a release gate (see
 
 ## The stable surface
 
-### Functions (40)
+### Functions (43)
 
 | Function | Role required | Purpose |
 | -------- | ------------- | ------- |
@@ -58,6 +58,9 @@ the database. Complete comment coverage is a release gate (see
 | `pgokf.health()` | `pgokf_reader` | Liveness/readiness document as jsonb (counts, backend, `in_recovery`) |
 | `pgokf.stale_concepts(bigint, timestamptz)` | `pgokf_reader` | Concepts past their OKF `stale_after` |
 | `pgokf.get_concept_source(bigint, text)` | `pgokf_reader` | Return one concept's stored source bytes as `bytea` (no filesystem write) |
+| `pgokf.get_skill(bigint, text)` | `pgokf_reader` | Return one Agent Skills package (`skill_result`): metadata, the exact `SKILL.md`, and its resource listing; audited |
+| `pgokf.get_script(bigint, text)` | `pgokf_reader` | Return one package script's exact bytes and typed metadata (`script_result`); audited |
+| `pgokf.get_reference(bigint, text, boolean)` | `pgokf_reader` | Return one package reference or asset (`reference_result`), bytes included unless `include_bytes` is false; audited when bytes are returned |
 | `pgokf.export_parquet(bigint, text)` | `pgokf_admin` | Export a bundle projection to Parquet files |
 | `pgokf.export_sources(bigint, text)` | `pgokf_admin` | Reconstruct a bundle's stored source files on disk, hash-verified |
 | `pgokf.rebuild_search_index()` | `pgokf_admin` | (Re)build the optional BM25 index for the provider `bm25_provider` resolves to (pg_textsearch or pg_search); a no-op with a notice when none is installed |
@@ -72,26 +75,28 @@ arguments (`name`/`options` on `register_bundle`, `bundle_id`/`limit` on search
 and neighbors) are contractual too: an existing call that omits them keeps
 working.
 
-### Composite types (14)
+### Composite types (17)
 
 `pgokf.bundle_sync_result`, `pgokf.concept_search_result`,
 `pgokf.concept_neighbor`, `pgokf.bundle_info`, `pgokf.export_result`,
 `pgokf.sync_log_entry`, `pgokf.catalog_stat`, `pgokf.stale_concept`,
 `pgokf.sync_change`, `pgokf.access_log_entry`, `pgokf.duplicate_group`,
-`pgokf.search_facet`, `pgokf.bundle_log_entry`, `pgokf.concept_version`.
+`pgokf.search_facet`, `pgokf.bundle_log_entry`, `pgokf.concept_version`,
+`pgokf.skill_result`, `pgokf.script_result`, `pgokf.reference_result`.
 
 The set of columns, their names, and their types are stable. New columns are
 **not** added to an existing composite type in a compatible release, because
 `SELECT *` and positional row expansion would break; a new field ships as a new
 type or a new function instead.
 
-### Tables (11 public + 4 documented-internal)
+### Tables (14 public + 4 documented-internal)
 
 Public, `SELECT`-able by `pgokf_reader`: `pgokf.bundles`, `pgokf.concepts`,
 `pgokf.concept_metadata`, `pgokf.links`, `pgokf.concept_provenance`,
 `pgokf.concept_verification`, `pgokf.concept_provenance_source`,
 `pgokf.concept_source`, `pgokf.concept_embedding`, `pgokf.bundle_log`,
-`pgokf.concept_history`.
+`pgokf.concept_history`, `pgokf.skills`, `pgokf.scripts`,
+`pgokf.reference_documents`.
 
 These are a **read projection**. Callers may `SELECT` from them and depend on
 existing column names and types; the columns listed in
@@ -104,7 +109,7 @@ fixed row type) is forward-compatible.
 
 `pgokf_private.config`, `pgokf_private.sync_log`, `pgokf_private.sync_log_change`,
 and `pgokf_private.access_log` are listed here only because they are catalog
-tables the documentation gate covers (the eleven public tables plus these four
+tables the documentation gate covers (the fourteen public tables plus these four
 private ones). They are **internal state, not API** - read the
 sync history through `pgokf.list_sync_log` and configuration through
 `pgokf.get_config`; see [The private surface](#the-private-surface-not-api).

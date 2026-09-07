@@ -78,9 +78,16 @@ fn validate_content_path(path: &str) -> Result<(), CatalogError> {
             Component::ParentDir | Component::RootDir | Component::Prefix(_)
         )
     });
-    if unsafe_path {
+    // `./a.md` and `a//b.md` name the same files as `a.md` and `a/b.md`; a
+    // path is stored as given, so an unnormalized spelling would register a
+    // second identity for the same file (and a resource id that no link can
+    // resolve). Require the normalized spelling instead.
+    let unnormalized = path
+        .split('/')
+        .any(|segment| segment.is_empty() || segment == ".");
+    if unsafe_path || unnormalized {
         return Err(CatalogError::invalid_parameter(
-            format!("content path is not a safe bundle-relative path: {path}"),
+            format!("content path is not a safe, normalized bundle-relative path: {path}"),
             Path::new(path),
         ));
     }
@@ -217,7 +224,7 @@ fn register_bundle_content_impl(
     security::authorize_current_user(security::Operation::Ingest, Path::new(""))?;
 
     validate_arrays(&paths, &contents)?;
-    let source = ContentSource::new(paths, contents);
+    let source = ContentSource::new(paths, contents)?;
 
     let path_key = content_path_key(name);
     // Serialize on the synthetic bundle key so a content resync cannot race
@@ -319,6 +326,15 @@ mod tests {
 
         // Assert
         assert_eq!(error.sqlstate(), "22023");
+    }
+
+    #[test]
+    fn validate_content_path_rejects_unnormalized_spellings() {
+        // Arrange / Act / Assert: a current-directory segment, an empty
+        // segment, and a trailing slash are all refused.
+        for path in ["./a.md", "a//b.md", "a/./b.md", "a.md/"] {
+            validate_content_path(path).expect_err(path);
+        }
     }
 
     #[test]

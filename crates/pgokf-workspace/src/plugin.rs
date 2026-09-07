@@ -9,10 +9,9 @@ use std::fmt::Write as _;
 use anyhow::{Result, anyhow};
 use serde::Serialize;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 
 use crate::profile::{EnvRef, McpFormat, McpSpec, Profile, Shape, Target};
-use crate::selection::{ConceptRecord, Selection, Snapshot, yaml_string};
+use crate::selection::{ConceptRecord, Selection, Snapshot, sha256_hex, yaml_string};
 
 /// Agent Skills limits for `SKILL.md` frontmatter.
 const NAME_MAX: usize = 64;
@@ -116,6 +115,8 @@ pub struct Plugin {
     pub root: String,
     pub files: Vec<PluginFile>,
     pub concept_count: usize,
+    /// How many of the concepts are skill packages copied whole.
+    pub package_count: usize,
     /// Concepts the tree contains, in index order.
     pub concepts: Vec<ConceptRecord>,
 }
@@ -157,11 +158,17 @@ pub fn slug(name: &str) -> String {
     }
 }
 
-/// Where a shape puts its index and its content files.
+/// Where a shape puts its index, its content files, the skill packages it
+/// copies whole, and the scripts selected on their own.
 struct Layout {
     root: String,
     index_path: String,
     content_dir: String,
+    /// Skill packages go to `<packages_dir>/<name>/`: beside the knowledge
+    /// skill for a native consumer, under the knowledge tree otherwise.
+    packages_dir: String,
+    /// A package script selected without its package.
+    scripts_dir: String,
 }
 
 fn layout(profile: &Profile, name: &str) -> Layout {
@@ -171,6 +178,8 @@ fn layout(profile: &Profile, name: &str) -> Layout {
             Layout {
                 index_path: format!("{root}/SKILL.md"),
                 content_dir: format!("{root}/references"),
+                packages_dir: profile.root.to_owned(),
+                scripts_dir: format!("{root}/scripts"),
                 root,
             }
         }
@@ -178,16 +187,22 @@ fn layout(profile: &Profile, name: &str) -> Layout {
             root: String::new(),
             index_path: "AGENTS.md".to_owned(),
             content_dir: "knowledge".to_owned(),
+            packages_dir: "knowledge/skills".to_owned(),
+            scripts_dir: "knowledge".to_owned(),
         },
         Shape::PromptBundle => Layout {
             root: profile.root.to_owned(),
             index_path: format!("{}/INDEX.md", profile.root),
             content_dir: format!("{}/knowledge", profile.root),
+            packages_dir: format!("{}/skills", profile.root),
+            scripts_dir: format!("{}/knowledge", profile.root),
         },
         Shape::Generic => Layout {
             root: profile.root.to_owned(),
             index_path: format!("{}/INDEX.md", profile.root),
             content_dir: format!("{}/concepts", profile.root),
+            packages_dir: format!("{}/skills", profile.root),
+            scripts_dir: format!("{}/concepts", profile.root),
         },
     }
 }
@@ -230,20 +245,44 @@ pub fn assemble(
         .len()
         > 1;
 
-    let (listed, content, entries) = content_files(&layout, records, multi_bundle)?;
+    let materialized = content_files(&layout, &name, records, multi_bundle)?;
+    let Materialized {
+        listed,
+        packages,
+        files: content,
+        entries,
+    } = materialized;
 
     let index_dir = layout.index_path.rsplit_once('/').map_or("", |(d, _)| d);
+    let package_prefix = relative_prefix(index_dir, &layout.packages_dir);
     let index = match profile.shape {
-        Shape::Skills => skill_md(&name, &title, options, selection, records, &listed),
-        Shape::InstructionFile => agents_md(&title, options, selection, records, &listed),
+        Shape::Skills => skill_md(
+            &name,
+            &title,
+            options,
+            selection,
+            records,
+            &listed,
+            &packages,
+            &package_prefix,
+        ),
+        Shape::InstructionFile => agents_md(
+            &title,
+            options,
+            selection,
+            records,
+            &listed,
+            &packages,
+            &package_prefix,
+        ),
         Shape::PromptBundle | Shape::Generic => index_md(
             &title,
             options,
             selection,
             records,
             &listed,
-            index_dir,
-            &layout.content_dir,
+            &packages,
+            &package_prefix,
         ),
     };
     let mut files = vec![file(layout.index_path.clone(), index.into_bytes())];
@@ -276,63 +315,186 @@ pub fn assemble(
         root: layout.root,
         files,
         concept_count: records.len(),
+        package_count: packages.len(),
         concepts: records.to_vec(),
     })
 }
 
-/// The listing the index renders, the content files, and the lockfile
-/// entries, in one order.
-type ContentFiles<'a> = (
-    Vec<(String, &'a ConceptRecord)>,
-    Vec<PluginFile>,
-    Vec<serde_json::Value>,
-);
+/// What `content_files` produces: the document listing the index renders,
+/// the packages (directory name and record), every content file, and the
+/// lockfile entries.
+struct Materialized<'a> {
+    listed: Vec<(String, &'a ConceptRecord)>,
+    packages: Vec<(String, &'a ConceptRecord)>,
+    files: Vec<PluginFile>,
+    entries: Vec<serde_json::Value>,
+}
 
-/// One file per concept (namespaced by bundle when several are mixed), the
-/// listing the index renders, and the lockfile entries.
+/// One file per document concept (namespaced by bundle when several are
+/// mixed), one directory per skill package copied byte for byte (its
+/// `SKILL.md` and every script, reference, and asset), and a resource
+/// selected on its own at its catalog path (scripts under the scripts
+/// directory, executable); plus the listing the index renders and the
+/// lockfile entries.
 fn content_files<'a>(
     layout: &Layout,
+    plugin_name: &str,
     records: &'a [ConceptRecord],
     multi_bundle: bool,
-) -> Result<ContentFiles<'a>> {
+) -> Result<Materialized<'a>> {
     let bundle_dirs = bundle_directories(records);
-    let listed: Vec<(String, &ConceptRecord)> = records
-        .iter()
-        .map(|record| {
-            let path = tree_path(&record.path)?;
-            let relative = if multi_bundle {
-                format!("{}/{path}", bundle_dirs[&record.bundle_id])
+    let package_dirs = package_directories(records, plugin_name);
+    let index_dir = layout.index_path.rsplit_once('/').map_or("", |(d, _)| d);
+    let mut listed = Vec::new();
+    let mut packages = Vec::new();
+    let mut files = Vec::new();
+    let mut entries = Vec::new();
+
+    for record in records {
+        if let Some(package) = &record.package {
+            let dir = &package_dirs[&(record.bundle_id, record.concept_id.as_str())];
+            let base = format!("{}/{dir}", layout.packages_dir);
+            let manifest = file(format!("{base}/SKILL.md"), record.bytes.clone());
+            entries.push(lock_entry(
+                record,
+                &manifest,
+                None,
+                Some((&package.hash, dir)),
+            ));
+            files.push(manifest);
+            for resource in &package.resources {
+                let mut f = file(
+                    format!("{base}/{}", tree_path(&resource.path)?),
+                    resource.bytes.clone(),
+                );
+                f.executable = resource.is_script();
+                entries.push(lock_entry(
+                    record,
+                    &f,
+                    Some(resource),
+                    Some((&package.hash, dir)),
+                ));
+                files.push(f);
+            }
+            packages.push((dir.clone(), record));
+            continue;
+        }
+        let path = tree_path(&record.path)?;
+        let relative = if multi_bundle {
+            format!("{}/{path}", bundle_dirs[&record.bundle_id])
+        } else {
+            path
+        };
+        let is_script = record
+            .resource
+            .as_ref()
+            .is_some_and(|r| r.class == "script");
+        let dir = if is_script {
+            &layout.scripts_dir
+        } else {
+            &layout.content_dir
+        };
+        let mut f = file(format!("{dir}/{relative}"), record.bytes.clone());
+        f.executable = is_script;
+        entries.push(lock_entry(record, &f, None, None));
+        files.push(f);
+        // The index links to the file relative to its own directory.
+        listed.push((
+            format!("{}{relative}", relative_prefix(index_dir, dir)),
+            record,
+        ));
+    }
+    Ok(Materialized {
+        listed,
+        packages,
+        files,
+        entries,
+    })
+}
+
+/// One lockfile entry per written file: the concept it came from (a package
+/// member under its own id and file hash), its catalog hashes, and for a
+/// package file the package hash and the directory the package was written
+/// to (which differs from its name only when two packages collided).
+fn lock_entry(
+    record: &ConceptRecord,
+    f: &PluginFile,
+    member: Option<&crate::selection::ResourceFile>,
+    package: Option<(&str, &str)>,
+) -> serde_json::Value {
+    let mut entry = json!({
+        "bundle_id": record.bundle_id,
+        "concept_id": member.map_or(record.concept_id.as_str(), |m| m.concept_id.as_str()),
+        "path": member.map_or(record.path.as_str(), |m| m.concept_id.as_str()),
+        "file": f.path,
+        "file_hash": member.map_or(record.file_hash.as_str(), |m| m.file_hash.as_str()),
+        "content_sha256": f.sha256,
+        "exact": record.exact,
+    });
+    if member.is_some() {
+        entry["package_concept_id"] = json!(record.concept_id);
+    } else if let Some(resource) = &record.resource {
+        entry["package_concept_id"] = json!(resource.package_concept_id);
+    }
+    if let Some((hash, dir)) = package {
+        entry["package_hash"] = json!(hash);
+        entry["package_directory"] = json!(dir);
+    }
+    entry
+}
+
+/// A directory per skill package: its Agent Skills name (slugged when the
+/// catalog's copy bends the rules), with the bundle id appended when two
+/// packages share a name or one collides with the plugin's own directory.
+fn package_directories<'a>(
+    records: &'a [ConceptRecord],
+    plugin_name: &str,
+) -> BTreeMap<(i64, &'a str), String> {
+    let mut taken: BTreeSet<String> = BTreeSet::from([plugin_name.to_owned()]);
+    let mut dirs = BTreeMap::new();
+    for r in records {
+        let Some(package) = &r.package else {
+            continue;
+        };
+        let base = slug(&package.name);
+        let mut dir = base.clone();
+        let mut n = 0;
+        while taken.contains(&dir) {
+            let suffix = if n == 0 {
+                format!("-{}", r.bundle_id)
             } else {
-                path
+                format!("-{}-{n}", r.bundle_id)
             };
-            Ok((relative, record))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let content: Vec<PluginFile> = listed
-        .iter()
-        .map(|(relative, record)| {
-            file(
-                format!("{}/{relative}", layout.content_dir),
-                record.bytes.clone(),
-            )
-        })
-        .collect();
-    let entries: Vec<serde_json::Value> = listed
-        .iter()
-        .zip(&content)
-        .map(|((_, record), f)| {
-            json!({
-                "bundle_id": record.bundle_id,
-                "concept_id": record.concept_id,
-                "path": record.path,
-                "file": f.path,
-                "file_hash": record.file_hash,
-                "content_sha256": f.sha256,
-                "exact": record.exact,
-            })
-        })
-        .collect();
-    Ok((listed, content, entries))
+            // Keep the suffixed directory a valid Agent Skills name: at most
+            // NAME_MAX characters, no trailing hyphen.
+            let keep = NAME_MAX.saturating_sub(suffix.len());
+            let head = base
+                .chars()
+                .take(keep)
+                .collect::<String>()
+                .trim_end_matches('-')
+                .to_owned();
+            dir = format!("{head}{suffix}");
+            n += 1;
+        }
+        taken.insert(dir.clone());
+        dirs.insert((r.bundle_id, r.concept_id.as_str()), dir);
+    }
+    dirs
+}
+
+/// The link prefix from the directory of the index file to `dir`: climb
+/// out of what the two paths do not share, then descend into `dir`.
+fn relative_prefix(index_dir: &str, dir: &str) -> String {
+    let from: Vec<&str> = index_dir.split('/').filter(|s| !s.is_empty()).collect();
+    let to: Vec<&str> = dir.split('/').filter(|s| !s.is_empty()).collect();
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    let mut prefix = "../".repeat(from.len() - common);
+    for segment in &to[common..] {
+        prefix.push_str(segment);
+        prefix.push('/');
+    }
+    prefix
 }
 
 /// A directory name per bundle: its slugged name, with the id appended when
@@ -359,13 +521,20 @@ fn bundle_directories(records: &[ConceptRecord]) -> BTreeMap<i64, String> {
 
 /// A concept path as written into the tree: the parser already refuses
 /// `..` and absolute forms, and any remaining separator-like or control
-/// character (a backslash is a separator to Windows extractors) becomes an
-/// underscore, so the tree is safe on every platform. The lockfile keeps
+/// character (a backslash is a separator to Windows extractors, a colon a
+/// drive letter) becomes an underscore, so the tree is safe on every
+/// platform and the directory writer accepts every path the zip carries. The lockfile keeps
 /// the catalog path beside the file name.
 fn tree_path(path: &str) -> Result<String> {
     let cleaned: String = path
         .chars()
-        .map(|c| if c == '\\' || c.is_control() { '_' } else { c })
+        .map(|c| {
+            if c == '\\' || c == ':' || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
     let segments: Vec<&str> = cleaned.split('/').collect();
     if segments
@@ -705,15 +874,6 @@ fn file(path: String, bytes: Vec<u8>) -> PluginFile {
     }
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .fold(String::with_capacity(64), |mut out, b| {
-            let _ = write!(out, "{b:02x}");
-            out
-        })
-}
-
 /// Distinct values in first-seen order, capped.
 fn distinct<'a>(items: impl Iterator<Item = &'a str>, cap: usize) -> Vec<&'a str> {
     let mut seen: Vec<&str> = Vec::new();
@@ -779,7 +939,7 @@ fn truncate_chars(text: &str, max: usize) -> String {
 /// The listing every index shares: one line per concept, grouped by bundle
 /// (in first-seen order, so a ranked selection keeps its order inside each
 /// group).
-fn listing(listed: &[(String, &ConceptRecord)], prefix: &str) -> String {
+fn listing(listed: &[(String, &ConceptRecord)]) -> String {
     let mut out = String::new();
     let mut bundles: Vec<i64> = Vec::new();
     for (_, r) in listed {
@@ -797,13 +957,52 @@ fn listing(listed: &[(String, &ConceptRecord)], prefix: &str) -> String {
             let _ = writeln!(out, "\n### Bundle {name} (#{bundle})\n");
         }
         for (relative, r) in listed.iter().filter(|(_, r)| r.bundle_id == bundle) {
-            listing_line(&mut out, relative, r, prefix);
+            listing_line(&mut out, relative, r);
         }
     }
     out
 }
 
-fn listing_line(out: &mut String, relative: &str, r: &ConceptRecord, prefix: &str) {
+/// The skill packages of the tree, one line each, linking to the copied
+/// `SKILL.md`.
+fn package_listing(packages: &[(String, &ConceptRecord)], prefix: &str) -> String {
+    let mut out = String::new();
+    for (dir, r) in packages {
+        let Some(package) = &r.package else {
+            continue;
+        };
+        let scripts = package.resources.iter().filter(|x| x.is_script()).count();
+        let others = package.resources.len() - scripts;
+        let _ = write!(
+            out,
+            "- [{}]({}) \u{2014} {}",
+            package.name,
+            link_destination(&format!("{prefix}{dir}/SKILL.md")),
+            r.trust_tier
+        );
+        if *dir != package.name {
+            let _ = write!(
+                out,
+                " (installed as `{dir}`; the harness may warn that the directory differs from \
+                 the skill's name)"
+            );
+        }
+        if let Some(d) = r.description.as_deref().filter(|d| !d.is_empty()) {
+            let _ = write!(out, ". {d}");
+        }
+        let _ = writeln!(
+            out,
+            " ({scripts} script{}, {others} reference{}) `({}:{})`",
+            if scripts == 1 { "" } else { "s" },
+            if others == 1 { "" } else { "s" },
+            r.bundle_id,
+            r.concept_id
+        );
+    }
+    out
+}
+
+fn listing_line(out: &mut String, link: &str, r: &ConceptRecord) {
     let title = r.title.as_deref().unwrap_or(&r.concept_id);
     let mut meta: Vec<String> = Vec::new();
     if let Some(t) = &r.concept_type {
@@ -817,7 +1016,7 @@ fn listing_line(out: &mut String, relative: &str, r: &ConceptRecord, prefix: &st
         out,
         "- [{}]({})",
         title.replace('[', "\\[").replace(']', "\\]"),
-        link_destination(&format!("{prefix}{relative}"))
+        link_destination(link)
     );
     let _ = write!(out, " \u{2014} {}", meta.join(" \u{00b7} "));
     if let Some(d) = r.description.as_deref().filter(|d| !d.is_empty()) {
@@ -826,6 +1025,7 @@ fn listing_line(out: &mut String, relative: &str, r: &ConceptRecord, prefix: &st
     let _ = writeln!(out, " `({}:{})`", r.bundle_id, r.concept_id);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn skill_md(
     name: &str,
     title: &str,
@@ -833,6 +1033,8 @@ fn skill_md(
     selection: &Selection,
     records: &[ConceptRecord],
     listed: &[(String, &ConceptRecord)],
+    packages: &[(String, &ConceptRecord)],
+    package_prefix: &str,
 ) -> String {
     let desc = description(options, selection, records);
     let bundles: Vec<String> = distinct(records.iter().map(|r| r.bundle_name.as_str()), 20)
@@ -866,8 +1068,21 @@ fn skill_md(
         if records.len() == 1 { "" } else { "s" },
         selection.describe()
     );
+    if !packages.is_empty() {
+        let _ = write!(
+            out,
+            "## Skills\n\nThese Agent Skills packages from the catalog are installed beside this one, \
+             byte for byte (their `SKILL.md`, `scripts/`, `references/`, and `assets/`); the harness \
+             loads them like any other skill.\n\n"
+        );
+        out.push_str(&package_listing(packages, package_prefix));
+        out.push('\n');
+    }
     out.push_str("## Contents\n");
-    out.push_str(&listing(listed, "references/"));
+    if listed.is_empty() {
+        out.push_str("(no documents besides the skills above)\n");
+    }
+    out.push_str(&listing(listed));
     if options.components.contains(&Component::Guide) {
         out.push_str("\nRead [references/USING-THE-CATALOG.md](references/USING-THE-CATALOG.md) for how to query the live catalog (MCP tools, JSON API) beyond these files.\n");
     }
@@ -891,6 +1106,8 @@ fn agents_md(
     selection: &Selection,
     records: &[ConceptRecord],
     listed: &[(String, &ConceptRecord)],
+    packages: &[(String, &ConceptRecord)],
+    package_prefix: &str,
 ) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "# {title}\n");
@@ -909,26 +1126,26 @@ fn agents_md(
         if records.len() == 1 { "" } else { "s" },
         options.catalog_name
     );
+    if !packages.is_empty() {
+        out.push_str("### Skills\n\nAgent Skills packages copied whole from the catalog; read a package's `SKILL.md` before using its scripts.\n\n");
+        out.push_str(&package_listing(packages, package_prefix));
+        out.push('\n');
+    }
     out.push_str("### Index\n");
-    out.push_str(&listing(listed, "knowledge/"));
+    out.push_str(&listing(listed));
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn index_md(
     title: &str,
     options: &BuildOptions,
     selection: &Selection,
     records: &[ConceptRecord],
     listed: &[(String, &ConceptRecord)],
-    index_dir: &str,
-    content_dir: &str,
+    packages: &[(String, &ConceptRecord)],
+    package_prefix: &str,
 ) -> String {
-    // Links relative to the index file's own directory.
-    let prefix = content_dir
-        .strip_prefix(index_dir)
-        .map(|rest| rest.trim_start_matches('/'))
-        .filter(|rest| !rest.is_empty())
-        .map_or(String::new(), |rest| format!("{rest}/"));
     let mut out = String::new();
     let _ = writeln!(out, "# {title}\n");
     let _ = write!(
@@ -939,8 +1156,13 @@ fn index_md(
         options.catalog_name,
         selection.describe()
     );
+    if !packages.is_empty() {
+        out.push_str("## Skills\n\nAgent Skills packages copied whole from the catalog (`SKILL.md`, `scripts/`, `references/`, `assets/`).\n\n");
+        out.push_str(&package_listing(packages, package_prefix));
+        out.push('\n');
+    }
     out.push_str("## Index\n");
-    out.push_str(&listing(listed, &prefix));
+    out.push_str(&listing(listed));
     out
 }
 
@@ -960,8 +1182,11 @@ fn system_prompt(title: &str, options: &BuildOptions, records: &[ConceptRecord])
     let mut used = out.len();
     let mut included = 0;
     for r in &ordered {
-        let text = String::from_utf8_lossy(&r.bytes);
-        let body = strip_frontmatter(&text);
+        // A binary asset has no prose to inline; it stays under knowledge/.
+        let Ok(text) = std::str::from_utf8(&r.bytes) else {
+            continue;
+        };
+        let body = strip_frontmatter(text);
         let header = format!(
             "\n## {} ({}{})\n\n",
             r.title.as_deref().unwrap_or(&r.concept_id),
@@ -1102,7 +1327,48 @@ mod tests {
             status: "stable".to_owned(),
             exact: true,
             bytes: format!("---\ntitle: {title}\n---\n\n# {title}\n\n{body}\n").into_bytes(),
+            package: None,
+            resource: None,
         }
+    }
+
+    /// A skill package record with one script and one reference.
+    fn package_record(bundle_id: i64, name: &str) -> ConceptRecord {
+        use crate::selection::{PackageRecord, ResourceFile};
+        let mut r = record(
+            bundle_id,
+            &format!("skills/{name}/SKILL"),
+            name,
+            "human-reviewed",
+            "Use it.",
+        );
+        r.path = format!("skills/{name}/SKILL.md");
+        r.concept_type = Some("Skill".to_owned());
+        r.bytes = format!("---\nname: {name}\ndescription: d\n---\n# Use\n").into_bytes();
+        r.package = Some(PackageRecord {
+            name: name.to_owned(),
+            root: format!("skills/{name}"),
+            hash: "p".repeat(64),
+            resources: vec![
+                ResourceFile {
+                    concept_id: format!("skills/{name}/scripts/run.sh"),
+                    class: "script".to_owned(),
+                    path: "scripts/run.sh".to_owned(),
+                    sha256: "s".repeat(64),
+                    file_hash: "fs".to_owned(),
+                    bytes: b"#!/bin/sh\necho run\n".to_vec(),
+                },
+                ResourceFile {
+                    concept_id: format!("skills/{name}/assets/logo.png"),
+                    class: "asset".to_owned(),
+                    path: "assets/logo.png".to_owned(),
+                    sha256: "a".repeat(64),
+                    file_hash: "fa".to_owned(),
+                    bytes: b"\x89PNG\r\n\x1a\n".to_vec(),
+                },
+            ],
+        });
+        r
     }
 
     fn options(target: Target) -> BuildOptions {
@@ -1545,5 +1811,314 @@ mod tests {
         assert!(yaml.contains("targets: [cursor]\ncomponents: [mcp]\n"));
         assert!(yaml.contains("  trust: verified-only\n"));
         assert!(yaml.contains("  - { bundle_ids: [2], types: [\"Runbook\"], tags: [\"ops\"], query: \"failover\", limit: 50 }\n"));
+    }
+
+    #[test]
+    fn a_skill_package_is_copied_whole_beside_the_knowledge_skill() {
+        // Arrange: one document and one package.
+        let records = vec![
+            record(1, "runbooks/a", "Alpha", "human-reviewed", "Do A."),
+            package_record(1, "deploy"),
+        ];
+
+        // Act
+        let plugin = assemble(
+            &options(Target::ClaudeCode),
+            &selection(),
+            &snapshot(),
+            &records,
+        )
+        .expect("assembles");
+
+        // Assert: the package lands under its own name with every file
+        // byte-identical, scripts executable, and the index links to it.
+        let paths: Vec<(&str, bool)> = plugin
+            .files
+            .iter()
+            .map(|f| (f.path.as_str(), f.executable))
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                (".claude/skills/ops-runbooks/SKILL.md", false),
+                (
+                    ".claude/skills/ops-runbooks/references/runbooks/a.md",
+                    false
+                ),
+                (".claude/skills/deploy/SKILL.md", false),
+                (".claude/skills/deploy/scripts/run.sh", true),
+                (".claude/skills/deploy/assets/logo.png", false),
+                (MANIFEST_FILE, false),
+                (LOCK_FILE, false),
+            ]
+        );
+        assert_eq!(plugin.package_count, 1);
+        assert_eq!(plugin.files[2].bytes, records[1].bytes);
+        assert_eq!(plugin.files[3].bytes, b"#!/bin/sh\necho run\n");
+        let index = String::from_utf8(plugin.files[0].bytes.clone()).expect("utf-8");
+        assert!(index.contains("## Skills"));
+        assert!(index.contains("- [deploy](../deploy/SKILL.md) \u{2014} human-reviewed. About deploy. (1 script, 1 reference) `(1:skills/deploy/SKILL)`"), "{index}");
+        let lock: serde_json::Value = serde_json::from_slice(&plugin.files[6].bytes).expect("json");
+        let entries = lock["entries"].as_array().expect("entries");
+        assert_eq!(entries.len(), 4);
+        assert_eq!(entries[1]["package_hash"], "p".repeat(64));
+        assert_eq!(entries[1]["package_directory"], "deploy");
+        assert_eq!(entries[1]["file_hash"], "ff", "the manifest's own hash");
+        assert_eq!(entries[2]["concept_id"], "skills/deploy/scripts/run.sh");
+        assert_eq!(entries[2]["package_concept_id"], "skills/deploy/SKILL");
+        assert_eq!(
+            entries[2]["file_hash"], "fs",
+            "a member's own hash, not the manifest's"
+        );
+        assert_eq!(entries[2]["content_sha256"], plugin.files[3].sha256);
+    }
+
+    #[test]
+    fn packages_go_under_the_knowledge_tree_for_other_shapes() {
+        // Arrange
+        let records = vec![package_record(1, "deploy")];
+
+        // Act
+        let agents = assemble(
+            &options(Target::AgentsMd),
+            &selection(),
+            &snapshot(),
+            &records,
+        )
+        .expect("assembles");
+        let generic = assemble(
+            &options(Target::Generic),
+            &selection(),
+            &snapshot(),
+            &records,
+        )
+        .expect("assembles");
+
+        // Assert
+        let agents_paths: Vec<&str> = agents.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            agents_paths[..4],
+            [
+                "AGENTS.md",
+                "knowledge/skills/deploy/SKILL.md",
+                "knowledge/skills/deploy/scripts/run.sh",
+                "knowledge/skills/deploy/assets/logo.png",
+            ]
+        );
+        let agents_md = String::from_utf8(agents.files[0].bytes.clone()).expect("utf-8");
+        assert!(
+            agents_md.contains("[deploy](knowledge/skills/deploy/SKILL.md)"),
+            "{agents_md}"
+        );
+        let generic_paths: Vec<&str> = generic.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(generic_paths[1], "okf-knowledge/skills/deploy/SKILL.md");
+        let index = String::from_utf8(generic.files[0].bytes.clone()).expect("utf-8");
+        assert!(
+            index.contains("[deploy](skills/deploy/SKILL.md)"),
+            "{index}"
+        );
+    }
+
+    #[test]
+    fn package_directories_never_collide_with_each_other_or_the_plugin() {
+        // Arrange: two packages named alike in different bundles, and one
+        // named like the plugin itself.
+        let mut clash = package_record(2, "deploy");
+        clash.bundle_name = "bundle-2".to_owned();
+        let mut same_as_plugin = package_record(1, "ops-runbooks");
+        same_as_plugin.concept_id = "skills/ops-runbooks/SKILL".to_owned();
+        let records = vec![package_record(1, "deploy"), clash, same_as_plugin];
+
+        // Act
+        let plugin = assemble(
+            &options(Target::ClaudeCode),
+            &selection(),
+            &snapshot(),
+            &records,
+        )
+        .expect("assembles");
+
+        // Assert
+        let manifests: Vec<&str> = plugin
+            .files
+            .iter()
+            .map(|f| f.path.as_str())
+            .filter(|p| p.ends_with("/SKILL.md"))
+            .collect();
+        assert_eq!(
+            manifests,
+            [
+                ".claude/skills/ops-runbooks/SKILL.md",
+                ".claude/skills/deploy/SKILL.md",
+                ".claude/skills/deploy-2/SKILL.md",
+                ".claude/skills/ops-runbooks-1/SKILL.md",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_standalone_script_lands_in_the_scripts_directory_executable() {
+        // Arrange: a script selected without its package.
+        use crate::selection::ResourceRecord;
+        let mut script = record(
+            1,
+            "skills/deploy/scripts/run.sh",
+            "run.sh",
+            "unverified",
+            "",
+        );
+        script.path = "skills/deploy/scripts/run.sh".to_owned();
+        script.concept_type = Some("Script".to_owned());
+        script.bytes = b"#!/bin/sh\necho run\n".to_vec();
+        script.resource = Some(ResourceRecord {
+            class: "script".to_owned(),
+            source_path: "scripts/run.sh".to_owned(),
+            package_concept_id: "skills/deploy/SKILL".to_owned(),
+            sha256: "s".repeat(64),
+        });
+        let records = vec![
+            record(1, "runbooks/a", "Alpha", "human-reviewed", "Do A."),
+            script,
+        ];
+
+        // Act
+        let plugin = assemble(
+            &options(Target::ClaudeCode),
+            &selection(),
+            &snapshot(),
+            &records,
+        )
+        .expect("assembles");
+
+        // Assert
+        let script_file = plugin
+            .files
+            .iter()
+            .find(|f| f.path.ends_with("run.sh"))
+            .expect("the script is written");
+        assert_eq!(
+            script_file.path,
+            ".claude/skills/ops-runbooks/scripts/skills/deploy/scripts/run.sh"
+        );
+        assert!(script_file.executable);
+        assert_eq!(plugin.package_count, 0);
+        // The index links to where the script was written, not to references/.
+        let index = String::from_utf8(plugin.files[0].bytes.clone()).expect("utf-8");
+        assert!(
+            index.contains("[run.sh](scripts/skills/deploy/scripts/run.sh)"),
+            "{index}"
+        );
+        let lock: serde_json::Value =
+            serde_json::from_slice(&plugin.files.last().unwrap().bytes).expect("json");
+        let entry = lock["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["concept_id"] == "skills/deploy/scripts/run.sh")
+            .expect("the script has a lock entry");
+        assert_eq!(entry["package_concept_id"], "skills/deploy/SKILL");
+    }
+
+    #[test]
+    fn same_bundle_same_name_packages_and_long_names_get_bounded_directories() {
+        // Arrange: two packages in one bundle whose manifests declare the same
+        // name (different directories), one of them 64 characters long.
+        let long = "a".repeat(NAME_MAX);
+        let mut first = package_record(1, &long);
+        first.concept_id = "skills/first/SKILL".to_owned();
+        let mut second = package_record(1, &long);
+        second.concept_id = "skills/second/SKILL".to_owned();
+        let records = vec![first, second];
+
+        // Act
+        let plugin = assemble(
+            &options(Target::ClaudeCode),
+            &selection(),
+            &snapshot(),
+            &records,
+        )
+        .expect("assembles");
+
+        // Assert: the second directory is suffixed and still a valid name.
+        let dirs: Vec<&str> = plugin
+            .files
+            .iter()
+            .filter(|f| f.path.ends_with("/SKILL.md"))
+            .filter_map(|f| f.path.strip_prefix(".claude/skills/"))
+            .map(|rest| rest.split('/').next().unwrap())
+            .collect();
+        assert_eq!(dirs[1], long);
+        assert_eq!(dirs[2], format!("{}-1", "a".repeat(NAME_MAX - 2)));
+        assert!(dirs[2].len() <= NAME_MAX);
+        let index = String::from_utf8(plugin.files[0].bytes.clone()).expect("utf-8");
+        assert!(index.contains("(installed as `"), "{index}");
+    }
+
+    #[test]
+    fn prompt_bundles_never_inline_binary_bytes() {
+        // Arrange: a standalone binary asset beside a document.
+        use crate::selection::ResourceRecord;
+        let mut asset = record(
+            1,
+            "skills/deploy/assets/logo.png",
+            "logo.png",
+            "unverified",
+            "",
+        );
+        asset.path = "skills/deploy/assets/logo.png".to_owned();
+        asset.concept_type = Some("Reference".to_owned());
+        asset.bytes = b"\x89PNG\r\n\x1a\n\xff\xfe".to_vec();
+        asset.resource = Some(ResourceRecord {
+            class: "asset".to_owned(),
+            source_path: "assets/logo.png".to_owned(),
+            package_concept_id: "skills/deploy/SKILL".to_owned(),
+            sha256: String::new(),
+        });
+        let records = vec![
+            record(1, "runbooks/a", "Alpha", "human-reviewed", "Do A."),
+            asset,
+        ];
+
+        // Act
+        let plugin = assemble(
+            &options(Target::Ollama),
+            &selection(),
+            &snapshot(),
+            &records,
+        )
+        .expect("assembles");
+
+        // Assert
+        let prompt = plugin
+            .files
+            .iter()
+            .find(|f| f.path.ends_with("system-prompt.md"))
+            .expect("prompt exists");
+        let text = String::from_utf8(prompt.bytes.clone()).expect("the prompt is UTF-8");
+        assert!(text.contains("## Alpha"));
+        assert!(!text.contains("logo.png"), "{text}");
+        assert!(text.contains("1 of 2 documents inlined"));
+    }
+
+    #[test]
+    fn tree_paths_neutralise_colons() {
+        // Arrange / Act / Assert
+        assert_eq!(
+            tree_path("references/a:b.txt").unwrap(),
+            "references/a_b.txt"
+        );
+    }
+
+    #[test]
+    fn relative_prefix_climbs_out_of_the_index_directory() {
+        // Arrange / Act / Assert
+        assert_eq!(relative_prefix(".claude/skills/x", ".claude/skills"), "../");
+        assert_eq!(relative_prefix("", "knowledge/skills"), "knowledge/skills/");
+        assert_eq!(
+            relative_prefix("okf-knowledge", "okf-knowledge/skills"),
+            "skills/"
+        );
+        assert_eq!(relative_prefix("a/b", "a/b"), "");
+        assert_eq!(relative_prefix("a/b", "c"), "../../c/");
     }
 }

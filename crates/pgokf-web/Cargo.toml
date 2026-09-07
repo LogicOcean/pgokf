@@ -28,10 +28,10 @@ axum = { version = "0.8", default-features = false, features = [
 ] }
 clap = { version = "4.5", features = ["derive", "env"] }
 deadpool-postgres = "0.14"
-okf-parser = { version = "=0.1.16", path = "../okf-parser" }
-pgokf-companion = { version = "=0.1.16", path = "../pgokf-companion", features = ["embeddings"] }
-pgokf-pgconn = { version = "=0.1.16", path = "../pgokf-pgconn" }
-pgokf-workspace = { version = "=0.1.16", path = "../pgokf-workspace" }
+okf-parser = { version = "=0.2.0", path = "../okf-parser" }
+pgokf-companion = { version = "=0.2.0", path = "../pgokf-companion", features = ["embeddings"] }
+pgokf-pgconn = { version = "=0.2.0", path = "../pgokf-pgconn" }
+pgokf-workspace = { version = "=0.2.0", path = "../pgokf-workspace" }
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 serde.workspace = true
 serde_json.workspace = true

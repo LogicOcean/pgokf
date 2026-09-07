@@ -1,5 +1,5 @@
 comment = 'Materialized PostgreSQL catalog for Open Knowledge Format bundles'
-default_version = '0.1.16'
+default_version = '0.2.0'
 module_pathname = '$libdir/pgokf'
 relocatable = false
 superuser = true

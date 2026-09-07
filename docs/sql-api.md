@@ -71,6 +71,9 @@ exercised against a live PostgreSQL 18 cluster.
 | `export_parquet(bundle_id, dest_dir)` | `export_result` | VOLATILE | DEFINER | `pgokf_admin` |
 | `get_concept_source(bundle_id, concept_id)` | `bytea` | STABLE | DEFINER | `pgokf_reader` |
 | `export_sources(bundle_id, dest_dir)` | `export_result` | VOLATILE | DEFINER | `pgokf_admin` |
+| `get_skill(bundle_id, concept_id)` | `skill_result` | STABLE | DEFINER | `pgokf_reader` |
+| `get_script(bundle_id, concept_id)` | `script_result` | STABLE | DEFINER | `pgokf_reader` |
+| `get_reference(bundle_id, concept_id, include_bytes)` | `reference_result` | STABLE | DEFINER | `pgokf_reader` |
 
 `register_bundle`, `concept_search`, `search_facets`, `find_similar`,
 `concept_search_semantic`, `concept_search_hybrid`, `concept_neighbors`,
@@ -1123,6 +1126,79 @@ FROM pgokf.export_sources(1, '/srv/okf-rebuild/sample');
 
 ---
 
+## Skill packages (exact retrieval)
+
+Since 0.2.0 a bundle may carry [Agent Skills](https://agentskills.io/)
+packages: a directory with a `SKILL.md` and optional `scripts/`,
+`references/`, and `assets/`. The sync projects the manifest as a virtual
+`type: Skill` concept (title = `name`, description, the `tags` extension,
+the complete frontmatter under `concept_metadata.agent_skill`) and every
+resource as a virtual `Script` (UTF-8 files below `scripts/`) or
+`Reference` (anything below `references/` or `assets/`) concept whose id is
+its full path, then keeps their **exact bytes** in `pgokf.skills`,
+`pgokf.scripts`, and `pgokf.reference_documents` regardless of
+`store_source`, so a workspace plugin can be rebuilt byte for byte. Package
+membership is projected into `pgokf.links` (`link_kind = 'package'`,
+`link_relation` `USES` for a script and `REFERENCES` for a reference or
+asset), and the manifest's own Markdown links to those files carry the
+same relations. Editing, adding, or removing any member re-projects the
+skill (its `package_hash` changes) even when `SKILL.md` is unchanged.
+
+The three readers are `STABLE STRICT`, `SECURITY DEFINER`, reader-level,
+tenant-scoped (a foreign tenant's package raises the same `22023` as an
+unknown one), and audited: each successful read appends a `get_skill` /
+`get_script` / `get_reference` row to the access log.
+
+Links resolve by path as well as by id: a Markdown link from any document to
+`skills/deploy/references/guide.md` names the package reference (whose id
+keeps the `.md`) and resolves to it, and `reresolve_bundle` retargets such
+edges when a `SKILL.md` appears or disappears beside the file. A resource
+that moves between packages (a nested `SKILL.md` came or went) is
+re-projected under its new owner, and both owners' package hashes change.
+
+### `pgokf.get_skill(bundle_id bigint, concept_id text) → pgokf.skill_result`
+
+One package: name, description, `package_root` (the manifest's directory,
+`''` for a bundle that is one package), `package_hash`, `file_hash`,
+`visibility`, the complete original frontmatter (`agent_skill`), the exact
+`SKILL.md` bytes (`skill_md`), and `resources`, a JSON array ordered by path
+of `{concept_id, class (script|reference|asset), path, byte_size, sha256,
+language | media_type}`.
+
+```sql
+SELECT s.name, s.package_root, jsonb_array_length(s.resources) AS files,
+       convert_from(s.skill_md, 'UTF8') AS manifest
+FROM pgokf.get_skill(1, 'skills/deploy/SKILL') AS s;
+```
+
+### `pgokf.get_script(bundle_id bigint, concept_id text) → pgokf.script_result`
+
+One script's exact bytes (`exact_bytes`, never `body_text`) with its
+`language` (from the shebang first, the extension second, else `unknown`),
+`source_path` (package-relative), `package_concept_id`, `byte_size`,
+`executable_sha256`, and the declared `runtime` (`{"executable": ...}`
+from the shebang), `arguments`, and `exit_codes` when known.
+
+```sql
+SELECT convert_from((pgokf.get_script(1, 'skills/deploy/scripts/check.sh')).exact_bytes, 'UTF8');
+```
+
+### `pgokf.get_reference(bundle_id bigint, concept_id text, include_bytes boolean DEFAULT true) → pgokf.reference_result`
+
+One reference or asset: `format` and `media_type` (verified magic bytes
+first, then the extension, then whether the bytes are UTF-8), `source_path`,
+`package_concept_id`, `byte_size`, `content_sha256`, `text_body` when the
+file is textual, and `exact_bytes` unless `include_bytes` is `false`. Every successful call is audited (a textual
+reference's `text_body` is its whole content); a call without the bytes is
+logged with the detail `metadata`.
+
+```sql
+SELECT r.media_type, r.byte_size, r.exact_bytes IS NULL AS metadata_only
+FROM pgokf.get_reference(1, 'skills/deploy/assets/logo.png', false) AS r;
+```
+
+---
+
 ## Composite types
 
 ### `pgokf.bundle_sync_result`
@@ -1533,6 +1609,63 @@ bundle on disk with `pgokf.export_sources`.
 SELECT concept_id, byte_size FROM pgokf.concept_source
 WHERE bundle_id = 1 ORDER BY concept_id;
 ```
+
+### `pgokf.skills`
+
+Exact projection of every Agent Skills manifest (one row per `type: Skill`
+concept), kept whether or not `store_source` is on. Reader-`SELECT`able;
+retrieve through `pgokf.get_skill`.
+
+| Column | Type | Notes |
+| ------ | ---- | ----- |
+| `bundle_id` / `concept_id` | `bigint` / `text` | `NOT NULL`, FK to `pgokf.concepts` `ON DELETE CASCADE`. |
+| `visibility` | `text` | `public` / `internal` / `private`; the frontmatter's `visibility` when it declares one, else `internal`. |
+| `agent_skill` | `jsonb` | The complete original frontmatter, never rewritten. |
+| `skill_md` | `bytea` | The exact `SKILL.md` bytes (`lz4` where available). |
+| `package_root` | `text` | The manifest's bundle-relative directory (`''` for a root package). |
+| `package_hash` | `text` | BLAKE3 over the classifier version, the manifest's file hash, and every member's class, package-relative path, and hash. |
+| `source_file_hash` | `text` | Equals `pgokf.concepts.file_hash`. |
+| `tenant_id` | `text` | `NOT NULL DEFAULT 'default'` - RLS discriminator. |
+
+### `pgokf.scripts`
+
+Exact projection of every UTF-8 file below a package's `scripts/` (one row
+per virtual `type: Script` concept; a binary there is a malformed file
+under the strict policy, skipped under warn). Reader-`SELECT`able;
+retrieve through `pgokf.get_script`.
+
+| Column | Type | Notes |
+| ------ | ---- | ----- |
+| `bundle_id` / `concept_id` | `bigint` / `text` | `NOT NULL`, FK to `pgokf.concepts` `ON DELETE CASCADE`. |
+| `language` | `text` | `NOT NULL` - shebang first, extension second, else `unknown`. |
+| `visibility` | `text` | Inherited from the owning skill. |
+| `author` / `origin` / `license` / `arguments` / `exit_codes` | `jsonb` / `text` | `NULL` for a discovered helper (reserved for package metadata). |
+| `runtime` | `jsonb` | `{"executable": "<shebang command>"}` or `NULL`. |
+| `exact_bytes` / `byte_size` / `executable_sha256` | `bytea` / `bigint` / `text` | The authoritative payload and its identity. |
+| `source_path` / `package_concept_id` | `text` | Package-relative path and the owning skill's concept id. |
+| `source_file_hash` | `text` | Equals `pgokf.concepts.file_hash`. |
+| `script_tsv` | `tsvector` | Type-specific search vector over the script text. |
+| `tenant_id` | `text` | `NOT NULL DEFAULT 'default'` - RLS discriminator. |
+
+### `pgokf.reference_documents`
+
+Exact projection of every file below a package's `references/` or `assets/`
+(one row per virtual `type: Reference` concept), text or binary.
+Reader-`SELECT`able; retrieve through `pgokf.get_reference`.
+
+| Column | Type | Notes |
+| ------ | ---- | ----- |
+| `bundle_id` / `concept_id` | `bigint` / `text` | `NOT NULL`, FK to `pgokf.concepts` `ON DELETE CASCADE`. |
+| `visibility` | `text` | Inherited from the owning skill. |
+| `format` / `media_type` | `text` | Canonical format (`markdown`, `text`, `json`, `yaml`, `csv`, `toml`, `html`, `xml`, `pdf`, `image`, `binary`) and IANA media type. |
+| `author` / `origin` / `license` | `jsonb` / `text` | `NULL` for a discovered file. |
+| `exact_bytes` / `byte_size` / `content_sha256` | `bytea` / `bigint` / `text` | The authoritative payload and its identity. |
+| `text_body` | `text` | The bytes as UTF-8 when the file is textual; `NULL` for a binary asset. |
+| `extracted_text` / `extraction` | `text` / `jsonb` | Reserved for an optional extractor; `NULL`. |
+| `source_path` / `package_concept_id` | `text` | Package-relative path (`references/...` or `assets/...`) and the owning skill's concept id. |
+| `source_file_hash` | `text` | Equals `pgokf.concepts.file_hash`. |
+| `reference_tsv` | `tsvector` | Type-specific search vector over `text_body`; `NULL` for a binary. |
+| `tenant_id` | `text` | `NOT NULL DEFAULT 'default'` - RLS discriminator. |
 
 ### `pgokf.concept_history`
 

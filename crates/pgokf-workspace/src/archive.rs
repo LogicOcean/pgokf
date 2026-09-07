@@ -178,6 +178,7 @@ mod tests {
                 executable: false,
             }],
             concept_count: 0,
+            package_count: 0,
             concepts: Vec::new(),
         }
     }

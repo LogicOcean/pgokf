@@ -34,7 +34,7 @@ pub struct Frontmatter {
     pub metadata: Map<String, Value>,
 }
 
-/// Split and deserialize a leading `---`-delimited YAML block.
+/// Split a leading `---`-delimited YAML block from the Markdown body.
 ///
 /// `path` is the normalized bundle-relative path of the file being parsed; it
 /// is attached to every error for per-file diagnostics.
@@ -43,19 +43,22 @@ pub struct Frontmatter {
 /// This line-based split intentionally avoids a YAML re-implementation, so a
 /// bare `---` on its own line is always treated as the closing delimiter -
 /// even when it appears inside a multiline quoted scalar. In that (rare) case
-/// the YAML block is cut short and `serde_yaml` reports an unterminated
-/// scalar, surfaced here as [`Error::InvalidFrontmatter`] whose message points
-/// at the offending line and column. Author such values on a single line or
-/// with a block scalar (`|`/`>`) to avoid the ambiguity.
+/// the YAML block is cut short and the caller's deserialization reports an
+/// unterminated scalar whose message points at the offending line and column.
+/// Author such values on a single line or with a block scalar (`|`/`>`) to
+/// avoid the ambiguity.
+///
+/// Returns the raw YAML text (without the delimiters) and the body after the
+/// closing delimiter.
 ///
 /// # Errors
-/// Returns an error for a missing delimiter, an oversized or unterminated
-/// block, invalid YAML, or metadata that cannot be represented as JSON.
-pub fn parse<'source>(
+/// Returns an error for a missing delimiter or an oversized or unterminated
+/// block.
+pub fn split<'source>(
     source: &'source str,
     path: &str,
     max_bytes: usize,
-) -> Result<(Frontmatter, &'source str)> {
+) -> Result<(&'source str, &'source str)> {
     let after_open = source
         .strip_prefix("---\n")
         .or_else(|| source.strip_prefix("---\r\n"))
@@ -96,13 +99,26 @@ pub fn parse<'source>(
             limit: max_bytes,
         });
     }
+    Ok((&after_open[..yaml_end], &after_open[body_start..]))
+}
 
-    let raw: RawFrontmatter = serde_yaml::from_str(&after_open[..yaml_end]).map_err(|source| {
-        Error::InvalidFrontmatter {
+/// Split and deserialize a leading `---`-delimited YAML block as OKF concept
+/// frontmatter (see [`split`] for the delimiter rules).
+///
+/// # Errors
+/// Returns an error for a missing delimiter, an oversized or unterminated
+/// block, invalid YAML, or metadata that cannot be represented as JSON.
+pub fn parse<'source>(
+    source: &'source str,
+    path: &str,
+    max_bytes: usize,
+) -> Result<(Frontmatter, &'source str)> {
+    let (yaml, body) = split(source, path, max_bytes)?;
+    let raw: RawFrontmatter =
+        serde_yaml::from_str(yaml).map_err(|source| Error::InvalidFrontmatter {
             path: path.to_owned(),
             source,
-        }
-    })?;
+        })?;
     let invalid_metadata = |source| Error::InvalidMetadata {
         path: path.to_owned(),
         source,
@@ -132,7 +148,7 @@ pub fn parse<'source>(
             resource,
             metadata,
         },
-        &after_open[body_start..],
+        body,
     ))
 }
 

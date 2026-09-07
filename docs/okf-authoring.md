@@ -477,6 +477,64 @@ see [the graph section of the search guide](search-guide.md#the-link-graph).
 
 ---
 
+## Skill packages: `SKILL.md` with `scripts/`, `references/`, `assets/`
+
+Since 0.2.0 a bundle may hold [Agent Skills](https://agentskills.io/)
+packages exactly as an agent harness expects them, and the catalog stores
+them so a plugin can be rebuilt byte for byte:
+
+```
+skills/deploy/
+├── SKILL.md              # name + description frontmatter, Markdown instructions
+├── scripts/check.sh      # UTF-8 executable helpers
+├── references/guide.md   # supporting documents (any extension)
+└── assets/topology.png   # anything else, text or binary
+```
+
+- The file named exactly `SKILL.md` (case-sensitive) makes its directory a
+  package. Its frontmatter is the portable Agent Skills one (`name` and
+  `description` required; `license`, `compatibility`, `metadata`,
+  `allowed-tools` optional) - **not** OKF `type`/`title`. pgokf never
+  rewrites it: it projects a virtual `type: Skill` concept whose `title` is
+  the `name`, whose `description` is the description, and whose complete
+  frontmatter lives under `concept_metadata.agent_skill`. A `tags` list in
+  the frontmatter (an unknown field the standard lets through) becomes the
+  concept's tags. Structural findings against the standard (name shape, name
+  not equal to the directory, description length) are logged as warnings,
+  never errors.
+- Every file below `scripts/`, `references/`, and `assets/` of the nearest
+  enclosing package is content whatever its extension: scripts become
+  `type: Script` concepts (UTF-8 required; a binary under `scripts/` is a
+  malformed file - move it to `assets/`), the others `type: Reference`
+  concepts. Their ids are their full bundle-relative paths, extension
+  included. A `.md` file there is stored verbatim as a reference, not parsed
+  as an OKF document. Files directly under the package directory that are
+  not Markdown are ignored; Markdown ones are ordinary documents.
+- Exact bytes, sizes, SHA-256s, the inferred language or media type, and the
+  package hash land in `pgokf.skills` / `pgokf.scripts` /
+  `pgokf.reference_documents` whether or not `store_source` is on, and are
+  read back with `get_skill`, `get_script`, and `get_reference` (audited).
+- The skill links to each member (`USES` a script, `REFERENCES` a reference
+  or asset), and its own Markdown links to `scripts/x.sh` or
+  `references/y.md` resolve to those concepts with the same relations, so
+  the graph shows the package. Any document's link to
+  `skills/deploy/references/y.md` resolves to the reference too (links
+  resolve by path as well as by id).
+- A nested `SKILL.md` starts a new package: the files below it move to the
+  nested skill, and both skills are re-projected. Members inherit the
+  skill's `visibility` (the frontmatter key, else `internal`), and a change
+  to it alone is propagated to them.
+- Editing, adding, or removing any member re-projects the skill: its
+  `package_hash` changes and it appears in the sync's change manifest even
+  when `SKILL.md` itself did not change. Removing `SKILL.md` dissolves the
+  package (its scripts and assets stop being content; a Markdown reference
+  becomes an ordinary document if it has OKF frontmatter).
+- `register_bundle_content` accepts the same layout in memory, and refuses a
+  loose non-Markdown path that no package owns rather than dropping it.
+- The `default_exclude` globs apply to package files as well; an include
+  glob selects manifests and documents, never resources (a resource is
+  selected through its manifest).
+
 ## Reserved files: `index.md` and `log.md`
 
 Two filenames are reserved at **every** directory level and are **never**
@@ -569,6 +627,10 @@ the log above projects (ordered by directory, then ordinal):
 | derived trust tier | `pgokf.concept_provenance.trust_tier` |
 | bundle-root `index.md` `okf_version` | `pgokf.bundles.okf_version` |
 | per-directory `log.md` entries | `pgokf.bundle_log` (one row per entry) |
+| a `SKILL.md` (Agent Skills manifest) | a virtual `type: Skill` concept (`title` = `name`, frontmatter under `concept_metadata.agent_skill`) **and** `pgokf.skills` (exact bytes, package hash) |
+| files below a package's `scripts/` | virtual `type: Script` concepts (id = full path) **and** `pgokf.scripts` (exact bytes) |
+| files below a package's `references/` or `assets/` | virtual `type: Reference` concepts (id = full path) **and** `pgokf.reference_documents` (exact bytes) |
+| package membership | `pgokf.links` edges (`link_kind = package`, `link_relation` `USES` / `REFERENCES`) |
 
 The search vector `body_tsv` is weighted: **title `A`**, **tags / type /
 description `B`**, **body `D`** - which is why the same query term ranks a title

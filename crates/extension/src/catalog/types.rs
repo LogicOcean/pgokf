@@ -10,8 +10,8 @@
 //! concept rows.
 
 use crate::errors::CatalogError;
-use okf_parser::ParsedConcept;
-use okf_sync::SyncReport;
+use okf_parser::{ParsedConcept, Value};
+use okf_sync::{FileClass, SyncReport};
 use pgrx::AllocatedByRust;
 use pgrx::heap_tuple::PgHeapTuple;
 use std::path::Path;
@@ -47,6 +47,91 @@ pub struct StagedConcept {
     /// parse the concept, so enabling `store_source` adds no extra filesystem
     /// I/O - only the retention of a buffer that would otherwise be dropped.
     pub raw_content: Option<Vec<u8>>,
+    /// The exact-payload projection a skill-package member carries: the
+    /// manifest's bytes and package identity, a script's bytes and language,
+    /// or a reference's bytes and media type. `None` for an ordinary OKF
+    /// document, which has no typed table.
+    pub typed: Option<TypedPayload>,
+}
+
+/// The mandatory typed projection of a staged skill-package member
+/// (specification §5.3), consumed by [`crate::catalog::packages::project`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypedPayload {
+    /// A `SKILL.md` manifest: the package root.
+    Skill(SkillPayload),
+    /// A UTF-8 executable helper below a package's `scripts/`.
+    Script(ScriptPayload),
+    /// A file below a package's `references/` or `assets/`.
+    Reference(ReferencePayload),
+}
+
+/// One file owned by a skill package, as the snapshot records it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageMember {
+    /// What the member is (a script, reference, or asset).
+    pub class: FileClass,
+    /// Normalized bundle-relative path.
+    pub path: String,
+    /// Path relative to the package root (`scripts/check.sh`).
+    pub package_path: String,
+    /// The member's concept ID (its full bundle-relative path).
+    pub concept_id: String,
+    /// Lowercase BLAKE3 digest of the member's bytes.
+    pub file_hash: String,
+}
+
+/// The typed projection of a `SKILL.md` manifest.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkillPayload {
+    /// Bundle-relative package directory (`""` for a bundle that is one package).
+    pub package_root: String,
+    /// The §9 package hash over the manifest and every owned member.
+    pub package_hash: String,
+    /// The exact `SKILL.md` bytes, kept even when `store_source` is off.
+    pub skill_md: Vec<u8>,
+    /// The complete original frontmatter.
+    pub agent_skill: Value,
+    /// Visibility (`public`, `internal`, or `private`).
+    pub visibility: String,
+    /// Every resource the package owns in this snapshot, in path order.
+    pub members: Vec<PackageMember>,
+}
+
+/// The typed projection of a package script.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScriptPayload {
+    /// The exact bytes (valid UTF-8; binaries are never scripts).
+    pub bytes: Vec<u8>,
+    /// Canonical language identifier, or `unknown`.
+    pub language: String,
+    /// The interpreter the shebang names, as `{"executable": ...}`, when any.
+    pub runtime: Option<Value>,
+    /// Package-relative path (`scripts/check.sh`).
+    pub source_path: String,
+    /// The owning skill's concept ID.
+    pub package_concept_id: String,
+    /// Visibility inherited from the owning skill.
+    pub visibility: String,
+}
+
+/// The typed projection of a package reference or asset.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReferencePayload {
+    /// The exact bytes, text or binary.
+    pub bytes: Vec<u8>,
+    /// Canonical format (`markdown`, `text`, `json`, `pdf`, or a media type).
+    pub format: String,
+    /// IANA media type.
+    pub media_type: String,
+    /// The bytes as UTF-8 text when the file is textual.
+    pub text_body: Option<String>,
+    /// Package-relative path (`references/guide.md`).
+    pub source_path: String,
+    /// The owning skill's concept ID.
+    pub package_concept_id: String,
+    /// Visibility inherited from the owning skill.
+    pub visibility: String,
 }
 
 /// One ranked hit produced by `pgokf.concept_search`, prior to being packed

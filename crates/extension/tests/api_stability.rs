@@ -38,7 +38,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The 40 stable public functions, as `(name, argument-type list)`. The pair
+/// The 43 stable public functions, as `(name, argument-type list)`. The pair
 /// renders to the exact `COMMENT ON FUNCTION pgokf.<name>(<args>)` prefix that
 /// the hardening blocks emit.
 const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
@@ -85,12 +85,15 @@ const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
     ("export_parquet", "bigint, text"),
     ("get_concept_source", "bigint, text"),
     ("export_sources", "bigint, text"),
+    ("get_skill", "bigint, text"),
+    ("get_script", "bigint, text"),
+    ("get_reference", "bigint, text, boolean"),
     ("rebuild_search_index", ""),
     ("version", ""),
     ("tenant_required", ""),
 ];
 
-/// The 14 stable public composite types.
+/// The 17 stable public composite types.
 const PUBLIC_TYPES: &[&str] = &[
     "bundle_sync_result",
     "concept_search_result",
@@ -106,12 +109,15 @@ const PUBLIC_TYPES: &[&str] = &[
     "search_facet",
     "bundle_log_entry",
     "concept_version",
+    "skill_result",
+    "script_result",
+    "reference_result",
 ];
 
-/// The 15 catalog tables, as fully-qualified `schema.table` identifiers. Eleven
-/// are public (`pgokf`); the singleton policy row and the three admin-only
-/// history/audit logs live in the `pgokf_private` schema and are documented all
-/// the same.
+/// The 18 catalog tables, as fully-qualified `schema.table` identifiers.
+/// Fourteen are public (`pgokf`); the singleton policy row and the three
+/// admin-only history/audit logs live in the `pgokf_private` schema and are
+/// documented all the same.
 const CATALOG_TABLES: &[&str] = &[
     "pgokf.bundles",
     "pgokf.concepts",
@@ -124,6 +130,9 @@ const CATALOG_TABLES: &[&str] = &[
     "pgokf.concept_embedding",
     "pgokf.bundle_log",
     "pgokf.concept_history",
+    "pgokf.skills",
+    "pgokf.scripts",
+    "pgokf.reference_documents",
     "pgokf_private.config",
     "pgokf_private.sync_log",
     "pgokf_private.sync_log_change",

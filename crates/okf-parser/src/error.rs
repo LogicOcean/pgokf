@@ -79,6 +79,14 @@ pub enum Error {
         #[source]
         source: serde_json::Error,
     },
+    /// An Agent Skills `SKILL.md` frontmatter is not a usable manifest.
+    #[error("{path}: invalid Agent Skills manifest: {reason}")]
+    InvalidSkillManifest {
+        /// Normalized bundle-relative path of the offending manifest.
+        path: String,
+        /// What is wrong with the manifest.
+        reason: String,
+    },
     /// The concept source bytes are not valid UTF-8.
     #[error("{path}: concept source is not valid UTF-8: {source}")]
     InvalidUtf8 {
@@ -132,7 +140,8 @@ impl Error {
             Self::InvalidUtf8 { .. } => ErrorCategory::Encoding,
             Self::MissingFrontmatter { .. }
             | Self::UnterminatedFrontmatter { .. }
-            | Self::InvalidFrontmatter { .. } => ErrorCategory::Frontmatter,
+            | Self::InvalidFrontmatter { .. }
+            | Self::InvalidSkillManifest { .. } => ErrorCategory::Frontmatter,
             Self::InvalidMetadata { .. } => ErrorCategory::Metadata,
             Self::EmptyPath
             | Self::AbsolutePath { .. }
@@ -158,6 +167,7 @@ impl Error {
             | Self::UnterminatedFrontmatter { path }
             | Self::InvalidFrontmatter { path, .. }
             | Self::InvalidMetadata { path, .. }
+            | Self::InvalidSkillManifest { path, .. }
             | Self::InvalidUtf8 { path, .. }
             | Self::AbsolutePath { path }
             | Self::PathTraversal { path }
