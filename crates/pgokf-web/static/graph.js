@@ -84,17 +84,22 @@
     return a && b && endId(a.source) === endId(b.source) && endId(a.target) === endId(b.target);
   }
   function linkIsLit(link) { return sameLink(link, highlightLink) || sameLink(link, hoverLink); }
+  function somethingIsLit() { return !!(highlightLink || hoverLink); }
+  // The lit link's own colour; the rest fade back while one is lit.
+  function linkColorFor(link, plain) {
+    if (linkIsLit(link)) return cssVar('--graph-glow', '#5c93f5');
+    return somethingIsLit() ? cssVar('--graph-link-dim', '#c9cfd8') : plain;
+  }
   function nodeIsLit(node) {
     var l = highlightLink || hoverLink;
     return !!l && (endId(l.source) === node.id || endId(l.target) === node.id);
   }
-  // Re-run the colour, width, size, and particle accessors so a highlight
-  // change is drawn.
+  // Re-run the colour, width, and size accessors so a highlight change is
+  // drawn.
   function repaint() {
     if (!graph) return;
     graph.linkColor(graph.linkColor());
     graph.linkWidth(graph.linkWidth());
-    graph.linkDirectionalParticles(graph.linkDirectionalParticles());
     graph.nodeColor(graph.nodeColor());
     graph.nodeVal(graph.nodeVal());
     labels.forEach(function (el, id) {
@@ -491,15 +496,12 @@
       })
       .nodeResolution(16)
       .nodeOpacity(0.95)
-      // A lit link glows: a wide pale halo in the accent tint (nothing like
-      // a node colour) with bright particles running along it.
-      .linkColor(function (l) { return linkIsLit(l) ? cssVar('--graph-glow', '#9cc2ff') : colors.link; })
-      .linkOpacity(0.6)
-      .linkWidth(function (l) { return (linkIsLit(l) ? 5 : 0) + Math.min(3, (touch ? 1.2 : 0.5) + l.count * 0.5); })
-      .linkDirectionalParticles(function (l) { return linkIsLit(l) ? 6 : 0; })
-      .linkDirectionalParticleWidth(3.2)
-      .linkDirectionalParticleSpeed(0.012)
-      .linkDirectionalParticleColor(function () { return cssVar('--graph-glow-core', '#ffffff'); })
+      // A lit link glows: a wide halo, and every other link recedes, so the
+      // highlight reads by contrast rather than by hue and never looks like
+      // one of the node colours. Nothing moves.
+      .linkColor(function (l) { return linkColorFor(l, colors.link); })
+      .linkOpacity(0.75)
+      .linkWidth(function (l) { return (linkIsLit(l) ? 6 : 0) + Math.min(3, (touch ? 1.2 : 0.5) + l.count * 0.5); })
       .linkHoverPrecision(touch ? 8 : 4)
       .linkDirectionalArrowLength(4)
       .linkDirectionalArrowRelPos(1)
@@ -528,7 +530,7 @@
       var next = palette();
       graph.backgroundColor(next.background);
       graph.nodeColor(function (n) { return colorFor(n, next); });
-      graph.linkColor(function (l) { return linkIsLit(l) ? cssVar('--graph-glow', '#9cc2ff') : next.link; });
+      graph.linkColor(function (l) { return linkColorFor(l, next.link); });
       renderLegend();
     }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
   }
