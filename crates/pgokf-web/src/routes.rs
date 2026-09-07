@@ -734,9 +734,6 @@ pub(crate) struct MetadataRow {
 /// information on the links tab, so only other relations are shown.
 const DEFAULT_RELATION: &str = "reference";
 
-/// Label for concepts that sit directly in the bundle root.
-const TOP_LEVEL_DIRECTORY: &str = "top level";
-
 /// Where a link edge points, as the links tab shows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LinkState {
@@ -845,12 +842,6 @@ fn group_links(links: &[Link], direction: LinkDirection, self_id: &str) -> Vec<L
     groups
 }
 
-/// Concepts of one directory inside a bundle.
-pub(crate) struct DirGroup {
-    pub directory: String,
-    pub concepts: Vec<ConceptSummary>,
-}
-
 // ---------------------------------------------------------------------------
 // Templates
 // ---------------------------------------------------------------------------
@@ -902,7 +893,7 @@ struct BundlesPage {
 struct BundlePage {
     shell: Shell,
     bundle: BundleInfo,
-    groups: Vec<DirGroup>,
+    concepts: Vec<ConceptSummary>,
     page_size: usize,
     shown: usize,
     /// Link to the next page of concepts, when the bundle has more.
@@ -1526,28 +1517,6 @@ async fn bundles_page(State(app): State<Shared>) -> PageResult {
     })
 }
 
-fn group_by_directory(concepts: Vec<ConceptSummary>) -> Vec<DirGroup> {
-    let mut groups: BTreeMap<String, Vec<ConceptSummary>> = BTreeMap::new();
-    for c in concepts {
-        let directory = c
-            .path
-            .rsplit_once('/')
-            .map_or(TOP_LEVEL_DIRECTORY, |(dir, _)| dir)
-            .to_owned();
-        groups.entry(directory).or_default().push(c);
-    }
-    // The bundle root comes first, then subdirectories alphabetically.
-    let top = groups.remove(TOP_LEVEL_DIRECTORY);
-    top.into_iter()
-        .map(|concepts| (TOP_LEVEL_DIRECTORY.to_owned(), concepts))
-        .chain(groups)
-        .map(|(directory, concepts)| DirGroup {
-            directory,
-            concepts,
-        })
-        .collect()
-}
-
 /// Concepts listed per bundle page; larger bundles page by path.
 const BUNDLE_PAGE: usize = 500;
 
@@ -1584,14 +1553,13 @@ async fn bundle_page(
         })
         .flatten();
     let shown = concepts.len();
-    let groups = group_by_directory(concepts);
     let sync_log = app.db.sync_log(Some(id), 20).await?;
     let bundle_log = app.db.bundle_log(id, 50).await?;
     let title = bundle.name.clone();
     html(&BundlePage {
         shell: Shell::new(&app, &title, "bundles"),
         bundle,
-        groups,
+        concepts,
         page_size: BUNDLE_PAGE,
         shown,
         next_url,
@@ -3687,33 +3655,6 @@ mod tests {
             odd,
             "attachment; filename=\"caf___quoted_.md\"; filename*=UTF-8''caf%C3%A9%20%22quoted%22.md"
         );
-    }
-
-    #[test]
-    fn group_by_directory_labels_root_concepts_top_level() {
-        // Arrange
-        let mk = |path: &str| ConceptSummary {
-            bundle_id: 1,
-            concept_id: path.trim_end_matches(".md").to_owned(),
-            path: path.to_owned(),
-            concept_type: None,
-            title: None,
-            description: None,
-            tags: Vec::new(),
-            modified_at: None,
-        };
-
-        // Act
-        let groups = group_by_directory(vec![
-            mk("index.md"),
-            mk("runbooks/a.md"),
-            mk("runbooks/b.md"),
-        ]);
-
-        // Assert
-        assert_eq!(groups[0].directory, TOP_LEVEL_DIRECTORY);
-        assert_eq!(groups[1].directory, "runbooks");
-        assert_eq!(groups[1].concepts.len(), 2);
     }
 
     #[test]

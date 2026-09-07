@@ -14,25 +14,30 @@
 
 <section class="panel">
   <div class="panel-head"><h2>Concepts <span class="muted">({% if continued || next_url.is_some() %}{{ shown }} of {{ bundle.file_count }} files{% else %}{{ shown }}{% endif %})</span></h2>
-    <input type="search" class="filter-input js-only" placeholder="Filter by title or path" data-filter="#pgokf-tree" aria-label="Filter concepts"></div>
+    <input type="search" class="filter-input js-only" placeholder="Filter by path, title, type, or tag" data-filter="#pgokf-concepts" aria-label="Filter concepts"></div>
   {% if continued %}<p class="muted small">Continued: concepts after the previous page. <a href="/bundles/{{ bundle.id }}">Start over</a>.</p>{% endif %}
-  {% if groups.is_empty() %}<p class="empty">{% if continued %}No more concepts.{% else %}This bundle has no concepts.{% endif %}</p>{% else %}
-  <div id="pgokf-tree" class="tree">
-  {% for g in groups %}
-    <details open>
-      <summary><span class="dir">{{ g.directory }}</span> <span class="muted small">{{ g.concepts.len() }}</span></summary>
-      <ul class="concept-list">
-      {% for c in g.concepts %}
-        <li data-filter-text="{{ c.title.as_deref().unwrap_or("") }} {{ c.path }}">
-          <a href="/concepts/{{ c.bundle_id }}/{{ c.concept_id|urlencode_path }}"><strong>{{ c.title.as_deref().unwrap_or(c.concept_id.as_str()) }}</strong></a>
-          {% if let Some(t) = c.concept_type %}<span class="pill type">{{ t }}</span>{% endif %}
-          {% if let Some(d) = c.description %}<span class="muted"> — {{ d }}</span>{% endif %}
-          {% if !c.tags.is_empty() %}<span class="tags">{% for t in c.tags %}<span class="tag">{{ t }}</span>{% endfor %}</span>{% endif %}
-        </li>
-      {% endfor %}
-      </ul>
-    </details>
-  {% endfor %}
+  {% if concepts.is_empty() %}<p class="empty">{% if continued %}No more concepts.{% else %}This bundle has no concepts.{% endif %}</p>{% else %}
+  <div class="table-wrap">
+  <table class="table" id="pgokf-concepts" data-sortable>
+    <thead><tr>
+      <th data-sort="text" aria-sort="ascending">Path</th>
+      <th data-sort="text">Title</th>
+      <th data-sort="text">Type</th>
+      <th data-sort="text">Tags</th>
+      <th data-sort="text">Modified</th>
+    </tr></thead>
+    <tbody>
+    {% for c in concepts %}
+      <tr data-filter-text="{{ c.title.as_deref().unwrap_or("") }} {{ c.path }} {{ c.concept_type.as_deref().unwrap_or("") }} {{ c.tags.join(" ") }}">
+        <td class="path"><a href="/concepts/{{ c.bundle_id }}/{{ c.concept_id|urlencode_path }}">{{ c.path }}</a></td>
+        <td><strong>{{ c.title.as_deref().unwrap_or(c.concept_id.as_str()) }}</strong>{% if let Some(d) = c.description %}<span class="desc" title="{{ d }}">{{ d }}</span>{% endif %}</td>
+        <td>{% if let Some(t) = c.concept_type %}<span class="pill type">{{ t }}</span>{% endif %}</td>
+        <td>{% for t in c.tags %}<span class="tag">{{ t }}</span>{% endfor %}</td>
+        <td class="when" data-value="{{ c.modified_at.as_deref().unwrap_or("") }}">{% if let Some(m) = c.modified_at %}{{ m|datetime }}{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
   </div>
   {% if let Some(next) = next_url %}<div class="more"><a class="btn" href="{{ next }}">Next {{ page_size }} concepts</a></div>{% endif %}
   {% endif %}

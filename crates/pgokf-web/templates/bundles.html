@@ -1,25 +1,43 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>Bundles</h1>
+<section class="hero">
+  <div>
+    <h1>Bundles</h1>
+    <p class="lede">Every registered bundle: its state, what has been indexed from it, and when it was last synced. Click a heading to sort, or type to filter.</p>
+  </div>
+</section>
 {% if stats.is_empty() %}
 <p class="empty">No bundles are registered yet.</p>
 {% else %}
-<div class="cards">
-{% for s in stats %}
-  <article class="card bundle">
-    <div class="card-head">
-      <h2><a href="/bundles/{{ s.bundle_id }}">{{ s.name }}</a></h2>
-      {% if s.retired_at.is_some() %}<span class="pill muted">retired</span>{% else if !s.enabled %}<span class="pill warn">disabled</span>{% else if s.is_stale %}<span class="pill warn">stale</span>{% else %}<span class="pill ok">active</span>{% endif %}
-    </div>
-    <dl class="kv">
-      <dt>Concepts</dt><dd>{{ s.indexed_concepts }}</dd>
-      <dt>Links</dt><dd>{{ s.resolved_link_count }} resolved of {{ s.link_count }}</dd>
-      <dt>Files</dt><dd>{{ s.file_count }}</dd>
-      <dt>Source</dt><dd>{{ s.source_type }}</dd>
-      <dt>Last sync</dt><dd>{{ s.last_synced_at.as_deref().unwrap_or("never")|datetime }}</dd>
-    </dl>
-  </article>
-{% endfor %}
-</div>
+<section class="panel">
+  <div class="panel-head"><h2>Registered bundles <span class="muted">({{ stats.len() }})</span></h2>
+    <input type="search" class="filter-input js-only" placeholder="Filter by name, source, or state" data-filter="#pgokf-bundles" aria-label="Filter bundles"></div>
+  <div class="table-wrap">
+  <table class="table" id="pgokf-bundles" data-sortable>
+    <thead><tr>
+      <th data-sort="text" aria-sort="ascending">Bundle</th>
+      <th data-sort="text">State</th>
+      <th class="num" data-sort="num">Concepts</th>
+      <th class="num" data-sort="num">Files</th>
+      <th class="num" data-sort="num">Links resolved</th>
+      <th data-sort="text">Source</th>
+      <th data-sort="text">Last sync</th>
+    </tr></thead>
+    <tbody>
+    {% for s in stats %}
+      <tr data-filter-text="{{ s.name }} {{ s.source_type }} {% if s.retired_at.is_some() %}retired{% else if !s.enabled %}disabled{% else if s.is_stale %}stale{% else %}active{% endif %}">
+        <td><a href="/bundles/{{ s.bundle_id }}"><strong>{{ s.name }}</strong></a></td>
+        <td>{% if s.retired_at.is_some() %}<span class="pill muted">retired</span>{% else if !s.enabled %}<span class="pill warn">disabled</span>{% else if s.is_stale %}<span class="pill warn">stale</span>{% else %}<span class="pill ok">active</span>{% endif %}</td>
+        <td class="num">{{ s.indexed_concepts }}</td>
+        <td class="num">{{ s.file_count }}</td>
+        <td class="num" data-value="{{ s.resolved_link_count }}">{{ s.resolved_link_count }} <span class="muted">of {{ s.link_count }}</span></td>
+        <td>{{ s.source_type }}</td>
+        <td class="when" data-value="{{ s.last_synced_at.as_deref().unwrap_or("") }}">{{ s.last_synced_at.as_deref().unwrap_or("never")|datetime }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
 {% endif %}
 {% endblock %}

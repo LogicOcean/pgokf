@@ -102,7 +102,6 @@ input:focus, select:focus, textarea:focus, button:focus-visible, a:focus-visible
 .card .big { font-size: 1.8rem; font-weight: 700; margin: 0; letter-spacing: -.02em; }
 .card p { margin: .15rem 0; }
 .card-head { display: flex; justify-content: space-between; align-items: center; gap: .5rem; }
-.card.bundle h2 { text-transform: none; letter-spacing: 0; font-size: 1.05rem; color: var(--text); }
 .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.1rem 1.25rem; margin-bottom: 1.25rem; box-shadow: var(--shadow); }
 .panel-head { display: flex; justify-content: space-between; align-items: center; gap: 1rem; margin-bottom: .75rem; }
 .panel-head h2 { margin: 0; }
@@ -137,6 +136,16 @@ a.tag:hover { color: var(--accent); text-decoration: none; }
 .table tr:last-child td { border-bottom: 0; }
 .table.compact td, .table.compact th { padding: .35rem .5rem; }
 .table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.table-wrap { overflow-x: auto; }
+.table th[data-sort] { cursor: pointer; user-select: none; white-space: nowrap; }
+.table th[data-sort]:hover, .table th[data-sort]:focus-visible { color: var(--text); }
+.table th[data-sort]::after { content: "\25B4\25BE"; margin-left: .35em; opacity: .35; letter-spacing: -.15em; }
+.table th[aria-sort="ascending"]::after { content: "\25B4"; opacity: 1; letter-spacing: 0; }
+.table th[aria-sort="descending"]::after { content: "\25BE"; opacity: 1; letter-spacing: 0; }
+.table .path { font-family: var(--mono); font-size: .9em; overflow-wrap: anywhere; }
+.table .desc { display: block; color: var(--muted); font-size: .85em; max-width: 44ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 400; }
+.table tr[hidden] { display: none; }
+.table .when { white-space: nowrap; }
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: .3rem 1rem; margin: 0; }
 .kv dt { color: var(--muted); font-size: .85em; font-weight: 600; }
 .kv dd { margin: 0; overflow-wrap: anywhere; }
@@ -146,11 +155,6 @@ a.tag:hover { color: var(--accent); text-decoration: none; }
 .facet-list li { display: flex; justify-content: space-between; padding: .2rem 0; border-bottom: 1px dashed var(--border); }
 .links, .log, .timeline { padding-left: 1.1rem; margin: 0; }
 .links li, .log li { margin: .35rem 0; }
-.tree details { border-top: 1px solid var(--border); padding: .4rem 0; }
-.tree summary { cursor: pointer; font-weight: 600; }
-.tree .dir { font-family: var(--mono); }
-.concept-list { list-style: none; padding: .3rem 0 0 1rem; margin: 0; }
-.concept-list li { padding: .3rem 0; }
 .json { font-size: .85em; white-space: pre-wrap; margin: 0; }
 .hash { font-size: .8em; overflow-wrap: anywhere; }
 
