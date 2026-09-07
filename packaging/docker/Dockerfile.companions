@@ -5,7 +5,8 @@
 #
 #   pgokf-ingest   mountless ingestion from an S3-compatible object store
 #   pgokf-embed    reference embedder (any OpenAI-compatible /v1/embeddings)
-#   pgokf-mcp      Model Context Protocol server over stdio
+#   pgokf-mcp      Model Context Protocol server, over stdio or over HTTP
+#                  (--http, with bearer tokens and roles)
 #
 # The extension performs no network I/O; these do, and talk to the catalog only
 # through its public SQL surface (see docs/deployment-topologies.md). The image
@@ -62,7 +63,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM debian:${DEBIAN_CODENAME}-slim
 
 LABEL org.opencontainers.image.title="pgokf-companions" \
-      org.opencontainers.image.description="pgokf network companions: pgokf-ingest, pgokf-embed, pgokf-mcp" \
+      org.opencontainers.image.description="pgokf network companions: pgokf-ingest, pgokf-embed, pgokf-mcp, pgokf-web" \
       org.opencontainers.image.source="https://github.com/LogicOcean/pgokf" \
       org.opencontainers.image.licenses="AGPL-3.0-only"
 

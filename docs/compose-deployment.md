@@ -89,7 +89,7 @@ the ones that matter most:
 | `PGOKF_BIND_ADDR`, `PGOKF_PORT` | Interface and port to publish PostgreSQL on. **Loopback by default**; use a private or VPN address to reach it from other hosts. Never a public interface without TLS and a firewall (see [Exposure](#exposure-and-tls)). |
 | `POSTGRES_PASSWORD`, `PGOKF_ADMIN_PASSWORD`, `PGOKF_WRITER_PASSWORD`, `PGOKF_READER_PASSWORD` | The superuser and the three tier accounts. Generate with `openssl rand -hex 24`: hex is URL-safe (the companions embed these in connection URLs) and contains no `$` (which compose interpolates; a literal one is `$$`). The `PGOKF_*` passwords may also be supplied as files through `PGOKF_*_PASSWORD_FILE` (compose secrets). |
 | `OKF_EMBED_TENANT`, `OKF_INGEST_TENANT`, `OKF_MCP_TENANT` | Optional `pgokf.tenant` scope for each companion's session (see [multi-tenancy](multi-tenancy.md#requiring-a-tenant-require_tenant)); required once the catalog policy `require_tenant` is on. |
-| `OKF_MCP_TOKENS_DIR`, `PGOKF_MCP_BIND`, `PGOKF_MCP_PORT`, `OKF_MCP_ALLOWED_ORIGINS` | The `mcp-http` profile: the host directory holding the `tokens` file, the interface and port to publish it on, and the browser origins allowed to call it. See [MCP over HTTP](#mcp-over-http). |
+| `OKF_MCP_TOKENS_DIR`, `OKF_MCP_UID`, `OKF_MCP_GID`, `PGOKF_MCP_BIND`, `PGOKF_MCP_PORT`, `OKF_MCP_ALLOWED_ORIGINS` | The `mcp-http` profile: the host directory holding the `tokens` file, the user the MCP containers run as, the interface and port to publish it on, and the browser origins allowed to call it. See [MCP over HTTP](#mcp-over-http). |
 | `PGOKF_POLICY` | JSON applied through `pgokf.set_config` on first init. **`embedding_dim` must equal your model's output dimension** (1024 for `Qwen3-Embedding-0.6B`, 768 for `nomic-embed-text`, 1536 for `text-embedding-3-small`); `store_source: true` keeps the source bytes in PostgreSQL so one dump is a complete backup; `allowed_roots: ["/bundles"]` confines registration to the mount; `search_backend` is `native` or `bm25`. |
 | `OKF_EMBED_ENDPOINT`, `OKF_EMBED_MODEL`, `OKF_EMBED_API_KEY` | Base URL (without `/v1/embeddings`), model name, optional bearer token. |
 | `PGOKF_SHARED_BUFFERS`, `PGOKF_EFFECTIVE_CACHE_SIZE`, `PGOKF_MAINTENANCE_WORK_MEM`, `PGOKF_WORK_MEM`, `PGOKF_SHM_SIZE` | Memory sizing. A common starting point is 25 % of RAM for `shared_buffers` and 50-75 % for `effective_cache_size`; the BM25 index and ANN index builds like a generous `maintenance_work_mem`. |
@@ -309,7 +309,10 @@ docker compose run --rm -T mcp \
 docker compose --profile mcp-http up -d
 ```
 
-Set `OKF_MCP_TOKENS_DIR=./mcp-tokens` in `.env` (that is also the default).
+Set `OKF_MCP_TOKENS_DIR=./mcp-tokens` in `.env` (that is also the default),
+and `OKF_MCP_UID`/`OKF_MCP_GID` to the user that owns that directory - the
+containers otherwise run as the image's own unprivileged user, which cannot
+write a file into a directory the host user owns.
 The endpoint is `POST http://127.0.0.1:8081/mcp`; move it with
 `PGOKF_MCP_BIND` / `PGOKF_MCP_PORT`. `GET /healthz` answers without a token.
 

@@ -252,6 +252,9 @@ services:
     profiles: ["tools"]
     stdin_open: true
     command: ["pgokf-mcp"]
+    # The image's unprivileged user, unless the tokens directory below
+    # belongs to a host user; then name that one, as the UI does.
+    user: "${OKF_MCP_UID:-10001}:${OKF_MCP_GID:-10001}"
     environment:
       OKF_PG_URL: "postgresql://${PGOKF_READER_ROLE:-okf_reader}:${PGOKF_READER_PASSWORD}@db:5432/${POSTGRES_DB:-okf}"
       OKF_TENANT: ${OKF_MCP_TENANT:-}
@@ -279,6 +282,7 @@ services:
       db:
         condition: service_healthy
     command: ["pgokf-mcp", "--http", "0.0.0.0:8081"]
+    user: "${OKF_MCP_UID:-10001}:${OKF_MCP_GID:-10001}"
     environment:
       OKF_PG_URL: "postgresql://${PGOKF_READER_ROLE:-okf_reader}:${PGOKF_READER_PASSWORD}@db:5432/${POSTGRES_DB:-okf}"
       OKF_TENANT: ${OKF_MCP_TENANT:-}
