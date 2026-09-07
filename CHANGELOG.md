@@ -141,6 +141,20 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
   requests are refused across sites, and the catalog must keep sources
   (`store_source`). `pgokf-web hash-password` makes users-file lines; the
   compose stack gained the matching `OKF_UI_*` settings.
+- **`OKF_WEB_AUTH=oidc`: the UI as its own OAuth client.** A fourth
+  implementation of the identity seam signs people in against any OpenID
+  Connect provider (Entra ID, Okta, Keycloak, Auth0, Google, GitLab) with
+  the authorization code flow and PKCE: the provider's configuration is
+  read from its issuer and must declare it, `state`, `nonce`, and the PKCE
+  verifier live in one short-lived signed cookie rather than in memory, the
+  code is exchanged directly over TLS, and the ID token must be signed by a
+  published key with an asymmetric algorithm (`none` and HMAC are refused),
+  for the configured issuer and this client, unexpired, and carrying the
+  nonce this site sent. Roles come from a groups claim through the same
+  `OKF_WEB_AUTH_ROLE_MAP` the proxy mode uses, and sign-out ends the
+  provider's session too where it offers one. The session cookie now names
+  the mode that opened it, so a server reconfigured from one mode to
+  another does not honour the old sessions.
 - Once identities are on, nobody reaches the site without signing in
   (login page, static assets, and health probe excepted). Everyone signed in
   has a profile page (identity, what the role allows, documents produced and

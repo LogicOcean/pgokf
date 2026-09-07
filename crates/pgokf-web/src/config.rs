@@ -42,11 +42,65 @@ pub(crate) struct Cli {
     #[arg(long, env = "OKF_WEB_BUNDLES_DB_DIR")]
     pub bundles_db_dir: Option<String>,
 
-    /// How people are identified: `none` (everyone is a viewer), `header`
-    /// (a trusted reverse proxy forwards the identity in headers), or
-    /// `users` (a local users file with a login form).
+    /// How people are identified: `none` (everyone is a viewer), `oidc`
+    /// (this site signs people in against an `OpenID` Connect provider),
+    /// `header` (a trusted reverse proxy forwards the identity in headers),
+    /// or `users` (a local users file with a login form).
     #[arg(long = "auth", env = "OKF_WEB_AUTH", default_value = "none")]
     pub auth: String,
+
+    /// `oidc` mode: the provider's issuer URL, exactly as it declares it
+    /// (its configuration is read from
+    /// `<issuer>/.well-known/openid-configuration`).
+    #[arg(long, env = "OKF_WEB_OIDC_ISSUER")]
+    pub oidc_issuer: Option<String>,
+
+    /// `oidc` mode: the client id this site is registered with.
+    #[arg(long, env = "OKF_WEB_OIDC_CLIENT_ID")]
+    pub oidc_client_id: Option<String>,
+
+    /// `oidc` mode: the client secret, for a confidential client. Leave it
+    /// unset for a public client, which PKCE alone protects.
+    #[arg(long, env = "OKF_WEB_OIDC_CLIENT_SECRET", hide_env_values = true)]
+    pub oidc_client_secret: Option<String>,
+
+    /// `oidc` mode: this site's callback URL, registered with the provider
+    /// as a redirect URI. It is the site's public address plus
+    /// `/auth/callback`.
+    #[arg(long, env = "OKF_WEB_OIDC_REDIRECT_URL")]
+    pub oidc_redirect_url: Option<String>,
+
+    /// `oidc` mode: the scopes to ask for (`openid` is always included).
+    #[arg(
+        long,
+        env = "OKF_WEB_OIDC_SCOPES",
+        default_value = "openid profile email"
+    )]
+    pub oidc_scopes: String,
+
+    /// `oidc` mode: the claims tried in order for the person's identity,
+    /// which becomes their OKF actor (`human:<subject>`). Name a claim the
+    /// provider guarantees stable and unique: `sub` always is, while a
+    /// user name or an email can be reassigned to someone else.
+    #[arg(
+        long,
+        env = "OKF_WEB_OIDC_SUBJECT_CLAIMS",
+        default_value = "preferred_username,email,sub"
+    )]
+    pub oidc_subject_claims: String,
+
+    /// `oidc` mode: the claim carrying the person's groups, which
+    /// `--auth-role-map` turns into a role.
+    #[arg(long, env = "OKF_WEB_OIDC_GROUPS_CLAIM", default_value = "groups")]
+    pub oidc_groups_claim: String,
+
+    /// `oidc` mode: what the sign-in button calls the provider.
+    #[arg(
+        long,
+        env = "OKF_WEB_OIDC_PROVIDER_NAME",
+        default_value = "single sign-on"
+    )]
+    pub oidc_provider_name: String,
 
     /// `header` mode: the header carrying the user's identifier.
     #[arg(
@@ -171,6 +225,10 @@ impl Cli {
         self.auth_groups_header = pgokf_companion::cli::non_empty(self.auth_groups_header);
         self.session_secret = pgokf_companion::cli::non_empty(self.session_secret);
         self.auth_users_file = self.auth_users_file.filter(|p| !p.as_os_str().is_empty());
+        self.oidc_issuer = pgokf_companion::cli::non_empty(self.oidc_issuer);
+        self.oidc_client_id = pgokf_companion::cli::non_empty(self.oidc_client_id);
+        self.oidc_client_secret = pgokf_companion::cli::non_empty(self.oidc_client_secret);
+        self.oidc_redirect_url = pgokf_companion::cli::non_empty(self.oidc_redirect_url);
         self.bundles_dir = self.bundles_dir.filter(|p| !p.as_os_str().is_empty());
         self.bundles_db_dir = pgokf_companion::cli::non_empty(self.bundles_db_dir);
         self.tenant = pgokf_companion::cli::non_empty(self.tenant);
@@ -210,7 +268,21 @@ impl Cli {
                     bail!("--session-hours must be at least 1");
                 }
             }
-            other => bail!("--auth must be none, header, or users (not {other:?})"),
+            "oidc" => {
+                for (value, flag) in [
+                    (&self.oidc_issuer, "--oidc-issuer"),
+                    (&self.oidc_client_id, "--oidc-client-id"),
+                    (&self.oidc_redirect_url, "--oidc-redirect-url"),
+                ] {
+                    if value.is_none() {
+                        bail!("--auth oidc needs {flag}");
+                    }
+                }
+                if self.session_hours == 0 {
+                    bail!("--session-hours must be at least 1");
+                }
+            }
+            other => bail!("--auth must be none, oidc, header, or users (not {other:?})"),
         }
         Ok(())
     }
@@ -246,6 +318,20 @@ mod tests {
                 .is_ok()
         );
         assert!(parse(&["--auth", "oidc"]).validate().is_err());
+        assert!(
+            parse(&[
+                "--auth",
+                "oidc",
+                "--oidc-issuer",
+                "https://id.example.test",
+                "--oidc-client-id",
+                "pgokf",
+                "--oidc-redirect-url",
+                "https://catalog.example.test/auth/callback",
+            ])
+            .validate()
+            .is_ok()
+        );
         let sub = Cli::parse_from([
             "pgokf-web",
             "hash-password",

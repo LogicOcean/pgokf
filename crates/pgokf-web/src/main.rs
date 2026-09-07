@@ -16,6 +16,7 @@ mod documents;
 mod graph;
 mod links;
 mod markdown;
+mod oidc;
 mod routes;
 mod store;
 
@@ -28,7 +29,7 @@ use axum::http::HeaderName;
 use clap::Parser;
 use pgokf_companion::embeddings::EmbeddingsClient;
 
-use crate::auth::{Authenticator, Cidr, HeaderAuth, Role, UsersAuth};
+use crate::auth::{Authenticator, Cidr, HeaderAuth, Role, RoleMapping, Sessions, UsersAuth};
 use crate::config::{Cli, Command};
 use crate::db::{Db, DbConfig};
 use crate::routes::App;
@@ -163,9 +164,60 @@ fn configured_stores(cli: &Cli) -> Result<store::Stores> {
     })
 }
 
+/// The signer of the session this site holds, for the modes that hold
+/// one. Without a configured secret a random one is used, which means the
+/// sessions end when the process does.
+fn build_sessions(cli: &Cli) -> Result<Arc<Sessions>> {
+    let secret = if let Some(secret) = &cli.session_secret {
+        secret.as_bytes().to_vec()
+    } else {
+        eprintln!(
+            "pgokf-web: warning: no OKF_WEB_SESSION_SECRET; sessions end when the \
+             process does"
+        );
+        auth::random_bytes(32)?
+    };
+    Ok(Arc::new(Sessions::new(
+        secret,
+        cli.session_hours.saturating_mul(3_600),
+        cli.cookie_secure,
+    )?))
+}
+
 /// The way people are identified, from the flags.
 fn build_authenticator(cli: &Cli) -> Result<Authenticator> {
     match cli.auth.trim() {
+        "oidc" => {
+            let required = |value: &Option<String>, flag: &str| -> Result<String> {
+                value
+                    .clone()
+                    .with_context(|| format!("--auth oidc needs {flag}"))
+            };
+            let default_role = Role::parse(&cli.auth_default_role)
+                .with_context(|| format!("unknown default role {:?}", cli.auth_default_role))?;
+            let subject_claims: Vec<String> = cli
+                .oidc_subject_claims
+                .split(',')
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+                .map(str::to_owned)
+                .collect();
+            let config = oidc::OidcConfig {
+                issuer: required(&cli.oidc_issuer, "--oidc-issuer")?,
+                client_id: required(&cli.oidc_client_id, "--oidc-client-id")?,
+                client_secret: cli.oidc_client_secret.clone(),
+                redirect_uri: required(&cli.oidc_redirect_url, "--oidc-redirect-url")?,
+                scopes: cli.oidc_scopes.clone(),
+                subject_claims,
+                groups_claim: cli.oidc_groups_claim.trim().to_owned(),
+                roles: RoleMapping::parse(&cli.auth_role_map, default_role)?,
+                provider_name: cli.oidc_provider_name.trim().to_owned(),
+            };
+            Ok(Authenticator::Oidc(Box::new(oidc::OidcAuth::new(
+                config,
+                build_sessions(cli)?,
+            )?)))
+        }
         "header" => {
             let header = |name: &str| {
                 HeaderName::from_bytes(name.trim().as_bytes())
@@ -188,8 +240,7 @@ fn build_authenticator(cli: &Cli) -> Result<Authenticator> {
                 user_header: header(&cli.auth_user_header)?,
                 name_header: cli.auth_name_header.as_deref().map(header).transpose()?,
                 groups_header: cli.auth_groups_header.as_deref().map(header).transpose()?,
-                role_map: HeaderAuth::parse_role_map(&cli.auth_role_map)?,
-                default_role,
+                roles: RoleMapping::parse(&cli.auth_role_map, default_role)?,
                 trusted,
                 trust_any_peer,
             }))
@@ -199,20 +250,9 @@ fn build_authenticator(cli: &Cli) -> Result<Authenticator> {
                 .auth_users_file
                 .as_deref()
                 .context("--auth users needs --auth-users-file")?;
-            let secret = if let Some(secret) = &cli.session_secret {
-                secret.as_bytes().to_vec()
-            } else {
-                eprintln!(
-                    "pgokf-web: warning: no OKF_WEB_SESSION_SECRET; sessions end when the \
-                     process does"
-                );
-                auth::random_bytes(32)?
-            };
             Ok(Authenticator::Users(UsersAuth::load(
                 path,
-                secret,
-                cli.session_hours.saturating_mul(3_600),
-                cli.cookie_secure,
+                build_sessions(cli)?,
             )?))
         }
         _ => Ok(Authenticator::Anonymous),

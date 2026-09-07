@@ -2,13 +2,20 @@
 //! Who is asking: the authentication seam and the roles it yields.
 //!
 //! The UI is read-only for everyone until an operator turns authentication
-//! on. Two ways of knowing a person are built in, behind one interface:
+//! on. Three ways of knowing a person are built in, behind one interface:
 //!
+//! - `oidc`: the site is its own `OAuth` client, signing people in against an
+//!   `OpenID` Connect provider (Entra ID, Okta, Keycloak, Auth0, Google, a
+//!   `GitLab` instance) with the authorization code flow and PKCE; see
+//!   [`crate::oidc`].
 //! - `header`: an authenticating reverse proxy (oauth2-proxy, Authelia,
 //!   Pomerium, Caddy `forward_auth`) forwards the identity in request
 //!   headers; the headers are believed only from the proxy's own addresses.
 //! - `users`: a local users file (name, role, Argon2id hash) with a login
 //!   form and a signed session cookie, for a deployment without a proxy.
+//!
+//! The `oidc` and `users` modes both end in a session this site signs, so
+//! [`Sessions`] owns that cookie and both hold one.
 //!
 //! Either way a request resolves to at most one [`Principal`] carrying one
 //! [`Role`]; the roles are a ladder (a role holds every role below it), and
@@ -20,7 +27,7 @@ use std::collections::HashMap;
 use std::fmt::{self, Write as _};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -30,6 +37,7 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, header};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use hmac::{Hmac, KeyInit, Mac};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -131,6 +139,8 @@ pub(crate) enum Mode {
     Header,
     /// A local users file with a login form and a session cookie.
     Users,
+    /// An `OpenID` Connect provider this site signs people in against.
+    Oidc,
 }
 
 impl Mode {
@@ -139,7 +149,70 @@ impl Mode {
             Mode::None => "none",
             Mode::Header => "header",
             Mode::Users => "users",
+            Mode::Oidc => "oidc",
         }
+    }
+
+    /// Whether this site holds the session itself, so it can end it and
+    /// offer its own sign-in page.
+    pub(crate) const fn is_local_session(self) -> bool {
+        matches!(self, Mode::Users | Mode::Oidc)
+    }
+}
+
+/// Group names mapped to roles, with the role of a person in no mapped
+/// group. Shared by every mode that learns a person's groups from
+/// somewhere else (a proxy's header, a provider's claim).
+#[derive(Debug, Clone)]
+pub(crate) struct RoleMapping {
+    map: Vec<(String, Role)>,
+    default_role: Role,
+}
+
+impl RoleMapping {
+    /// Parse `group=role,group=role`.
+    ///
+    /// # Errors
+    ///
+    /// An entry that is not `group=role`, or one naming an unknown role.
+    pub(crate) fn parse(text: &str, default_role: Role) -> Result<Self> {
+        let map = text
+            .split(',')
+            .map(str::trim)
+            .filter(|e| !e.is_empty())
+            .map(|entry| {
+                let (group, role) = entry
+                    .split_once('=')
+                    .with_context(|| format!("role map entry {entry:?} is not group=role"))?;
+                let role = Role::parse(role)
+                    .with_context(|| format!("role map entry {entry:?} names an unknown role"))?;
+                Ok((group.trim().to_owned(), role))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self { map, default_role })
+    }
+
+    /// The groups that appear in the map, in the order they were given:
+    /// the only ones whose membership changes a role, so a session need
+    /// carry no others whatever the provider sends.
+    pub(crate) fn known_groups(&self, groups: &[String]) -> Vec<String> {
+        groups
+            .iter()
+            .filter(|group| self.map.iter().any(|(mapped, _)| mapped == *group))
+            .cloned()
+            .collect()
+    }
+
+    /// The highest role any of `groups` maps to, or the default. Taking the
+    /// highest (rather than the first) keeps the result independent of the
+    /// order the groups arrive in.
+    pub(crate) fn role_for(&self, groups: &[String]) -> Role {
+        self.map
+            .iter()
+            .filter(|(group, _)| groups.iter().any(|g| g == group))
+            .map(|(_, role)| *role)
+            .max()
+            .unwrap_or(self.default_role)
     }
 }
 
@@ -201,10 +274,8 @@ pub(crate) struct HeaderAuth {
     pub user_header: HeaderName,
     pub name_header: Option<HeaderName>,
     pub groups_header: Option<HeaderName>,
-    /// Group name to role, first match wins; a person in no mapped group
-    /// gets `default_role`.
-    pub role_map: Vec<(String, Role)>,
-    pub default_role: Role,
+    /// Group names to roles, with the role of a person in no mapped group.
+    pub roles: RoleMapping,
     /// Peers whose headers are believed. Empty means nobody (fail closed).
     pub trusted: Vec<Cidr>,
     /// Believe every peer: only for a server that is reachable from the
@@ -213,22 +284,6 @@ pub(crate) struct HeaderAuth {
 }
 
 impl HeaderAuth {
-    /// Parse `group=role,group=role`.
-    pub(crate) fn parse_role_map(text: &str) -> Result<Vec<(String, Role)>> {
-        text.split(',')
-            .map(str::trim)
-            .filter(|e| !e.is_empty())
-            .map(|entry| {
-                let (group, role) = entry
-                    .split_once('=')
-                    .with_context(|| format!("role map entry {entry:?} is not group=role"))?;
-                let role = Role::parse(role)
-                    .with_context(|| format!("role map entry {entry:?} names an unknown role"))?;
-                Ok((group.trim().to_owned(), role))
-            })
-            .collect()
-    }
-
     fn trusts(&self, peer: Option<IpAddr>) -> bool {
         if self.trust_any_peer {
             return true;
@@ -258,13 +313,7 @@ impl HeaderAuth {
             .and_then(|h| header_text(headers, h))
             .map(|g| g.split(',').map(|s| s.trim().to_owned()).collect())
             .unwrap_or_default();
-        let role = self
-            .role_map
-            .iter()
-            .filter(|(group, _)| groups.iter().any(|g| g == group))
-            .map(|(_, role)| *role)
-            .max()
-            .unwrap_or(self.default_role);
+        let role = self.roles.role_for(&groups);
         Some(Principal {
             subject,
             display,
@@ -295,9 +344,7 @@ pub(crate) struct UserRecord {
 pub(crate) struct UsersAuth {
     path: Option<PathBuf>,
     loaded: RwLock<LoadedUsers>,
-    secret: Vec<u8>,
-    session_seconds: u64,
-    cookie_secure: bool,
+    sessions: Arc<Sessions>,
     /// Failed sign-ins per user name, for the throttle.
     failures: Mutex<HashMap<String, Failures>>,
 }
@@ -331,21 +378,185 @@ struct LoadedUsers {
 /// The session cookie's name.
 pub(crate) const SESSION_COOKIE: &str = "pgokf_session";
 
-/// What a session cookie carries: the subject, when it expires, and a
-/// fingerprint of the password hash the session was opened with. The role
-/// is looked up in the users file on every request, so removing or
-/// demoting a user takes effect at once, and a changed password ends every
-/// session opened before it.
+/// The cookie holding one sign-in attempt while the person is away at the
+/// provider (`oidc` mode).
+pub(crate) const FLOW_COOKIE: &str = "pgokf_signin";
+
+/// The session this site signs and the rules for its cookie. Both modes
+/// that end in a local session (`users`, `oidc`) hold one, so a session
+/// looks the same however it was opened. `Debug` is written by hand so the
+/// signing key cannot reach a log line through it.
+pub(crate) struct Sessions {
+    secret: Vec<u8>,
+    seconds: u64,
+    cookie_secure: bool,
+}
+
+impl fmt::Debug for Sessions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Sessions")
+            .field("secret", &"<redacted>")
+            .field("seconds", &self.seconds)
+            .field("cookie_secure", &self.cookie_secure)
+            .finish()
+    }
+}
+
+impl Sessions {
+    /// A session signer. The secret must be long enough to be a key.
+    ///
+    /// # Errors
+    ///
+    /// A secret shorter than 32 bytes.
+    pub(crate) fn new(secret: Vec<u8>, seconds: u64, cookie_secure: bool) -> Result<Self> {
+        if secret.len() < 32 {
+            bail!("the session secret must be at least 32 bytes");
+        }
+        Ok(Self {
+            secret,
+            seconds,
+            cookie_secure,
+        })
+    }
+
+    /// A `Set-Cookie` value that ends the session.
+    pub(crate) fn clear_session(&self) -> String {
+        self.clear(SESSION_COOKIE)
+    }
+
+    /// A `Set-Cookie` value that drops a sign-in in progress.
+    pub(crate) fn clear_flow(&self) -> String {
+        self.clear(FLOW_COOKIE)
+    }
+
+    /// A value this site can hand out and recognize again: the JSON of
+    /// `value`, base64, with an HMAC tag over it.
+    ///
+    /// # Errors
+    ///
+    /// A value that does not serialize.
+    pub(crate) fn seal<T: Serialize>(&self, value: &T) -> Result<String> {
+        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(value)?);
+        let tag = URL_SAFE_NO_PAD.encode(self.sign(payload.as_bytes()));
+        Ok(format!("{payload}.{tag}"))
+    }
+
+    /// The value behind a sealed token, when the tag is this site's own.
+    /// Verification happens before the payload is parsed, so a forged
+    /// payload is never deserialized.
+    pub(crate) fn open<T: DeserializeOwned>(&self, token: &str) -> Option<T> {
+        let (payload, tag) = token.split_once('.')?;
+        let tag = URL_SAFE_NO_PAD.decode(tag).ok()?;
+        self.verify_tag(payload.as_bytes(), &tag).ok()?;
+        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).ok()?).ok()
+    }
+
+    /// A `Set-Cookie` value for one of this site's cookies.
+    pub(crate) fn cookie(&self, name: &str, value: &str, max_age: u64) -> String {
+        format!(
+            "{name}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{}",
+            if self.cookie_secure { "; Secure" } else { "" }
+        )
+    }
+
+    /// A `Set-Cookie` value that removes one of this site's cookies.
+    pub(crate) fn clear(&self, name: &str) -> String {
+        self.cookie(name, "", 0)
+    }
+
+    /// Open the session cookie of a request, when it is this site's, was
+    /// opened by `mode`, and has not expired.
+    pub(crate) fn read_session(&self, headers: &HeaderMap, mode: Mode) -> Option<SessionClaims> {
+        let claims: SessionClaims = self.open(&cookie_value(headers, SESSION_COOKIE)?)?;
+        (claims.expires > now_unix() && claims.mode == mode.id()).then_some(claims)
+    }
+
+    /// A session cookie for `subject`, bound to `binding` (what the mode
+    /// checks again on every request: a password fingerprint, or nothing).
+    ///
+    /// # Errors
+    ///
+    /// The system random source failing.
+    pub(crate) fn open_session(
+        &self,
+        subject: &str,
+        mode: Mode,
+        binding: String,
+    ) -> Result<String> {
+        self.open_session_with(subject, mode, binding, None, Vec::new())
+    }
+
+    /// A session cookie carrying what a provider told this site about the
+    /// person: what to call them, and the groups their role comes from.
+    ///
+    /// # Errors
+    ///
+    /// The system random source failing.
+    pub(crate) fn open_session_with(
+        &self,
+        subject: &str,
+        mode: Mode,
+        binding: String,
+        display: Option<String>,
+        groups: Vec<String>,
+    ) -> Result<String> {
+        let claims = SessionClaims {
+            subject: subject.to_owned(),
+            expires: now_unix() + self.seconds,
+            nonce: URL_SAFE_NO_PAD.encode(random_bytes(12)?),
+            binding,
+            display,
+            groups,
+            mode: mode.id().to_owned(),
+        };
+        Ok(self.cookie(SESSION_COOKIE, &self.seal(&claims)?, self.seconds))
+    }
+
+    fn sign(&self, payload: &[u8]) -> Vec<u8> {
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(&self.secret).expect("HMAC accepts any key length");
+        mac.update(payload);
+        mac.finalize().into_bytes().to_vec()
+    }
+
+    fn verify_tag(&self, payload: &[u8], tag: &[u8]) -> Result<()> {
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(&self.secret).expect("HMAC accepts any key length");
+        mac.update(payload);
+        mac.verify_slice(tag)
+            .map_err(|_| anyhow!("session signature mismatch"))
+    }
+}
+
+/// What a session cookie carries: the subject, when it expires, a nonce so
+/// two sessions of one person differ, and a binding the mode checks again
+/// on every request. In `users` mode the binding is a fingerprint of the
+/// password hash, so a changed password ends every session opened before
+/// it; in `oidc` mode the provider governs and the binding is empty. The
+/// role is never carried: it is looked up on every request, so removing or
+/// demoting a person takes effect at once.
 #[derive(Debug, Serialize, Deserialize)]
-struct SessionClaims {
+pub(crate) struct SessionClaims {
     #[serde(rename = "s")]
-    subject: String,
+    pub subject: String,
     #[serde(rename = "e")]
-    expires: u64,
+    pub expires: u64,
     #[serde(rename = "n")]
     nonce: String,
-    #[serde(rename = "p", default)]
-    password_fingerprint: String,
+    #[serde(rename = "p", default, skip_serializing_if = "String::is_empty")]
+    pub binding: String,
+    /// What to call the person (`oidc`); their subject otherwise.
+    #[serde(rename = "d", default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<String>,
+    /// The groups that decide their role (`oidc`), so the role is derived
+    /// again on every request rather than carried.
+    #[serde(rename = "g", default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<String>,
+    /// The mode that opened this session. A server reconfigured from one
+    /// mode to another keeps its signing key, and a session opened under
+    /// the old mode must not be honoured by the new one.
+    #[serde(rename = "m", default)]
+    mode: String,
 }
 
 /// A short digest of a stored hash: enough to tell a session opened under
@@ -359,25 +570,15 @@ fn fingerprint(hash: &str) -> String {
 impl UsersAuth {
     /// Load a users file: one `name:role:$argon2id$...` per line, `#`
     /// comments and blank lines ignored.
-    pub(crate) fn load(
-        path: &Path,
-        secret: Vec<u8>,
-        session_seconds: u64,
-        cookie_secure: bool,
-    ) -> Result<Self> {
+    pub(crate) fn load(path: &Path, sessions: Arc<Sessions>) -> Result<Self> {
         let (modified, users) = Self::read_file(path)?;
         if users.is_empty() {
             bail!("the users file {} names no user", path.display());
         }
-        if secret.len() < 32 {
-            bail!("the session secret must be at least 32 bytes");
-        }
         Ok(Self {
             path: Some(path.to_path_buf()),
             loaded: RwLock::new(LoadedUsers { modified, users }),
-            secret,
-            session_seconds,
-            cookie_secure,
+            sessions,
             failures: Mutex::new(HashMap::new()),
         })
     }
@@ -629,46 +830,21 @@ impl UsersAuth {
 
     /// A `Set-Cookie` value that signs the person in.
     pub(crate) fn issue_cookie(&self, principal: &Principal) -> Result<String> {
-        let claims = SessionClaims {
-            subject: principal.subject.clone(),
-            expires: now_unix() + self.session_seconds,
-            nonce: URL_SAFE_NO_PAD.encode(random_bytes(12)?),
-            password_fingerprint: self
-                .record(&principal.subject)
-                .map(|r| fingerprint(&r.hash))
-                .unwrap_or_default(),
-        };
-        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims)?);
-        let tag = URL_SAFE_NO_PAD.encode(self.sign(payload.as_bytes()));
-        Ok(format!(
-            "{SESSION_COOKIE}={payload}.{tag}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}{}",
-            self.session_seconds,
-            if self.cookie_secure { "; Secure" } else { "" }
-        ))
+        let binding = self
+            .record(&principal.subject)
+            .map(|r| fingerprint(&r.hash))
+            .unwrap_or_default();
+        self.sessions
+            .open_session(&principal.subject, Mode::Users, binding)
     }
 
-    /// A `Set-Cookie` value that signs the person out.
-    pub(crate) fn clear_cookie(&self) -> String {
-        format!(
-            "{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{}",
-            if self.cookie_secure { "; Secure" } else { "" }
-        )
-    }
-
-    /// The person a request's cookie names: a valid signature, not expired,
-    /// and still in the users file (whose role applies).
+    /// The person a request's cookie names: a session this site signed,
+    /// not expired, still in the users file (whose role applies), and
+    /// opened under the password the file holds now.
     fn identify(&self, headers: &HeaderMap) -> Option<Principal> {
-        let token = cookie_value(headers, SESSION_COOKIE)?;
-        let (payload, tag) = token.split_once('.')?;
-        let tag = URL_SAFE_NO_PAD.decode(tag).ok()?;
-        self.verify_tag(payload.as_bytes(), &tag).ok()?;
-        let claims: SessionClaims =
-            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).ok()?).ok()?;
-        if claims.expires <= now_unix() {
-            return None;
-        }
+        let claims = self.sessions.read_session(headers, Mode::Users)?;
         let record = self.record(&claims.subject)?;
-        if claims.password_fingerprint != fingerprint(&record.hash) {
+        if claims.binding != fingerprint(&record.hash) {
             // The password changed since this session was opened.
             return None;
         }
@@ -677,21 +853,6 @@ impl UsersAuth {
             display: claims.subject,
             role: record.role,
         })
-    }
-
-    fn sign(&self, payload: &[u8]) -> Vec<u8> {
-        let mut mac =
-            Hmac::<Sha256>::new_from_slice(&self.secret).expect("HMAC accepts any key length");
-        mac.update(payload);
-        mac.finalize().into_bytes().to_vec()
-    }
-
-    fn verify_tag(&self, payload: &[u8], tag: &[u8]) -> Result<()> {
-        let mut mac =
-            Hmac::<Sha256>::new_from_slice(&self.secret).expect("HMAC accepts any key length");
-        mac.update(payload);
-        mac.verify_slice(tag)
-            .map_err(|_| anyhow!("session signature mismatch"))
     }
 }
 
@@ -731,7 +892,7 @@ fn now_unix() -> u64 {
 }
 
 /// The value of one cookie in the request's `Cookie` headers.
-fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+pub(crate) fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     headers
         .get_all(header::COOKIE)
         .iter()
@@ -748,6 +909,9 @@ pub(crate) enum Authenticator {
     Anonymous,
     Header(HeaderAuth),
     Users(UsersAuth),
+    // Boxed: the provider mode carries an HTTP client and cached metadata,
+    // several times the size of the others.
+    Oidc(Box<crate::oidc::OidcAuth>),
 }
 
 impl Authenticator {
@@ -756,6 +920,7 @@ impl Authenticator {
             Authenticator::Anonymous => Mode::None,
             Authenticator::Header(_) => Mode::Header,
             Authenticator::Users(_) => Mode::Users,
+            Authenticator::Oidc(_) => Mode::Oidc,
         }
     }
 
@@ -765,12 +930,29 @@ impl Authenticator {
             Authenticator::Anonymous => None,
             Authenticator::Header(h) => h.identify(headers, peer),
             Authenticator::Users(u) => u.identify(headers),
+            Authenticator::Oidc(o) => o.identify(headers),
         }
     }
 
     pub(crate) fn users(&self) -> Option<&UsersAuth> {
         match self {
             Authenticator::Users(u) => Some(u),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn oidc(&self) -> Option<&crate::oidc::OidcAuth> {
+        match self {
+            Authenticator::Oidc(o) => Some(o),
+            _ => None,
+        }
+    }
+
+    /// The session signer, for the modes that hold a session here.
+    pub(crate) fn sessions(&self) -> Option<&Sessions> {
+        match self {
+            Authenticator::Users(u) => Some(&u.sessions),
+            Authenticator::Oidc(o) => Some(o.sessions()),
             _ => None,
         }
     }
@@ -868,9 +1050,8 @@ mod tests {
             user_header: HeaderName::from_static("x-forwarded-user"),
             name_header: Some(HeaderName::from_static("x-forwarded-preferred-username")),
             groups_header: Some(HeaderName::from_static("x-forwarded-groups")),
-            role_map: HeaderAuth::parse_role_map("okf-editors=editor, okf-approvers=approver")
+            roles: RoleMapping::parse("okf-editors=editor, okf-approvers=approver", Role::Viewer)
                 .expect("valid"),
-            default_role: Role::Viewer,
             trusted: trusted.iter().map(|c| Cidr::parse(c).unwrap()).collect(),
             trust_any_peer: false,
         }
@@ -926,8 +1107,8 @@ mod tests {
         );
         assert!(auth.identify(&bad, peer).is_none());
         assert!(auth.identify(&HeaderMap::new(), peer).is_none());
-        assert!(HeaderAuth::parse_role_map("okf-editors").is_err());
-        assert!(HeaderAuth::parse_role_map("g=owner").is_err());
+        assert!(RoleMapping::parse("okf-editors", Role::Viewer).is_err());
+        assert!(RoleMapping::parse("g=owner", Role::Viewer).is_err());
     }
 
     fn users_auth_with(secret: Vec<u8>) -> UsersAuth {
@@ -939,9 +1120,7 @@ mod tests {
                 modified: None,
                 users: UsersAuth::parse_users(&text).expect("parses"),
             }),
-            secret,
-            session_seconds: 3600,
-            cookie_secure: false,
+            sessions: Arc::new(Sessions::new(secret, 3600, false).expect("valid")),
             failures: Mutex::new(HashMap::new()),
         }
     }
@@ -1037,7 +1216,11 @@ mod tests {
         let path = dir.join("users");
         let hash = hash_password("pw").expect("hashes");
         std::fs::write(&path, format!("alice:approver:{hash}\n")).expect("write");
-        let auth = UsersAuth::load(&path, vec![7_u8; 32], 3600, false).expect("loads");
+        let auth = UsersAuth::load(
+            &path,
+            Arc::new(Sessions::new(vec![7_u8; 32], 3600, false).expect("valid")),
+        )
+        .expect("loads");
         assert_eq!(
             auth.verify("alice", "pw").map(|p| p.role),
             Some(Role::Approver)
@@ -1069,7 +1252,11 @@ mod tests {
         let path = dir.join("users");
         let hash = hash_password("pw").expect("hashes");
         std::fs::write(&path, format!("alice:admin:{hash}\n")).expect("write");
-        let auth = UsersAuth::load(&path, vec![7_u8; 32], 3600, false).expect("loads");
+        let auth = UsersAuth::load(
+            &path,
+            Arc::new(Sessions::new(vec![7_u8; 32], 3600, false).expect("valid")),
+        )
+        .expect("loads");
 
         // Act
         auth.add_user("bob", Role::Uploader, "a long enough password")
@@ -1144,7 +1331,11 @@ mod tests {
             ),
         )
         .expect("write");
-        let auth = UsersAuth::load(&path, vec![7_u8; 32], 3600, false).expect("loads");
+        let auth = UsersAuth::load(
+            &path,
+            Arc::new(Sessions::new(vec![7_u8; 32], 3600, false).expect("valid")),
+        )
+        .expect("loads");
         let alice = auth.verify("alice", "first password").expect("verifies");
         let cookie = auth.issue_cookie(&alice).expect("issues");
         let mut headers = HeaderMap::new();

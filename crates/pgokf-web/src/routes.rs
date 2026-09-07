@@ -109,6 +109,7 @@ pub(crate) fn router(app: Shared) -> Router {
         .route("/plugins/preview", get(plugins_preview))
         .route("/plugins/build.zip", get(plugins_zip))
         .route("/login", get(login_page).post(login_submit))
+        .route("/auth/callback", get(auth_callback))
         .route("/logout", post(logout))
         .route("/profile", get(profile_page))
         .route("/profile/password", post(profile_password))
@@ -203,12 +204,13 @@ async fn authenticate(State(app): State<Shared>, mut request: Request, next: Nex
             return (StatusCode::UNAUTHORIZED, Json(body)).into_response();
         }
         let next = request.uri().path_and_query().map_or("/", |pq| pq.as_str());
-        return match mode {
-            Mode::Users => AppError::sign_in(next).into_response(),
-            _ => AppError::forbidden_message(
+        return if mode.is_local_session() {
+            AppError::sign_in(next).into_response()
+        } else {
+            AppError::forbidden_message(
                 "Sign in through the site's identity provider; this server believes only its proxy.",
             )
-            .into_response(),
+            .into_response()
         };
     }
     request.extensions_mut().insert(Session { principal, mode });
@@ -217,7 +219,10 @@ async fn authenticate(State(app): State<Shared>, mut request: Request, next: Nex
 
 /// The paths a person who is not signed in may still reach.
 fn open_to_anyone(path: &str) -> bool {
-    path == "/login" || path == "/logout" || path == "/api/health" || path.starts_with("/static/")
+    matches!(
+        path,
+        "/login" | "/logout" | "/auth/callback" | "/api/health"
+    ) || path.starts_with("/static/")
 }
 
 /// Refuse state-changing requests that a browser sends from another site:
@@ -549,13 +554,13 @@ impl Shell {
                 display: p.display.clone(),
                 role: p.role.id().to_owned(),
             }),
-            signin_url: (session.mode == Mode::Users && session.principal.is_none())
+            signin_url: (session.mode.is_local_session() && session.principal.is_none())
                 .then(|| "/login".to_owned()),
             workflow,
             can_upload: workflow && session.allows(Role::Uploader),
             can_review: workflow && session.allows(Role::Approver),
             can_admin: session.allows(Role::Admin),
-            can_sign_out: session.mode == Mode::Users && session.principal.is_some(),
+            can_sign_out: session.mode.is_local_session() && session.principal.is_some(),
         }
     }
 
@@ -1180,6 +1185,9 @@ struct LoginPage {
     shell: Shell,
     next: String,
     error: Option<String>,
+    /// In `oidc` mode, what the provider is called: the page then offers a
+    /// button to it instead of a user name and password.
+    provider: Option<String>,
 }
 
 #[derive(Template)]
@@ -2518,22 +2526,144 @@ struct NextParams {
     next: String,
 }
 
+/// The sign-in page. In `oidc` mode there is nothing to type: the person
+/// goes straight to the provider, and this page appears only when that
+/// could not be started, with a button to try again.
 async fn login_page(
     State(app): State<Shared>,
     session: Session,
     Query(params): Query<NextParams>,
 ) -> PageResult {
-    if app.auth.users().is_none() {
+    if !session.mode.is_local_session() {
         return Err(AppError::not_found("This page"));
     }
+    let next = safe_next(&params.next);
     if session.principal.is_some() {
-        return Ok(redirect(&safe_next(&params.next)));
+        return Ok(redirect(&next));
     }
-    html(&LoginPage {
-        shell: Shell::new(&app, &session, "Sign in", "login"),
-        next: safe_next(&params.next),
-        error: None,
-    })
+    let Some(oidc) = app.auth.oidc() else {
+        return html(&LoginPage {
+            shell: Shell::new(&app, &session, "Sign in", "login"),
+            next,
+            error: None,
+            provider: None,
+        });
+    };
+    match oidc.start(&next).await {
+        Ok((url, cookie)) => {
+            let mut response = redirect(&url);
+            if let Some(value) = cookie_header(&cookie) {
+                response.headers_mut().append(header::SET_COOKIE, value);
+            }
+            Ok(response)
+        }
+        Err(error) => {
+            eprintln!("pgokf-web: the sign-in could not be started: {error:#}");
+            let mut response = html(&LoginPage {
+                shell: Shell::new(&app, &session, "Sign in", "login"),
+                next,
+                error: Some(format!(
+                    "{} could not be reached just now.",
+                    oidc.provider_name()
+                )),
+                provider: Some(oidc.provider_name().to_owned()),
+            })?;
+            *response.status_mut() = StatusCode::BAD_GATEWAY;
+            Ok(response)
+        }
+    }
+}
+
+/// What the provider sends back to the redirect URL: a code, or a refusal.
+#[derive(Debug, Default, Deserialize)]
+struct CallbackParams {
+    #[serde(default)]
+    code: String,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    error: String,
+}
+
+/// The provider's answer: check it, open a session, and go on to the page
+/// the person was heading for.
+async fn auth_callback(
+    State(app): State<Shared>,
+    session: Session,
+    headers: HeaderMap,
+    Query(params): Query<CallbackParams>,
+) -> PageResult {
+    let oidc = app
+        .auth
+        .oidc()
+        .ok_or_else(|| AppError::not_found("This page"))?;
+    // Whatever happens, this attempt is over: the cookie goes.
+    let drop_flow = oidc.sessions().clear_flow();
+    let refused = |message: String, status: StatusCode| -> PageResult {
+        let mut response = html(&LoginPage {
+            shell: Shell::new(&app, &session, "Sign in", "login"),
+            next: "/".to_owned(),
+            error: Some(message),
+            provider: Some(oidc.provider_name().to_owned()),
+        })?;
+        *response.status_mut() = status;
+        if let Some(value) = cookie_header(&drop_flow) {
+            response.headers_mut().append(header::SET_COOKIE, value);
+        }
+        Ok(response)
+    };
+    if !params.error.trim().is_empty() {
+        // The provider's error code is a fixed token; nothing else it sent
+        // is repeated back to the browser.
+        let code: String = params
+            .error
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .take(64)
+            .collect();
+        eprintln!("pgokf-web: the provider refused a sign-in ({code})");
+        return refused(
+            format!("{} did not sign you in ({code}).", oidc.provider_name()),
+            StatusCode::UNAUTHORIZED,
+        );
+    }
+    if params.code.trim().is_empty() {
+        return refused(
+            "That sign-in carried no code.".to_owned(),
+            StatusCode::BAD_REQUEST,
+        );
+    }
+    match oidc.complete(&headers, &params.code, &params.state).await {
+        Ok((person, groups, next)) => {
+            let cookie = oidc.sessions().open_session_with(
+                &person.subject,
+                Mode::Oidc,
+                String::new(),
+                Some(person.display.clone()),
+                groups,
+            )?;
+            eprintln!(
+                "pgokf-web: {} signed in through {}",
+                person.actor(),
+                oidc.provider_name()
+            );
+            let mut response = redirect(&safe_next(&next));
+            for value in [&drop_flow, &cookie]
+                .into_iter()
+                .filter_map(|c| cookie_header(c))
+            {
+                response.headers_mut().append(header::SET_COOKIE, value);
+            }
+            Ok(response)
+        }
+        Err(error) => {
+            eprintln!("pgokf-web: a sign-in did not complete: {error:#}");
+            refused(
+                "That sign-in could not be completed. Start again.".to_owned(),
+                StatusCode::UNAUTHORIZED,
+            )
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -2576,19 +2706,27 @@ async fn login_submit(
         shell: Shell::new(&app, &session, "Sign in", "login"),
         next: safe_next(&form.next),
         error: Some(error),
+        provider: None,
     })?;
     *response.status_mut() = StatusCode::UNAUTHORIZED;
     Ok(response)
 }
 
+/// End this site's session, and the provider's too when it offers to.
 async fn logout(State(app): State<Shared>) -> PageResult {
-    let mut response = redirect("/");
-    if let Some(value) = app
+    let Some(sessions) = app.auth.sessions() else {
+        return Ok(redirect("/"));
+    };
+    let onward = app
         .auth
-        .users()
-        .and_then(|u| cookie_header(&u.clear_cookie()))
-    {
-        response.headers_mut().insert(header::SET_COOKIE, value);
+        .oidc()
+        .and_then(super::oidc::OidcAuth::end_session_url)
+        .unwrap_or_else(|| "/".to_owned());
+    let mut response = redirect(&onward);
+    for cookie in [sessions.clear_session(), sessions.clear_flow()] {
+        if let Some(value) = cookie_header(&cookie) {
+            response.headers_mut().append(header::SET_COOKIE, value);
+        }
     }
     Ok(response)
 }
@@ -3009,11 +3147,11 @@ async fn concept_review(
 fn signed_in(session: &Session, next: &str) -> Result<Principal, AppError> {
     match (&session.principal, session.mode) {
         (Some(person), _) => Ok(person.clone()),
-        (None, Mode::Users) => Err(AppError::sign_in(next)),
+        (None, mode) if mode.is_local_session() => Err(AppError::sign_in(next)),
         (None, Mode::Header) => Err(AppError::forbidden_message(
             "Sign in through the site's identity provider.",
         )),
-        (None, Mode::None) => Err(AppError::not_found("This page")),
+        (None, _) => Err(AppError::not_found("This page")),
     }
 }
 
@@ -3056,6 +3194,10 @@ async fn render_profile(
         how: match session.mode {
             Mode::Users => "this site's own users file".to_owned(),
             Mode::Header => "the identity provider in front of this site".to_owned(),
+            Mode::Oidc => app
+                .auth
+                .oidc()
+                .map_or_else(String::new, |o| o.provider_name().to_owned()),
             Mode::None => String::new(),
         },
         permissions: permission_views(person.role),

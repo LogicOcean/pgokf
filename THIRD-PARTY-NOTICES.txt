@@ -15,9 +15,9 @@ Regenerate it with:
 
     cargo about generate --workspace --all-features -o THIRD-PARTY-NOTICES.txt about.hbs
 
-  Apache License 2.0: 325 crate(s)
-  MIT License: 99 crate(s)
-  ISC License: 22 crate(s)
+  Apache License 2.0: 332 crate(s)
+  MIT License: 102 crate(s)
+  ISC License: 23 crate(s)
   Unicode License v3: 19 crate(s)
   GNU Affero General Public License v3.0 only: 10 crate(s)
   BSD 3-Clause "New" or "Revised" License: 7 crate(s)
@@ -31,16 +31,16 @@ GNU Affero General Public License v3.0 only
 ================================================================================
 
 Used by:
-  - pgokf 0.1.16  (https://github.com/LogicOcean/pgokf)
-  - okf-parser 0.1.16  (https://github.com/LogicOcean/pgokf)
-  - okf-sync 0.1.16  (https://github.com/LogicOcean/pgokf)
-  - pgokf-companion 0.1.16  (https://github.com/LogicOcean/pgokf)
-  - pgokf-embed 0.1.16  (https://github.com/LogicOcean/pgokf)
-  - pgokf-ingest 0.1.16  (https://github.com/LogicOcean/pgokf)
-  - pgokf-mcp 0.1.16  (https://github.com/LogicOcean/pgokf)
-  - pgokf-pgconn 0.1.16  (https://github.com/LogicOcean/pgokf)
-  - pgokf-web 0.1.16  (https://github.com/LogicOcean/pgokf)
-  - pgokf-workspace 0.1.16  (https://github.com/LogicOcean/pgokf)
+  - pgokf 0.2.0  (https://github.com/LogicOcean/pgokf)
+  - okf-parser 0.2.0  (https://github.com/LogicOcean/pgokf)
+  - okf-sync 0.2.0  (https://github.com/LogicOcean/pgokf)
+  - pgokf-companion 0.2.0  (https://github.com/LogicOcean/pgokf)
+  - pgokf-embed 0.2.0  (https://github.com/LogicOcean/pgokf)
+  - pgokf-ingest 0.2.0  (https://github.com/LogicOcean/pgokf)
+  - pgokf-mcp 0.2.0  (https://github.com/LogicOcean/pgokf)
+  - pgokf-pgconn 0.2.0  (https://github.com/LogicOcean/pgokf)
+  - pgokf-web 0.2.0  (https://github.com/LogicOcean/pgokf)
+  - pgokf-workspace 0.2.0  (https://github.com/LogicOcean/pgokf)
 
 GNU AFFERO GENERAL PUBLIC LICENSE
 Version 3, 19 November 2007
@@ -939,6 +939,7 @@ Used by:
   - tinyvec 1.12.0  (https://github.com/Lokathor/tinyvec)
   - utf8_iter 1.0.4  (https://github.com/hsivonen/utf8_iter)
   - zeroize 1.9.0  (https://github.com/RustCrypto/utils)
+  - zeroize_derive 1.5.0  (https://github.com/RustCrypto/utils)
 
 
                                  Apache License
@@ -6468,6 +6469,9 @@ Apache License 2.0
 ================================================================================
 
 Used by:
+  - argon2 0.6.0  (https://github.com/RustCrypto/password-hashes)
+  - base64ct 1.8.3  (https://github.com/RustCrypto/formats)
+  - blake2 0.11.0  (https://github.com/RustCrypto/hashes)
   - block-buffer 0.12.1  (https://github.com/RustCrypto/utils)
   - chacha20 0.10.2  (https://github.com/RustCrypto/stream-ciphers)
   - const-oid 0.10.2  (https://github.com/RustCrypto/formats)
@@ -6482,7 +6486,10 @@ Used by:
   - hmac 0.13.0  (https://github.com/RustCrypto/MACs)
   - hybrid-array 0.4.14  (https://github.com/RustCrypto/hybrid-array)
   - md-5 0.11.0  (https://github.com/RustCrypto/hashes)
+  - password-hash 0.6.1  (https://github.com/RustCrypto/traits)
+  - phc 0.6.1  (https://github.com/RustCrypto/formats)
   - sha2 0.11.0  (https://github.com/RustCrypto/hashes)
+  - signature 2.2.0  (https://github.com/RustCrypto/traits/tree/master/signature)
   - spki 0.7.3  (https://github.com/RustCrypto/formats/tree/master/spki)
   - x509-cert 0.2.5  (https://github.com/RustCrypto/formats/tree/master/x509-cert)
 
@@ -8710,6 +8717,7 @@ ISC License
 ================================================================================
 
 Used by:
+  - untrusted 0.7.1  (https://github.com/briansmith/untrusted)
   - untrusted 0.9.0  (https://github.com/briansmith/untrusted)
 
 // Copyright 2015-2016 Brian Smith.
@@ -10270,6 +10278,36 @@ MIT License
 ================================================================================
 
 Used by:
+  - multer 3.1.0  (https://github.com/rwf2/multer)
+
+MIT License
+
+Copyright (c) 2020 Rousan Ali
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+================================================================================
+MIT License
+================================================================================
+
+Used by:
   - funty 2.0.0  (https://github.com/myrrlyn/funty)
 
 MIT License
@@ -10644,6 +10682,7 @@ MIT License
 
 Used by:
   - spin 0.10.1  (https://github.com/mvdnes/spin-rs.git)
+  - spin 0.9.9  (https://github.com/mvdnes/spin-rs.git)
 
 The MIT License (MIT)
 
@@ -10916,6 +10955,36 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
+
+
+================================================================================
+MIT License
+================================================================================
+
+Used by:
+  - jsonwebtoken 11.0.0  (https://github.com/Keats/jsonwebtoken)
+
+The MIT License (MIT)
+
+Copyright (c) 2015 Vincent Prouillet
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 
 ================================================================================

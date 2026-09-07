@@ -234,8 +234,9 @@ as JSON under `/api/` (`/api/health`, `/api/search?q=...`, `/api/bundles`,
 
 The UI is read-only until two things are set in `.env`: a writer connection
 (`OKF_UI_WRITER_URL`, the stack's writer role) and a way of knowing who is
-asking (`OKF_UI_AUTH=users` with a users file, or `OKF_UI_AUTH=header`
-behind a proxy that forwards the identity). The catalog must also keep
+asking (`OKF_UI_AUTH=oidc` against your identity provider,
+`OKF_UI_AUTH=users` with a users file, or `OKF_UI_AUTH=header` behind a
+proxy that forwards the identity). The catalog must also keep
 document sources:
 
 ```sh
@@ -273,6 +274,13 @@ OKF_UI_BUNDLES_MODE=rw
 OKF_UI_UID=1000    # id -u of the directory's owner
 OKF_UI_GID=1000
 ```
+
+With `OKF_UI_AUTH=oidc` there is no users file: people sign in with your
+provider, and their groups become roles through `OKF_UI_ROLE_MAP`. Register
+`https://<this site>/auth/callback` with the provider, set
+`OKF_UI_OIDC_ISSUER`, `OKF_UI_OIDC_CLIENT_ID`, `OKF_UI_OIDC_CLIENT_SECRET`,
+and `OKF_UI_OIDC_REDIRECT_URL`, and give the stack a
+`OKF_UI_SESSION_SECRET` as usual.
 
 See the crate README for the roles and the security model.
 

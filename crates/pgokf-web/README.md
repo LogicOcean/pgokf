@@ -35,7 +35,9 @@ connections so an edge can be reached by a tap.
 | `--database-url` | `OKF_PG_URL` | Connection string for a `pgokf_reader` role (required): everything the UI shows comes through it. |
 | `--writer-url` | `OKF_PG_WRITER_URL` | Connection string for a `pgokf_writer` role, used only by the human workflow (upload, edit, review) and only for signed-in people whose role allows it. Without it those pages are off and the UI is read-only. |
 | `--bundles-dir`, `--bundles-db-dir` | `OKF_WEB_BUNDLES_DIR`, `OKF_WEB_BUNDLES_DB_DIR` | The directory under which directory bundles are reachable from this process (mounted read-write), and the path the database server uses for the same directory when it differs. With it set, editors change documents of directory bundles in place: the file is written atomically, confined to the bundle (no `..`, no symbolic links), and the bundle is refreshed, so the directory stays the source of truth. Unset, such bundles are read-only in the UI. |
-| `--auth` | `OKF_WEB_AUTH` | How people are identified: `none` (everyone is a viewer; the default), `header` (a trusted reverse proxy forwards the identity), or `users` (a local users file with a login form). |
+| `--auth` | `OKF_WEB_AUTH` | How people are identified: `none` (everyone is a viewer; the default), `oidc` (this site signs people in against an OpenID Connect provider), `header` (a trusted reverse proxy forwards the identity), or `users` (a local users file with a login form). |
+| `--oidc-issuer`, `--oidc-client-id`, `--oidc-client-secret`, `--oidc-redirect-url` | `OKF_WEB_OIDC_ISSUER`, `OKF_WEB_OIDC_CLIENT_ID`, `OKF_WEB_OIDC_CLIENT_SECRET`, `OKF_WEB_OIDC_REDIRECT_URL` | `oidc` mode: the provider's issuer URL exactly as it declares it, the client this site is registered as, its secret (omit it for a public client, which PKCE alone protects), and this site's callback URL, which is its public address plus `/auth/callback` and must be registered with the provider. |
+| `--oidc-scopes`, `--oidc-subject-claims`, `--oidc-groups-claim`, `--oidc-provider-name` | `OKF_WEB_OIDC_SCOPES`, `OKF_WEB_OIDC_SUBJECT_CLAIMS`, `OKF_WEB_OIDC_GROUPS_CLAIM`, `OKF_WEB_OIDC_PROVIDER_NAME` | The scopes to ask for (default `openid profile email`; `openid` is always added), the claims tried in order for the person's identity (default `preferred_username,email,sub`), the claim carrying their groups (default `groups`), and what the sign-in button calls the provider. Roles come from `--auth-role-map` and `--auth-default-role`, and the session from `--session-secret` / `--session-hours` / `--cookie-secure`, exactly as in `users` mode. |
 | `--auth-users-file`, `--session-secret`, `--session-hours`, `--cookie-secure` | `OKF_WEB_AUTH_USERS_FILE`, `OKF_WEB_SESSION_SECRET`, `OKF_WEB_SESSION_HOURS`, `OKF_WEB_COOKIE_SECURE` | `users` mode: the file (`name:role:$argon2id$...` per line, made with `pgokf-web hash-password --user NAME --role ROLE < password.txt`), the key that signs session cookies (at least 32 characters; unset, a random one is used and sessions end with the process), the session length (default 12 h), and whether cookies are marked `Secure` (set it once the UI is served over HTTPS). |
 | `--auth-trusted-proxy`, `--auth-user-header`, `--auth-groups-header`, `--auth-name-header`, `--auth-role-map`, `--auth-default-role` | `OKF_WEB_AUTH_TRUSTED_PROXY`, `OKF_WEB_AUTH_USER_HEADER`, `OKF_WEB_AUTH_GROUPS_HEADER`, `OKF_WEB_AUTH_NAME_HEADER`, `OKF_WEB_AUTH_ROLE_MAP`, `OKF_WEB_AUTH_DEFAULT_ROLE` | `header` mode: the proxy's addresses or CIDR ranges (required; identity headers from any other peer are ignored; the word `any` believes every peer, for a server only the proxy can reach), the headers carrying the user (default `X-Forwarded-User`), the comma-separated groups (default `X-Forwarded-Groups`), and an optional display name, `group=role,...` (the highest matching role wins), and the role of a person in no mapped group (default `viewer`). |
 | `--bind` | `OKF_WEB_BIND` | Listen address (default `127.0.0.1:8080`). |
@@ -66,11 +68,14 @@ every variable unconditionally.
 - Read-only by default, and every write is a person's: the human workflow
   needs a writer connection *and* an identified person whose role allows the
   action; anonymous requests never reach the writer. Identities come through
-  one seam (`auth.rs`): a trusted reverse proxy's headers, believed only from
-  the proxy's own addresses, or a local users file (Argon2id hashes) with a
-  login form and an HMAC-signed, `HttpOnly`, `SameSite=Lax` session cookie
-  whose role is re-read from the file on every request, so removing a user
-  takes effect at once, and a changed password ends every session opened
+  one seam (`auth.rs`): an OpenID Connect provider this site signs people in
+  against, a trusted reverse proxy's headers, believed only from the proxy's
+  own addresses, or a local users file (Argon2id hashes) with a login form.
+  The two that end here issue the same HMAC-signed, `HttpOnly`,
+  `SameSite=Lax` session cookie, which names the mode that opened it so one
+  mode never honours another's, and carries no role: the role is derived on
+  every request, so removing a user or changing the role map takes effect at
+  once, and in `users` mode a changed password ends every session opened
   before it. Sign-ins are throttled per name (after five failures each
   attempt waits out a doubling cooldown), and an unknown name costs the
   same time as a wrong password. State-changing requests are refused when
@@ -103,6 +108,52 @@ every variable unconditionally.
   is exhausted, 504 on timeout. Under `/api/` every error is a JSON document
   `{"error": {"status", "message"}}`.
 
+## Signing in with an identity provider (`oidc`)
+
+The site is its own OAuth client, using the authorization code flow with
+PKCE, which is what the OAuth 2.1 draft asks of a server-side client. It
+works with any OpenID Connect provider: Entra ID, Okta, Keycloak, Auth0,
+Google, a GitLab instance.
+
+```sh
+OKF_WEB_AUTH=oidc \
+OKF_WEB_OIDC_ISSUER=https://id.example.com/realms/okf \
+OKF_WEB_OIDC_CLIENT_ID=pgokf \
+OKF_WEB_OIDC_CLIENT_SECRET=... \
+OKF_WEB_OIDC_REDIRECT_URL=https://catalog.example.com/auth/callback \
+OKF_WEB_AUTH_ROLE_MAP=okf-editors=editor,okf-approvers=approver,okf-admins=admin \
+OKF_WEB_SESSION_SECRET=... \
+pgokf-web
+```
+
+Register `https://<this site>/auth/callback` with the provider as the
+redirect URI, and have it send a `groups` claim; the role map turns those
+groups into roles, and a person in no mapped group gets
+`--auth-default-role` (`viewer`).
+
+What the sign-in insists on, in order: the provider's configuration is read
+from `<issuer>/.well-known/openid-configuration` and must declare the
+configured issuer; the request carries a fresh `state`, `nonce`, and PKCE
+`S256` challenge, all kept in one short-lived signed cookie rather than in
+memory, so a restart or a second instance loses nothing; the code is
+exchanged over TLS directly with the provider, so it never passes through
+the browser; and the ID token must be signed by a key the provider
+publishes, with an asymmetric algorithm (`none` and the HMAC algorithms are
+refused, since an HMAC one would let the provider's *public* key be used as
+a shared secret), for the configured issuer, for this client, unexpired, and
+with the `nonce` this site sent. Sign-out ends this site's session and,
+where the provider advertises one, its own session too.
+
+Two things to know. The person's identity becomes their OKF actor
+(`human:<subject>`) and is recorded in every document they touch, so the
+claim it comes from should be one the provider guarantees unique and never
+reassigns; `sub` always is, while a user name or an email may be given to
+someone else later, and the server says so at startup when the first
+configured claim is not `sub`. And a role change at the provider takes
+effect when the person signs in again (their mapped groups travel in the
+session), while a change to the role map here takes effect at once; keep
+`--session-hours` short if that matters.
+
 ## The human workflow
 
 With a writer connection and an authentication mode, people with the right
@@ -117,7 +168,7 @@ Roles are a ladder; each holds the ones below it:
 
 | Role | May |
 | ---- | --- |
-| `viewer` | read everything the reader role can see (everyone, signed in or not) |
+| `viewer` | read everything the reader role can see (everyone signed in; also everyone at all when identities are off) |
 | `uploader` | **Upload** Markdown documents into a content bundle (new or existing); a document without `generated`/`author` is stamped with the person's OKF actor, `human:<name>` |
 | `editor` | **Edit** a document (frontmatter and body, with a validating preview) or delete it; any earlier verification is set aside, `generated` names the editor, and the document returns to the review queue |
 | `approver` | **Review**: the queue of unverified documents; approving records a `verified` event under the person's name (the document becomes *human-reviewed*, a draft becomes active), sending back makes it a draft and keeps the note under `reviews` |
