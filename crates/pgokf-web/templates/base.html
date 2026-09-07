@@ -14,10 +14,11 @@
 </head>
 <body>
 <a class="skip" href="#pgokf-main">Skip to content</a>
+{% block header %}
 <header class="topbar">
-  <a class="brand" href="/" aria-label="Home">
+  <a class="brand" href="/" aria-label="Home" title="{{ shell.catalog_name }}">
     <span class="brand-mark" aria-hidden="true"></span>
-    <span class="brand-name">{{ shell.catalog_name }}</span>
+    <span class="brand-name">catalog</span>
   </a>
   <form class="topsearch" role="search" action="/search" method="get">
     <input type="search" name="q" placeholder="Search the catalog  ( / )" value="{{ shell.query }}" autocomplete="off" aria-label="Search">
@@ -40,6 +41,7 @@
     <button type="button" class="btn ghost icon js-only" id="pgokf-theme" aria-label="Toggle dark mode" title="Toggle dark mode">◐</button>
   </div>
 </header>
+{% endblock %}
 <main id="pgokf-main" class="page">
 {% block content %}{% endblock %}
 </main>

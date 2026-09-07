@@ -151,6 +151,12 @@ a.tag:hover { color: var(--accent); text-decoration: none; }
 .table .desc { display: block; color: var(--muted); font-size: .85em; max-width: 44ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 400; }
 .table tr[hidden] { display: none; }
 .table .when { white-space: nowrap; }
+/* ---- sign-in page: no header, the box centred -------------------------- */
+.login-stage { min-height: calc(100vh - 7rem); display: flex; align-items: center; justify-content: center; padding: 1rem 0; }
+.panel.login { width: min(24rem, 100%); }
+.panel.login h2 { margin: .2rem 0 1rem; font-size: 1.35rem; }
+.login-brand { display: flex; align-items: center; gap: .5rem; font-weight: 700; margin-bottom: .6rem; color: var(--text); }
+.btn.wide { width: 100%; justify-content: center; }
 /* ---- profile and admin ------------------------------------------------- */
 .perm-list { list-style: none; padding: 0; margin: 0 0 .5rem; display: grid; gap: .3rem; }
 .perm-list li { display: flex; gap: .5rem; align-items: baseline; }
