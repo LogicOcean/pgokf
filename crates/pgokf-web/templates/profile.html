@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero">
+  <div>
+    <h1>{{ display }}</h1>
+    <p class="lede">Signed in as <code>{{ subject }}</code> with the <strong>{{ role }}</strong> role. What you produce or verify is recorded in the documents as <code>{{ actor }}</code>.</p>
+  </div>
+</section>
+{% if let Some(n) = notice %}<p class="notice ok">{{ n }}</p>{% endif %}
+{% if let Some(e) = error %}<p class="notice bad">{{ e }}</p>{% endif %}
+<div class="admin-grid">
+  <section class="panel">
+    <div class="panel-head"><h2>What your role allows</h2></div>
+    <ul class="perm-list">
+      {% for p in permissions %}<li><span class="pill {% if p.held %}ok{% else %}muted{% endif %}">{{ p.role }}</span><span{% if !p.held %} class="muted"{% endif %}>{{ p.text }}</span></li>{% endfor %}
+    </ul>
+    <p class="hint">Roles are a ladder: each one holds everything below it. Signed in through {{ how }}.</p>
+  </section>
+  {% if can_change_password %}
+  <section class="panel">
+    <div class="panel-head"><h2>Change password</h2></div>
+    <form method="post" action="/profile/password">
+      <div class="field"><label for="pw-current">Current password</label><input id="pw-current" type="password" name="current" autocomplete="current-password" required></div>
+      <div class="field"><label for="pw-new">New password <span class="muted">(at least 12 characters)</span></label><input id="pw-new" type="password" name="new" autocomplete="new-password" minlength="12" required></div>
+      <div class="field"><label for="pw-again">New password again</label><input id="pw-again" type="password" name="again" autocomplete="new-password" minlength="12" required></div>
+      <button type="submit" class="btn primary">Change password</button>
+    </form>
+  </section>
+  {% else %}
+  <section class="panel">
+    <div class="panel-head"><h2>Account</h2></div>
+    <p class="muted">Your account is managed by the identity provider in front of this site; there is nothing to change here.</p>
+  </section>
+  {% endif %}
+</div>
+<div class="two-col">
+  <section class="panel">
+    <div class="panel-head"><h2>Documents you produced <span class="muted">({{ produced.len() }})</span></h2></div>
+    {% if produced.is_empty() %}<p class="empty">No document names you in <code>generated</code> yet.</p>{% else %}
+    <table class="table compact">
+      <thead><tr><th>Document</th><th>Bundle</th><th>Trust</th><th>When</th></tr></thead>
+      <tbody>{% for i in produced %}<tr><td><a href="/concepts/{{ i.bundle_id }}/{{ i.concept_id|urlencode_path }}">{{ i.title.as_deref().unwrap_or(i.concept_id.as_str()) }}</a><span class="desc path">{{ i.path }}</span></td><td>{{ i.bundle_name }}</td><td><span class="pill trust-{{ i.trust_tier }}">{{ i.trust_tier }}</span></td><td class="when">{% if let Some(w) = i.when %}{{ w|datetime }}{% endif %}</td></tr>{% endfor %}</tbody>
+    </table>{% endif %}
+  </section>
+  <section class="panel">
+    <div class="panel-head"><h2>Documents you verified <span class="muted">({{ verified.len() }})</span></h2></div>
+    {% if verified.is_empty() %}<p class="empty">No verification under your name yet.</p>{% else %}
+    <table class="table compact">
+      <thead><tr><th>Document</th><th>Bundle</th><th>Trust</th><th>When</th></tr></thead>
+      <tbody>{% for i in verified %}<tr><td><a href="/concepts/{{ i.bundle_id }}/{{ i.concept_id|urlencode_path }}">{{ i.title.as_deref().unwrap_or(i.concept_id.as_str()) }}</a><span class="desc path">{{ i.path }}</span></td><td>{{ i.bundle_name }}</td><td><span class="pill trust-{{ i.trust_tier }}">{{ i.trust_tier }}</span></td><td class="when">{% if let Some(w) = i.when %}{{ w|datetime }}{% endif %}</td></tr>{% endfor %}</tbody>
+    </table>{% endif %}
+  </section>
+</div>
+{% endblock %}

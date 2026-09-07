@@ -259,8 +259,21 @@ outside `ui-auth/` with mode 600): the mounted directory holds only the
 Argon2id hashes, and the file is re-read whenever it changes.
 
 Uploaders add documents, editors change them (which sends them back to
-review), and approvers record the human verification the trust tier derives
-from. See the crate README for the roles and the security model.
+review), approvers record the human verification the trust tier derives
+from, and an admin manages people and bundles from the Admin page. To let
+editors change the documents of the bundles under `PGOKF_BUNDLES_DIR` in
+place, mount them read-write into the UI and run it as the host user that
+owns them:
+
+```sh
+# .env
+OKF_UI_BUNDLES_DIR=/bundles
+OKF_UI_BUNDLES_MODE=rw
+OKF_UI_UID=1000    # id -u of the directory's owner
+OKF_UI_GID=1000
+```
+
+See the crate README for the roles and the security model.
 
 ## Backups and restore
 

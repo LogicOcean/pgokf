@@ -34,6 +34,7 @@ connections so an edge can be reached by a tap.
 | ---- | ----------- | ------- |
 | `--database-url` | `OKF_PG_URL` | Connection string for a `pgokf_reader` role (required): everything the UI shows comes through it. |
 | `--writer-url` | `OKF_PG_WRITER_URL` | Connection string for a `pgokf_writer` role, used only by the human workflow (upload, edit, review) and only for signed-in people whose role allows it. Without it those pages are off and the UI is read-only. |
+| `--bundles-dir`, `--bundles-db-dir` | `OKF_WEB_BUNDLES_DIR`, `OKF_WEB_BUNDLES_DB_DIR` | The directory under which directory bundles are reachable from this process (mounted read-write), and the path the database server uses for the same directory when it differs. With it set, editors change documents of directory bundles in place: the file is written atomically, confined to the bundle (no `..`, no symbolic links), and the bundle is refreshed, so the directory stays the source of truth. Unset, such bundles are read-only in the UI. |
 | `--auth` | `OKF_WEB_AUTH` | How people are identified: `none` (everyone is a viewer; the default), `header` (a trusted reverse proxy forwards the identity), or `users` (a local users file with a login form). |
 | `--auth-users-file`, `--session-secret`, `--session-hours`, `--cookie-secure` | `OKF_WEB_AUTH_USERS_FILE`, `OKF_WEB_SESSION_SECRET`, `OKF_WEB_SESSION_HOURS`, `OKF_WEB_COOKIE_SECURE` | `users` mode: the file (`name:role:$argon2id$...` per line, made with `pgokf-web hash-password --user NAME --role ROLE < password.txt`), the key that signs session cookies (at least 32 characters; unset, a random one is used and sessions end with the process), the session length (default 12 h), and whether cookies are marked `Secure` (set it once the UI is served over HTTPS). |
 | `--auth-trusted-proxy`, `--auth-user-header`, `--auth-groups-header`, `--auth-name-header`, `--auth-role-map`, `--auth-default-role` | `OKF_WEB_AUTH_TRUSTED_PROXY`, `OKF_WEB_AUTH_USER_HEADER`, `OKF_WEB_AUTH_GROUPS_HEADER`, `OKF_WEB_AUTH_NAME_HEADER`, `OKF_WEB_AUTH_ROLE_MAP`, `OKF_WEB_AUTH_DEFAULT_ROLE` | `header` mode: the proxy's addresses or CIDR ranges (required; identity headers from any other peer are ignored; the word `any` believes every peer, for a server only the proxy can reach), the headers carrying the user (default `X-Forwarded-User`), the comma-separated groups (default `X-Forwarded-Groups`), and an optional display name, `group=role,...` (the highest matching role wins), and the role of a person in no mapped group (default `viewer`). |
@@ -98,11 +99,12 @@ every variable unconditionally.
 ## The human workflow
 
 With a writer connection and an authentication mode, people with the right
-role work on **content bundles**: bundles the catalog holds in its own store
-(`register_bundle_content`), which the UI can rebuild after a change. A
-bundle synced from a directory or a bucket is changed at its source, and the
-UI says so. The catalog must keep sources (`store_source` on), because a
-resync is a full snapshot rebuilt from what the catalog stored.
+role work on **content bundles** (bundles the catalog holds in its own
+store, `register_bundle_content`, rebuilt from the sources the catalog
+keeps, so `store_source` must be on) and, when `--bundles-dir` points at
+the same directory the database reads, on **directory bundles** too: the
+document is written in place and the bundle refreshed. A bundle synced
+from an object store is changed at its source, and the UI says so.
 
 Roles are a ladder; each holds the ones below it:
 
@@ -112,7 +114,14 @@ Roles are a ladder; each holds the ones below it:
 | `uploader` | **Upload** Markdown documents into a content bundle (new or existing); a document without `generated`/`author` is stamped with the person's OKF actor, `human:<name>` |
 | `editor` | **Edit** a document (frontmatter and body, with a validating preview) or delete it; any earlier verification is set aside, `generated` names the editor, and the document returns to the review queue |
 | `approver` | **Review**: the queue of unverified documents; approving records a `verified` event under the person's name (the document becomes *human-reviewed*, a draft becomes active), sending back makes it a draft and keeps the note under `reviews` |
-| `admin` | everything above (reserved for operators) |
+| `admin` | everything above, plus **Admin**: people (in `users` mode: add, change role, reset password, remove; the file is rewritten in place and reloaded) and bundles (register a directory bundle, refresh, enable or disable, retire or bring back, unregister) |
+
+Once identities are on (any mode but `none`), nobody reaches the site
+without signing in: only the login page, the static assets, and the health
+probe answer an anonymous request, so signing out ends access. Everyone
+signed in has a **profile** page: their identity, what their role allows,
+the documents they produced and verified, and (in `users` mode) a password
+change.
 
 Every decision is an ordinary OKF field in the document itself (`generated`,
 `author`, `verified`, `status`, `reviews`, `superseded_verifications`), so

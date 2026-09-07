@@ -33,14 +33,15 @@ use tower::limit::ConcurrencyLimitLayer;
 
 use crate::auth::{Authenticator, Mode, Principal, Role, Session, cookie_header};
 use crate::db::{
-    BundleFile, BundleInfo, BundleLogEntry, BundleStat, ConceptDetail, ConceptSummary,
-    ContentBundle, Cursor, Db, DuplicateGroup, Facet, Failure, Graph, Hit, Link, Neighbor,
-    PackageInfo, ResourceInfo, ReviewItem, SearchQuery, StaleConcept, SyncLogEntry, SyncOutcome,
+    AdminBundle, BundleFile, BundleInfo, BundleLogEntry, BundleStat, ConceptDetail, ConceptSummary,
+    Cursor, Db, DuplicateGroup, Facet, Failure, Graph, Hit, Link, Neighbor, PackageInfo,
+    PersonalItem, ResourceInfo, ReviewItem, SearchQuery, StaleConcept, SyncLogEntry, SyncOutcome,
     Version,
 };
 use crate::documents::{Document, now_iso};
 use crate::graph::{GraphEdge, GraphNode};
 use crate::links::Resolver;
+use crate::store::DocumentStore;
 use crate::{graph, markdown};
 use pgokf_workspace::drop_packaged_resources;
 
@@ -54,6 +55,8 @@ pub(crate) struct App {
     /// Bundle rebuilds run one at a time: a content resync is a full
     /// snapshot, so two interleaved ones could lose each other's change.
     pub rebuilds: tokio::sync::Mutex<()>,
+    /// Where directory bundles are reachable from this process, if at all.
+    pub stores: crate::store::Stores,
     pub embedder: Option<EmbeddingsClient>,
     pub catalog_name: String,
     pub tenant: Option<String>,
@@ -107,6 +110,11 @@ pub(crate) fn router(app: Shared) -> Router {
         .route("/plugins/build.zip", get(plugins_zip))
         .route("/login", get(login_page).post(login_submit))
         .route("/logout", post(logout))
+        .route("/profile", get(profile_page))
+        .route("/profile/password", post(profile_password))
+        .route("/admin", get(admin_page))
+        .route("/admin/users", post(admin_users))
+        .route("/admin/bundles", post(admin_bundles))
         .route("/review", get(review_page))
         .route("/review/{bundle_id}/{*concept_id}", post(concept_review))
         .route(
@@ -178,15 +186,38 @@ async fn security_headers(request: Request, next: Next) -> Response {
     response
 }
 
-/// Resolve who is asking and attach the [`Session`] to the request.
+/// Resolve who is asking and attach the [`Session`] to the request. Once
+/// people are identified at all (any mode but `none`), a request from
+/// nobody reaches nothing but the login page, the static assets, and the
+/// health probe: signing out ends access to the site.
 async fn authenticate(State(app): State<Shared>, mut request: Request, next: Next) -> Response {
     let peer = Session::peer_of(request.extensions());
     let principal = app.auth.identify(request.headers(), peer);
-    request.extensions_mut().insert(Session {
-        principal,
-        mode: app.auth.mode(),
-    });
+    let mode = app.auth.mode();
+    if mode != Mode::None && principal.is_none() && !open_to_anyone(request.uri().path()) {
+        let path = request.uri().path();
+        if path == "/api" || path.starts_with("/api/") {
+            let body = serde_json::json!({
+                "error": { "status": 401, "message": "Sign in required." }
+            });
+            return (StatusCode::UNAUTHORIZED, Json(body)).into_response();
+        }
+        let next = request.uri().path_and_query().map_or("/", |pq| pq.as_str());
+        return match mode {
+            Mode::Users => AppError::sign_in(next).into_response(),
+            _ => AppError::forbidden_message(
+                "Sign in through the site's identity provider; this server believes only its proxy.",
+            )
+            .into_response(),
+        };
+    }
+    request.extensions_mut().insert(Session { principal, mode });
     next.run(request).await
+}
+
+/// The paths a person who is not signed in may still reach.
+fn open_to_anyone(path: &str) -> bool {
+    path == "/login" || path == "/logout" || path == "/api/health" || path.starts_with("/static/")
 }
 
 /// Refuse state-changing requests that a browser sends from another site:
@@ -467,6 +498,8 @@ static ASSET_VERSION: LazyLock<String> = LazyLock::new(|| {
 });
 
 /// The header and navigation state every page carries.
+// The flags mirror the header's toggles one to one.
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct Shell {
     pub page_title: String,
     pub catalog_name: String,
@@ -486,6 +519,7 @@ pub(crate) struct Shell {
     pub workflow: bool,
     pub can_upload: bool,
     pub can_review: bool,
+    pub can_admin: bool,
 }
 
 /// The signed-in person as the header shows them.
@@ -515,6 +549,7 @@ impl Shell {
             workflow,
             can_upload: workflow && session.allows(Role::Uploader),
             can_review: workflow && session.allows(Role::Approver),
+            can_admin: session.allows(Role::Admin),
         }
     }
 
@@ -533,6 +568,7 @@ impl Shell {
             workflow: false,
             can_upload: false,
             can_review: false,
+            can_admin: false,
         }
     }
 }
@@ -1143,8 +1179,17 @@ struct LoginPage {
 #[template(path = "upload.html")]
 struct UploadPage {
     shell: Shell,
-    bundles: Vec<ContentBundle>,
+    bundles: Vec<UploadBundle>,
     error: Option<String>,
+}
+
+/// A bundle an upload may go to.
+pub(crate) struct UploadBundle {
+    pub id: i64,
+    pub name: String,
+    /// `content` or `directory`, for the chooser.
+    pub kind: String,
+    pub file_count: i32,
 }
 
 #[derive(Template)]
@@ -1167,6 +1212,51 @@ struct EditCheckPartial {
     title: String,
     description: Option<String>,
     body_html: String,
+}
+
+#[derive(Template)]
+#[template(path = "profile.html")]
+struct ProfilePage {
+    shell: Shell,
+    display: String,
+    subject: String,
+    role: String,
+    actor: String,
+    /// How the person was identified, in words.
+    how: String,
+    permissions: Vec<PermissionView>,
+    can_change_password: bool,
+    produced: Vec<PersonalItem>,
+    verified: Vec<PersonalItem>,
+    notice: Option<String>,
+    error: Option<String>,
+}
+
+/// One rung of the role ladder, marked when the person holds it.
+pub(crate) struct PermissionView {
+    pub role: String,
+    pub text: String,
+    pub held: bool,
+}
+
+#[derive(Template)]
+#[template(path = "admin.html")]
+struct AdminPage {
+    shell: Shell,
+    users: Vec<AdminUserView>,
+    /// Whether the users file is managed here (`users` mode).
+    users_managed_here: bool,
+    roles: Vec<String>,
+    bundles: Vec<AdminBundle>,
+    config_json: String,
+    notice: Option<String>,
+    error: Option<String>,
+}
+
+pub(crate) struct AdminUserView {
+    pub name: String,
+    pub role: String,
+    pub is_me: bool,
 }
 
 #[derive(Template)]
@@ -2236,26 +2326,61 @@ async fn ensure_sources(db: &Db) -> Result<(), AppError> {
     }
 }
 
-/// Resync a content bundle with some files replaced and some removed: the
-/// catalog's content ingestion is a full snapshot, so the rest of the
-/// bundle is read back and sent along unchanged.
-async fn resync(
+/// Apply a change to a bundle through its store, one change at a time
+/// across the process (a content resync is a full snapshot; a directory
+/// write plus refresh must not interleave with another).
+async fn apply_change(
     app: &App,
     writer: &Db,
-    bundle: &ContentBundle,
+    store: &DocumentStore,
     changes: Vec<BundleFile>,
     removals: &[String],
 ) -> Result<SyncOutcome, AppError> {
     let _one_at_a_time = app.rebuilds.lock().await;
-    let mut files = writer.bundle_files(bundle.id).await?;
-    for change in changes {
-        match files.iter_mut().find(|f| f.path == change.path) {
-            Some(existing) => existing.bytes = change.bytes,
-            None => files.push(change),
-        }
+    Ok(store.apply(writer, changes, removals).await?)
+}
+
+/// The store of a bundle, or why it cannot be changed from here.
+async fn open_store(app: &App, bundle_id: i64) -> Result<Result<DocumentStore, String>, AppError> {
+    let Some((kind, path)) = app.db.bundle_source(bundle_id).await? else {
+        return Ok(Err("This bundle is not available.".to_owned()));
+    };
+    Ok(match kind.as_str() {
+        "content" => app
+            .db
+            .content_bundle(bundle_id)
+            .await?
+            .map(DocumentStore::Content)
+            .ok_or_else(|| "This content bundle is not available.".to_owned()),
+        "filesystem" => match app.stores.local_dir(&path) {
+            Some(root) if root.is_dir() => Ok(DocumentStore::Directory { bundle_id, root }),
+            Some(root) => Err(format!(
+                "This bundle's directory is not reachable here ({} is missing); change the \
+                 document at its source.",
+                root.display()
+            )),
+            None => Err(
+                "This bundle is synced from a directory the UI cannot reach: set \
+                 OKF_WEB_BUNDLES_DIR (mounted read-write) to edit it here, or change the \
+                 document at its source."
+                    .to_owned(),
+            ),
+        },
+        _ => Err(
+            "This bundle is synced from an object store; change the document at its source."
+                .to_owned(),
+        ),
+    })
+}
+
+/// Whether the workflow can rebuild through this store: a content bundle
+/// needs the catalog to keep sources.
+async fn ensure_store_sources(store: &DocumentStore, writer: &Db) -> Result<(), AppError> {
+    if store.rebuilds_from_catalog() {
+        ensure_sources(writer).await
+    } else {
+        Ok(())
     }
-    files.retain(|f| !removals.contains(&f.path));
-    Ok(writer.register_content(&bundle.name, &files).await?)
 }
 
 /// A content bundle name as `register_bundle_content` keys it.
@@ -2324,21 +2449,18 @@ async fn concept_workflow(
     if app.writer.is_none() || !session.allows(Role::Editor) && !session.allows(Role::Approver) {
         return Ok(ConceptWorkflow::default());
     }
-    let blocker = if app.db.content_bundle(c.bundle_id).await?.is_none() {
-        Some(
-            "This bundle is synced from a directory or a bucket; change the document at its \
-             source."
-                .to_owned(),
-        )
-    } else if !is_markdown(&c.path) {
-        Some(
+    let blocker = match open_store(app, c.bundle_id).await? {
+        Err(reason) => Some(reason),
+        Ok(_) if !is_markdown(&c.path) => Some(
             "Only Markdown documents are edited here; package files come with their skill."
                 .to_owned(),
-        )
-    } else if c.source.is_none() {
-        Some("The catalog holds no source for this document (store_source was off when it was ingested).".to_owned())
-    } else {
-        None
+        ),
+        Ok(DocumentStore::Content(_)) if c.source.is_none() => Some(
+            "The catalog holds no source for this document (store_source was off when it was \
+             ingested)."
+                .to_owned(),
+        ),
+        Ok(_) => None,
     };
     let editable = blocker.is_none();
     Ok(ConceptWorkflow {
@@ -2348,18 +2470,17 @@ async fn concept_workflow(
     })
 }
 
-/// A document of a content bundle with its stored source, for editing or
-/// reviewing.
+/// A document with its current text, for editing or reviewing: from the
+/// bundle's directory when the UI can reach it, else from the source the
+/// catalog stored.
 async fn editable_document(
     app: &App,
     bundle_id: i64,
     concept_id: &str,
-) -> Result<(ContentBundle, ConceptDetail, String), AppError> {
-    let bundle = app.db.content_bundle(bundle_id).await?.ok_or_else(|| {
-        AppError::bad_request(
-            "This bundle is synced from a directory or a bucket; change the document at its source.",
-        )
-    })?;
+) -> Result<(DocumentStore, ConceptDetail, String), AppError> {
+    let store = open_store(app, bundle_id)
+        .await?
+        .map_err(AppError::bad_request)?;
     let concept = app
         .db
         .concept(bundle_id, concept_id)
@@ -2370,14 +2491,18 @@ async fn editable_document(
             "Only Markdown documents are edited here; package files come with their skill.",
         ));
     }
-    let source = concept.source.clone().ok_or_else(|| {
-        AppError::bad_request(
-            "The catalog holds no source for this document (store_source was off when it was ingested).",
-        )
-    })?;
+    let source = match store.read(&concept.path).map_err(AppError::from)? {
+        Some(bytes) => bytes,
+        None => concept.source.clone().ok_or_else(|| {
+            AppError::bad_request(
+                "The catalog holds no source for this document (store_source was off when it \
+                 was ingested).",
+            )
+        })?,
+    };
     let text = String::from_utf8(source)
         .map_err(|_| AppError::bad_request("The stored source is not UTF-8 text."))?;
-    Ok((bundle, concept, text))
+    Ok((store, concept, text))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2453,19 +2578,48 @@ async fn logout(State(app): State<Shared>) -> PageResult {
 }
 
 async fn upload_page(State(app): State<Shared>, session: Session) -> PageResult {
-    let access = require(&app, &session, Role::Uploader, "/upload")?;
-    ensure_sources(access.writer).await?;
+    require(&app, &session, Role::Uploader, "/upload")?;
     html(&UploadPage {
         shell: Shell::new(&app, &session, "Upload documents", "upload"),
-        bundles: app.db.content_bundles().await?,
+        bundles: upload_bundles(&app).await?,
         error: None,
     })
 }
 
 /// Where an upload goes.
 enum UploadTarget {
-    Existing(ContentBundle),
+    Existing(DocumentStore),
     New(String),
+}
+
+/// The bundles an upload may go to: content bundles, and directory bundles
+/// this process can write.
+async fn upload_bundles(app: &App) -> Result<Vec<UploadBundle>, AppError> {
+    let mut targets: Vec<UploadBundle> = app
+        .db
+        .content_bundles()
+        .await?
+        .into_iter()
+        .map(|b| UploadBundle {
+            id: b.id,
+            name: b.name,
+            kind: "content".to_owned(),
+            file_count: b.file_count,
+        })
+        .collect();
+    if app.stores.local_root.is_some() {
+        for bundle in app.db.bundles().await? {
+            if let Ok(DocumentStore::Directory { .. }) = open_store(app, bundle.id).await? {
+                targets.push(UploadBundle {
+                    id: bundle.id,
+                    name: bundle.name,
+                    kind: "directory".to_owned(),
+                    file_count: bundle.file_count,
+                });
+            }
+        }
+    }
+    Ok(targets)
 }
 
 /// The fields of the upload form, read from the multipart body.
@@ -2515,14 +2669,13 @@ async fn upload_submit(
     multipart: Multipart,
 ) -> PageResult {
     let access = require(&app, &session, Role::Uploader, "/upload")?;
-    ensure_sources(access.writer).await?;
     match upload_documents(&app, &access, multipart).await {
         Ok(response) => Ok(response),
         // The form comes back with the problem instead of an error page.
         Err(error) if error.status() == StatusCode::BAD_REQUEST => {
             let mut response = html(&UploadPage {
                 shell: Shell::new(&app, &session, "Upload documents", "upload"),
-                bundles: app.db.content_bundles().await?,
+                bundles: upload_bundles(&app).await?,
                 error: Some(error.message().to_owned()),
             })?;
             *response.status_mut() = StatusCode::BAD_REQUEST;
@@ -2539,19 +2692,16 @@ async fn upload_documents(app: &App, access: &Access<'_>, multipart: Multipart) 
             "Choose at least one Markdown document.",
         ));
     }
-    let target = match non_empty(&fields.bundle) {
-        Some(id) => {
-            let id: i64 = id
-                .parse()
-                .map_err(|_| AppError::bad_request("Choose a bundle."))?;
-            UploadTarget::Existing(
-                app.db
-                    .content_bundle(id)
-                    .await?
-                    .ok_or_else(|| AppError::bad_request("That bundle is not a content bundle."))?,
-            )
-        }
-        None => UploadTarget::New(validated_bundle_name(&fields.new_bundle)?),
+    let target = if let Some(id) = non_empty(&fields.bundle) {
+        let id: i64 = id
+            .parse()
+            .map_err(|_| AppError::bad_request("Choose a bundle."))?;
+        let store = open_store(app, id).await?.map_err(AppError::bad_request)?;
+        ensure_store_sources(&store, access.writer).await?;
+        UploadTarget::Existing(store)
+    } else {
+        ensure_sources(access.writer).await?;
+        UploadTarget::New(validated_bundle_name(&fields.new_bundle)?)
     };
     let directory = validated_directory(&fields.directory)?;
     let now = now_iso();
@@ -2581,8 +2731,8 @@ async fn upload_documents(app: &App, access: &Access<'_>, multipart: Multipart) 
     }
     let count = documents.len();
     let outcome = match &target {
-        UploadTarget::Existing(bundle) => {
-            resync(app, access.writer, bundle, documents, &[]).await?
+        UploadTarget::Existing(store) => {
+            apply_change(app, access.writer, store, documents, &[]).await?
         }
         UploadTarget::New(name) => {
             let _one_at_a_time = app.rebuilds.lock().await;
@@ -2615,12 +2765,12 @@ async fn edit_page(
 ) -> PageResult {
     let next = format!("/edit/{bundle_id}/{concept_id}");
     let access = require(&app, &session, Role::Editor, &next)?;
-    ensure_sources(access.writer).await?;
-    let (bundle, concept, content) = editable_document(&app, bundle_id, &concept_id).await?;
+    let (store, concept, content) = editable_document(&app, bundle_id, &concept_id).await?;
+    ensure_store_sources(&store, access.writer).await?;
     html(&EditPage {
         shell: Shell::new(&app, &session, &format!("Edit {}", concept.path), "bundles"),
         bundle_id,
-        bundle_name: bundle.name,
+        bundle_name: concept.bundle_name.clone(),
         concept_id,
         path: concept.path,
         content,
@@ -2644,14 +2794,14 @@ async fn edit_submit(
 ) -> PageResult {
     let next = format!("/edit/{bundle_id}/{concept_id}");
     let access = require(&app, &session, Role::Editor, &next)?;
-    ensure_sources(access.writer).await?;
-    let (bundle, concept, current) = editable_document(&app, bundle_id, &concept_id).await?;
+    let (store, concept, current) = editable_document(&app, bundle_id, &concept_id).await?;
+    ensure_store_sources(&store, access.writer).await?;
     let concept_url = concept_href(bundle_id, &concept_id);
     if form.action == "delete" {
-        resync(
+        apply_change(
             &app,
             access.writer,
-            &bundle,
+            &store,
             Vec::new(),
             std::slice::from_ref(&concept.path),
         )
@@ -2690,7 +2840,7 @@ async fn edit_submit(
             let mut response = html(&EditPage {
                 shell: Shell::new(&app, &session, &format!("Edit {}", concept.path), "bundles"),
                 bundle_id,
-                bundle_name: bundle.name,
+                bundle_name: concept.bundle_name.clone(),
                 concept_id,
                 path: concept.path,
                 content: submitted,
@@ -2703,10 +2853,10 @@ async fn edit_submit(
     let had_verification = stored
         .as_ref()
         .is_some_and(Document::has_human_verification);
-    resync(
+    apply_change(
         &app,
         access.writer,
-        &bundle,
+        &store,
         vec![BundleFile {
             path: concept.path.clone(),
             bytes: document.render().into_bytes(),
@@ -2794,8 +2944,8 @@ async fn concept_review(
 ) -> PageResult {
     let concept_url = concept_href(bundle_id, &concept_id);
     let access = require(&app, &session, Role::Approver, &concept_url)?;
-    ensure_sources(access.writer).await?;
-    let (bundle, concept, current) = editable_document(&app, bundle_id, &concept_id).await?;
+    let (store, concept, current) = editable_document(&app, bundle_id, &concept_id).await?;
+    ensure_store_sources(&store, access.writer).await?;
     let mut document = Document::parse(&current)
         .map_err(|e| AppError::bad_request(format!("The stored document does not parse: {e}")))?;
     let actor = access.who.actor();
@@ -2814,10 +2964,10 @@ async fn concept_review(
     document.validate(&concept.path).map_err(|e| {
         AppError::bad_request(format!("The reviewed document would not parse: {e}"))
     })?;
-    resync(
+    apply_change(
         &app,
         access.writer,
-        &bundle,
+        &store,
         vec![BundleFile {
             path: concept.path.clone(),
             bytes: document.render().into_bytes(),
@@ -2832,6 +2982,353 @@ async fn concept_review(
     Ok(redirect(&format!(
         "{concept_url}?notice={}",
         filters::percent_encode(outcome)
+    )))
+}
+
+// ---------------------------------------------------------------------------
+// Profile and administration
+// ---------------------------------------------------------------------------
+
+/// The signed-in person, or the way to become one.
+fn signed_in(session: &Session, next: &str) -> Result<Principal, AppError> {
+    match (&session.principal, session.mode) {
+        (Some(person), _) => Ok(person.clone()),
+        (None, Mode::Users) => Err(AppError::sign_in(next)),
+        (None, Mode::Header) => Err(AppError::forbidden_message(
+            "Sign in through the site's identity provider.",
+        )),
+        (None, Mode::None) => Err(AppError::not_found("This page")),
+    }
+}
+
+/// What each rung of the ladder allows, in words.
+fn permission_views(role: Role) -> Vec<PermissionView> {
+    Role::all()
+        .iter()
+        .map(|r| PermissionView {
+            role: r.id().to_owned(),
+            text: match r {
+                Role::Viewer => "Browse, search, and download everything the reader role can see.",
+                Role::Uploader => "Upload documents into a content bundle.",
+                Role::Editor => "Edit or delete documents (they go back to review).",
+                Role::Approver => "Approve documents or send them back with a note.",
+                Role::Admin => "Manage people and bundles.",
+            }
+            .to_owned(),
+            held: role.allows(*r),
+        })
+        .collect()
+}
+
+/// The profile queries are bounded to this many rows each.
+const PROFILE_ROWS: i64 = 50;
+
+async fn render_profile(
+    app: &App,
+    session: &Session,
+    person: &Principal,
+    notice: Option<String>,
+    error: Option<String>,
+) -> PageResult {
+    let actor = person.actor();
+    html(&ProfilePage {
+        shell: Shell::new(app, session, "Your profile", "profile"),
+        display: person.display.clone(),
+        subject: person.subject.clone(),
+        role: person.role.id().to_owned(),
+        actor: actor.clone(),
+        how: match session.mode {
+            Mode::Users => "this site's own users file".to_owned(),
+            Mode::Header => "the identity provider in front of this site".to_owned(),
+            Mode::None => String::new(),
+        },
+        permissions: permission_views(person.role),
+        can_change_password: app.auth.users().is_some(),
+        produced: app.db.produced_by(&actor, PROFILE_ROWS).await?,
+        verified: app.db.verified_by(&actor, PROFILE_ROWS).await?,
+        notice,
+        error,
+    })
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct NoticeParams {
+    #[serde(default)]
+    notice: String,
+}
+
+async fn profile_page(
+    State(app): State<Shared>,
+    session: Session,
+    Query(params): Query<NoticeParams>,
+) -> PageResult {
+    let person = signed_in(&session, "/profile")?;
+    render_profile(&app, &session, &person, non_empty(&params.notice), None).await
+}
+
+#[derive(Debug, Deserialize)]
+struct PasswordForm {
+    #[serde(default)]
+    current: String,
+    #[serde(default)]
+    new: String,
+    #[serde(default)]
+    again: String,
+}
+
+async fn profile_password(
+    State(app): State<Shared>,
+    session: Session,
+    Form(form): Form<PasswordForm>,
+) -> PageResult {
+    let person = signed_in(&session, "/profile")?;
+    let users = app
+        .auth
+        .users()
+        .ok_or_else(|| AppError::not_found("This page"))?;
+    let problem = if users.verify(&person.subject, &form.current).is_none() {
+        Some("The current password is wrong.".to_owned())
+    } else if form.new != form.again {
+        Some("The new passwords do not match.".to_owned())
+    } else {
+        users
+            .set_password(&person.subject, &form.new)
+            .err()
+            .map(|e| e.to_string())
+    };
+    match problem {
+        None => Ok(redirect(&format!(
+            "/profile?notice={}",
+            filters::percent_encode("Password changed.")
+        ))),
+        Some(problem) => {
+            let mut response = render_profile(&app, &session, &person, None, Some(problem)).await?;
+            *response.status_mut() = StatusCode::BAD_REQUEST;
+            Ok(response)
+        }
+    }
+}
+
+/// The admin page needs the admin role; nothing else.
+fn admin(session: &Session) -> Result<Principal, AppError> {
+    let person = signed_in(session, "/admin")?;
+    if person.role.allows(Role::Admin) {
+        Ok(person)
+    } else {
+        Err(AppError::forbidden(Role::Admin))
+    }
+}
+
+async fn render_admin(
+    app: &App,
+    session: &Session,
+    person: &Principal,
+    notice: Option<String>,
+    error: Option<String>,
+) -> PageResult {
+    let users = app
+        .auth
+        .users()
+        .map(|u| {
+            u.list()
+                .into_iter()
+                .map(|(name, role)| AdminUserView {
+                    is_me: name == person.subject,
+                    name,
+                    role: role.id().to_owned(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    html(&AdminPage {
+        shell: Shell::new(app, session, "Administration", "admin"),
+        users,
+        users_managed_here: app.auth.users().is_some(),
+        roles: Role::all().iter().map(|r| r.id().to_owned()).collect(),
+        bundles: app.db.admin_bundles().await?,
+        config_json: serde_json::to_string_pretty(&app.db.config().await?).unwrap_or_default(),
+        notice,
+        error,
+    })
+}
+
+async fn admin_page(
+    State(app): State<Shared>,
+    session: Session,
+    Query(params): Query<NoticeParams>,
+) -> PageResult {
+    let person = admin(&session)?;
+    render_admin(&app, &session, &person, non_empty(&params.notice), None).await
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminUserForm {
+    #[serde(default)]
+    action: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    role: String,
+    #[serde(default)]
+    password: String,
+}
+
+/// One change to the users file, as the admin form asks for it.
+fn change_user(
+    users: &crate::auth::UsersAuth,
+    person: &Principal,
+    form: &AdminUserForm,
+) -> anyhow::Result<String> {
+    let name = form.name.trim();
+    match form.action.as_str() {
+        "add" => {
+            let role = Role::parse(&form.role).ok_or_else(|| anyhow::anyhow!("choose a role"))?;
+            users.add_user(name, role, &form.password)?;
+            Ok(format!("Added {name}."))
+        }
+        "role" => {
+            let role = Role::parse(&form.role).ok_or_else(|| anyhow::anyhow!("choose a role"))?;
+            if name == person.subject && !role.allows(Role::Admin) {
+                anyhow::bail!("you cannot take the admin role from yourself");
+            }
+            users.set_role(name, role)?;
+            Ok(format!("{name} is now {}.", role.id()))
+        }
+        "password" => {
+            users.set_password(name, &form.password)?;
+            Ok(format!("Password reset for {name}."))
+        }
+        "remove" => {
+            if name == person.subject {
+                anyhow::bail!("you cannot remove yourself");
+            }
+            users.remove_user(name)?;
+            Ok(format!("Removed {name}."))
+        }
+        other => anyhow::bail!("unknown action {other:?}"),
+    }
+}
+
+async fn admin_users(
+    State(app): State<Shared>,
+    session: Session,
+    Form(form): Form<AdminUserForm>,
+) -> PageResult {
+    let person = admin(&session)?;
+    let users = app.auth.users().ok_or_else(|| {
+        AppError::bad_request("People are managed by the identity provider, not here.")
+    })?;
+    match change_user(users, &person, &form) {
+        Ok(notice) => {
+            eprintln!(
+                "pgokf-web: {} {} user {}",
+                person.actor(),
+                form.action,
+                form.name.trim()
+            );
+            Ok(redirect(&format!(
+                "/admin?notice={}",
+                filters::percent_encode(&notice)
+            )))
+        }
+        Err(error) => {
+            let mut response =
+                render_admin(&app, &session, &person, None, Some(error.to_string())).await?;
+            *response.status_mut() = StatusCode::BAD_REQUEST;
+            Ok(response)
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminBundleForm {
+    #[serde(default)]
+    action: String,
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    name: String,
+}
+
+async fn admin_bundles(
+    State(app): State<Shared>,
+    session: Session,
+    Form(form): Form<AdminBundleForm>,
+) -> PageResult {
+    let person = admin(&session)?;
+    let access = require(&app, &session, Role::Admin, "/admin")?;
+    let id = || -> Result<i64, AppError> {
+        form.id
+            .trim()
+            .parse()
+            .map_err(|_| AppError::bad_request("Choose a bundle."))
+    };
+    let notice = match form.action.as_str() {
+        "refresh" => {
+            let _one_at_a_time = app.rebuilds.lock().await;
+            let outcome = access.writer.refresh_bundle(id()?).await?;
+            format!(
+                "Refreshed bundle {}: {} added, {} updated, {} removed.",
+                outcome.bundle_id, outcome.added, outcome.updated, outcome.removed
+            )
+        }
+        "enable" | "disable" => {
+            let enabled = form.action == "enable";
+            access.writer.set_bundle_enabled(id()?, enabled).await?;
+            format!(
+                "Bundle {} {}.",
+                form.id.trim(),
+                if enabled { "enabled" } else { "disabled" }
+            )
+        }
+        "retire" | "unretire" => {
+            let retire = form.action == "retire";
+            access.writer.retire_bundle(id()?, retire).await?;
+            format!(
+                "Bundle {} {}.",
+                form.id.trim(),
+                if retire { "retired" } else { "brought back" }
+            )
+        }
+        "unregister" => {
+            access.writer.unregister_bundle(id()?).await?;
+            format!("Bundle {} unregistered.", form.id.trim())
+        }
+        "register" => {
+            let path = form.path.trim();
+            if path.is_empty() {
+                return Err(AppError::bad_request("Give the bundle's path."));
+            }
+            let _one_at_a_time = app.rebuilds.lock().await;
+            let outcome = access
+                .writer
+                .register_bundle(path, non_empty(&form.name).as_deref())
+                .await?;
+            format!(
+                "Registered bundle {} with {} concept{}.",
+                outcome.bundle_id,
+                outcome.added,
+                if outcome.added == 1 { "" } else { "s" }
+            )
+        }
+        other => return Err(AppError::bad_request(format!("Unknown action {other:?}."))),
+    };
+    eprintln!(
+        "pgokf-web: {} {} bundle {}{}",
+        person.actor(),
+        form.action,
+        form.id.trim(),
+        if form.path.trim().is_empty() {
+            String::new()
+        } else {
+            format!(" at {}", form.path.trim())
+        }
+    );
+    Ok(redirect(&format!(
+        "/admin?notice={}",
+        filters::percent_encode(&notice)
     )))
 }
 
@@ -4290,6 +4787,16 @@ mod tests {
         assert!(
             same_origin(&with(&[("host", "catalog.example")])),
             "a non-browser client"
+        );
+    }
+
+    #[test]
+    fn only_the_login_assets_and_health_are_open_to_nobody() {
+        // Arrange / Act / Assert
+        assert!(open_to_anyone("/login") && open_to_anyone("/logout"));
+        assert!(open_to_anyone("/static/app.css") && open_to_anyone("/api/health"));
+        assert!(
+            !open_to_anyone("/") && !open_to_anyone("/api/search") && !open_to_anyone("/bundles")
         );
     }
 

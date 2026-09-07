@@ -29,6 +29,19 @@ pub(crate) struct Cli {
     #[arg(long, env = "OKF_PG_WRITER_URL", hide_env_values = true)]
     pub writer_url: Option<String>,
 
+    /// The directory under which directory bundles are reachable from this
+    /// process, mounted read-write: editors can then change their documents
+    /// in place (the bundle is refreshed afterwards). Unset, such bundles are
+    /// read-only in the UI.
+    #[arg(long, env = "OKF_WEB_BUNDLES_DIR")]
+    pub bundles_dir: Option<PathBuf>,
+
+    /// The path the database server uses for that same directory, when it
+    /// differs from `--bundles-dir` (the prefix of the registered bundle
+    /// paths). Defaults to `--bundles-dir`.
+    #[arg(long, env = "OKF_WEB_BUNDLES_DB_DIR")]
+    pub bundles_db_dir: Option<String>,
+
     /// How people are identified: `none` (everyone is a viewer), `header`
     /// (a trusted reverse proxy forwards the identity in headers), or
     /// `users` (a local users file with a login form).
@@ -158,6 +171,8 @@ impl Cli {
         self.auth_groups_header = pgokf_companion::cli::non_empty(self.auth_groups_header);
         self.session_secret = pgokf_companion::cli::non_empty(self.session_secret);
         self.auth_users_file = self.auth_users_file.filter(|p| !p.as_os_str().is_empty());
+        self.bundles_dir = self.bundles_dir.filter(|p| !p.as_os_str().is_empty());
+        self.bundles_db_dir = pgokf_companion::cli::non_empty(self.bundles_db_dir);
         self.tenant = pgokf_companion::cli::non_empty(self.tenant);
         self.embed_endpoint = pgokf_companion::cli::non_empty(self.embed_endpoint);
         self.embed_model = pgokf_companion::cli::non_empty(self.embed_model);

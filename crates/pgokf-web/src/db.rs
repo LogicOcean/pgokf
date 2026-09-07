@@ -42,6 +42,19 @@ pub(crate) struct Db {
     pool: Pool,
 }
 
+fn personal_item(r: &Row) -> Result<PersonalItem> {
+    Ok(PersonalItem {
+        bundle_id: col(r, 0)?,
+        bundle_name: col(r, 1)?,
+        concept_id: col(r, 2)?,
+        path: col(r, 3)?,
+        title: col(r, 4)?,
+        concept_type: col(r, 5)?,
+        trust_tier: col(r, 6)?,
+        when: col(r, 7)?,
+    })
+}
+
 /// The name a content bundle is keyed on: its registered name, or the
 /// synthetic path `content:<name>` without the prefix.
 pub(crate) fn content_bundle_name(path: &str, name: Option<&str>) -> String {
@@ -107,6 +120,32 @@ pub(crate) struct SyncOutcome {
     pub added: i32,
     pub updated: i32,
     pub removed: i32,
+}
+
+/// A bundle as the admin page lists it: every row, retired ones included.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct AdminBundle {
+    pub id: i64,
+    pub path: String,
+    pub name: String,
+    pub source_type: String,
+    pub enabled: bool,
+    pub retired: bool,
+    pub file_count: i32,
+    pub last_synced_at: Option<String>,
+}
+
+/// A concept a person produced or verified, for their profile.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct PersonalItem {
+    pub bundle_id: i64,
+    pub bundle_name: String,
+    pub concept_id: String,
+    pub path: String,
+    pub title: Option<String>,
+    pub concept_type: Option<String>,
+    pub trust_tier: String,
+    pub when: Option<String>,
 }
 
 /// One concept awaiting a human review.
@@ -882,6 +921,148 @@ impl Db {
             })
         })
         .await
+    }
+
+    /// Every bundle for the admin page, retired ones included.
+    pub(crate) async fn admin_bundles(&self) -> Result<Vec<AdminBundle>> {
+        let sql = format!(
+            "SELECT b.id, b.path, {}, b.source_type, b.enabled, (b.retired_at IS NOT NULL),
+                    b.file_count, {}
+             FROM pgokf.bundles b
+             ORDER BY (b.retired_at IS NOT NULL), b.id",
+            display_name("b"),
+            iso("b.last_synced_at")
+        );
+        self.query_map(&sql, &[], |r| {
+            Ok(AdminBundle {
+                id: col(r, 0)?,
+                path: col(r, 1)?,
+                name: col(r, 2)?,
+                source_type: col(r, 3)?,
+                enabled: col(r, 4)?,
+                retired: col(r, 5)?,
+                file_count: col(r, 6)?,
+                last_synced_at: col(r, 7)?,
+            })
+        })
+        .await
+    }
+
+    /// A bundle's source type and path as the database sees it.
+    pub(crate) async fn bundle_source(&self, id: i64) -> Result<Option<(String, String)>> {
+        let row = self
+            .query_opt(
+                "SELECT source_type, path FROM pgokf.bundles
+                 WHERE id = $1 AND enabled AND retired_at IS NULL",
+                &[&id],
+            )
+            .await?;
+        row.map(|r| Ok((col(&r, 0)?, col(&r, 1)?))).transpose()
+    }
+
+    /// Run one writer-tier bundle function that returns `bundle_info`.
+    async fn bundle_op(&self, sql: &str, params: &[&(dyn ToSql + Sync)]) -> Result<()> {
+        self.query_opt(sql, params)
+            .await?
+            .ok_or_else(|| anyhow!("the bundle operation returned no row"))?;
+        Ok(())
+    }
+
+    pub(crate) async fn refresh_bundle(&self, id: i64) -> Result<SyncOutcome> {
+        let row = self
+            .query_opt(
+                "SELECT r.bundle_id, r.added, r.updated, r.removed FROM pgokf.refresh_bundle($1) r",
+                &[&id],
+            )
+            .await?
+            .ok_or_else(|| anyhow!("refresh_bundle returned no row"))?;
+        Ok(SyncOutcome {
+            bundle_id: col(&row, 0)?,
+            added: col::<Option<i32>>(&row, 1)?.unwrap_or_default(),
+            updated: col::<Option<i32>>(&row, 2)?.unwrap_or_default(),
+            removed: col::<Option<i32>>(&row, 3)?.unwrap_or_default(),
+        })
+    }
+
+    pub(crate) async fn set_bundle_enabled(&self, id: i64, enabled: bool) -> Result<()> {
+        self.bundle_op(
+            "SELECT * FROM pgokf.set_bundle_enabled($1, $2)",
+            &[&id, &enabled],
+        )
+        .await
+    }
+
+    pub(crate) async fn retire_bundle(&self, id: i64, retire: bool) -> Result<()> {
+        if retire {
+            self.bundle_op("SELECT * FROM pgokf.retire_bundle($1)", &[&id])
+                .await
+        } else {
+            self.bundle_op("SELECT * FROM pgokf.unretire_bundle($1)", &[&id])
+                .await
+        }
+    }
+
+    pub(crate) async fn unregister_bundle(&self, id: i64) -> Result<()> {
+        self.bundle_op("SELECT * FROM pgokf.unregister_bundle($1)", &[&id])
+            .await
+    }
+
+    /// Register a directory bundle at a path the database server can read.
+    pub(crate) async fn register_bundle(
+        &self,
+        path: &str,
+        name: Option<&str>,
+    ) -> Result<SyncOutcome> {
+        let row = self
+            .query_opt(
+                "SELECT r.bundle_id, r.added, r.updated, r.removed
+                 FROM pgokf.register_bundle($1, $2, '{}'::jsonb) r",
+                &[&path, &name],
+            )
+            .await?
+            .ok_or_else(|| anyhow!("register_bundle returned no row"))?;
+        Ok(SyncOutcome {
+            bundle_id: col(&row, 0)?,
+            added: col::<Option<i32>>(&row, 1)?.unwrap_or_default(),
+            updated: col::<Option<i32>>(&row, 2)?.unwrap_or_default(),
+            removed: col::<Option<i32>>(&row, 3)?.unwrap_or_default(),
+        })
+    }
+
+    /// Concepts whose current content a person produced (`generated.by`).
+    pub(crate) async fn produced_by(&self, actor: &str, limit: i64) -> Result<Vec<PersonalItem>> {
+        let sql = format!(
+            "SELECT c.bundle_id, {}, c.id, c.path, c.title, c.type,
+                    coalesce(p.trust_tier, 'unverified'), {}
+             FROM pgokf.concept_provenance p
+             JOIN pgokf.concepts c ON c.bundle_id = p.bundle_id AND c.id = p.concept_id
+             JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled AND b.retired_at IS NULL
+             WHERE p.generated_by = $1
+             ORDER BY p.generated_at DESC NULLS LAST, c.path
+             LIMIT $2",
+            display_name("b"),
+            iso("p.generated_at")
+        );
+        self.query_map(&sql, &[&actor, &limit], personal_item).await
+    }
+
+    /// Concepts a person verified.
+    pub(crate) async fn verified_by(&self, actor: &str, limit: i64) -> Result<Vec<PersonalItem>> {
+        let sql = format!(
+            "SELECT DISTINCT ON (c.bundle_id, c.id) c.bundle_id, {}, c.id, c.path, c.title, c.type,
+                    coalesce(p.trust_tier, 'unverified'), {}
+             FROM pgokf.concept_verification v
+             JOIN pgokf.concepts c ON c.bundle_id = v.bundle_id AND c.id = v.concept_id
+             JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled AND b.retired_at IS NULL
+             LEFT JOIN pgokf.concept_provenance p
+                    ON p.bundle_id = c.bundle_id AND p.concept_id = c.id
+             WHERE v.verified_by = $1
+             ORDER BY c.bundle_id, c.id, v.verified_at DESC NULLS LAST
+             LIMIT $2",
+            display_name("b"),
+            iso("v.verified_at")
+        );
+        self.query_map(&sql, &[&actor, &limit], personal_item).await
     }
 
     /// Up to `limit` concepts of one bundle ordered by path, starting after

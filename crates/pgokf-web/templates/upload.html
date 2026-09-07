@@ -3,7 +3,7 @@
 <section class="hero">
   <div>
     <h1>Upload documents</h1>
-    <p class="lede">Add OKF Markdown documents to a content bundle the catalog keeps in its own store. Each file is checked before anything is written; a document without a stated origin is stamped with you as its author.</p>
+    <p class="lede">Add OKF Markdown documents to a bundle: one the catalog keeps in its own store, or a directory bundle this site can write to. Each file is checked before anything is written; a document without a stated origin is stamped with you as its author.</p>
   </div>
 </section>
 {% if let Some(e) = error %}<p class="notice bad">{{ e }}</p>{% endif %}
@@ -12,7 +12,7 @@
     <div class="field">
       <label for="u-bundle">Bundle</label>
       <select id="u-bundle" name="bundle" data-upload-bundle>
-        {% for b in bundles %}<option value="{{ b.id }}">{{ b.name }} <span class="muted">({{ b.file_count }} files)</span></option>{% endfor %}
+        {% for b in bundles %}<option value="{{ b.id }}">{{ b.name }} ({{ b.kind }}, {{ b.file_count }} files)</option>{% endfor %}
         <option value="">New content bundle…</option>
       </select>
     </div>

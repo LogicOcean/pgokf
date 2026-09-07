@@ -189,6 +189,9 @@ services:
       db:
         condition: service_healthy
     command: ["pgokf-web"]
+    # Runs as the image's unprivileged user unless the bundles directory
+    # must be writable by the host's owner (OKF_UI_UID/OKF_UI_GID).
+    user: "${OKF_UI_UID:-10001}:${OKF_UI_GID:-10001}"
     environment:
       OKF_PG_URL: "postgresql://${PGOKF_READER_ROLE:-okf_reader}:${PGOKF_READER_PASSWORD}@db:5432/${POSTGRES_DB:-okf}"
       OKF_WEB_BIND: "0.0.0.0:8080"
@@ -209,10 +212,16 @@ services:
       OKF_WEB_AUTH_USER_HEADER: ${OKF_UI_USER_HEADER:-X-Forwarded-User}
       OKF_WEB_AUTH_GROUPS_HEADER: ${OKF_UI_GROUPS_HEADER:-X-Forwarded-Groups}
       OKF_WEB_AUTH_NAME_HEADER: ${OKF_UI_NAME_HEADER:-}
+      # Editing documents of directory bundles in place: set to /bundles and
+      # mount the bundles read-write (OKF_UI_BUNDLES_MODE=rw).
+      OKF_WEB_BUNDLES_DIR: ${OKF_UI_BUNDLES_DIR:-}
     volumes:
       # Read-only home for the users file (OKF_UI_USERS_FILE names a file
       # inside it, for example /etc/pgokf/ui/users).
       - ${OKF_UI_AUTH_DIR:-./ui-auth}:/etc/pgokf/ui:ro
+      # The same bundles the database reads, at the same path; read-only
+      # unless editors are to change them from the UI.
+      - ${PGOKF_BUNDLES_DIR:?PGOKF_BUNDLES_DIR is required}:/bundles:${OKF_UI_BUNDLES_MODE:-ro}
     ports:
       - "${PGOKF_UI_BIND:-127.0.0.1}:${PGOKF_UI_PORT:-8080}:8080"
     networks:

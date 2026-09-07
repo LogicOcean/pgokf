@@ -17,6 +17,7 @@ mod graph;
 mod links;
 mod markdown;
 mod routes;
+mod store;
 
 use std::io::Read;
 use std::net::SocketAddr;
@@ -51,25 +52,9 @@ async fn main() -> Result<()> {
         tenant: cli.tenant.as_deref(),
         statement_timeout_ms: cli.statement_timeout_ms,
     })?;
-    // The writer pool is small and used only by the human workflow.
-    let writer = match &cli.writer_url {
-        Some(url) => {
-            let writer = Db::connect(&DbConfig {
-                database_url: url,
-                force_tls: cli.tls,
-                pool_size: 2,
-                tenant: cli.tenant.as_deref(),
-                statement_timeout_ms: cli.statement_timeout_ms.max(60_000),
-            })?;
-            writer
-                .versions()
-                .await
-                .context("the catalog is not reachable with the configured writer connection")?;
-            Some(writer)
-        }
-        None => None,
-    };
+    let writer = connect_writer(&cli).await?;
     let authenticator = build_authenticator(&cli)?;
+    let stores = configured_stores(&cli)?;
     // Fail fast on a bad connection string or role: the first page would
     // otherwise be the first error.
     let (version, sql_version) = db
@@ -97,6 +82,7 @@ async fn main() -> Result<()> {
         writer,
         auth: authenticator,
         rebuilds: tokio::sync::Mutex::new(()),
+        stores,
         embedder,
         catalog_name,
         tenant: cli.tenant.clone(),
@@ -138,6 +124,43 @@ async fn main() -> Result<()> {
     .context("serving HTTP")?;
     eprintln!("pgokf-web: stopped");
     Ok(())
+}
+
+/// The writer pool: small, and used only by the human workflow.
+async fn connect_writer(cli: &Cli) -> Result<Option<Db>> {
+    let Some(url) = &cli.writer_url else {
+        return Ok(None);
+    };
+    let writer = Db::connect(&DbConfig {
+        database_url: url,
+        force_tls: cli.tls,
+        pool_size: 2,
+        tenant: cli.tenant.as_deref(),
+        statement_timeout_ms: cli.statement_timeout_ms.max(60_000),
+    })?;
+    writer
+        .versions()
+        .await
+        .context("the catalog is not reachable with the configured writer connection")?;
+    Ok(Some(writer))
+}
+
+/// Where directory bundles are reachable, from the flags.
+fn configured_stores(cli: &Cli) -> Result<store::Stores> {
+    let Some(dir) = &cli.bundles_dir else {
+        return Ok(store::Stores::default());
+    };
+    let local_root = dir
+        .canonicalize()
+        .with_context(|| format!("--bundles-dir {} is not a directory", dir.display()))?;
+    Ok(store::Stores {
+        db_root: Some(
+            cli.bundles_db_dir
+                .clone()
+                .unwrap_or_else(|| dir.to_string_lossy().into_owned()),
+        ),
+        local_root: Some(local_root),
+    })
 }
 
 /// The way people are identified, from the flags.

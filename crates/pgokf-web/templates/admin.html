@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero">
+  <div>
+    <h1>Administration</h1>
+    <p class="lede">People and their roles, and the bundles the catalog holds. Every action here runs through the writer role under your name; catalog settings themselves are changed by a database admin with <code>pgokf.set_config</code>.</p>
+  </div>
+</section>
+{% if let Some(n) = notice %}<p class="notice ok">{{ n }}</p>{% endif %}
+{% if let Some(e) = error %}<p class="notice bad">{{ e }}</p>{% endif %}
+
+<section class="panel">
+  <div class="panel-head"><h2>People <span class="muted">({{ users.len() }})</span></h2></div>
+  {% if users_managed_here %}
+  <div class="table-wrap">
+  <table class="table" id="pgokf-users">
+    <thead><tr><th>User</th><th>Role</th><th>Change</th></tr></thead>
+    <tbody>
+    {% for u in users %}
+      <tr>
+        <td><strong>{{ u.name }}</strong>{% if u.is_me %} <span class="muted small">(you)</span>{% endif %}</td>
+        <td><span class="pill muted">{{ u.role }}</span></td>
+        <td class="row-actions">
+          <form method="post" action="/admin/users"><input type="hidden" name="action" value="role"><input type="hidden" name="name" value="{{ u.name }}">
+            <select name="role" aria-label="Role for {{ u.name }}">{% for r in roles %}<option value="{{ r }}" {% if r.as_str() == u.role.as_str() %}selected{% endif %}>{{ r }}</option>{% endfor %}</select>
+            <button type="submit" class="btn">Set role</button></form>
+          <form method="post" action="/admin/users"><input type="hidden" name="action" value="password"><input type="hidden" name="name" value="{{ u.name }}">
+            <input type="password" name="password" placeholder="New password" minlength="12" aria-label="New password for {{ u.name }}" autocomplete="new-password">
+            <button type="submit" class="btn">Reset password</button></form>
+          {% if !u.is_me %}<form method="post" action="/admin/users"><input type="hidden" name="action" value="remove"><input type="hidden" name="name" value="{{ u.name }}">
+            <button type="submit" class="btn danger" data-confirm="Remove {{ u.name }}? Their session ends at once.">Remove</button></form>{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <h3>Add a person</h3>
+  <form method="post" action="/admin/users" class="step-grid three">
+    <input type="hidden" name="action" value="add">
+    <div class="field"><label for="au-name">User name</label><input id="au-name" type="text" name="name" required pattern="[A-Za-z0-9._@+-]{1,128}" spellcheck="false" autocomplete="off"></div>
+    <div class="field"><label for="au-role">Role</label><select id="au-role" name="role">{% for r in roles %}<option value="{{ r }}">{{ r }}</option>{% endfor %}</select></div>
+    <div class="field"><label for="au-pw">Password <span class="muted">(at least 12 characters)</span></label><input id="au-pw" type="password" name="password" minlength="12" required autocomplete="new-password"></div>
+    <div><button type="submit" class="btn primary">Add</button></div>
+  </form>
+  {% else %}
+  <p class="muted">People are identified by the proxy in front of this site and their roles come from its groups (<code>OKF_WEB_AUTH_ROLE_MAP</code>); manage them there.</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>Bundles <span class="muted">({{ bundles.len() }})</span></h2></div>
+  <div class="table-wrap">
+  <table class="table" id="pgokf-admin-bundles">
+    <thead><tr><th>Bundle</th><th>Source</th><th>State</th><th class="num">Files</th><th>Last sync</th><th>Actions</th></tr></thead>
+    <tbody>
+    {% for b in bundles %}
+      <tr>
+        <td><a href="/bundles/{{ b.id }}"><strong>{{ b.name }}</strong></a><span class="desc path" title="{{ b.path }}">{{ b.path }}</span></td>
+        <td>{{ b.source_type }}</td>
+        <td>{% if b.retired %}<span class="pill muted">retired</span>{% else if !b.enabled %}<span class="pill warn">disabled</span>{% else %}<span class="pill ok">active</span>{% endif %}</td>
+        <td class="num">{{ b.file_count }}</td>
+        <td class="when">{{ b.last_synced_at.as_deref().unwrap_or("never")|datetime }}</td>
+        <td class="row-actions">
+          {% if !b.retired %}
+          {% if b.source_type.as_str() != "content" %}<form method="post" action="/admin/bundles"><input type="hidden" name="id" value="{{ b.id }}"><input type="hidden" name="action" value="refresh"><button type="submit" class="btn" title="Re-read the source and index what changed">Refresh</button></form>{% endif %}
+          <form method="post" action="/admin/bundles"><input type="hidden" name="id" value="{{ b.id }}"><input type="hidden" name="action" value="{% if b.enabled %}disable{% else %}enable{% endif %}"><button type="submit" class="btn">{% if b.enabled %}Disable{% else %}Enable{% endif %}</button></form>
+          <form method="post" action="/admin/bundles"><input type="hidden" name="id" value="{{ b.id }}"><input type="hidden" name="action" value="retire"><button type="submit" class="btn" data-confirm="Retire {{ b.name }}? It leaves search and browsing; it can be brought back until it is purged.">Retire</button></form>
+          {% else %}
+          <form method="post" action="/admin/bundles"><input type="hidden" name="id" value="{{ b.id }}"><input type="hidden" name="action" value="unretire"><button type="submit" class="btn">Bring back</button></form>
+          <form method="post" action="/admin/bundles"><input type="hidden" name="id" value="{{ b.id }}"><input type="hidden" name="action" value="unregister"><button type="submit" class="btn danger" data-confirm="Unregister {{ b.name }} now? Every concept of it is deleted from the catalog. This cannot be undone.">Unregister</button></form>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <h3>Register a directory bundle</h3>
+  <form method="post" action="/admin/bundles" class="step-grid three">
+    <input type="hidden" name="action" value="register">
+    <div class="field"><label for="ab-path">Path <span class="muted">(as the database server sees it)</span></label><input id="ab-path" type="text" name="path" placeholder="/bundles/team-docs" required spellcheck="false"></div>
+    <div class="field"><label for="ab-name">Name <span class="muted">(optional)</span></label><input id="ab-name" type="text" name="name" spellcheck="false"></div>
+    <div><button type="submit" class="btn primary">Register</button></div>
+  </form>
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>Catalog settings</h2></div>
+  <p class="muted small">Read from <code>pgokf.get_config()</code>. They are changed by a database admin, for example <code>SELECT pgokf.set_config('store_source', 'true')</code>; the UI's writer role cannot.</p>
+  <pre class="json">{{ config_json }}</pre>
+</section>
+{% endblock %}

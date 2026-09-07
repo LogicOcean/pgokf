@@ -17,7 +17,7 @@
 //! documents it touches.
 
 use std::collections::HashMap;
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
@@ -283,7 +283,7 @@ fn header_text(headers: &HeaderMap, name: &HeaderName) -> Option<String> {
 
 /// One line of the users file.
 #[derive(Debug, Clone)]
-struct UserRecord {
+pub(crate) struct UserRecord {
     role: Role,
     hash: String,
 }
@@ -384,6 +384,109 @@ impl UsersAuth {
     fn record(&self, name: &str) -> Option<UserRecord> {
         self.refresh();
         self.loaded.read().ok()?.users.get(name).cloned()
+    }
+
+    /// Every user with their role, sorted by name (for the admin page).
+    pub(crate) fn list(&self) -> Vec<(String, Role)> {
+        self.refresh();
+        let mut users: Vec<(String, Role)> = self
+            .loaded
+            .read()
+            .map(|loaded| {
+                loaded
+                    .users
+                    .iter()
+                    .map(|(n, r)| (n.clone(), r.role))
+                    .collect()
+            })
+            .unwrap_or_default();
+        users.sort();
+        users
+    }
+
+    /// Change the users file through `edit` and write it back atomically
+    /// (a temporary file in the same directory, then a rename), so a
+    /// half-written file is never read. The loaded state follows.
+    ///
+    /// # Errors
+    ///
+    /// No file path (a test instance), `edit` refusing, or the write failing.
+    pub(crate) fn mutate(
+        &self,
+        edit: impl FnOnce(&mut HashMap<String, UserRecord>) -> Result<()>,
+    ) -> Result<()> {
+        let path = self
+            .path
+            .as_ref()
+            .context("this users store is not backed by a file")?;
+        let mut guard = self
+            .loaded
+            .write()
+            .map_err(|_| anyhow!("the users file lock is poisoned"))?;
+        let mut users = guard.users.clone();
+        edit(&mut users)?;
+        let mut names: Vec<&String> = users.keys().collect();
+        names.sort();
+        let mut text = String::from("# pgokf-web users: name:role:argon2id-hash, one per line\n");
+        for name in names {
+            let record = &users[name];
+            let _ = writeln!(text, "{name}:{}:{}", record.role.id(), record.hash);
+        }
+        let temp = path.with_extension("tmp");
+        std::fs::write(&temp, text).with_context(|| format!("writing {}", temp.display()))?;
+        std::fs::rename(&temp, path).with_context(|| format!("replacing {}", path.display()))?;
+        let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        *guard = LoadedUsers { modified, users };
+        Ok(())
+    }
+
+    /// Add a person (a new name) with a hashed password.
+    pub(crate) fn add_user(&self, name: &str, role: Role, password: &str) -> Result<()> {
+        let name = name.trim();
+        if !valid_subject(name) {
+            bail!("{name:?} is not a valid user name (letters, digits, . _ - @ +)");
+        }
+        let hash = validated_password(password).and_then(hash_password)?;
+        self.mutate(|users| {
+            if users.contains_key(name) {
+                bail!("{name} already exists");
+            }
+            users.insert(name.to_owned(), UserRecord { role, hash });
+            Ok(())
+        })
+    }
+
+    pub(crate) fn set_role(&self, name: &str, role: Role) -> Result<()> {
+        self.mutate(|users| {
+            let record = users
+                .get_mut(name)
+                .with_context(|| format!("{name} is not a user"))?;
+            record.role = role;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn set_password(&self, name: &str, password: &str) -> Result<()> {
+        let hash = validated_password(password).and_then(hash_password)?;
+        self.mutate(|users| {
+            let record = users
+                .get_mut(name)
+                .with_context(|| format!("{name} is not a user"))?;
+            record.hash = hash;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn remove_user(&self, name: &str) -> Result<()> {
+        self.mutate(|users| {
+            if users.remove(name).is_none() {
+                bail!("{name} is not a user");
+            }
+            if users.is_empty() {
+                bail!("the last user cannot be removed");
+            }
+            Ok(())
+        })
     }
 
     fn parse_users(text: &str) -> Result<HashMap<String, UserRecord>> {
@@ -496,6 +599,17 @@ impl UsersAuth {
         mac.verify_slice(tag)
             .map_err(|_| anyhow!("session signature mismatch"))
     }
+}
+
+/// The shortest password the UI accepts when one is set through it.
+const PASSWORD_MIN: usize = 12;
+
+/// A password long enough to be worth hashing.
+fn validated_password(password: &str) -> Result<&str> {
+    if password.chars().count() < PASSWORD_MIN {
+        bail!("a password needs at least {PASSWORD_MIN} characters");
+    }
+    Ok(password)
 }
 
 /// Hash a password for the users file (Argon2id, default parameters, a
@@ -849,6 +963,39 @@ mod tests {
             auth.verify("alice", "pw").map(|p| p.role),
             Some(Role::Viewer)
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_users_file_is_managed_in_place() {
+        // Arrange
+        let dir = std::env::temp_dir().join(format!("pgokf-users-admin-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("users");
+        let hash = hash_password("pw").expect("hashes");
+        std::fs::write(&path, format!("alice:admin:{hash}\n")).expect("write");
+        let auth = UsersAuth::load(&path, vec![7_u8; 32], 3600, false).expect("loads");
+
+        // Act
+        auth.add_user("bob", Role::Uploader, "a long enough password")
+            .expect("adds");
+        let short = auth.add_user("carol", Role::Viewer, "short");
+        let duplicate = auth.add_user("bob", Role::Viewer, "another long password");
+        auth.set_role("bob", Role::Editor).expect("promotes");
+        auth.set_password("bob", "a different long password")
+            .expect("resets");
+        auth.remove_user("alice").expect("removes");
+        let last = auth.remove_user("bob");
+
+        // Assert
+        assert!(short.is_err() && duplicate.is_err());
+        assert_eq!(auth.list(), vec![("bob".to_owned(), Role::Editor)]);
+        assert!(auth.verify("bob", "a different long password").is_some());
+        assert!(auth.verify("bob", "a long enough password").is_none());
+        assert!(last.is_err(), "the last user stays");
+        let text = std::fs::read_to_string(&path).expect("reads");
+        assert!(text.contains("bob:editor:$argon2id$"), "{text}");
+        assert!(!text.contains("alice"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

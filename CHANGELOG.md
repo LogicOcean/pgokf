@@ -141,6 +141,17 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
   requests are refused across sites, and the catalog must keep sources
   (`store_source`). `pgokf-web hash-password` makes users-file lines; the
   compose stack gained the matching `OKF_UI_*` settings.
+- Once identities are on, nobody reaches the site without signing in
+  (login page, static assets, and health probe excepted). Everyone signed in
+  has a profile page (identity, what the role allows, documents produced and
+  verified, a password change in `users` mode). The admin role has an admin
+  page: people (add, change role, reset password, remove; the users file is
+  rewritten in place and reloaded) and bundles (register a directory bundle,
+  refresh, enable or disable, retire or bring back, unregister). With
+  `OKF_WEB_BUNDLES_DIR` pointing at the directory the database reads
+  (mounted read-write), editors change documents of directory bundles in
+  place, written atomically and confined to the bundle, and the bundle is
+  refreshed; the compose stack mounts the bundles into the UI for it.
 - **GitHub Copilot** is a target (`copilot`: `.github/skills/`, MCP entry
   in `.github/mcp.json` as a typed `local` server that inherits Copilot's
   environment). **Custom agents:** `target: custom` with a harness
