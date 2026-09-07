@@ -197,6 +197,22 @@ services:
       OKF_EMBED_ENDPOINT: ${OKF_EMBED_ENDPOINT:-}
       OKF_EMBED_MODEL: ${OKF_EMBED_MODEL:-}
       OKF_EMBED_API_KEY: ${OKF_EMBED_API_KEY:-}
+      # The human workflow (upload, edit, review): a writer connection plus a
+      # way of knowing who is asking. Off until both are set; see .env.example.
+      OKF_PG_WRITER_URL: ${OKF_UI_WRITER_URL:-}
+      OKF_WEB_AUTH: ${OKF_UI_AUTH:-none}
+      OKF_WEB_AUTH_USERS_FILE: ${OKF_UI_USERS_FILE:-}
+      OKF_WEB_SESSION_SECRET: ${OKF_UI_SESSION_SECRET:-}
+      OKF_WEB_COOKIE_SECURE: ${OKF_UI_COOKIE_SECURE:-false}
+      OKF_WEB_AUTH_TRUSTED_PROXY: ${OKF_UI_TRUSTED_PROXY:-}
+      OKF_WEB_AUTH_ROLE_MAP: ${OKF_UI_ROLE_MAP:-}
+      OKF_WEB_AUTH_USER_HEADER: ${OKF_UI_USER_HEADER:-X-Forwarded-User}
+      OKF_WEB_AUTH_GROUPS_HEADER: ${OKF_UI_GROUPS_HEADER:-X-Forwarded-Groups}
+      OKF_WEB_AUTH_NAME_HEADER: ${OKF_UI_NAME_HEADER:-}
+    volumes:
+      # Read-only home for the users file (OKF_UI_USERS_FILE names a file
+      # inside it, for example /etc/pgokf/ui/users).
+      - ${OKF_UI_AUTH_DIR:-./ui-auth}:/etc/pgokf/ui:ro
     ports:
       - "${PGOKF_UI_BIND:-127.0.0.1}:${PGOKF_UI_PORT:-8080}:8080"
     networks:

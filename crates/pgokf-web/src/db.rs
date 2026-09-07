@@ -42,6 +42,15 @@ pub(crate) struct Db {
     pool: Pool,
 }
 
+/// The name a content bundle is keyed on: its registered name, or the
+/// synthetic path `content:<name>` without the prefix.
+pub(crate) fn content_bundle_name(path: &str, name: Option<&str>) -> String {
+    path.strip_prefix("content:")
+        .or(name)
+        .unwrap_or(path)
+        .to_owned()
+}
+
 /// One row of `pgokf.list_bundles()`.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct BundleInfo {
@@ -72,6 +81,47 @@ pub(crate) struct BundleStat {
     pub sync_age_seconds: Option<i64>,
     pub is_stale: bool,
     pub retired_at: Option<String>,
+}
+
+/// One file of a content bundle as the catalog stores it, for the human
+/// workflow's full-snapshot resyncs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BundleFile {
+    pub path: String,
+    pub bytes: Vec<u8>,
+}
+
+/// A content bundle the human workflow can write to.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ContentBundle {
+    pub id: i64,
+    /// The name `register_bundle_content` keys the bundle on.
+    pub name: String,
+    pub file_count: i32,
+}
+
+/// What `pgokf.register_bundle_content` reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SyncOutcome {
+    pub bundle_id: i64,
+    pub added: i32,
+    pub updated: i32,
+    pub removed: i32,
+}
+
+/// One concept awaiting a human review.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ReviewItem {
+    pub bundle_id: i64,
+    pub bundle_name: String,
+    pub concept_id: String,
+    pub path: String,
+    pub title: Option<String>,
+    pub concept_type: Option<String>,
+    pub status: Option<String>,
+    pub trust_tier: String,
+    pub generated_by: Option<String>,
+    pub modified_at: Option<String>,
 }
 
 /// A concept as listed inside a bundle or a filter-only browse.
@@ -686,6 +736,151 @@ impl Db {
                 })
             },
         )
+        .await
+    }
+
+    /// Whether the catalog keeps document sources (`store_source`), which
+    /// the human workflow needs to rebuild a content bundle.
+    pub(crate) async fn keeps_sources(&self) -> Result<bool> {
+        Ok(self.config().await?["store_source"]
+            .as_bool()
+            .unwrap_or(false))
+    }
+
+    /// The content bundles (registered from in-memory content, so the UI
+    /// can resync them) that are enabled and not retired.
+    pub(crate) async fn content_bundles(&self) -> Result<Vec<ContentBundle>> {
+        self.query_map(
+            "SELECT id, path, name, file_count
+             FROM pgokf.bundles
+             WHERE source_type = 'content' AND enabled AND retired_at IS NULL
+             ORDER BY coalesce(name, path)",
+            &[],
+            |r| {
+                let path: String = col(r, 1)?;
+                Ok(ContentBundle {
+                    id: col(r, 0)?,
+                    name: content_bundle_name(&path, col::<Option<String>>(r, 2)?.as_deref()),
+                    file_count: col(r, 3)?,
+                })
+            },
+        )
+        .await
+    }
+
+    /// One content bundle by id, or `None` when the bundle is not a content
+    /// bundle (a filesystem or object-store bundle is edited at its source).
+    pub(crate) async fn content_bundle(&self, id: i64) -> Result<Option<ContentBundle>> {
+        let rows = self
+            .query_map(
+                "SELECT id, path, name, file_count
+                 FROM pgokf.bundles
+                 WHERE id = $1 AND source_type = 'content' AND enabled AND retired_at IS NULL",
+                &[&id],
+                |r| {
+                    let path: String = col(r, 1)?;
+                    Ok(ContentBundle {
+                        id: col(r, 0)?,
+                        name: content_bundle_name(&path, col::<Option<String>>(r, 2)?.as_deref()),
+                        file_count: col(r, 3)?,
+                    })
+                },
+            )
+            .await?;
+        Ok(rows.into_iter().next())
+    }
+
+    /// Every file of a bundle as the catalog stores it: document sources
+    /// from `concept_source`, package files from the typed projections.
+    ///
+    /// # Errors
+    ///
+    /// A concept whose bytes are not stored (the catalog did not keep
+    /// sources when it was ingested): the bundle cannot be rebuilt.
+    pub(crate) async fn bundle_files(&self, bundle_id: i64) -> Result<Vec<BundleFile>> {
+        let rows = self
+            .query_map(
+                "SELECT c.path, coalesce(sk.skill_md, sc.exact_bytes, rd.exact_bytes, s.raw_content)
+                 FROM pgokf.concepts c
+                 LEFT JOIN pgokf.concept_source s
+                        ON s.bundle_id = c.bundle_id AND s.concept_id = c.id
+                 LEFT JOIN pgokf.skills sk ON sk.bundle_id = c.bundle_id AND sk.concept_id = c.id
+                 LEFT JOIN pgokf.scripts sc ON sc.bundle_id = c.bundle_id AND sc.concept_id = c.id
+                 LEFT JOIN pgokf.reference_documents rd
+                        ON rd.bundle_id = c.bundle_id AND rd.concept_id = c.id
+                 WHERE c.bundle_id = $1
+                 ORDER BY c.path",
+                &[&bundle_id],
+                |r| Ok((col::<String>(r, 0)?, col::<Option<Vec<u8>>>(r, 1)?)),
+            )
+            .await?;
+        rows.into_iter()
+            .map(|(path, bytes)| match bytes {
+                Some(bytes) => Ok(BundleFile { path, bytes }),
+                None => Err(anyhow!(
+                    "the catalog holds no source for {path}; the bundle cannot be rebuilt \
+                     (store_source was off when it was ingested)"
+                )),
+            })
+            .collect()
+    }
+
+    /// Create or resync a content bundle from a full snapshot of its files
+    /// (`pgokf.register_bundle_content`; a `pgokf_writer` connection).
+    pub(crate) async fn register_content(
+        &self,
+        name: &str,
+        files: &[BundleFile],
+    ) -> Result<SyncOutcome> {
+        let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        let contents: Vec<&[u8]> = files.iter().map(|f| f.bytes.as_slice()).collect();
+        let row = self
+            .query_opt(
+                "SELECT r.bundle_id, r.added, r.updated, r.removed
+                 FROM pgokf.register_bundle_content($1, $2, $3, '{}'::jsonb) r",
+                &[&name, &paths, &contents],
+            )
+            .await?
+            .ok_or_else(|| anyhow!("register_bundle_content returned no row"))?;
+        Ok(SyncOutcome {
+            bundle_id: col(&row, 0)?,
+            added: col::<Option<i32>>(&row, 1)?.unwrap_or_default(),
+            updated: col::<Option<i32>>(&row, 2)?.unwrap_or_default(),
+            removed: col::<Option<i32>>(&row, 3)?.unwrap_or_default(),
+        })
+    }
+
+    /// Concepts of content bundles that no human has verified yet, oldest
+    /// change first: the review queue.
+    pub(crate) async fn review_queue(&self, limit: i64) -> Result<Vec<ReviewItem>> {
+        let sql = format!(
+            "SELECT c.bundle_id, {}, c.id, c.path, c.title, c.type, p.status,
+                    coalesce(p.trust_tier, 'unverified'), p.generated_by, {}
+             FROM pgokf.concepts c
+             JOIN pgokf.bundles b ON b.id = c.bundle_id
+                  AND b.source_type = 'content' AND b.enabled AND b.retired_at IS NULL
+             LEFT JOIN pgokf.concept_provenance p
+                    ON p.bundle_id = c.bundle_id AND p.concept_id = c.id
+             WHERE coalesce(p.trust_tier, 'unverified') <> 'human-reviewed'
+             ORDER BY coalesce(c.modified_at, c.indexed_at) NULLS FIRST, c.bundle_id, c.path
+             LIMIT $1",
+            display_name("b"),
+            iso("coalesce(c.modified_at, c.indexed_at)")
+        );
+        self.query_map(&sql, &[&limit], |r| {
+            Ok(ReviewItem {
+                bundle_id: col(r, 0)?,
+                bundle_name: col(r, 1)?,
+                concept_id: col(r, 2)?,
+                path: col(r, 3)?,
+                title: col(r, 4)?,
+                concept_type: col(r, 5)?,
+                status: col(r, 6)?,
+                trust_tier: col(r, 7)?,
+                generated_by: col(r, 8)?,
+                modified_at: col(r, 9)?,
+            })
+        })
         .await
     }
 

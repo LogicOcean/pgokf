@@ -16,6 +16,7 @@ visibility decision is the database's.
 | **Graph** (`/graph`) | the catalog-wide link graph: the best-connected concepts of the catalog or one bundle (coloured by bundle or type) or, seeded from a concept, its neighborhood; nodes and edges open detail cards, zoom, center, 2D/3D, and full-screen controls, a finder, and "explore from here" |
 | **Agent Plugin builder** (`/plugins`) | the agent plugin builder over the `pgokf-workspace` crate, laid out as five steps: say what you are building (an Agent Plugin, a skills package, an instruction file, a prompt bundle, or generic files) and for which agent (a searchable list per kind: a portable Agent Plugins 1.0.0 directory, Claude Code, Codex, GitHub Copilot, Hermes Agent, Kimi, Gemini CLI, Cursor, the generic `.agents/` directory, `AGENTS.md`, Ollama, generic; a name that is not listed is added as a new agent, with its skills directory for a skills package), name it, choose the content (browse a bundle or all bundles, find files by name, title, type, or tag, tick files or whole directories, or take everything in the scope and narrow it by type, tag, ranked search, or concept ids; a selection bar shows every rule and ticked file as a removable chip), add extras (the agent's MCP server entry, a catalog guide, an `okf.sh` helper over the JSON API), then preview and download; the preview updates as you go, skill packages stored in the catalog are copied whole and byte for byte, and the equivalent `build_workspace_plugin` MCP call is one click away |
 | **Operations** (`/status`) | `health()`, `search_index_status()`, `get_config()`, `stale_concepts()`, `duplicate_concepts()`, the sync log |
+| **Sign in**, **Upload**, **Edit**, **Review** | the human workflow (see below), shown to people whose role allows each step: an upload form for Markdown documents into a content bundle, a full-document editor with a validating preview, a review queue and a review tab on each document (approve, or send back with a note) |
 | **JSON API** (`/api/health`, `/api/bundles`, `/api/bundles/{id}/tree` (the picker's file list), `/api/search`, `/api/concepts/{bundle_id}/{concept_id}` (with `package` and `resource` for skill packages), `/api/graph?bundle=&limit=` and `/api/graph/{bundle_id}/{concept_id}?hops=N`) | the same data layer, for scripts and dashboards; the graph documents are what the 3D views draw |
 
 Search results carry the database's `ts_headline` snippet (sanitized to its
@@ -31,7 +32,11 @@ connections so an edge can be reached by a tap.
 
 | Flag | Environment | Meaning |
 | ---- | ----------- | ------- |
-| `--database-url` | `OKF_PG_URL` | Connection string for a `pgokf_reader` role (required). A writer or admin role is never needed. |
+| `--database-url` | `OKF_PG_URL` | Connection string for a `pgokf_reader` role (required): everything the UI shows comes through it. |
+| `--writer-url` | `OKF_PG_WRITER_URL` | Connection string for a `pgokf_writer` role, used only by the human workflow (upload, edit, review) and only for signed-in people whose role allows it. Without it those pages are off and the UI is read-only. |
+| `--auth` | `OKF_WEB_AUTH` | How people are identified: `none` (everyone is a viewer; the default), `header` (a trusted reverse proxy forwards the identity), or `users` (a local users file with a login form). |
+| `--auth-users-file`, `--session-secret`, `--session-hours`, `--cookie-secure` | `OKF_WEB_AUTH_USERS_FILE`, `OKF_WEB_SESSION_SECRET`, `OKF_WEB_SESSION_HOURS`, `OKF_WEB_COOKIE_SECURE` | `users` mode: the file (`name:role:$argon2id$...` per line, made with `pgokf-web hash-password --user NAME --role ROLE < password.txt`), the key that signs session cookies (at least 32 characters; unset, a random one is used and sessions end with the process), the session length (default 12 h), and whether cookies are marked `Secure` (set it once the UI is served over HTTPS). |
+| `--auth-trusted-proxy`, `--auth-user-header`, `--auth-groups-header`, `--auth-name-header`, `--auth-role-map`, `--auth-default-role` | `OKF_WEB_AUTH_TRUSTED_PROXY`, `OKF_WEB_AUTH_USER_HEADER`, `OKF_WEB_AUTH_GROUPS_HEADER`, `OKF_WEB_AUTH_NAME_HEADER`, `OKF_WEB_AUTH_ROLE_MAP`, `OKF_WEB_AUTH_DEFAULT_ROLE` | `header` mode: the proxy's addresses or CIDR ranges (required; identity headers from any other peer are ignored; the word `any` believes every peer, for a server only the proxy can reach), the headers carrying the user (default `X-Forwarded-User`), the comma-separated groups (default `X-Forwarded-Groups`), and an optional display name, `group=role,...` (the highest matching role wins), and the role of a person in no mapped group (default `viewer`). |
 | `--bind` | `OKF_WEB_BIND` | Listen address (default `127.0.0.1:8080`). |
 | `--tenant` | `OKF_TENANT` | `pgokf.tenant` scope applied to every pooled connection; required once the catalog's `require_tenant` policy is on. |
 | `--tls` | `OKF_PG_TLS` | Force TLS to PostgreSQL. |
@@ -57,9 +62,22 @@ every variable unconditionally.
   only the **Download source** button and a plugin download go through
   `get_concept_source()`, so the extension's access log records exports,
   not page views. A plugin preview reads no sources at all.
-- No login of its own: it is the reader role's view of the catalog. Bind it
-  to loopback (the default) and expose it through a reverse proxy that
-  terminates TLS and authenticates users, or keep it on a private network.
+- Read-only by default, and every write is a person's: the human workflow
+  needs a writer connection *and* an identified person whose role allows the
+  action; anonymous requests never reach the writer. Identities come through
+  one seam (`auth.rs`): a trusted reverse proxy's headers, believed only from
+  the proxy's own addresses, or a local users file (Argon2id hashes) with a
+  login form and an HMAC-signed, `HttpOnly`, `SameSite=Lax` session cookie
+  whose role is re-read from the file on every request, so removing a user
+  takes effect at once. State-changing requests are refused when the browser
+  says they came from another site (fetch metadata, else `Origin` against
+  `Host`). Bind the UI to loopback (the default) and expose it through a
+  reverse proxy that terminates TLS, or keep it on a private network.
+- A verification is granted only by an approver: a `verified` list typed
+  into an uploaded or edited document is set aside under
+  `superseded_verifications` (with who, when, and why), never believed, so
+  the trust tier cannot be claimed, and an edit sends a document back to
+  review.
 - Catalog content is never trusted as HTML: Markdown bodies and search
   snippets pass through an allow-list sanitizer before rendering (no scripts,
   no event handlers, no `javascript:`/`data:` URLs, same-origin images only),
@@ -77,12 +95,54 @@ every variable unconditionally.
   is exhausted, 504 on timeout. Under `/api/` every error is a JSON document
   `{"error": {"status", "message"}}`.
 
+## The human workflow
+
+With a writer connection and an authentication mode, people with the right
+role work on **content bundles**: bundles the catalog holds in its own store
+(`register_bundle_content`), which the UI can rebuild after a change. A
+bundle synced from a directory or a bucket is changed at its source, and the
+UI says so. The catalog must keep sources (`store_source` on), because a
+resync is a full snapshot rebuilt from what the catalog stored.
+
+Roles are a ladder; each holds the ones below it:
+
+| Role | May |
+| ---- | --- |
+| `viewer` | read everything the reader role can see (everyone, signed in or not) |
+| `uploader` | **Upload** Markdown documents into a content bundle (new or existing); a document without `generated`/`author` is stamped with the person's OKF actor, `human:<name>` |
+| `editor` | **Edit** a document (frontmatter and body, with a validating preview) or delete it; any earlier verification is set aside, `generated` names the editor, and the document returns to the review queue |
+| `approver` | **Review**: the queue of unverified documents; approving records a `verified` event under the person's name (the document becomes *human-reviewed*, a draft becomes active), sending back makes it a draft and keeps the note under `reviews` |
+| `admin` | everything above (reserved for operators) |
+
+Every decision is an ordinary OKF field in the document itself (`generated`,
+`author`, `verified`, `status`, `reviews`, `superseded_verifications`), so
+the trust tier and lifecycle status the catalog derives are the ones every
+reader, agent, and plugin sees, and the extension's version history (when
+`track_history` is on) keeps each revision.
+
 ## Running
 
 ```sh
 OKF_PG_URL=postgresql://okf_reader:...@db:5432/okf \
 OKF_WEB_BIND=127.0.0.1:8080 \
 pgokf-web
+```
+
+With the human workflow on, behind a proxy that authenticates people:
+
+```sh
+OKF_PG_URL=postgresql://okf_reader:...@db:5432/okf \
+OKF_PG_WRITER_URL=postgresql://okf_writer:...@db:5432/okf \
+OKF_WEB_AUTH=header OKF_WEB_AUTH_TRUSTED_PROXY=10.0.0.5 \
+OKF_WEB_AUTH_ROLE_MAP=okf-editors=editor,okf-approvers=approver \
+pgokf-web
+```
+
+Or with a local users file:
+
+```sh
+printf '%s' 'a long password' | pgokf-web hash-password --user alice --role approver >> users
+OKF_WEB_AUTH=users OKF_WEB_AUTH_USERS_FILE=users OKF_WEB_SESSION_SECRET=... pgokf-web
 ```
 
 In the compose stack it is the `ui` profile:

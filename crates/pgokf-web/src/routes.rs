@@ -13,11 +13,14 @@ use std::time::Duration;
 
 use askama::Template;
 use axum::body::Body;
-use axum::extract::{Path, Query, Request, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::extract::{
+    DefaultBodyLimit, Form, FromRequestParts, Multipart, Path, Query, Request, State,
+};
+use axum::http::request::Parts;
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use pgokf_companion::embeddings::EmbeddingsClient;
 use pgokf_workspace::{
@@ -28,11 +31,14 @@ use serde::Deserialize;
 use serde_json::Value;
 use tower::limit::ConcurrencyLimitLayer;
 
+use crate::auth::{Authenticator, Mode, Principal, Role, Session, cookie_header};
 use crate::db::{
-    BundleInfo, BundleLogEntry, BundleStat, ConceptDetail, ConceptSummary, Cursor, Db,
-    DuplicateGroup, Facet, Failure, Graph, Hit, Link, Neighbor, PackageInfo, ResourceInfo,
-    SearchQuery, StaleConcept, SyncLogEntry, Version,
+    BundleFile, BundleInfo, BundleLogEntry, BundleStat, ConceptDetail, ConceptSummary,
+    ContentBundle, Cursor, Db, DuplicateGroup, Facet, Failure, Graph, Hit, Link, Neighbor,
+    PackageInfo, ResourceInfo, ReviewItem, SearchQuery, StaleConcept, SyncLogEntry, SyncOutcome,
+    Version,
 };
+use crate::documents::{Document, now_iso};
 use crate::graph::{GraphEdge, GraphNode};
 use crate::links::Resolver;
 use crate::{graph, markdown};
@@ -41,6 +47,13 @@ use pgokf_workspace::drop_packaged_resources;
 /// Shared application state.
 pub(crate) struct App {
     pub db: Db,
+    /// The writer connection the human workflow uses; `None` keeps the UI
+    /// read-only.
+    pub writer: Option<Db>,
+    pub auth: Authenticator,
+    /// Bundle rebuilds run one at a time: a content resync is a full
+    /// snapshot, so two interleaved ones could lose each other's change.
+    pub rebuilds: tokio::sync::Mutex<()>,
     pub embedder: Option<EmbeddingsClient>,
     pub catalog_name: String,
     pub tenant: Option<String>,
@@ -92,6 +105,20 @@ pub(crate) fn router(app: Shared) -> Router {
         .route("/plugins", get(plugins_page))
         .route("/plugins/preview", get(plugins_preview))
         .route("/plugins/build.zip", get(plugins_zip))
+        .route("/login", get(login_page).post(login_submit))
+        .route("/logout", post(logout))
+        .route("/review", get(review_page))
+        .route("/review/{bundle_id}/{*concept_id}", post(concept_review))
+        .route(
+            "/edit/{bundle_id}/{*concept_id}",
+            get(edit_page).post(edit_submit),
+        )
+        .route("/edit-check/{bundle_id}/{*concept_id}", post(edit_check))
+        .merge(
+            Router::new()
+                .route("/upload", get(upload_page).post(upload_submit))
+                .layer(DefaultBodyLimit::max(UPLOAD_LIMIT)),
+        )
         .route("/static/{file}", get(static_asset))
         .nest("/api", api)
         .fallback(not_found)
@@ -99,8 +126,17 @@ pub(crate) fn router(app: Shared) -> Router {
         .layer(middleware::from_fn(request_timeout))
         .layer(middleware::from_fn(security_headers))
         .layer(middleware::from_fn(shape_errors))
+        .layer(middleware::from_fn_with_state(app.clone(), authenticate))
+        .layer(middleware::from_fn(same_origin_writes))
         .with_state(app)
 }
+
+/// The most bytes one upload request may carry.
+const UPLOAD_LIMIT: usize = 32 * 1024 * 1024;
+/// The most documents one upload may carry.
+const MAX_UPLOAD_FILES: usize = 200;
+/// The most items the review queue lists.
+const REVIEW_LIMIT: i64 = 500;
 
 // ---------------------------------------------------------------------------
 // Middleware
@@ -140,6 +176,62 @@ async fn security_headers(request: Request, next: Next) -> Response {
     );
     headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     response
+}
+
+/// Resolve who is asking and attach the [`Session`] to the request.
+async fn authenticate(State(app): State<Shared>, mut request: Request, next: Next) -> Response {
+    let peer = Session::peer_of(request.extensions());
+    let principal = app.auth.identify(request.headers(), peer);
+    request.extensions_mut().insert(Session {
+        principal,
+        mode: app.auth.mode(),
+    });
+    next.run(request).await
+}
+
+/// Refuse state-changing requests that a browser sends from another site:
+/// the session cookie is `SameSite=Lax`, and this is the second lock.
+async fn same_origin_writes(request: Request, next: Next) -> Response {
+    let mutating = matches!(
+        *request.method(),
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    );
+    if mutating && !same_origin(request.headers()) {
+        return AppError::forbidden_message("Cross-site requests are refused.").into_response();
+    }
+    next.run(request).await
+}
+
+/// Whether the browser says the request came from this site: the fetch
+/// metadata header when present, else the `Origin` against the `Host`. A
+/// request with neither (a non-browser client) passes.
+fn same_origin(headers: &HeaderMap) -> bool {
+    match headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
+        Some("same-origin" | "none") => true,
+        Some(_) => false,
+        None => match (
+            headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()),
+            headers.get(header::HOST).and_then(|v| v.to_str().ok()),
+        ) {
+            (Some(origin), Some(host)) => origin
+                .split_once("://")
+                .is_some_and(|(_, rest)| rest.eq_ignore_ascii_case(host)),
+            (Some(_), None) => false,
+            (None, _) => true,
+        },
+    }
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for Session {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(parts
+            .extensions
+            .get::<Session>()
+            .cloned()
+            .unwrap_or_else(|| Session::anonymous(Mode::None)))
+    }
 }
 
 /// Bound a whole request; a page that issues a dozen statements otherwise
@@ -196,7 +288,12 @@ async fn shape_errors(request: Request, next: Next) -> Response {
         });
         (status, Json(body)).into_response()
     } else {
-        AppError { status, message }.into_response()
+        AppError {
+            status,
+            message,
+            location: None,
+        }
+        .into_response()
     }
 }
 
@@ -213,35 +310,76 @@ struct ErrorDetail(String);
 pub(crate) struct AppError {
     status: StatusCode,
     message: String,
+    /// A redirect instead of an error page (signing in first).
+    location: Option<String>,
 }
 
 impl AppError {
-    fn not_found(what: &str) -> Self {
+    fn with(status: StatusCode, message: impl Into<String>) -> Self {
         Self {
-            status: StatusCode::NOT_FOUND,
-            message: format!("{what} is not visible to this session or does not exist."),
+            status,
+            message: message.into(),
+            location: None,
         }
+    }
+
+    fn not_found(what: &str) -> Self {
+        Self::with(
+            StatusCode::NOT_FOUND,
+            format!("{what} is not visible to this session or does not exist."),
+        )
     }
 
     fn bad_request(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::BAD_REQUEST,
-            message: message.into(),
-        }
+        Self::with(StatusCode::BAD_REQUEST, message)
     }
 
     fn timeout() -> Self {
-        Self {
-            status: StatusCode::GATEWAY_TIMEOUT,
-            message: "The catalog took too long to answer; try a narrower query.".to_owned(),
-        }
+        Self::with(
+            StatusCode::GATEWAY_TIMEOUT,
+            "The catalog took too long to answer; try a narrower query.",
+        )
     }
 
     fn bad_gateway(message: impl Into<String>) -> Self {
+        Self::with(StatusCode::BAD_GATEWAY, message)
+    }
+
+    /// The role the page needs is not held.
+    fn forbidden(role: Role) -> Self {
+        Self::with(
+            StatusCode::FORBIDDEN,
+            format!(
+                "This needs the {} role; yours does not include it.",
+                role.id()
+            ),
+        )
+    }
+
+    fn forbidden_message(message: impl Into<String>) -> Self {
+        Self::with(StatusCode::FORBIDDEN, message)
+    }
+
+    /// Nobody is signed in and there is a login page: go there, and come
+    /// back to `next` afterwards.
+    fn sign_in(next: &str) -> Self {
         Self {
-            status: StatusCode::BAD_GATEWAY,
-            message: message.into(),
+            status: StatusCode::SEE_OTHER,
+            message: "Sign in to continue.".to_owned(),
+            location: Some(format!("/login?next={}", filters::percent_encode(next))),
         }
+    }
+
+    fn unavailable(message: impl Into<String>) -> Self {
+        Self::with(StatusCode::SERVICE_UNAVAILABLE, message)
+    }
+
+    fn status(&self) -> StatusCode {
+        self.status
+    }
+
+    fn message(&self) -> &str {
+        &self.message
     }
 }
 
@@ -250,25 +388,28 @@ impl From<anyhow::Error> for AppError {
         // The operator sees the cause in the log; the page sees a summary.
         eprintln!("pgokf-web: request failed: {error:#}");
         match crate::db::classify(&error) {
-            Failure::Busy => Self {
-                status: StatusCode::SERVICE_UNAVAILABLE,
-                message: "The catalog is busy; try again in a moment.".to_owned(),
-            },
+            Failure::Busy => Self::with(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "The catalog is busy; try again in a moment.",
+            ),
             Failure::Timeout => Self::timeout(),
             Failure::InvalidInput => Self::bad_request(
                 crate::db::db_message(&error)
                     .unwrap_or_else(|| "The catalog rejected a request value.".to_owned()),
             ),
-            Failure::Other => Self {
-                status: StatusCode::INTERNAL_SERVER_ERROR,
-                message: "The catalog query failed; the server log has the cause.".to_owned(),
-            },
+            Failure::Other => Self::with(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "The catalog query failed; the server log has the cause.",
+            ),
         }
     }
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        if let Some(location) = &self.location {
+            return redirect(location);
+        }
         let page = ErrorPage {
             shell: Shell::bare("Error"),
             status: self.status.as_u16(),
@@ -284,6 +425,22 @@ impl IntoResponse for AppError {
 }
 
 type PageResult = Result<Response, AppError>;
+
+/// A `303 See Other` to a page of this site.
+fn redirect(to: &str) -> Response {
+    let location = HeaderValue::from_str(to).unwrap_or_else(|_| HeaderValue::from_static("/"));
+    (StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response()
+}
+
+/// A `next` parameter that stays on this site: a path, never a URL.
+fn safe_next(next: &str) -> String {
+    let next = next.trim();
+    if next.starts_with('/') && !next.starts_with("//") && !next.contains("://") {
+        next.to_owned()
+    } else {
+        "/".to_owned()
+    }
+}
 
 fn html<T: Template>(template: &T) -> PageResult {
     let body = template
@@ -321,10 +478,25 @@ pub(crate) struct Shell {
     pub tenant: Option<String>,
     pub version: String,
     pub asset_version: String,
+    /// The signed-in person, when there is one.
+    pub user: Option<UserView>,
+    /// Where to sign in, when the server has a login page and nobody is.
+    pub signin_url: Option<String>,
+    /// Whether the human workflow is on (a writer connection is set).
+    pub workflow: bool,
+    pub can_upload: bool,
+    pub can_review: bool,
+}
+
+/// The signed-in person as the header shows them.
+pub(crate) struct UserView {
+    pub display: String,
+    pub role: String,
 }
 
 impl Shell {
-    fn new(app: &App, page_title: &str, nav: &'static str) -> Self {
+    fn new(app: &App, session: &Session, page_title: &str, nav: &'static str) -> Self {
+        let workflow = app.writer.is_some();
         Self {
             page_title: page_title.to_owned(),
             catalog_name: app.catalog_name.clone(),
@@ -334,6 +506,15 @@ impl Shell {
             tenant: app.tenant.clone(),
             version: app.version.clone(),
             asset_version: ASSET_VERSION.clone(),
+            user: session.principal.as_ref().map(|p| UserView {
+                display: p.display.clone(),
+                role: p.role.id().to_owned(),
+            }),
+            signin_url: (session.mode == Mode::Users && session.principal.is_none())
+                .then(|| "/login".to_owned()),
+            workflow,
+            can_upload: workflow && session.allows(Role::Uploader),
+            can_review: workflow && session.allows(Role::Approver),
         }
     }
 
@@ -347,6 +528,11 @@ impl Shell {
             tenant: None,
             version: env!("CARGO_PKG_VERSION").to_owned(),
             asset_version: ASSET_VERSION.clone(),
+            user: None,
+            signin_url: None,
+            workflow: false,
+            can_upload: false,
+            can_review: false,
         }
     }
 }
@@ -893,6 +1079,8 @@ struct BundlesPage {
 struct BundlePage {
     shell: Shell,
     bundle: BundleInfo,
+    /// A one-line outcome of the action that led here.
+    notice: Option<String>,
     concepts: Vec<ConceptSummary>,
     page_size: usize,
     shown: usize,
@@ -927,6 +1115,67 @@ struct ConceptPage {
     package: Option<PackageInfo>,
     /// The package resource this concept is, if any.
     resource: Option<ResourceInfo>,
+    /// A one-line outcome of the action that led here.
+    notice: Option<String>,
+    /// The human workflow's view of this concept for the signed-in person.
+    workflow: ConceptWorkflow,
+}
+
+/// What the signed-in person may do to a concept here, and why not.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ConceptWorkflow {
+    pub can_edit: bool,
+    pub can_review: bool,
+    /// Why the document cannot be changed from the UI, for people who
+    /// otherwise could.
+    pub blocker: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "login.html")]
+struct LoginPage {
+    shell: Shell,
+    next: String,
+    error: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "upload.html")]
+struct UploadPage {
+    shell: Shell,
+    bundles: Vec<ContentBundle>,
+    error: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "edit.html")]
+struct EditPage {
+    shell: Shell,
+    bundle_id: i64,
+    bundle_name: String,
+    concept_id: String,
+    path: String,
+    content: String,
+    error: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "partials/edit-check.html")]
+struct EditCheckPartial {
+    error: Option<String>,
+    concept_type: Option<String>,
+    title: String,
+    description: Option<String>,
+    body_html: String,
+}
+
+#[derive(Template)]
+#[template(path = "review.html")]
+struct ReviewPage {
+    shell: Shell,
+    items: Vec<ReviewItem>,
+    truncated: bool,
+    error: Option<String>,
 }
 
 #[derive(Template)]
@@ -1216,14 +1465,14 @@ async fn bundle_names(app: &App) -> Result<BTreeMap<i64, String>, AppError> {
         .collect())
 }
 
-async fn dashboard(State(app): State<Shared>) -> PageResult {
+async fn dashboard(State(app): State<Shared>, session: Session) -> PageResult {
     let (version, sql_version) = app.db.versions().await?;
     let health = HealthView::from_json(&app.db.health().await?, version, sql_version);
     let index = IndexView::from_json(&app.db.index_status().await?);
     let stats = app.db.catalog_stats().await?;
     let sync_log = app.db.sync_log(None, 10).await?;
     html(&DashboardPage {
-        shell: Shell::new(&app, "Overview", "home"),
+        shell: Shell::new(&app, &session, "Overview", "home"),
         health,
         index,
         stats,
@@ -1451,7 +1700,11 @@ async fn load_facets(
     })
 }
 
-async fn search_page(State(app): State<Shared>, Query(params): Query<SearchParams>) -> PageResult {
+async fn search_page(
+    State(app): State<Shared>,
+    session: Session,
+    Query(params): Query<SearchParams>,
+) -> PageResult {
     let (form, query) = params.normalize()?;
     let health = app.db.health().await?;
     let backend_label = health["search_backend"]
@@ -1465,7 +1718,7 @@ async fn search_page(State(app): State<Shared>, Query(params): Query<SearchParam
     let names: BTreeMap<i64, String> = bundles.iter().map(|b| (b.id, b.name.clone())).collect();
     let results = run_search(&app, &form, &query, &names).await?;
     let facets = load_facets(&app, &form, &query, &names).await?;
-    let mut shell = Shell::new(&app, "Search", "search");
+    let mut shell = Shell::new(&app, &session, "Search", "search");
     shell.query.clone_from(&form.q);
     shell.filters = form.filter_pairs();
     html(&SearchPage {
@@ -1509,10 +1762,10 @@ async fn search_results(
     Ok(response)
 }
 
-async fn bundles_page(State(app): State<Shared>) -> PageResult {
+async fn bundles_page(State(app): State<Shared>, session: Session) -> PageResult {
     let stats = app.db.catalog_stats().await?;
     html(&BundlesPage {
-        shell: Shell::new(&app, "Bundles", "bundles"),
+        shell: Shell::new(&app, &session, "Bundles", "bundles"),
         stats,
     })
 }
@@ -1525,10 +1778,13 @@ struct BundleParams {
     /// Keyset cursor: list concepts whose path sorts after this one.
     #[serde(default)]
     after: String,
+    #[serde(default)]
+    notice: String,
 }
 
 async fn bundle_page(
     State(app): State<Shared>,
+    session: Session,
     Path(id): Path<i64>,
     Query(params): Query<BundleParams>,
 ) -> PageResult {
@@ -1557,8 +1813,9 @@ async fn bundle_page(
     let bundle_log = app.db.bundle_log(id, 50).await?;
     let title = bundle.name.clone();
     html(&BundlePage {
-        shell: Shell::new(&app, &title, "bundles"),
+        shell: Shell::new(&app, &session, &title, "bundles"),
         bundle,
+        notice: non_empty(&params.notice),
         concepts,
         page_size: BUNDLE_PAGE,
         shown,
@@ -1573,6 +1830,8 @@ async fn bundle_page(
 struct ConceptParams {
     #[serde(default)]
     hops: String,
+    #[serde(default)]
+    notice: String,
 }
 
 const DEFAULT_HOPS: i32 = 2;
@@ -1587,6 +1846,7 @@ fn parse_hops(raw: &str) -> i32 {
 
 async fn concept_page(
     State(app): State<Shared>,
+    session: Session,
     Path((bundle_id, concept_id)): Path<(i64, String)>,
     Query(params): Query<ConceptParams>,
 ) -> PageResult {
@@ -1635,8 +1895,11 @@ async fn concept_page(
         })
         .collect();
     let title = c.title.clone().unwrap_or_else(|| c.concept_id.clone());
+    let workflow = concept_workflow(&app, &session, &c).await?;
     html(&ConceptPage {
-        shell: Shell::new(&app, &title, "bundles"),
+        shell: Shell::new(&app, &session, &title, "bundles"),
+        notice: non_empty(&params.notice),
+        workflow,
         self_href: concept_href(bundle_id, &concept_id),
         graph_url: graph_href(bundle_id, &concept_id),
         prov: ProvenanceView::from_concept(&c),
@@ -1900,7 +2163,7 @@ async fn concept_source(
         .into_response())
 }
 
-async fn status_page(State(app): State<Shared>) -> PageResult {
+async fn status_page(State(app): State<Shared>, session: Session) -> PageResult {
     let (version, sql_version) = app.db.versions().await?;
     let health = HealthView::from_json(&app.db.health().await?, version, sql_version);
     let index = IndexView::from_json(&app.db.index_status().await?);
@@ -1909,7 +2172,7 @@ async fn status_page(State(app): State<Shared>) -> PageResult {
     let duplicates = app.db.duplicates().await?;
     let sync_log = app.db.sync_log(None, 50).await?;
     html(&StatusPage {
-        shell: Shell::new(&app, "Operations", "status"),
+        shell: Shell::new(&app, &session, "Operations", "status"),
         health,
         index,
         config_json,
@@ -1921,6 +2184,655 @@ async fn status_page(State(app): State<Shared>) -> PageResult {
 
 async fn not_found() -> PageResult {
     Err(AppError::not_found("This page"))
+}
+
+// ---------------------------------------------------------------------------
+// Human workflow: sign in, upload, edit, review
+// ---------------------------------------------------------------------------
+
+/// The writer connection and the person, once a workflow page has checked
+/// both.
+struct Access<'a> {
+    writer: &'a Db,
+    who: Principal,
+}
+
+/// Gate a workflow page: the server must have a writer connection, and the
+/// person must hold `role`. Nobody signed in is sent to the login page
+/// when there is one, and refused otherwise.
+fn require<'a>(
+    app: &'a App,
+    session: &Session,
+    role: Role,
+    next: &str,
+) -> Result<Access<'a>, AppError> {
+    let writer = app.writer.as_ref().ok_or_else(|| {
+        AppError::unavailable(
+            "The human workflow is off: this server has no writer connection (OKF_PG_WRITER_URL).",
+        )
+    })?;
+    let who = match &session.principal {
+        Some(person) => person.clone(),
+        None if session.mode == Mode::Users => return Err(AppError::sign_in(next)),
+        None => return Err(AppError::forbidden(role)),
+    };
+    if !who.role.allows(role) {
+        return Err(AppError::forbidden(role));
+    }
+    Ok(Access { writer, who })
+}
+
+/// The workflow rebuilds a content bundle from the sources the catalog
+/// keeps, so it needs `store_source` on.
+async fn ensure_sources(db: &Db) -> Result<(), AppError> {
+    if db.keeps_sources().await? {
+        Ok(())
+    } else {
+        Err(AppError::unavailable(
+            "The catalog does not keep document sources (its store_source setting is off), so a \
+             document cannot be rebuilt after a change. An admin turns it on with \
+             pgokf.set_config('store_source', 'true') and refreshes the bundles.",
+        ))
+    }
+}
+
+/// Resync a content bundle with some files replaced and some removed: the
+/// catalog's content ingestion is a full snapshot, so the rest of the
+/// bundle is read back and sent along unchanged.
+async fn resync(
+    app: &App,
+    writer: &Db,
+    bundle: &ContentBundle,
+    changes: Vec<BundleFile>,
+    removals: &[String],
+) -> Result<SyncOutcome, AppError> {
+    let _one_at_a_time = app.rebuilds.lock().await;
+    let mut files = writer.bundle_files(bundle.id).await?;
+    for change in changes {
+        match files.iter_mut().find(|f| f.path == change.path) {
+            Some(existing) => existing.bytes = change.bytes,
+            None => files.push(change),
+        }
+    }
+    files.retain(|f| !removals.contains(&f.path));
+    Ok(writer.register_content(&bundle.name, &files).await?)
+}
+
+/// A content bundle name as `register_bundle_content` keys it.
+fn validated_bundle_name(name: &str) -> Result<String, AppError> {
+    let name = name.trim();
+    let plain = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-');
+    if name.is_empty() || name.len() > 64 || !name.chars().all(plain) || name.starts_with('.') {
+        return Err(AppError::bad_request(
+            "A bundle name is 1 to 64 letters, digits, dots, underscores, or hyphens, not \
+             starting with a dot.",
+        ));
+    }
+    Ok(name.to_owned())
+}
+
+/// A directory inside the bundle: plain segments, no climbing.
+fn validated_directory(dir: &str) -> Result<String, AppError> {
+    let dir = dir.trim().trim_matches('/');
+    let plain = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-');
+    let ok = dir.is_empty()
+        || dir
+            .split('/')
+            .all(|seg| !seg.is_empty() && seg != "." && seg != ".." && seg.chars().all(plain));
+    if ok && dir.len() <= 200 {
+        Ok(dir.to_owned())
+    } else {
+        Err(AppError::bad_request(
+            "The directory must be plain path segments (letters, digits, dots, underscores, \
+             hyphens) without . or ..",
+        ))
+    }
+}
+
+/// Whether a path names a Markdown file.
+fn is_markdown(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+}
+
+/// The file name of an uploaded document: its base name, a Markdown file.
+fn validated_file_name(name: &str) -> Result<String, AppError> {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or("").trim();
+    let plain = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ' ');
+    let ok = base.len() > 3
+        && base.len() <= 200
+        && is_markdown(base)
+        && !base.starts_with('.')
+        && base.chars().all(plain);
+    if ok {
+        Ok(base.replace(' ', "-"))
+    } else {
+        Err(AppError::bad_request(format!(
+            "{name:?} is not a Markdown document name (letters, digits, dots, underscores, \
+             hyphens, ending in .md)"
+        )))
+    }
+}
+
+/// What the signed-in person may do to this concept.
+async fn concept_workflow(
+    app: &App,
+    session: &Session,
+    c: &ConceptDetail,
+) -> Result<ConceptWorkflow, AppError> {
+    if app.writer.is_none() || !session.allows(Role::Editor) && !session.allows(Role::Approver) {
+        return Ok(ConceptWorkflow::default());
+    }
+    let blocker = if app.db.content_bundle(c.bundle_id).await?.is_none() {
+        Some(
+            "This bundle is synced from a directory or a bucket; change the document at its \
+             source."
+                .to_owned(),
+        )
+    } else if !is_markdown(&c.path) {
+        Some(
+            "Only Markdown documents are edited here; package files come with their skill."
+                .to_owned(),
+        )
+    } else if c.source.is_none() {
+        Some("The catalog holds no source for this document (store_source was off when it was ingested).".to_owned())
+    } else {
+        None
+    };
+    let editable = blocker.is_none();
+    Ok(ConceptWorkflow {
+        can_edit: editable && session.allows(Role::Editor),
+        can_review: editable && session.allows(Role::Approver),
+        blocker: blocker.filter(|_| session.allows(Role::Editor)),
+    })
+}
+
+/// A document of a content bundle with its stored source, for editing or
+/// reviewing.
+async fn editable_document(
+    app: &App,
+    bundle_id: i64,
+    concept_id: &str,
+) -> Result<(ContentBundle, ConceptDetail, String), AppError> {
+    let bundle = app.db.content_bundle(bundle_id).await?.ok_or_else(|| {
+        AppError::bad_request(
+            "This bundle is synced from a directory or a bucket; change the document at its source.",
+        )
+    })?;
+    let concept = app
+        .db
+        .concept(bundle_id, concept_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("This concept"))?;
+    if !is_markdown(&concept.path) {
+        return Err(AppError::bad_request(
+            "Only Markdown documents are edited here; package files come with their skill.",
+        ));
+    }
+    let source = concept.source.clone().ok_or_else(|| {
+        AppError::bad_request(
+            "The catalog holds no source for this document (store_source was off when it was ingested).",
+        )
+    })?;
+    let text = String::from_utf8(source)
+        .map_err(|_| AppError::bad_request("The stored source is not UTF-8 text."))?;
+    Ok((bundle, concept, text))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct NextParams {
+    #[serde(default)]
+    next: String,
+}
+
+async fn login_page(
+    State(app): State<Shared>,
+    session: Session,
+    Query(params): Query<NextParams>,
+) -> PageResult {
+    if app.auth.users().is_none() {
+        return Err(AppError::not_found("This page"));
+    }
+    if session.principal.is_some() {
+        return Ok(redirect(&safe_next(&params.next)));
+    }
+    html(&LoginPage {
+        shell: Shell::new(&app, &session, "Sign in", "login"),
+        next: safe_next(&params.next),
+        error: None,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct LoginForm {
+    username: String,
+    password: String,
+    #[serde(default)]
+    next: String,
+}
+
+async fn login_submit(
+    State(app): State<Shared>,
+    session: Session,
+    Form(form): Form<LoginForm>,
+) -> PageResult {
+    let users = app
+        .auth
+        .users()
+        .ok_or_else(|| AppError::not_found("This page"))?;
+    if let Some(person) = users.verify(&form.username, &form.password) {
+        let cookie = users.issue_cookie(&person)?;
+        let mut response = redirect(&safe_next(&form.next));
+        if let Some(value) = cookie_header(&cookie) {
+            response.headers_mut().insert(header::SET_COOKIE, value);
+        }
+        return Ok(response);
+    }
+    // A pause between attempts, so guessing costs time.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let mut response = html(&LoginPage {
+        shell: Shell::new(&app, &session, "Sign in", "login"),
+        next: safe_next(&form.next),
+        error: Some("Unknown user name or wrong password.".to_owned()),
+    })?;
+    *response.status_mut() = StatusCode::UNAUTHORIZED;
+    Ok(response)
+}
+
+async fn logout(State(app): State<Shared>) -> PageResult {
+    let mut response = redirect("/");
+    if let Some(value) = app
+        .auth
+        .users()
+        .and_then(|u| cookie_header(&u.clear_cookie()))
+    {
+        response.headers_mut().insert(header::SET_COOKIE, value);
+    }
+    Ok(response)
+}
+
+async fn upload_page(State(app): State<Shared>, session: Session) -> PageResult {
+    let access = require(&app, &session, Role::Uploader, "/upload")?;
+    ensure_sources(access.writer).await?;
+    html(&UploadPage {
+        shell: Shell::new(&app, &session, "Upload documents", "upload"),
+        bundles: app.db.content_bundles().await?,
+        error: None,
+    })
+}
+
+/// Where an upload goes.
+enum UploadTarget {
+    Existing(ContentBundle),
+    New(String),
+}
+
+/// The fields of the upload form, read from the multipart body.
+struct UploadFields {
+    bundle: String,
+    new_bundle: String,
+    directory: String,
+    files: Vec<(String, Vec<u8>)>,
+}
+
+async fn read_upload(mut multipart: Multipart) -> Result<UploadFields, AppError> {
+    let mut fields = UploadFields {
+        bundle: String::new(),
+        new_bundle: String::new(),
+        directory: String::new(),
+        files: Vec::new(),
+    };
+    let bad = |e: axum::extract::multipart::MultipartError| {
+        AppError::bad_request(format!("The upload could not be read: {e}"))
+    };
+    while let Some(field) = multipart.next_field().await.map_err(bad)? {
+        match field.name().unwrap_or("") {
+            "bundle" => fields.bundle = field.text().await.map_err(bad)?,
+            "new_bundle" => fields.new_bundle = field.text().await.map_err(bad)?,
+            "directory" => fields.directory = field.text().await.map_err(bad)?,
+            "files" => {
+                let name = field.file_name().unwrap_or("").to_owned();
+                let bytes = field.bytes().await.map_err(bad)?;
+                if !name.is_empty() && !bytes.is_empty() {
+                    fields.files.push((name, bytes.to_vec()));
+                }
+                if fields.files.len() > MAX_UPLOAD_FILES {
+                    return Err(AppError::bad_request(format!(
+                        "At most {MAX_UPLOAD_FILES} documents per upload."
+                    )));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(fields)
+}
+
+async fn upload_submit(
+    State(app): State<Shared>,
+    session: Session,
+    multipart: Multipart,
+) -> PageResult {
+    let access = require(&app, &session, Role::Uploader, "/upload")?;
+    ensure_sources(access.writer).await?;
+    match upload_documents(&app, &access, multipart).await {
+        Ok(response) => Ok(response),
+        // The form comes back with the problem instead of an error page.
+        Err(error) if error.status() == StatusCode::BAD_REQUEST => {
+            let mut response = html(&UploadPage {
+                shell: Shell::new(&app, &session, "Upload documents", "upload"),
+                bundles: app.db.content_bundles().await?,
+                error: Some(error.message().to_owned()),
+            })?;
+            *response.status_mut() = StatusCode::BAD_REQUEST;
+            Ok(response)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn upload_documents(app: &App, access: &Access<'_>, multipart: Multipart) -> PageResult {
+    let fields = read_upload(multipart).await?;
+    if fields.files.is_empty() {
+        return Err(AppError::bad_request(
+            "Choose at least one Markdown document.",
+        ));
+    }
+    let target = match non_empty(&fields.bundle) {
+        Some(id) => {
+            let id: i64 = id
+                .parse()
+                .map_err(|_| AppError::bad_request("Choose a bundle."))?;
+            UploadTarget::Existing(
+                app.db
+                    .content_bundle(id)
+                    .await?
+                    .ok_or_else(|| AppError::bad_request("That bundle is not a content bundle."))?,
+            )
+        }
+        None => UploadTarget::New(validated_bundle_name(&fields.new_bundle)?),
+    };
+    let directory = validated_directory(&fields.directory)?;
+    let now = now_iso();
+    let actor = access.who.actor();
+    let mut documents = Vec::with_capacity(fields.files.len());
+    for (name, bytes) in &fields.files {
+        let file_name = validated_file_name(name)?;
+        let path = if directory.is_empty() {
+            file_name
+        } else {
+            format!("{directory}/{file_name}")
+        };
+        let text = std::str::from_utf8(bytes)
+            .map_err(|_| AppError::bad_request(format!("{name} is not UTF-8 text.")))?;
+        let mut document =
+            Document::parse(text).map_err(|e| AppError::bad_request(format!("{name}: {e}")))?;
+        document.stamp_origin(&actor, &now);
+        // A verification is granted by an approver here, never uploaded.
+        document.quarantine_verifications(&actor, &now, "uploaded");
+        document
+            .validate(&path)
+            .map_err(|e| AppError::bad_request(format!("{name}: {e}")))?;
+        documents.push(BundleFile {
+            path,
+            bytes: document.render().into_bytes(),
+        });
+    }
+    let count = documents.len();
+    let outcome = match &target {
+        UploadTarget::Existing(bundle) => {
+            resync(app, access.writer, bundle, documents, &[]).await?
+        }
+        UploadTarget::New(name) => {
+            let _one_at_a_time = app.rebuilds.lock().await;
+            access.writer.register_content(name, &documents).await?
+        }
+    };
+    eprintln!(
+        "pgokf-web: {} uploaded {count} document(s) into bundle {} ({} added, {} updated)",
+        access.who.actor(),
+        outcome.bundle_id,
+        outcome.added,
+        outcome.updated
+    );
+    Ok(redirect(&format!(
+        "/bundles/{}?notice={}",
+        outcome.bundle_id,
+        filters::percent_encode(&format!(
+            "Uploaded {count} document{}: {} added, {} updated.",
+            if count == 1 { "" } else { "s" },
+            outcome.added,
+            outcome.updated
+        ))
+    )))
+}
+
+async fn edit_page(
+    State(app): State<Shared>,
+    session: Session,
+    Path((bundle_id, concept_id)): Path<(i64, String)>,
+) -> PageResult {
+    let next = format!("/edit/{bundle_id}/{concept_id}");
+    let access = require(&app, &session, Role::Editor, &next)?;
+    ensure_sources(access.writer).await?;
+    let (bundle, concept, content) = editable_document(&app, bundle_id, &concept_id).await?;
+    html(&EditPage {
+        shell: Shell::new(&app, &session, &format!("Edit {}", concept.path), "bundles"),
+        bundle_id,
+        bundle_name: bundle.name,
+        concept_id,
+        path: concept.path,
+        content,
+        error: None,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct EditForm {
+    #[serde(default)]
+    content: String,
+    #[serde(default)]
+    action: String,
+}
+
+async fn edit_submit(
+    State(app): State<Shared>,
+    session: Session,
+    Path((bundle_id, concept_id)): Path<(i64, String)>,
+    Form(form): Form<EditForm>,
+) -> PageResult {
+    let next = format!("/edit/{bundle_id}/{concept_id}");
+    let access = require(&app, &session, Role::Editor, &next)?;
+    ensure_sources(access.writer).await?;
+    let (bundle, concept, current) = editable_document(&app, bundle_id, &concept_id).await?;
+    let concept_url = concept_href(bundle_id, &concept_id);
+    if form.action == "delete" {
+        resync(
+            &app,
+            access.writer,
+            &bundle,
+            Vec::new(),
+            std::slice::from_ref(&concept.path),
+        )
+        .await?;
+        eprintln!(
+            "pgokf-web: {} deleted {}:{}",
+            access.who.actor(),
+            bundle_id,
+            concept.path
+        );
+        return Ok(redirect(&format!(
+            "/bundles/{bundle_id}?notice={}",
+            filters::percent_encode(&format!("Deleted {}.", concept.path))
+        )));
+    }
+    let submitted = form.content.replace("\r\n", "\n");
+    if submitted == current {
+        return Ok(redirect(&format!(
+            "{concept_url}?notice={}",
+            filters::percent_encode("No changes to save.")
+        )));
+    }
+    let stored = Document::parse(&current).ok();
+    let checked = Document::parse(&submitted).and_then(|mut document| {
+        // The stored verifications are carried over and set aside with any
+        // the editor typed: an edit always goes back to review.
+        if let Some(stored) = &stored {
+            document.inherit_verifications(stored);
+        }
+        document.supersede_verifications(&access.who.actor(), &now_iso());
+        document.validate(&concept.path).map(|()| document)
+    });
+    let document = match checked {
+        Ok(document) => document,
+        Err(problem) => {
+            let mut response = html(&EditPage {
+                shell: Shell::new(&app, &session, &format!("Edit {}", concept.path), "bundles"),
+                bundle_id,
+                bundle_name: bundle.name,
+                concept_id,
+                path: concept.path,
+                content: submitted,
+                error: Some(problem),
+            })?;
+            *response.status_mut() = StatusCode::BAD_REQUEST;
+            return Ok(response);
+        }
+    };
+    let had_verification = stored
+        .as_ref()
+        .is_some_and(Document::has_human_verification);
+    resync(
+        &app,
+        access.writer,
+        &bundle,
+        vec![BundleFile {
+            path: concept.path.clone(),
+            bytes: document.render().into_bytes(),
+        }],
+        &[],
+    )
+    .await?;
+    eprintln!(
+        "pgokf-web: {} edited {}:{}",
+        access.who.actor(),
+        bundle_id,
+        concept.path
+    );
+    let notice = if had_verification {
+        "Saved. The earlier verification was set aside, so the document is back in the review queue."
+    } else {
+        "Saved."
+    };
+    Ok(redirect(&format!(
+        "{concept_url}?notice={}",
+        filters::percent_encode(notice)
+    )))
+}
+
+async fn edit_check(
+    State(app): State<Shared>,
+    session: Session,
+    Path((bundle_id, concept_id)): Path<(i64, String)>,
+    Form(form): Form<EditForm>,
+) -> PageResult {
+    require(&app, &session, Role::Editor, "/")?;
+    let path = format!("{concept_id}.md");
+    let _ = bundle_id;
+    let checked = Document::parse(&form.content.replace("\r\n", "\n"))
+        .and_then(|document| document.validate(&path).map(|()| document));
+    let partial = match checked {
+        Ok(document) => EditCheckPartial {
+            error: None,
+            concept_type: document.text("type").map(str::to_owned),
+            title: document.text("title").unwrap_or("(untitled)").to_owned(),
+            description: document.text("description").map(str::to_owned),
+            body_html: markdown::render(&document.body),
+        },
+        Err(problem) => EditCheckPartial {
+            error: Some(problem),
+            concept_type: None,
+            title: String::new(),
+            description: None,
+            body_html: String::new(),
+        },
+    };
+    html(&partial)
+}
+
+async fn review_page(State(app): State<Shared>, session: Session) -> PageResult {
+    let access = require(&app, &session, Role::Approver, "/review")?;
+    let error = ensure_sources(access.writer)
+        .await
+        .err()
+        .map(|e| e.message().to_owned());
+    let mut items = app.db.review_queue(REVIEW_LIMIT + 1).await?;
+    let truncated = i64::try_from(items.len()).unwrap_or(i64::MAX) > REVIEW_LIMIT;
+    items.truncate(usize::try_from(REVIEW_LIMIT).unwrap_or(usize::MAX));
+    html(&ReviewPage {
+        shell: Shell::new(&app, &session, "Review queue", "review"),
+        items,
+        truncated,
+        error,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewForm {
+    #[serde(default)]
+    decision: String,
+    #[serde(default)]
+    note: String,
+}
+
+async fn concept_review(
+    State(app): State<Shared>,
+    session: Session,
+    Path((bundle_id, concept_id)): Path<(i64, String)>,
+    Form(form): Form<ReviewForm>,
+) -> PageResult {
+    let concept_url = concept_href(bundle_id, &concept_id);
+    let access = require(&app, &session, Role::Approver, &concept_url)?;
+    ensure_sources(access.writer).await?;
+    let (bundle, concept, current) = editable_document(&app, bundle_id, &concept_id).await?;
+    let mut document = Document::parse(&current)
+        .map_err(|e| AppError::bad_request(format!("The stored document does not parse: {e}")))?;
+    let actor = access.who.actor();
+    let note = non_empty(&form.note);
+    let outcome = match form.decision.as_str() {
+        "approve" => {
+            document.record_verification(&actor, &now_iso(), note.as_deref());
+            "Approved: the document is now human-reviewed."
+        }
+        "send-back" => {
+            document.send_back(&actor, &now_iso(), note.as_deref());
+            "Sent back: the document is a draft again."
+        }
+        _ => return Err(AppError::bad_request("Choose approve or send back.")),
+    };
+    document.validate(&concept.path).map_err(|e| {
+        AppError::bad_request(format!("The reviewed document would not parse: {e}"))
+    })?;
+    resync(
+        &app,
+        access.writer,
+        &bundle,
+        vec![BundleFile {
+            path: concept.path.clone(),
+            bytes: document.render().into_bytes(),
+        }],
+        &[],
+    )
+    .await?;
+    eprintln!(
+        "pgokf-web: {actor} reviewed {bundle_id}:{} ({})",
+        concept.path, form.decision
+    );
+    Ok(redirect(&format!(
+        "{concept_url}?notice={}",
+        filters::percent_encode(outcome)
+    )))
 }
 
 // ---------------------------------------------------------------------------
@@ -2121,6 +3033,7 @@ async fn api_catalog_graph(
 
 async fn graph_page(
     State(app): State<Shared>,
+    session: Session,
     Query(params): Query<CatalogGraphParams>,
 ) -> PageResult {
     let bundle_id = params.bundle_id()?;
@@ -2151,7 +3064,7 @@ async fn graph_page(
         .map(|(k, v)| format!("{k}={}", filters::percent_encode(v)))
         .collect();
     html(&GraphPage {
-        shell: Shell::new(&app, "Graph", "graph"),
+        shell: Shell::new(&app, &session, "Graph", "graph"),
         bundles,
         bundle: bundle_id.map(|b| b.to_string()).unwrap_or_default(),
         limit_options: GRAPH_NODE_OPTIONS
@@ -2747,7 +3660,11 @@ async fn preview_or_message(
     }
 }
 
-async fn plugins_page(State(app): State<Shared>, Query(params): Query<PluginParams>) -> PageResult {
+async fn plugins_page(
+    State(app): State<Shared>,
+    session: Session,
+    Query(params): Query<PluginParams>,
+) -> PageResult {
     let (form, chosen, selection, base_model) = params.normalize()?;
     let (preview, error) = preview_or_message(&app, &form, &chosen, &selection, base_model).await;
     let error = form.problems().or(error);
@@ -2756,7 +3673,7 @@ async fn plugins_page(State(app): State<Shared>, Query(params): Query<PluginPara
     let mut tag_facets = app.db.catalog_facets(None, "tag").await?;
     tag_facets.truncate(CHIP_TAGS);
     html(&PluginsPage {
-        shell: Shell::new(&app, "Agent Plugin builder", "plugins"),
+        shell: Shell::new(&app, &session, "Agent Plugin builder", "plugins"),
         kinds: kind_views(chosen.kind),
         agents: agent_views(),
         form,
@@ -3336,6 +4253,73 @@ mod tests {
             Some("{\"team\":\"platform\"}")
         );
         assert_eq!(actor_display(&Value::Null), None);
+    }
+
+    #[test]
+    fn same_origin_reads_fetch_metadata_first_and_origin_second() {
+        use axum::http::HeaderName;
+
+        // Arrange
+        let with = |pairs: &[(&str, &str)]| {
+            let mut h = HeaderMap::new();
+            for (k, v) in pairs {
+                h.insert(
+                    HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                    HeaderValue::from_str(v).unwrap(),
+                );
+            }
+            h
+        };
+
+        // Act / Assert
+        assert!(same_origin(&with(&[("sec-fetch-site", "same-origin")])));
+        assert!(same_origin(&with(&[("sec-fetch-site", "none")])));
+        assert!(!same_origin(&with(&[
+            ("sec-fetch-site", "cross-site"),
+            ("origin", "http://x"),
+            ("host", "x")
+        ])));
+        assert!(same_origin(&with(&[
+            ("origin", "http://catalog.example:8080"),
+            ("host", "catalog.example:8080")
+        ])));
+        assert!(!same_origin(&with(&[
+            ("origin", "http://evil.example"),
+            ("host", "catalog.example:8080")
+        ])));
+        assert!(
+            same_origin(&with(&[("host", "catalog.example")])),
+            "a non-browser client"
+        );
+    }
+
+    #[test]
+    fn workflow_inputs_are_validated_and_next_stays_on_site() {
+        // Arrange / Act / Assert
+        assert_eq!(
+            validated_bundle_name(" team-runbooks ").ok().expect("ok"),
+            "team-runbooks"
+        );
+        assert!(validated_bundle_name(".hidden").is_err());
+        assert!(validated_bundle_name("a/b").is_err());
+        assert_eq!(
+            validated_directory("/runbooks/db/").ok().expect("ok"),
+            "runbooks/db"
+        );
+        assert_eq!(validated_directory("").ok().expect("ok"), "");
+        assert!(validated_directory("../up").is_err());
+        assert_eq!(
+            validated_file_name("C:\\docs\\My Note.md")
+                .ok()
+                .expect("ok"),
+            "My-Note.md"
+        );
+        assert!(validated_file_name("notes.txt").is_err());
+        assert!(validated_file_name(".md").is_err());
+        assert_eq!(safe_next("/bundles/3"), "/bundles/3");
+        assert_eq!(safe_next("//evil.example"), "/");
+        assert_eq!(safe_next("https://evil.example/"), "/");
+        assert_eq!(safe_next(""), "/");
     }
 
     #[test]

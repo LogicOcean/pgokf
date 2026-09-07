@@ -1,0 +1,9 @@
+{% if let Some(e) = error %}
+<p class="notice bad">{{ e }}</p>
+{% else %}
+<section class="panel">
+  <div class="panel-head"><h2>Preview</h2><span class="pill ok">valid</span></div>
+  <p class="muted small">{% if let Some(t) = concept_type %}<span class="pill type">{{ t }}</span>{% endif %} <strong>{{ title }}</strong>{% if let Some(d) = description %} — {{ d }}{% endif %}</p>
+  {% if body_html.trim().is_empty() %}<p class="empty">The body is empty.</p>{% else %}<article class="prose">{{ body_html|safe }}</article>{% endif %}
+</section>
+{% endif %}

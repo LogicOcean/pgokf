@@ -230,6 +230,38 @@ as JSON under `/api/` (`/api/health`, `/api/search?q=...`, `/api/bundles`,
 
 ---
 
+### The human workflow (upload, edit, review)
+
+The UI is read-only until two things are set in `.env`: a writer connection
+(`OKF_UI_WRITER_URL`, the stack's writer role) and a way of knowing who is
+asking (`OKF_UI_AUTH=users` with a users file, or `OKF_UI_AUTH=header`
+behind a proxy that forwards the identity). The catalog must also keep
+document sources:
+
+```sh
+docker compose exec -T db psql -U postgres -d okf -c "SELECT pgokf.set_config('store_source', 'true')"
+```
+
+People then work on *content bundles* (bundles the catalog holds itself);
+a bundle mounted from `/bundles` stays read-only in the UI. Make a users
+file line per person (roles: `viewer`, `uploader`, `editor`, `approver`,
+`admin`), never putting the password on a command line:
+
+```sh
+mkdir -p ui-auth
+printf '%s' 'a long password' | docker compose run --rm -T ui pgokf-web hash-password --user alice --role approver >> ui-auth/users
+chmod 755 ui-auth && chmod 644 ui-auth/users   # hashes only; the container reads it as uid 10001
+docker compose --profile ui up -d ui
+```
+
+Keep the passwords themselves elsewhere (a password manager, or a file
+outside `ui-auth/` with mode 600): the mounted directory holds only the
+Argon2id hashes, and the file is re-read whenever it changes.
+
+Uploaders add documents, editors change them (which sends them back to
+review), and approvers record the human verification the trust tier derives
+from. See the crate README for the roles and the security model.
+
 ## Backups and restore
 
 Backups are logical and run by the image's own tooling against the live

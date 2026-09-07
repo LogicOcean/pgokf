@@ -1,41 +1,75 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! `pgokf-web`: the pgokf catalog's web UI and JSON API.
 //!
-//! A thin, read-only companion: it renders what the `pgokf_reader` role can
-//! see through the public SQL API (search, browse, inspect, monitor) and
-//! never holds catalogue semantics of its own. Configuration is by flags or
-//! `OKF_*` environment variables like the other companions; the companions
-//! image ships the binary.
+//! A thin companion: it renders what the `pgokf_reader` role can see
+//! through the public SQL API (search, browse, inspect, monitor) and never
+//! holds catalogue semantics of its own. With a writer connection and an
+//! authentication mode it also carries the human workflow (upload, edit,
+//! review), which writes ordinary OKF documents into content bundles.
+//! Configuration is by flags or `OKF_*` environment variables like the
+//! other companions; the companions image ships the binary.
 
+mod auth;
 mod config;
 mod db;
+mod documents;
 mod graph;
 mod links;
 mod markdown;
 mod routes;
 
+use std::io::Read;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
+use axum::http::HeaderName;
 use clap::Parser;
 use pgokf_companion::embeddings::EmbeddingsClient;
 
-use crate::config::Cli;
+use crate::auth::{Authenticator, Cidr, HeaderAuth, Role, UsersAuth};
+use crate::config::{Cli, Command};
 use crate::db::{Db, DbConfig};
 use crate::routes::App;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse().normalized();
+    if let Some(command) = &cli.command {
+        return run_command(command);
+    }
     cli.validate()?;
+    let database_url = cli
+        .database_url
+        .clone()
+        .context("--database-url (OKF_PG_URL) is required")?;
 
     let db = Db::connect(&DbConfig {
-        database_url: &cli.database_url,
+        database_url: &database_url,
         force_tls: cli.tls,
         pool_size: cli.pool_size,
         tenant: cli.tenant.as_deref(),
         statement_timeout_ms: cli.statement_timeout_ms,
     })?;
+    // The writer pool is small and used only by the human workflow.
+    let writer = match &cli.writer_url {
+        Some(url) => {
+            let writer = Db::connect(&DbConfig {
+                database_url: url,
+                force_tls: cli.tls,
+                pool_size: 2,
+                tenant: cli.tenant.as_deref(),
+                statement_timeout_ms: cli.statement_timeout_ms.max(60_000),
+            })?;
+            writer
+                .versions()
+                .await
+                .context("the catalog is not reachable with the configured writer connection")?;
+            Some(writer)
+        }
+        None => None,
+    };
+    let authenticator = build_authenticator(&cli)?;
     // Fail fast on a bad connection string or role: the first page would
     // otherwise be the first error.
     let (version, sql_version) = db
@@ -52,7 +86,7 @@ async fn main() -> Result<()> {
         _ => None,
     };
     let catalog_name = cli.title.clone().unwrap_or_else(|| {
-        pgokf_pgconn::parse_config(&cli.database_url)
+        pgokf_pgconn::parse_config(&database_url)
             .ok()
             .and_then(|c| c.get_dbname().map(str::to_owned))
             .unwrap_or_else(|| "pgokf".to_owned())
@@ -60,36 +94,128 @@ async fn main() -> Result<()> {
 
     let app = Arc::new(App {
         db,
+        writer,
+        auth: authenticator,
+        rebuilds: tokio::sync::Mutex::new(()),
         embedder,
         catalog_name,
         tenant: cli.tenant.clone(),
         version: version.clone(),
     });
-    let router = routes::router(app);
+    let router = routes::router(app.clone());
 
     let listener = tokio::net::TcpListener::bind(cli.bind)
         .await
         .with_context(|| format!("binding {}", cli.bind))?;
     eprintln!(
-        "pgokf-web: serving catalog {} (pgokf {version}, SQL {sql_version}) on http://{}{}",
+        "pgokf-web: serving catalog {} (pgokf {version}, SQL {sql_version}) on http://{}{}; auth {}{}",
         cli.title.as_deref().unwrap_or("(from connection)"),
         cli.bind,
         cli.tenant
             .as_deref()
             .map(|t| format!(" as tenant {t}"))
-            .unwrap_or_default()
+            .unwrap_or_default(),
+        app.auth.mode().id(),
+        if cli.writer_url.is_some() {
+            ", human workflow on"
+        } else {
+            ", read-only"
+        }
     );
     let shutdown = pgokf_companion::daemon::shutdown_signal()?;
-    axum::serve(listener, router)
-        .with_graceful_shutdown(async move {
-            if let Err(error) = shutdown.await {
-                eprintln!("pgokf-web: shutdown signal error: {error}");
-            }
-        })
-        .await
-        .context("serving HTTP")?;
+    // Connection info gives the auth seam the peer address, which is what
+    // decides whether a proxy's identity headers are believed.
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        if let Err(error) = shutdown.await {
+            eprintln!("pgokf-web: shutdown signal error: {error}");
+        }
+    })
+    .await
+    .context("serving HTTP")?;
     eprintln!("pgokf-web: stopped");
     Ok(())
+}
+
+/// The way people are identified, from the flags.
+fn build_authenticator(cli: &Cli) -> Result<Authenticator> {
+    match cli.auth.trim() {
+        "header" => {
+            let header = |name: &str| {
+                HeaderName::from_bytes(name.trim().as_bytes())
+                    .with_context(|| format!("{name:?} is not a valid header name"))
+            };
+            let trusted_text = cli.auth_trusted_proxy.trim();
+            let trust_any_peer = trusted_text.eq_ignore_ascii_case("any");
+            let trusted = if trust_any_peer {
+                Vec::new()
+            } else {
+                trusted_text
+                    .split(',')
+                    .filter(|c| !c.trim().is_empty())
+                    .map(Cidr::parse)
+                    .collect::<Result<Vec<_>>>()?
+            };
+            let default_role = Role::parse(&cli.auth_default_role)
+                .with_context(|| format!("unknown default role {:?}", cli.auth_default_role))?;
+            Ok(Authenticator::Header(HeaderAuth {
+                user_header: header(&cli.auth_user_header)?,
+                name_header: cli.auth_name_header.as_deref().map(header).transpose()?,
+                groups_header: cli.auth_groups_header.as_deref().map(header).transpose()?,
+                role_map: HeaderAuth::parse_role_map(&cli.auth_role_map)?,
+                default_role,
+                trusted,
+                trust_any_peer,
+            }))
+        }
+        "users" => {
+            let path = cli
+                .auth_users_file
+                .as_deref()
+                .context("--auth users needs --auth-users-file")?;
+            let secret = if let Some(secret) = &cli.session_secret {
+                secret.as_bytes().to_vec()
+            } else {
+                eprintln!(
+                    "pgokf-web: warning: no OKF_WEB_SESSION_SECRET; sessions end when the \
+                     process does"
+                );
+                auth::random_bytes(32)?
+            };
+            Ok(Authenticator::Users(UsersAuth::load(
+                path,
+                secret,
+                cli.session_hours.saturating_mul(3_600),
+                cli.cookie_secure,
+            )?))
+        }
+        _ => Ok(Authenticator::Anonymous),
+    }
+}
+
+/// A maintenance command: no catalog, no server.
+fn run_command(command: &Command) -> Result<()> {
+    match command {
+        Command::HashPassword { user, role } => {
+            if !auth::valid_subject(user) {
+                bail!("{user:?} is not a valid user name (letters, digits, . _ - @ +)");
+            }
+            let role = Role::parse(role).with_context(|| format!("unknown role {role:?}"))?;
+            let mut password = String::new();
+            std::io::stdin()
+                .read_to_string(&mut password)
+                .context("reading the password from standard input")?;
+            let password = password.trim_end_matches(['\r', '\n']);
+            if password.is_empty() {
+                bail!("the password (read from standard input) is empty");
+            }
+            println!("{user}:{}:{}", role.id(), auth::hash_password(password)?);
+            Ok(())
+        }
+    }
 }
 
 /// Probe the embeddings endpoint once and compare the vector width with the

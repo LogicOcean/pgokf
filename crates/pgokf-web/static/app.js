@@ -535,6 +535,24 @@
   }
   document.querySelectorAll('[data-tabs]').forEach(initTabs);
 
+  // ---- confirmations and small form helpers --------------------------------
+  document.addEventListener('click', function (event) {
+    var button = event.target.closest('[data-confirm]');
+    if (button && !window.confirm(button.getAttribute('data-confirm'))) event.preventDefault();
+    var opener = event.target.closest('[data-open-tab]');
+    if (opener) {
+      var tab = document.querySelector('[role=tab][data-tab="' + opener.getAttribute('data-open-tab') + '"]');
+      if (tab) { event.preventDefault(); tab.click(); tab.scrollIntoView({ block: 'start', behavior: 'smooth' }); }
+    }
+  });
+  var uploadBundle = document.querySelector('[data-upload-bundle]');
+  if (uploadBundle) {
+    var newBundle = document.querySelector('[data-upload-new]');
+    var syncUpload = function () { if (newBundle) newBundle.hidden = uploadBundle.value !== ''; };
+    uploadBundle.addEventListener('change', syncUpload);
+    syncUpload();
+  }
+
   // ---- sortable tables: click a heading to sort by its column --------------
   document.querySelectorAll('table[data-sortable]').forEach(function (table) {
     var headers = Array.prototype.slice.call(table.querySelectorAll('th[data-sort]'));

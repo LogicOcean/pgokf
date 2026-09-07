@@ -6,18 +6,90 @@
 //! the service purely through its environment.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use anyhow::{Result, bail};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 /// `pgokf-web`: the pgokf catalog's web UI and JSON API.
 #[derive(Debug, Parser)]
 #[command(name = "pgokf-web", version, about)]
 pub(crate) struct Cli {
-    /// `PostgreSQL` connection string for a `pgokf_reader` role. The UI is
-    /// read-only by construction: it never needs a writer or admin role.
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
+    /// `PostgreSQL` connection string for a `pgokf_reader` role: everything
+    /// the UI shows comes through it.
     #[arg(long, env = "OKF_PG_URL", hide_env_values = true)]
-    pub database_url: String,
+    pub database_url: Option<String>,
+
+    /// `PostgreSQL` connection string for a `pgokf_writer` role, used only by
+    /// the human workflow (upload, edit, review) and only for people whose
+    /// role allows it. Without it those pages are off.
+    #[arg(long, env = "OKF_PG_WRITER_URL", hide_env_values = true)]
+    pub writer_url: Option<String>,
+
+    /// How people are identified: `none` (everyone is a viewer), `header`
+    /// (a trusted reverse proxy forwards the identity in headers), or
+    /// `users` (a local users file with a login form).
+    #[arg(long = "auth", env = "OKF_WEB_AUTH", default_value = "none")]
+    pub auth: String,
+
+    /// `header` mode: the header carrying the user's identifier.
+    #[arg(
+        long,
+        env = "OKF_WEB_AUTH_USER_HEADER",
+        default_value = "X-Forwarded-User"
+    )]
+    pub auth_user_header: String,
+
+    /// `header` mode: an optional header carrying a display name.
+    #[arg(long, env = "OKF_WEB_AUTH_NAME_HEADER")]
+    pub auth_name_header: Option<String>,
+
+    /// `header` mode: an optional header carrying comma-separated groups.
+    #[arg(
+        long,
+        env = "OKF_WEB_AUTH_GROUPS_HEADER",
+        default_value = "X-Forwarded-Groups"
+    )]
+    pub auth_groups_header: Option<String>,
+
+    /// `header` mode: `group=role,...` mapping groups to roles (viewer,
+    /// uploader, editor, approver, admin); the highest matching role wins.
+    #[arg(long, env = "OKF_WEB_AUTH_ROLE_MAP", default_value = "")]
+    pub auth_role_map: String,
+
+    /// `header` mode: the role of an identified person in no mapped group.
+    #[arg(long, env = "OKF_WEB_AUTH_DEFAULT_ROLE", default_value = "viewer")]
+    pub auth_default_role: String,
+
+    /// `header` mode: comma-separated addresses or CIDR ranges the proxy
+    /// connects from; identity headers from anywhere else are ignored. The
+    /// word `any` believes every peer (only on a network where nothing but
+    /// the proxy can reach this server).
+    #[arg(long, env = "OKF_WEB_AUTH_TRUSTED_PROXY", default_value = "")]
+    pub auth_trusted_proxy: String,
+
+    /// `users` mode: the users file (`name:role:$argon2id$...` per line;
+    /// `pgokf-web hash-password` produces a line).
+    #[arg(long, env = "OKF_WEB_AUTH_USERS_FILE")]
+    pub auth_users_file: Option<PathBuf>,
+
+    /// `users` mode: the key that signs session cookies (at least 32
+    /// characters). Unset, a random key is used and sessions end with the
+    /// process.
+    #[arg(long, env = "OKF_WEB_SESSION_SECRET", hide_env_values = true)]
+    pub session_secret: Option<String>,
+
+    /// `users` mode: how long a session lasts, in hours.
+    #[arg(long, env = "OKF_WEB_SESSION_HOURS", default_value_t = 12)]
+    pub session_hours: u64,
+
+    /// `users` mode: mark the session cookie `Secure` (the site is served
+    /// over HTTPS).
+    #[arg(long, env = "OKF_WEB_COOKIE_SECURE", default_value_t = false)]
+    pub cookie_secure: bool,
 
     /// Socket address to listen on.
     #[arg(long, env = "OKF_WEB_BIND", default_value = "127.0.0.1:8080")]
@@ -62,10 +134,30 @@ pub(crate) struct Cli {
     pub title: Option<String>,
 }
 
+/// Maintenance commands that run without a catalog.
+#[derive(Debug, Subcommand)]
+pub(crate) enum Command {
+    /// Hash a password read from standard input and print a users-file line
+    /// (`name:role:$argon2id$...`) for it.
+    HashPassword {
+        /// The user name the line is for.
+        #[arg(long)]
+        user: String,
+        /// The user's role: viewer, uploader, editor, approver, or admin.
+        #[arg(long, default_value = "viewer")]
+        role: String,
+    },
+}
+
 impl Cli {
     /// Treat empty optional values as unset (the shape a compose stack
     /// produces for an unset variable), mirroring the other companions.
     pub(crate) fn normalized(mut self) -> Self {
+        self.writer_url = pgokf_companion::cli::non_empty(self.writer_url);
+        self.auth_name_header = pgokf_companion::cli::non_empty(self.auth_name_header);
+        self.auth_groups_header = pgokf_companion::cli::non_empty(self.auth_groups_header);
+        self.session_secret = pgokf_companion::cli::non_empty(self.session_secret);
+        self.auth_users_file = self.auth_users_file.filter(|p| !p.as_os_str().is_empty());
         self.tenant = pgokf_companion::cli::non_empty(self.tenant);
         self.embed_endpoint = pgokf_companion::cli::non_empty(self.embed_endpoint);
         self.embed_model = pgokf_companion::cli::non_empty(self.embed_model);
@@ -85,6 +177,26 @@ impl Cli {
         if self.embed_endpoint.is_some() != self.embed_model.is_some() {
             bail!("--embed-endpoint and --embed-model must be given together");
         }
+        match self.auth.trim() {
+            "none" => {}
+            "header" => {
+                if self.auth_trusted_proxy.trim().is_empty() {
+                    bail!(
+                        "--auth header needs --auth-trusted-proxy (the proxy's address or range, \
+                         or the word any)"
+                    );
+                }
+            }
+            "users" => {
+                if self.auth_users_file.is_none() {
+                    bail!("--auth users needs --auth-users-file");
+                }
+                if self.session_hours == 0 {
+                    bail!("--session-hours must be at least 1");
+                }
+            }
+            other => bail!("--auth must be none, header, or users (not {other:?})"),
+        }
         Ok(())
     }
 }
@@ -101,6 +213,37 @@ mod tests {
         ];
         args.extend_from_slice(extra);
         Cli::parse_from(args)
+    }
+
+    #[test]
+    fn auth_modes_demand_their_own_settings() {
+        // Arrange / Act / Assert
+        assert!(parse(&["--auth", "header"]).validate().is_err());
+        assert!(
+            parse(&["--auth", "header", "--auth-trusted-proxy", "10.0.0.0/8"])
+                .validate()
+                .is_ok()
+        );
+        assert!(parse(&["--auth", "users"]).validate().is_err());
+        assert!(
+            parse(&["--auth", "users", "--auth-users-file", "/tmp/users"])
+                .validate()
+                .is_ok()
+        );
+        assert!(parse(&["--auth", "oidc"]).validate().is_err());
+        let sub = Cli::parse_from([
+            "pgokf-web",
+            "hash-password",
+            "--user",
+            "alice",
+            "--role",
+            "editor",
+        ]);
+        assert!(matches!(sub.command, Some(Command::HashPassword { .. })));
+        assert!(
+            sub.database_url.is_none(),
+            "a maintenance command needs no catalog"
+        );
     }
 
     #[test]

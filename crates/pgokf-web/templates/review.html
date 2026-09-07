@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero">
+  <div>
+    <h1>Review queue</h1>
+    <p class="lede">Documents in content bundles that no person has verified yet. Open one to read it, then approve it (a <code>verified</code> event under your name makes it <em>human-reviewed</em>) or send it back as a draft with a note.</p>
+  </div>
+</section>
+{% if let Some(e) = error %}<p class="notice bad">{{ e }}</p>{% endif %}
+{% if items.is_empty() %}
+<div class="empty-state"><h3>Nothing to review</h3><p>Every document in the content bundles carries a human verification. New uploads and edits appear here.</p></div>
+{% else %}
+<section class="panel">
+  <div class="panel-head"><h2>Waiting for review <span class="muted">({{ items.len() }}{% if truncated %}+{% endif %})</span></h2>
+    <input type="search" class="filter-input js-only" placeholder="Filter by path, title, bundle, or type" data-filter="#pgokf-review" aria-label="Filter the queue"></div>
+  <div class="table-wrap">
+  <table class="table" id="pgokf-review" data-sortable>
+    <thead><tr>
+      <th data-sort="text">Document</th>
+      <th data-sort="text">Bundle</th>
+      <th data-sort="text">Type</th>
+      <th data-sort="text">Status</th>
+      <th data-sort="text">Trust</th>
+      <th data-sort="text">Produced by</th>
+      <th data-sort="text" aria-sort="ascending">Changed</th>
+    </tr></thead>
+    <tbody>
+    {% for i in items %}
+      <tr data-filter-text="{{ i.path }} {{ i.title.as_deref().unwrap_or("") }} {{ i.bundle_name }} {{ i.concept_type.as_deref().unwrap_or("") }}">
+        <td><a href="/concepts/{{ i.bundle_id }}/{{ i.concept_id|urlencode_path }}#tab-review"><strong>{{ i.title.as_deref().unwrap_or(i.concept_id.as_str()) }}</strong></a><span class="desc path">{{ i.path }}</span></td>
+        <td><a href="/bundles/{{ i.bundle_id }}">{{ i.bundle_name }}</a></td>
+        <td>{% if let Some(t) = i.concept_type %}<span class="pill type">{{ t }}</span>{% endif %}</td>
+        <td>{% if let Some(s) = i.status %}<span class="pill muted">{{ s }}</span>{% endif %}</td>
+        <td><span class="pill trust-{{ i.trust_tier }}">{{ i.trust_tier }}</span></td>
+        <td>{{ i.generated_by.as_deref().unwrap_or("") }}</td>
+        <td class="when" data-value="{{ i.modified_at.as_deref().unwrap_or("") }}">{% if let Some(m) = i.modified_at %}{{ m|datetime }}{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+{% endif %}
+{% endblock %}

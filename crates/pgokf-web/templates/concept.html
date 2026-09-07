@@ -5,6 +5,7 @@
 {% endblock %}
 {% block content %}
 <nav class="crumbs" aria-label="Breadcrumb"><a href="/bundles">Bundles</a> <span>/</span> <a href="/bundles/{{ c.bundle_id }}">{{ c.bundle_name }}</a> <span>/</span> <span>{{ c.path }}</span></nav>
+{% if let Some(n) = notice %}<p class="notice ok">{{ n }}</p>{% endif %}
 <section class="hero concept-hero">
   <div>
     <h1>{{ c.title.as_deref().unwrap_or(c.concept_id.as_str()) }}</h1>
@@ -16,8 +17,11 @@
     </div>
   </div>
   <div class="hero-status">
-    <button type="button" class="btn ghost js-only" data-copy="{{ c.bundle_id }}:{{ c.concept_id }}" title="Copy the (bundle_id, concept_id) identity">Copy identity</button>
+    <button type="button" class="btn ghost js-only" data-copy="{{ c.bundle_id }}:{{ c.concept_id }}" title="Copy {{ c.bundle_id }}:{{ c.concept_id }}, the stable identity agents, the MCP tools, and the plugin builder use to name this concept">Copy identity</button>
     {% if package.is_some() || resource.is_some() %}<a class="btn" href="/resource/{{ c.bundle_id }}/{{ c.concept_id|urlencode_path }}" download title="The exact stored bytes, through the audited reader">Download file</a>{% else if c.has_source %}<a class="btn" href="/source/{{ c.bundle_id }}/{{ c.concept_id|urlencode_path }}" download>Download source</a>{% endif %}
+    {% if workflow.can_edit %}<a class="btn" href="/edit/{{ c.bundle_id }}/{{ c.concept_id|urlencode_path }}" title="Edit the document; it goes back to review afterwards">Edit</a>{% endif %}
+    {% if workflow.can_review %}<a class="btn primary" href="#tab-review" data-open-tab="review">Review</a>{% endif %}
+    {% if let Some(b) = workflow.blocker %}<p class="hint">{{ b }}</p>{% endif %}
   </div>
 </section>
 
@@ -31,7 +35,29 @@
     <button role="tab" id="tab-metadata" aria-controls="panel-metadata" aria-selected="false" data-tab="metadata">Metadata{% if !metadata.is_empty() %} <span class="count">{{ metadata.len() }}</span>{% endif %}</button>
     <button role="tab" id="tab-similar" aria-controls="panel-similar" aria-selected="false" data-tab="similar">Similar</button>
     {% if !history.is_empty() %}<button role="tab" id="tab-history" aria-controls="panel-history" aria-selected="false" data-tab="history">History <span class="count">{{ history.len() }}</span></button>{% endif %}
+    {% if workflow.can_review %}<button role="tab" id="tab-review" aria-controls="panel-review" aria-selected="false" data-tab="review">Review</button>{% endif %}
   </div>
+
+  {% if workflow.can_review %}
+  <section role="tabpanel" id="panel-review" aria-labelledby="tab-review" data-panel="review" class="panel">
+    <h2 class="nojs">Review</h2>
+    <div class="review-state">
+      {% if let Some(p) = c.provenance %}{% if let Some(tier) = p.trust_tier %}<span class="pill trust-{{ tier }}">{{ tier }}</span>{% endif %}{% if let Some(st) = p.status %}<span class="pill muted">{{ st }}</span>{% endif %}{% endif %}
+      <span class="muted">{{ c.verifications.len() }} verification event{{ c.verifications.len()|pluralize }} on record{% if let Some(p) = c.provenance %}{% if let Some(by) = p.generated_by %}; produced by <code>{{ by }}</code>{% endif %}{% endif %}.</span>
+    </div>
+    <form method="post" action="/review/{{ c.bundle_id }}/{{ c.concept_id|urlencode_path }}" class="review-form">
+      <div class="options">
+        <label class="option"><input type="radio" name="decision" value="approve" checked><span><strong>Approve</strong><span class="muted">Records a <code>verified</code> event under your name; the document becomes <em>human-reviewed</em>, and a draft becomes active.</span></span></label>
+        <label class="option"><input type="radio" name="decision" value="send-back"><span><strong>Send back</strong><span class="muted">Marks the document a draft and keeps your note with it, for the author to act on.</span></span></label>
+      </div>
+      <div class="field">
+        <label for="r-note">Note <span class="muted">(optional; kept in the document)</span></label>
+        <textarea id="r-note" name="note" rows="3" placeholder="What you checked, or what needs to change."></textarea>
+      </div>
+      <button type="submit" class="btn primary">Record the decision</button>
+    </form>
+  </section>
+  {% endif %}
 
   <section role="tabpanel" id="panel-body" aria-labelledby="tab-body" data-panel="body" class="panel prose-wrap active">
     <h2 class="nojs">Body</h2>

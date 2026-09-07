@@ -94,6 +94,11 @@ input:focus, select:focus, textarea:focus, button:focus-visible, a:focus-visible
 .hero { display: flex; justify-content: space-between; align-items: flex-start; gap: 1.5rem; margin-bottom: 1.25rem; }
 .hero .lede { margin: 0; color: var(--muted); font-size: 1.05em; }
 .hero-status { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.hero > div:first-child { flex: 1 1 auto; min-width: 0; }
+/* The concept page's actions: always one column on the right, whatever the
+   length of the description beside them. */
+.concept-hero .hero-status { flex: none; flex-direction: column; align-items: stretch; min-width: 11rem; }
+.concept-hero .hero-status .btn { justify-content: center; }
 .crumbs { font-size: .9em; color: var(--muted); margin-bottom: .6rem; display: flex; gap: .4rem; }
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 1rem; margin-bottom: 1.25rem; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem 1.1rem; box-shadow: var(--shadow); }
@@ -146,6 +151,21 @@ a.tag:hover { color: var(--accent); text-decoration: none; }
 .table .desc { display: block; color: var(--muted); font-size: .85em; max-width: 44ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 400; }
 .table tr[hidden] { display: none; }
 .table .when { white-space: nowrap; }
+/* ---- human workflow: sign in, upload, edit, review ---------------------- */
+.panel.narrow { max-width: 44rem; }
+.user-menu { display: inline-flex; gap: .4rem; align-items: center; font-size: .9em; }
+.user-name { font-weight: 600; }
+form.inline { display: inline; }
+.notice.ok { border-color: var(--ok); background: var(--ok-bg); }
+.editor textarea.code { font-family: var(--mono); font-size: .9em; min-height: 60vh; line-height: 1.45; white-space: pre; overflow-wrap: normal; overflow-x: auto; }
+.editor-actions { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+.editor-spacer { flex: 1; }
+.btn.danger { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, var(--border)); }
+.btn.danger:hover { background: var(--bad-bg); }
+.review-state { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin-bottom: .9rem; }
+.review-form .options { margin-bottom: .9rem; }
+input[type=file] { font: inherit; padding: .4rem 0; }
+input[type=radio], input[type=checkbox] { accent-color: var(--accent); }
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: .3rem 1rem; margin: 0; }
 .kv dt { color: var(--muted); font-size: .85em; font-weight: 600; }
 .kv dd { margin: 0; overflow-wrap: anywhere; }
@@ -204,6 +224,7 @@ svg.graph a:hover circle { stroke-width: 3; }
   .filters { position: static; order: 2; }
   .card.span2 { grid-column: auto; }
   .hero { flex-direction: column; }
+  .concept-hero .hero-status { flex-direction: row; align-items: center; min-width: 0; }
 }
 
 /* ---- embedding coverage meter (a native progress element) ------------- */

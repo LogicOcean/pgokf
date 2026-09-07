@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <nav class="crumbs" aria-label="Breadcrumb"><a href="/bundles">Bundles</a> <span>/</span> <span>{{ bundle.name }}</span></nav>
+{% if let Some(n) = notice %}<p class="notice ok">{{ n }}</p>{% endif %}
 <section class="hero">
   <div>
     <h1>{{ bundle.name }}</h1>

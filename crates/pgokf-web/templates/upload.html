@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero">
+  <div>
+    <h1>Upload documents</h1>
+    <p class="lede">Add OKF Markdown documents to a content bundle the catalog keeps in its own store. Each file is checked before anything is written; a document without a stated origin is stamped with you as its author.</p>
+  </div>
+</section>
+{% if let Some(e) = error %}<p class="notice bad">{{ e }}</p>{% endif %}
+<section class="panel narrow">
+  <form method="post" action="/upload" enctype="multipart/form-data">
+    <div class="field">
+      <label for="u-bundle">Bundle</label>
+      <select id="u-bundle" name="bundle" data-upload-bundle>
+        {% for b in bundles %}<option value="{{ b.id }}">{{ b.name }} <span class="muted">({{ b.file_count }} files)</span></option>{% endfor %}
+        <option value="">New content bundle…</option>
+      </select>
+    </div>
+    <div class="field" data-upload-new{% if !bundles.is_empty() %} hidden{% endif %}>
+      <label for="u-new">New bundle name</label>
+      <input id="u-new" type="text" name="new_bundle" placeholder="team-runbooks" pattern="[A-Za-z0-9._-]{1,64}" spellcheck="false">
+      <p class="hint">Letters, digits, dots, underscores, and hyphens. The bundle is created on the first upload.</p>
+    </div>
+    <div class="field">
+      <label for="u-dir">Directory inside the bundle <span class="muted">(optional)</span></label>
+      <input id="u-dir" type="text" name="directory" placeholder="runbooks" spellcheck="false">
+    </div>
+    <div class="field">
+      <label for="u-files">Documents <span class="muted">(Markdown with OKF frontmatter; several at once)</span></label>
+      <input id="u-files" type="file" name="files" accept=".md,text/markdown" multiple required>
+    </div>
+    <button type="submit" class="btn primary">Upload</button>
+  </form>
+  <details class="advanced">
+    <summary>What a document needs</summary>
+    <p class="muted small">A <code>---</code> frontmatter block with at least <code>type</code> and <code>title</code>, then the Markdown body. <code>generated</code> and <code>author</code> are filled in with your identity when absent; <code>verified</code> is never added here (an approver does that). The file name becomes the concept id, so <code>runbooks/failover.md</code> is <code>runbooks/failover</code>.</p>
+    <pre>---
+type: Runbook
+title: Primary failover
+description: One sentence for search previews.
+tags: [postgresql, operations]
+---
+
+# Primary failover
+
+Steps…</pre>
+  </details>
+</section>
+{% endblock %}

@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<nav class="crumbs" aria-label="Breadcrumb"><a href="/bundles">Bundles</a> <span>/</span> <a href="/bundles/{{ bundle_id }}">{{ bundle_name }}</a> <span>/</span> <a href="/concepts/{{ bundle_id }}/{{ concept_id|urlencode_path }}">{{ path }}</a> <span>/</span> <span>Edit</span></nav>
+<section class="hero">
+  <div>
+    <h1>Edit {{ path }}</h1>
+    <p class="lede">The whole document: frontmatter and body. Saving replaces the stored source and re-indexes the concept. A change sets aside any earlier verification, so the document goes back to the review queue.</p>
+  </div>
+</section>
+{% if let Some(e) = error %}<p class="notice bad">{{ e }}</p>{% endif %}
+<form method="post" action="/edit/{{ bundle_id }}/{{ concept_id|urlencode_path }}" class="editor" id="pgokf-editor">
+  <div class="field">
+    <label for="e-content">Document</label>
+    <textarea id="e-content" name="content" rows="28" class="code" spellcheck="false" data-editor>{{ content }}</textarea>
+  </div>
+  <div class="editor-actions">
+    <button type="submit" class="btn primary" name="action" value="save">Save</button>
+    <button type="button" class="btn js-only" hx-post="/edit-check/{{ bundle_id }}/{{ concept_id|urlencode_path }}" hx-include="#pgokf-editor" hx-target="#pgokf-check">Check</button>
+    <a class="btn ghost" href="/concepts/{{ bundle_id }}/{{ concept_id|urlencode_path }}">Cancel</a>
+    <span class="editor-spacer"></span>
+    <button type="submit" class="btn danger" name="action" value="delete" data-confirm="Delete {{ path }} from the bundle? This removes the concept from the catalog.">Delete document</button>
+  </div>
+</form>
+<div id="pgokf-check" aria-live="polite"></div>
+{% endblock %}

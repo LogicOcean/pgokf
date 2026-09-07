@@ -124,6 +124,23 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
   extra's own fields appear only when it is ticked), then preview and
   download. The result summarizes the build in one line with the download
   button beside it; the MCP call is folded under it.
+- **The human workflow and an authentication seam in `pgokf-web`.** With a
+  writer connection (`OKF_PG_WRITER_URL`) and an authentication mode
+  (`OKF_WEB_AUTH`: `header` for an authenticating reverse proxy whose
+  identity headers are believed only from its own addresses, or `users` for
+  a local Argon2id users file with a login form and a signed session
+  cookie), people work on content bundles by role: uploaders add Markdown
+  documents (stamped with `generated`/`author` as `human:<name>` when
+  absent), editors change or delete them with a validating preview (an edit
+  sets aside earlier verifications and names the editor in `generated`),
+  and approvers work a review queue, recording a `verified` event (the
+  document becomes human-reviewed) or sending a draft back with a note.
+  Every decision is an ordinary OKF field in the document, a `verified` list
+  typed into an upload or edit is set aside rather than believed, roles are
+  a ladder (viewer, uploader, editor, approver, admin), state-changing
+  requests are refused across sites, and the catalog must keep sources
+  (`store_source`). `pgokf-web hash-password` makes users-file lines; the
+  compose stack gained the matching `OKF_UI_*` settings.
 - **GitHub Copilot** is a target (`copilot`: `.github/skills/`, MCP entry
   in `.github/mcp.json` as a typed `local` server that inherits Copilot's
   environment). **Custom agents:** `target: custom` with a harness
