@@ -3,129 +3,51 @@
 <section class="hero">
   <div>
     <h1>Agent Plugin builder</h1>
-    <p class="lede">Turn catalog knowledge and stored skill packages into a plugin an agent loads from its workspace. Choose the agent, choose the content, add extras, name it. The preview at the bottom updates as you go; download the zip when it looks right and unpack it at the workspace root.</p>
+    <p class="lede">Turn catalog knowledge and stored skill packages into a plugin an agent loads from its workspace. Say what you are building and for which agent, name it, choose the content, add extras. The preview at the bottom updates as you go; download the zip when it looks right.</p>
   </div>
 </section>
 
-<form id="pgokf-plugin-form" class="builder-steps" method="get" action="/plugins" data-target="{{ form.target }}"
+<form id="pgokf-plugin-form" class="builder-steps" method="get" action="/plugins" data-kind="{{ form.kind }}" data-custom="{{ form.custom }}"
       hx-get="/plugins/preview" hx-target="#pgokf-plugin-preview" hx-trigger="change, submit, keyup changed delay:400ms from:.live" hx-include="#pgokf-plugin-form">
 
-  <section class="step" id="step-agent">
+  <section class="step" id="step-build">
     <header class="step-head">
       <span class="step-no" aria-hidden="true">1</span>
-      <div><h2>Choose the agent</h2><p class="muted">Where the plugin will be unpacked. Every layout comes from that harness's own documentation.</p></div>
-    </header>
-    <div class="target-grid" role="radiogroup" aria-label="Target agent">
-      {% for t in targets %}
-      <label class="target-card{% if t.selected %} selected{% endif %}">
-        <input type="radio" name="target" value="{{ t.id }}" {% if t.selected %}checked{% endif %}>
-        <span class="target-label">{{ t.label }}</span>
-        <span class="target-root"><code>{{ t.root }}</code></span>
-        <span class="target-shape">{{ t.shape }}</span>
-      </label>
-      {% endfor %}
-    </div>
-    {% for t in targets %}<p class="hint step-note" data-target-note="{{ t.id }}" {% if !t.selected %}hidden{% endif %}>{{ t.notes }}</p>{% endfor %}
-  </section>
-
-  <section class="step" id="step-content">
-    <header class="step-head">
-      <span class="step-no" aria-hidden="true">2</span>
-      <div><h2>Choose the content</h2><p class="muted">Select by bundle, search, type, and tag, or pick specific files below; picks are added to whatever the selectors match. Skill packages are copied whole (<code>SKILL.md</code>, scripts, references, assets); every other concept becomes a reference document.</p></div>
+      <div><h2>What are you building, and for which agent?</h2><p class="muted">Choose the kind of tree, then the agent that will read it. Type to search the agents; a name that is not in the list is added as a new agent.</p></div>
     </header>
     <div class="step-grid">
       <div class="field">
-        <label for="p-bundle">Bundle</label>
-        <select id="p-bundle" name="bundle">
-          <option value="">Any bundle</option>
-          {% for b in bundles %}<option value="{{ b.id }}" {% if form.bundle.as_str() == b.id.to_string().as_str() %}selected{% endif %}>{{ b.name }}</option>{% endfor %}
+        <label for="p-kind">Kind</label>
+        <select id="p-kind" name="kind" data-kind-select>
+          {% for k in kinds %}<option value="{{ k.id }}" data-description="{{ k.description }}" {% if k.selected %}selected{% endif %}>{{ k.label }}</option>{% endfor %}
         </select>
+        <p class="hint" data-kind-note>{% for k in kinds %}{% if k.selected %}{{ k.description }}{% endif %}{% endfor %}</p>
       </div>
       <div class="field">
-        <label for="p-q">Search <span class="muted">(ranked; the best matches come first)</span></label>
-        <input id="p-q" type="search" class="live" name="q" value="{{ form.q }}" placeholder="e.g. failover OR backup">
+        <label for="p-agent">Agent</label>
+        <div class="combo">
+          <input id="p-agent" type="text" class="live" name="agent" list="pgokf-agents-{{ form.kind }}" value="{{ form.agent }}" autocomplete="off" spellcheck="false" placeholder="Type to search, or type a new name to add it" data-agent-input>
+          <button type="button" class="combo-open js-only" data-agent-open title="Show every agent for this kind" aria-label="Show every agent for this kind">&#9662;</button>
+        </div>
+        {% for k in kinds %}<datalist id="pgokf-agents-{{ k.id }}">{% for a in agents %}{% if a.kind.as_str() == k.id.as_str() %}<option value="{{ a.label }}" data-id="{{ a.id }}" data-root="{{ a.root }}" data-notes="{{ a.notes }}">{{ a.root }}</option>{% endif %}{% endfor %}</datalist>{% endfor %}
+        <p class="hint" data-agent-note>{{ form.agent_note }}</p>
       </div>
     </div>
-    <div class="field">
-      <label for="p-types">Types <span class="muted">(any of these)</span></label>
-      {% if !type_facets.is_empty() %}<div class="chips js-only" data-chips-for="p-types">{% for f in type_facets %}<button type="button" class="chip" data-chip="{{ f.value }}" aria-pressed="false">{{ f.value }} <span class="count">{{ f.count }}</span></button>{% endfor %}</div>{% endif %}
-      <input id="p-types" type="text" class="live" name="types" value="{{ form.types }}" placeholder="Skill, Runbook (comma-separated)">
-    </div>
-    <div class="field">
-      <label for="p-tags">Tags <span class="muted">(all of these)</span></label>
-      {% if !tag_facets.is_empty() %}<div class="chips js-only" data-chips-for="p-tags">{% for f in tag_facets %}<button type="button" class="chip" data-chip="{{ f.value }}" aria-pressed="false">{{ f.value }} <span class="count">{{ f.count }}</span></button>{% endfor %}</div>{% endif %}
-      <input id="p-tags" type="text" class="live" name="tags" value="{{ form.tags }}" placeholder="postgresql, operations (comma-separated)">
-    </div>
-    <details class="picker"{% if !form.picks.is_empty() %} open{% endif %} data-picker>
-      <summary>Pick specific files <span class="muted small">(browse a bundle and tick what to include; a skill's <code>SKILL.md</code> brings its whole package)</span></summary>
-      <div class="picker-body">
-        <div class="picker-toolbar js-only">
-          <label class="picker-bundle">Browse
-            <select data-picker-bundle>
-              {% for b in bundles %}<option value="{{ b.id }}" {% if form.bundle.as_str() == b.id.to_string().as_str() %}selected{% endif %}>{{ b.name }}</option>{% endfor %}
-            </select>
-          </label>
-          <input type="search" class="picker-filter" data-picker-filter placeholder="Filter by path or title" aria-label="Filter files">
-          <span class="muted small" data-picker-status></span>
-        </div>
-        <div class="picker-tree js-only" data-picker-tree aria-label="Files of the bundle"></div>
-        <div class="field">
-          <label for="p-picks">Picked files <span class="muted">(one <code>bundle:concept id</code> per line; edit freely)</span></label>
-          <textarea id="p-picks" class="live" name="picks" rows="3" placeholder="3:skills/postgres-failover/SKILL">{{ form.picks }}</textarea>
-        </div>
-      </div>
-    </details>
-    <details class="advanced"{% if !form.ids.is_empty() || form.verified %} open{% endif %}>
-      <summary>More selectors <span class="muted small">(concept ids as a filter, trust, size)</span></summary>
-      <div class="step-grid">
-        <div class="field">
-          <label for="p-ids">Concept ids <span class="muted">(one per line)</span></label>
-          <textarea id="p-ids" class="live" name="ids" rows="3" placeholder="runbooks/database-failover">{{ form.ids }}</textarea>
-        </div>
-        <div>
-          <div class="field check">
-            <label><input type="checkbox" name="verified" value="1" {% if form.verified %}checked{% endif %}> Verified concepts only <span class="muted">(human-reviewed or machine-confirmed)</span></label>
-          </div>
-          <div class="field">
-            <label for="p-limit">Most concepts</label>
-            <input id="p-limit" type="number" class="live" name="limit" value="{{ form.limit }}" min="1" max="500" placeholder="100">
-          </div>
-        </div>
-      </div>
-    </details>
-  </section>
-
-  <section class="step" id="step-extras">
-    <header class="step-head">
-      <span class="step-no" aria-hidden="true">3</span>
-      <div><h2>Add extras</h2><p class="muted">Optional parts that let the agent reach the live catalog beyond the files in the plugin.</p></div>
-    </header>
-    <div class="options">
-      <label class="option is-fixed"><input type="checkbox" checked disabled><span><strong>Knowledge</strong><span class="muted">The selected concepts and skill packages. Always included.</span></span></label>
-      <label class="option"><input type="checkbox" name="mcp" value="1" {% if form.with_mcp %}checked{% endif %}><span><strong>MCP server entry</strong><span class="muted">The harness's own config for <code>pgokf-mcp</code>, so the agent can search the catalog live. The connection string is never written into the file.</span></span></label>
-      <label class="option"><input type="checkbox" name="guide" value="1" {% if form.with_guide %}checked{% endif %}><span><strong>Catalog guide</strong><span class="muted">A short document on identities, trust tiers, the MCP tools, and the JSON API.</span></span></label>
-      <label class="option"><input type="checkbox" name="tools" value="1" {% if form.with_tools %}checked{% endif %}><span><strong>CLI helper</strong><span class="muted"><code>okf.sh</code> over the JSON API, for harnesses without MCP.</span></span></label>
-    </div>
-    <div class="step-grid">
-      <div class="field" data-needs="mcp">
-        <label for="p-mcp">MCP command <span class="muted">(how the harness starts the server)</span></label>
-        <input id="p-mcp" type="text" class="live" name="mcp_command" value="{{ form.mcp_command }}" placeholder="pgokf-mcp">
-      </div>
-      <div class="field" data-needs="guide tools">
-        <label for="p-web">Web UI address <span class="muted">(for the guide and the helper)</span></label>
-        <input id="p-web" type="url" class="live" name="web_url" value="{{ form.web_url }}" placeholder="http://catalog.example:8080">
-      </div>
+    <div class="field custom-skills" data-custom-skills{% if !form.custom || form.kind.as_str() != "skills" %} hidden{% endif %}>
+      <label for="p-skills-dir">Where does <span data-agent-name>{{ form.agent }}</span> read skills from?</label>
+      <input id="p-skills-dir" type="text" class="live" name="skills_dir" value="{{ form.skills_dir }}" placeholder=".agents/skills" spellcheck="false">
+      <p class="hint">A directory relative to the workspace root; the skill package is written beneath it. The agent's own documentation says which one it scans.</p>
     </div>
   </section>
 
   <section class="step" id="step-name">
     <header class="step-head">
-      <span class="step-no" aria-hidden="true">4</span>
+      <span class="step-no" aria-hidden="true">2</span>
       <div><h2>Name it</h2><p class="muted">The name becomes the plugin's directory and the zip's file name.</p></div>
     </header>
     <div class="step-grid three">
       <div class="field">
-        <label for="p-name">Package name</label>
+        <label for="p-name">Name</label>
         <input id="p-name" type="text" class="live" name="name" value="{{ form.name }}" placeholder="okf-knowledge" pattern="[A-Za-z0-9 _-]+">
         <p class="hint">Lowercase letters, digits, and hyphens after slugging.</p>
       </div>
@@ -133,9 +55,110 @@
         <label for="p-title">Title <span class="muted">(optional)</span></label>
         <input id="p-title" type="text" class="live" name="title" value="{{ form.title }}" placeholder="Shown at the top of the index">
       </div>
-      <div class="field" data-only-target="ollama">
-        <label for="p-model">Base model <span class="muted">(Ollama)</span></label>
+      <div class="field" data-only-kind="prompt-bundle">
+        <label for="p-model">Base model <span class="muted">(the Modelfile's FROM line)</span></label>
         <input id="p-model" type="text" class="live" name="base_model" value="{{ form.base_model }}" placeholder="llama3.1">
+      </div>
+    </div>
+  </section>
+
+  <section class="step" id="step-content">
+    <header class="step-head">
+      <span class="step-no" aria-hidden="true">3</span>
+      <div><h2>Choose the content</h2><p class="muted">Browse a bundle and tick the files you want, or take everything in it and narrow that down. A ticked <code>SKILL.md</code> brings its whole package; every other file becomes a reference document.</p></div>
+    </header>
+
+    <div class="selection-bar" data-selection>
+      <span class="selection-label">Selected</span>
+      <span class="selection-chips" data-selection-chips>{% if form.has_selection %}<span class="muted">{{ form.selection_summary }}</span>{% else %}<span class="muted">nothing yet</span>{% endif %}</span>
+      <button type="button" class="btn small ghost js-only" data-clear-selection{% if !form.has_selection %} hidden{% endif %}>Clear</button>
+    </div>
+
+    <div class="browser">
+      <div class="browser-toolbar">
+        <div class="field browser-scope">
+          <label for="p-bundle">Bundle</label>
+          <select id="p-bundle" name="bundle" data-browse-bundle>
+            <option value="">All bundles</option>
+            {% for b in bundles %}<option value="{{ b.id }}" {% if form.bundle.as_str() == b.id.to_string().as_str() %}selected{% endif %}>{{ b.name }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="field browser-find js-only">
+          <label for="p-find">Find files</label>
+          <input id="p-find" type="search" data-browse-find placeholder="Name, title, type, or tag" autocomplete="off">
+        </div>
+        <span class="muted small browser-status" data-browse-status></span>
+      </div>
+
+      <label class="scope-all">
+        <input type="checkbox" name="all" value="1" {% if form.all %}checked{% endif %} data-scope-all>
+        <span><strong>Take everything in <span data-scope-name>{% if form.bundle.is_empty() %}all bundles{% else %}{% for b in bundles %}{% if form.bundle.as_str() == b.id.to_string().as_str() %}{{ b.name }}{% endif %}{% endfor %}{% endif %}</span></strong> <span class="muted">A rule that stays in step with the catalog as it changes. Narrow it below, or tick files instead.</span></span>
+      </label>
+
+      <div class="narrow" data-narrow{% if !form.all %} hidden{% endif %}>
+        <div class="step-grid">
+          <div class="field">
+            <label for="p-q">Narrow by search <span class="muted">(ranked; the best matches come first)</span></label>
+            <input id="p-q" type="search" class="live" name="q" value="{{ form.q }}" placeholder="e.g. failover OR backup">
+          </div>
+          <div class="field">
+            <label for="p-ids">Narrow to concept ids <span class="muted">(one per line)</span></label>
+            <textarea id="p-ids" class="live" name="ids" rows="1" placeholder="runbooks/database-failover">{{ form.ids }}</textarea>
+          </div>
+        </div>
+        <div class="field">
+          <label for="p-types">Types <span class="muted">(any of these)</span></label>
+          {% if !type_facets.is_empty() %}<div class="chips js-only" data-chips-for="p-types">{% for f in type_facets %}<button type="button" class="chip" data-chip="{{ f.value }}" aria-pressed="false">{{ f.value }} <span class="count">{{ f.count }}</span></button>{% endfor %}</div>{% endif %}
+          <input id="p-types" type="text" class="live" name="types" value="{{ form.types }}" placeholder="Skill, Runbook (comma-separated)">
+        </div>
+        <div class="field">
+          <label for="p-tags">Tags <span class="muted">(all of these)</span></label>
+          {% if !tag_facets.is_empty() %}<div class="chips js-only" data-chips-for="p-tags">{% for f in tag_facets %}<button type="button" class="chip" data-chip="{{ f.value }}" aria-pressed="false">{{ f.value }} <span class="count">{{ f.count }}</span></button>{% endfor %}</div>{% endif %}
+          <input id="p-tags" type="text" class="live" name="tags" value="{{ form.tags }}" placeholder="postgresql, operations (comma-separated)">
+        </div>
+      </div>
+
+      <div class="browser-tree js-only" data-browse-tree aria-label="Files of the bundle"></div>
+
+      <div class="field nojs">
+        <label for="p-picks">Ticked files <span class="muted">(one <code>bundle:concept id</code> per line)</span></label>
+        <textarea id="p-picks" class="live" name="picks" rows="3" placeholder="3:skills/postgres-failover/SKILL">{{ form.picks }}</textarea>
+      </div>
+    </div>
+
+    <details class="advanced"{% if form.verified || !form.limit.is_empty() %} open{% endif %}>
+      <summary>Trust and size</summary>
+      <div class="step-grid">
+        <div class="field check">
+          <label><input type="checkbox" name="verified" value="1" {% if form.verified %}checked{% endif %}> Verified concepts only <span class="muted">(human-reviewed or machine-confirmed; applies to ticked files too)</span></label>
+        </div>
+        <div class="field">
+          <label for="p-limit">Most concepts</label>
+          <input id="p-limit" type="number" class="live" name="limit" value="{{ form.limit }}" min="1" max="500" placeholder="100">
+        </div>
+      </div>
+    </details>
+  </section>
+
+  <section class="step" id="step-extras">
+    <header class="step-head">
+      <span class="step-no" aria-hidden="true">4</span>
+      <div><h2>Add extras</h2><p class="muted">Optional parts that let the agent reach the live catalog beyond the files in the plugin.</p></div>
+    </header>
+    <div class="options">
+      <label class="option is-fixed"><input type="checkbox" checked disabled><span><strong>Knowledge</strong><span class="muted">The selected concepts and skill packages. Always included.</span></span></label>
+      <label class="option"><input type="checkbox" name="mcp" value="1" {% if form.with_mcp %}checked{% endif %}><span><strong>MCP server entry</strong><span class="muted">The agent's own config for <code>pgokf-mcp</code>, so it can search the catalog live. The connection string is never written into the file.</span></span></label>
+      <label class="option"><input type="checkbox" name="guide" value="1" {% if form.with_guide %}checked{% endif %}><span><strong>Catalog guide</strong><span class="muted">A short document on identities, trust tiers, the MCP tools, and the JSON API.</span></span></label>
+      <label class="option"><input type="checkbox" name="tools" value="1" {% if form.with_tools %}checked{% endif %}><span><strong>CLI helper</strong><span class="muted"><code>okf.sh</code> over the JSON API, for agents without MCP.</span></span></label>
+    </div>
+    <div class="step-grid">
+      <div class="field" data-needs="mcp">
+        <label for="p-mcp">MCP command <span class="muted">(how the agent starts the server)</span></label>
+        <input id="p-mcp" type="text" class="live" name="mcp_command" value="{{ form.mcp_command }}" placeholder="pgokf-mcp">
+      </div>
+      <div class="field" data-needs="guide tools">
+        <label for="p-web">Web UI address <span class="muted">(for the guide and the helper)</span></label>
+        <input id="p-web" type="url" class="live" name="web_url" value="{{ form.web_url }}" placeholder="http://catalog.example:8080">
       </div>
     </div>
     <button type="submit" class="btn nojs">Preview</button>
@@ -145,7 +168,7 @@
 <section class="step step-result" id="step-result">
   <header class="step-head">
     <span class="step-no" aria-hidden="true">5</span>
-    <div><h2>Preview and download</h2><p class="muted">What the reader role can see with these selectors, and the files the zip will contain. Nothing is exported until you download.</p></div>
+    <div><h2>Preview and download</h2><p class="muted">What the reader role can see with this selection, and the files the zip will contain. Nothing is exported until you download.</p></div>
   </header>
   <div id="pgokf-plugin-preview" aria-live="polite">{% include "partials/plugin-preview.html" %}</div>
 </section>

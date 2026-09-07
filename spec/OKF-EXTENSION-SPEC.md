@@ -1638,7 +1638,7 @@ Selectors resolve through the reader API (`catalogue_search`, the type wrappers,
 
 Targets are a registry of declarative profiles; adding one is a data change. Each profile states the layout root, the index file (if any), the naming and size limits, whether scripts keep their executable bit, and which of three shapes it takes:
 
-- **Native Agent Skills consumer:** a directory the harness scans; packages are copied byte-identical (`SKILL.md` unchanged, resources under `scripts/`, `references/`, `assets/`). Initial entries: `claude-code` (`.claude/skills/<name>/`), `hermes-agent`, `codex`, `kimi`, `gemini-cli`, `cursor`.
+- **Native Agent Skills consumer:** a directory the harness scans; packages are copied byte-identical (`SKILL.md` unchanged, resources under `scripts/`, `references/`, `assets/`). Initial entries: `claude-code` (`.claude/skills/<name>/`), `hermes-agent`, `codex`, `copilot` (`.github/skills/<name>/`), `kimi`, `gemini-cli`, `cursor`, and the cross-tool `agents` (`.agents/skills/`). A harness the registry does not know is built as `custom` from a user-supplied description (name, kind, and the skills directory, validated to stay inside the workspace), laid out like the kind's base profile; the manifest records the description.
 - **Instruction-file harness:** a tool that reads an `AGENTS.md`-style file and has no skills directory; the adapter renders a compact discovery index (the §19.2 shape) into that file and the full content under a `knowledge/` tree beside it.
 - **Prompt bundle:** for model servers and bare endpoints (`ollama`, a DeepSeek-hosted harness) that consume a system prompt or Modelfile; the adapter emits one bounded bundle plus the file tree, or defers to the adapter of the harness that fronts the model.
 

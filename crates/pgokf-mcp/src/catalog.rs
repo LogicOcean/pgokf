@@ -9,7 +9,9 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
-use pgokf_workspace::{BuildOptions, Component, ConceptRef, Profile, Selection, Target};
+use pgokf_workspace::{
+    BuildOptions, Component, ConceptRef, CustomHarness, Profile, Selection, Shape, Target,
+};
 use serde_json::{Value, json};
 use tokio_postgres::Client;
 use tokio_postgres::types::ToSql;
@@ -161,7 +163,7 @@ impl Catalog {
         json!([
             {
                 "name": "list_plugin_targets",
-                "description": "List the targets a workspace plugin can be built for: agent-plugin (a portable Agent Plugins 1.0.0 directory with plugin.json, skills/, and mcp.json) and the per-harness layouts (claude-code, codex, hermes-agent, kimi, gemini-cli, cursor, agents, agents-md, ollama, generic), with the documented directory each one reads.",
+                "description": "List the targets a workspace plugin can be built for: agent-plugin (a portable Agent Plugins 1.0.0 directory with plugin.json, skills/, and mcp.json) and the per-harness layouts (claude-code, codex, copilot, hermes-agent, kimi, gemini-cli, cursor, agents, agents-md, ollama, generic), each with its kind (agent-plugin, skills, instruction-file, prompt-bundle, generic) and the documented directory it reads. An agent not listed is built with target 'custom' plus a harness description.",
                 "inputSchema": {"type": "object", "properties": {}}
             },
             {
@@ -170,7 +172,9 @@ impl Catalog {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "target": {"type": "string", "description": "A target id from list_plugin_targets."},
+                        "target": {"type": "string", "description": "A target id from list_plugin_targets, or 'custom' with a harness description for an agent the registry does not know."},
+                        "harness": {"type": "object", "description": "With target 'custom': the agent's display name, the kind of tree (agent-plugin, skills, instruction-file, prompt-bundle, generic; default skills), and for a skills package the directory the agent reads skills from, relative to the workspace root (for example .acme/skills).", "properties": {"label": {"type": "string"}, "kind": {"type": "string", "enum": ["agent-plugin", "skills", "instruction-file", "prompt-bundle", "generic"]}, "skills_dir": {"type": "string"}}, "required": ["label"]},
+                        "all": {"type": "boolean", "description": "Start from every visible concept (bounded by the limit) instead of nothing, so a selection narrowed only by types, tags, or a query - or by nothing at all - is expressible without naming a bundle."},
                         "name": {"type": "string", "description": "Package name (lowercase letters, digits, hyphens; default okf-knowledge)."},
                         "title": {"type": "string", "description": "Display title for the index (defaults to the name)."},
                         "bundle_ids": {"type": "array", "items": {"type": "integer"}, "description": "Restrict to these bundle ids."},
@@ -307,6 +311,8 @@ impl Catalog {
                     json!({
                         "id": p.id,
                         "label": p.label,
+                        "kind": p.shape.id(),
+                        "kind_label": p.shape.label(),
                         "shape": format!("{:?}", p.shape),
                         "root": p.root,
                         "documented_at": p.source,
@@ -327,6 +333,7 @@ impl Catalog {
         )?;
         Ok(Selection {
             picks,
+            all: args.get("all").and_then(Value::as_bool).unwrap_or(false),
             bundle_ids: opt_i64_vec(args, "bundle_ids")?.unwrap_or_default(),
             concept_ids: opt_string_vec(args, "concept_ids")?.unwrap_or_default(),
             tags: opt_string_vec(args, "tags")?.unwrap_or_default(),
@@ -367,6 +374,7 @@ impl Catalog {
         };
         Ok(BuildOptions {
             target,
+            harness: harness_from_args(args, target)?,
             name: opt_str(args, "name").unwrap_or("okf-knowledge").to_owned(),
             title: opt_str(args, "title").map(str::to_owned),
             catalog_name: self.database_name.clone(),
@@ -451,6 +459,26 @@ impl Catalog {
             .context("catalog query failed")?;
         Ok(row.get(0))
     }
+}
+
+/// The custom harness a `target: custom` build describes (`None` for a
+/// registry target, whose layout is documented and needs no description).
+fn harness_from_args(args: &Value, target: Target) -> Result<Option<CustomHarness>> {
+    if target != Target::Custom {
+        return Ok(None);
+    }
+    let harness = args
+        .get("harness")
+        .filter(|h| h.is_object())
+        .ok_or_else(|| anyhow!("target 'custom' needs a 'harness' object: label, kind, and for a skills package skills_dir"))?;
+    let label = require_str(harness, "label")?;
+    let kind = match opt_str(harness, "kind") {
+        None => Shape::Skills,
+        Some(id) => Shape::parse(id).ok_or_else(|| {
+            anyhow!("unknown harness kind '{id}'; use agent-plugin, skills, instruction-file, prompt-bundle, or generic")
+        })?,
+    };
+    CustomHarness::new(label, kind, opt_str(harness, "skills_dir")).map(Some)
 }
 
 /// A file's content for the inline result: UTF-8 text as a string, anything
@@ -663,6 +691,63 @@ mod tests {
                 .as_str()
                 .is_some_and(|s| s.starts_with("https://"))
         );
+    }
+
+    #[test]
+    fn a_custom_target_needs_a_valid_harness_and_registry_targets_ignore_one() {
+        // Arrange
+        let described = json!({
+            "target": "custom",
+            "harness": { "label": "Acme Agent", "kind": "skills", "skills_dir": ".acme/skills" }
+        });
+        let defaulted = json!({ "target": "custom", "harness": { "label": "Acme" } });
+        let bad_kind =
+            json!({ "target": "custom", "harness": { "label": "Acme", "kind": "plugin" } });
+        let registry = json!({ "target": "codex", "harness": { "label": "ignored" } });
+
+        // Act
+        let harness = harness_from_args(&described, Target::Custom)
+            .expect("valid")
+            .expect("described");
+        let missing_dir = harness_from_args(&defaulted, Target::Custom);
+        let unknown_kind = harness_from_args(&bad_kind, Target::Custom);
+        let none = harness_from_args(&registry, Target::Codex).expect("ok");
+        let absent = harness_from_args(&json!({ "target": "custom" }), Target::Custom);
+
+        // Assert
+        assert_eq!(harness.label, "Acme Agent");
+        assert_eq!(harness.skills_dir.as_deref(), Some(".acme/skills"));
+        assert!(
+            missing_dir
+                .expect_err("skills needs a directory")
+                .to_string()
+                .contains("reads Agent Skills")
+        );
+        assert!(
+            unknown_kind
+                .expect_err("bad kind")
+                .to_string()
+                .contains("unknown harness kind")
+        );
+        assert!(none.is_none());
+        assert!(
+            absent
+                .expect_err("no harness")
+                .to_string()
+                .contains("'harness' object")
+        );
+    }
+
+    #[test]
+    fn selections_carry_the_everything_scope() {
+        // Arrange / Act
+        let all = Catalog::selection_from_args(&json!({ "all": true, "types": ["Runbook"] }))
+            .expect("valid");
+        let plain = Catalog::selection_from_args(&json!({ "types": ["Runbook"] })).expect("valid");
+
+        // Assert
+        assert!(all.all && all.has_filters());
+        assert!(!plain.all);
     }
 
     #[test]

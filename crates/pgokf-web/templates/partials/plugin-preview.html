@@ -1,12 +1,12 @@
 {% if let Some(e) = error %}<p class="notice bad">{{ e }}</p>{% endif %}
 {% if let Some(p) = preview %}
 {% if p.concepts.is_empty() %}
-<div class="empty-state"><h3>Nothing matched</h3><p>No visible concept satisfies every selector in step 2. Loosen a filter or pick another bundle.</p></div>
+<div class="empty-state"><h3>Nothing matched</h3><p>No visible concept satisfies the rule in step 3, and no ticked file is visible. Loosen the narrowing, choose another bundle, or tick other files.</p></div>
 {% else %}
 <div class="result-summary">
   <div class="result-facts">
     <p class="result-line"><strong>{{ p.concepts.len() }} concept{{ p.concepts.len()|pluralize }}</strong> {{ p.description }}{% if p.package_count > 0 %}, including <strong>{{ p.package_count }} skill package{{ p.package_count|pluralize }}</strong> copied whole{% endif %}.</p>
-    <p class="muted">For <strong>{{ p.target_label }}</strong>: the files go under <code>{{ p.root }}</code> and the harness reads <code>{{ p.index_file }}</code> first.{% if let Some(m) = p.mcp_note %} {{ m }}{% endif %}{% if p.truncated %} <span class="warn-text">The selection hit its limit; raise it in step 2 or narrow the selection.</span>{% endif %}</p>
+    <p class="muted">For <strong>{{ p.target_label }}</strong>: the files go under <code>{{ p.root }}</code> and the harness reads <code>{{ p.index_file }}</code> first.{% if let Some(m) = p.mcp_note %} {{ m }}{% endif %}{% if p.truncated %} <span class="warn-text">The selection hit its limit; raise it under Trust and size in step 3, or narrow the rule.</span>{% endif %}</p>
   </div>
   <div class="result-cta">
     <a class="btn primary big" href="{{ p.download_url }}" download>Download {{ form.name }}.zip</a>
@@ -39,6 +39,6 @@
 {% else if !form.has_selection %}
 <div class="empty-state">
   <h3>Nothing selected yet</h3>
-  <p>Pick a bundle, a type, a tag, a search, or specific files in step 2. The preview appears here as soon as something matches.</p>
+  <p>Tick files in step 3, or take everything in a bundle and narrow it. The preview appears here as soon as something is selected.</p>
 </div>
 {% endif %}

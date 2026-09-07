@@ -12,6 +12,7 @@ to unpack at a workspace root, or as files written in place.
 | `kimi` | Agent Skills package | `.kimi/skills/<name>/` |
 | `gemini-cli` | Agent Skills package | `.gemini/skills/<name>/` |
 | `cursor` | Agent Skills package | `.cursor/skills/<name>/` |
+| `copilot` | Agent Skills package | `.github/skills/<name>/` (MCP entry in `.github/mcp.json`) |
 | `agents` | Agent Skills package | `.agents/skills/<name>/` (read by several harnesses) |
 | `agents-md` | Instruction file | `AGENTS.md` + `knowledge/` |
 | `ollama` | Prompt bundle | `okf-prompt/Modelfile`, `system-prompt.md`, `knowledge/` |
@@ -19,7 +20,14 @@ to unpack at a workspace root, or as files written in place.
 
 Every layout was read from the harness's own documentation when the adapter
 was written (each profile records the source and date), and the builder
-refuses a target it does not know rather than guess a layout.
+refuses a target it does not know rather than guess a layout. Each target
+has a *kind* (`Shape`: `agent-plugin`, `skills`, `instruction-file`,
+`prompt-bundle`, `generic`), which is what the UI asks first. An agent that
+is not in the registry is built as `target: custom` with a `CustomHarness`
+(a display name, the kind, and, for a skills package, the directory it
+reads skills from, validated to stay inside the workspace); its layout is
+the kind's base profile under that directory, and the manifest and lockfile
+record the description so the tree is reproducible.
 
 The first target, `agent-plugin`, is the portable one: a self-contained
 plugin directory as the [Agent Plugins Specification 1.0.0](https://github.com/agentplugins/agent-plugins-spec)

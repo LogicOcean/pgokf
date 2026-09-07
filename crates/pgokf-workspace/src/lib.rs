@@ -28,8 +28,8 @@ pub use plugin::{
     assemble, slug,
 };
 pub use profile::{
-    AGENT_PLUGIN_MCP_SCHEMA, AGENT_PLUGIN_SCHEMA, EnvRef, McpFormat, McpSpec, Profile, Shape,
-    Target,
+    AGENT_PLUGIN_MCP_SCHEMA, AGENT_PLUGIN_SCHEMA, CUSTOM_TARGET_ID, CustomHarness, EnvRef,
+    McpFormat, McpSpec, Profile, Shape, Target,
 };
 pub use selection::{
     BundleState, ConceptRecord, ConceptRef, DEFAULT_LIMIT, MAX_CONCEPTS, PackageRecord,

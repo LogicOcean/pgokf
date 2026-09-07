@@ -19,6 +19,12 @@ pub const DEFAULT_LIMIT: usize = 100;
 /// selection (no selector at all) is refused rather than exporting a catalog.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Selection {
+    /// Everything visible, bounded by the limit: the scope a selection
+    /// starts from when no bundle narrows it, so "all bundles, narrowed by
+    /// nothing" is expressible (a selection with no selector at all is
+    /// empty and refused).
+    #[serde(default)]
+    pub all: bool,
     #[serde(default)]
     pub bundle_ids: Vec<i64>,
     /// Concept ids, within the selected bundles (or any bundle).
@@ -125,11 +131,12 @@ impl Selection {
     /// not one: it names files without narrowing the catalog).
     #[must_use]
     pub fn has_filters(&self) -> bool {
-        !(self.bundle_ids.is_empty()
-            && self.concept_ids.is_empty()
-            && self.tags.is_empty()
-            && self.types.is_empty()
-            && self.query.as_deref().is_none_or(|q| q.trim().is_empty()))
+        self.all
+            || !(self.bundle_ids.is_empty()
+                && self.concept_ids.is_empty()
+                && self.tags.is_empty()
+                && self.types.is_empty()
+                && self.query.as_deref().is_none_or(|q| q.trim().is_empty()))
     }
 
     /// The effective row limit, bounded to [`MAX_CONCEPTS`].
@@ -174,7 +181,13 @@ impl Selection {
             }
         }
         if parts.is_empty() {
-            "nothing selected".to_owned()
+            if self.all {
+                "everything in the catalog".to_owned()
+            } else {
+                "nothing selected".to_owned()
+            }
+        } else if self.all && self.bundle_ids.is_empty() {
+            format!("everything {}", parts.join(", "))
         } else {
             parts.join(", ")
         }
@@ -953,6 +966,32 @@ mod tests {
         assert_eq!(picked.describe(), "1 picked file");
         assert!(mixed.has_filters());
         assert_eq!(mixed.describe(), "tagged ops, plus 1 picked file");
+    }
+
+    #[test]
+    fn everything_is_a_scope_of_its_own() {
+        // Arrange
+        let everything = Selection {
+            all: true,
+            ..Selection::default()
+        };
+        let narrowed = Selection {
+            all: true,
+            types: vec!["Runbook".to_owned()],
+            ..Selection::default()
+        };
+        let in_bundle = Selection {
+            all: true,
+            bundle_ids: vec![2],
+            ..Selection::default()
+        };
+
+        // Act / Assert
+        assert!(everything.has_filters() && !everything.is_empty());
+        assert_eq!(everything.describe(), "everything in the catalog");
+        assert_eq!(narrowed.describe(), "everything of type Runbook");
+        assert_eq!(in_bundle.describe(), "in bundle(s) 2");
+        assert_eq!(Selection::default().describe(), "nothing selected");
     }
 
     #[test]

@@ -113,13 +113,25 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
   The builder page browses a bundle's files in a tree (directories, skill
   packages and their members marked) and ticks them into the selection; the
   MCP tool takes `picks`; `/api/bundles/{id}/tree` lists a bundle for it.
-- The **Agent Plugin builder** page is a five-step flow: choose the agent
-  (a card grid with each harness's directory and a note for the chosen
-  one), choose the content (bundle, search, one-click type and tag chips
-  from the catalog's facets, more selectors folded away), add extras (each
-  extra's own fields appear only when it is ticked), name it, then preview
-  and download. The result summarizes the build in one line with the
-  download button beside it; the MCP call is folded under it.
+- The **Agent Plugin builder** page is a five-step flow: say what you are
+  building (an Agent Plugin, a skills package, an instruction file, a
+  prompt bundle, or generic files) and for which agent (a searchable list
+  per kind; a name that is not listed is added as a new agent, with its
+  skills directory for a skills package), name it, choose the content
+  (browse a bundle or all bundles, find files, tick files or whole
+  directories, or take everything in the scope and narrow it; every rule
+  and ticked file is a removable chip in a selection bar), add extras (each
+  extra's own fields appear only when it is ticked), then preview and
+  download. The result summarizes the build in one line with the download
+  button beside it; the MCP call is folded under it.
+- **GitHub Copilot** is a target (`copilot`: `.github/skills/`, MCP entry
+  in `.github/mcp.json` as a typed `local` server that inherits Copilot's
+  environment). **Custom agents:** `target: custom` with a harness
+  description (name, kind, skills directory) builds for an agent the
+  registry does not know, laid out like the kind's base profile; the web
+  builder adds one when a typed name is not in the list, and the MCP tool
+  takes `harness`. Selections gained `all` (start from everything visible,
+  so a rule narrowed only by types, tags, or a query needs no bundle).
 - The UI is laid out for phones: scrolling navigation and tab strips,
   tables that scroll inside their panels, results before filters, the
   builder's target list folded behind its summary, and graph controls on

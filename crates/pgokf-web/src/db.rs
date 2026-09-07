@@ -217,6 +217,7 @@ pub(crate) struct TreeEntry {
     pub package: bool,
     /// The owning skill's id when the concept is a package member.
     pub package_of: Option<String>,
+    pub tags: Vec<String>,
 }
 
 /// A skill package (`pgokf.skills`) with the resources it owns.
@@ -661,7 +662,8 @@ impl Db {
         self.query_map(
             "SELECT c.id, c.path, c.type, c.title,
                     (sk.concept_id IS NOT NULL),
-                    coalesce(s.package_concept_id, d.package_concept_id)
+                    coalesce(s.package_concept_id, d.package_concept_id),
+                    coalesce(c.tags, '{}')
              FROM pgokf.concepts c
              JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled AND b.retired_at IS NULL
              LEFT JOIN pgokf.skills sk ON sk.bundle_id = c.bundle_id AND sk.concept_id = c.id
@@ -680,6 +682,7 @@ impl Db {
                     title: col(r, 3)?,
                     package: col::<Option<bool>>(r, 4)?.unwrap_or(false),
                     package_of: col(r, 5)?,
+                    tags: col(r, 6)?,
                 })
             },
         )

@@ -21,7 +21,8 @@ use axum::routing::get;
 use axum::{Json, Router};
 use pgokf_companion::embeddings::EmbeddingsClient;
 use pgokf_workspace::{
-    BuildOptions, Component, ConceptRecord, ConceptRef, Profile, Selection, Target,
+    BuildOptions, Component, ConceptRecord, ConceptRef, CustomHarness, Profile, Selection, Shape,
+    Target,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -625,13 +626,22 @@ fn actor_display(value: &Value) -> Option<String> {
 }
 
 /// A target profile as the builder page lists it.
-pub(crate) struct TargetView {
+/// One kind of tree the builder can make (the first choice on the page).
+pub(crate) struct KindView {
     pub id: String,
     pub label: String,
+    pub description: String,
+    pub selected: bool,
+}
+
+/// One registry agent, listed under its kind for the agent chooser.
+pub(crate) struct AgentView {
+    pub id: String,
+    pub label: String,
+    pub kind: String,
+    /// Where the tree lands, as a short path.
     pub root: String,
     pub notes: String,
-    pub shape: String,
-    pub selected: bool,
 }
 
 /// The builder form's state, echoed back into the fields.
@@ -639,7 +649,24 @@ pub(crate) struct TargetView {
 // The flags mirror the form's checkboxes one to one.
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct PluginForm {
-    pub target: String,
+    /// The kind of tree (a `Shape` id).
+    pub kind: String,
+    /// The agent as the chooser shows it: a registry label or the typed name.
+    pub agent: String,
+    /// Where a custom skills agent reads skills from.
+    pub skills_dir: String,
+    /// `true` when the agent is one the user added rather than a registry one.
+    pub custom: bool,
+    /// One line about the chosen agent (its note, or what adding one means).
+    pub agent_note: String,
+    /// Why the chosen agent cannot be built for (a bad skills directory);
+    /// shown on the page, refused by the download.
+    pub agent_problem: Option<String>,
+    /// Whether the selection starts from everything in scope (a rule that
+    /// stays in step with the catalog) rather than from ticked files only.
+    pub all: bool,
+    /// The selection in words, for the page before any preview.
+    pub selection_summary: String,
     pub name: String,
     pub title: String,
     pub bundle: String,
@@ -664,6 +691,17 @@ pub(crate) struct PluginForm {
     /// The same request as a query string, for the download link and the
     /// preview partial.
     pub query_string: String,
+}
+
+impl PluginForm {
+    /// The first thing wrong with the form that the page shows and the
+    /// download refuses: an agent that cannot be built for, then a
+    /// malformed ticked-files line.
+    fn problems(&self) -> Option<String> {
+        self.agent_problem
+            .clone()
+            .or_else(|| self.pick_problem.clone())
+    }
 }
 
 /// What a selection resolves to, before anything is downloaded.
@@ -919,7 +957,8 @@ struct GraphPage {
 struct PluginsPage {
     shell: Shell,
     form: PluginForm,
-    targets: Vec<TargetView>,
+    kinds: Vec<KindView>,
+    agents: Vec<AgentView>,
     bundles: Vec<BundleInfo>,
     /// The catalog's concept types and its most used tags, for one-click
     /// selectors.
@@ -1930,7 +1969,7 @@ async fn api_health(State(app): State<Shared>) -> Result<Json<Value>, AppError> 
 
 /// Where the unpacked zip goes: an Agent Plugin is one directory the client
 /// installs, every other shape is unpacked over the workspace root.
-fn install_note(profile: &pgokf_workspace::Profile, name: &str) -> String {
+fn install_note(profile: &Profile<'_>, name: &str) -> String {
     if profile.shape == pgokf_workspace::Shape::AgentPlugin {
         format!(
             "Unpack anywhere and install the {name}/ directory with your agent's plugin command \
@@ -2165,8 +2204,21 @@ async fn graph_page(
 /// download.
 #[derive(Debug, Clone, Default, Deserialize)]
 struct PluginParams {
+    /// The older form of the choice: a target id alone.
     #[serde(default)]
     target: String,
+    /// What is being built (a `Shape` id) and for which agent (a registry
+    /// label or id, or a new name the user adds).
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    agent: String,
+    /// For an added skills agent: where it reads skills from.
+    #[serde(default)]
+    skills_dir: String,
+    /// `1` when the selection starts from everything in scope.
+    #[serde(default)]
+    all: String,
     #[serde(default)]
     name: String,
     #[serde(default)]
@@ -2206,6 +2258,140 @@ struct PluginParams {
 
 const DEFAULT_PLUGIN_NAME: &str = "okf-knowledge";
 
+/// Where an added skills agent is assumed to read skills from until the
+/// user says otherwise: the cross-tool location several harnesses share.
+const DEFAULT_SKILLS_DIR: &str = ".agents/skills";
+
+/// What the builder builds for, resolved from the form's kind and agent
+/// (or the older `target` id alone).
+#[derive(Debug, Clone)]
+struct Chosen {
+    target: Target,
+    harness: Option<CustomHarness>,
+    kind: Shape,
+    /// The agent as the chooser shows it.
+    agent: String,
+    skills_dir: String,
+    /// Why the choice cannot be built (an invalid custom directory).
+    problem: Option<String>,
+}
+
+impl Chosen {
+    fn registry(profile: &'static Profile<'static>) -> Self {
+        Self {
+            target: profile.target,
+            harness: None,
+            kind: profile.shape,
+            agent: short_label(profile.label).to_owned(),
+            skills_dir: String::new(),
+            problem: None,
+        }
+    }
+
+    /// One line about the chosen agent for the page.
+    fn note(&self) -> String {
+        if let Some(problem) = &self.problem {
+            return problem.clone();
+        }
+        match (&self.harness, Profile::of(self.target)) {
+            (Some(harness), _) if harness.shape == Shape::Skills => format!(
+                "{} is not in the list, so the skill package is laid out like the generic Agent \
+                 Skills package under {}/ (change the directory if {} reads another), and the \
+                 MCP entry is a snippet to merge into its own configuration.",
+                harness.label,
+                harness.skills_dir.as_deref().unwrap_or(DEFAULT_SKILLS_DIR),
+                harness.label
+            ),
+            (Some(harness), _) => format!(
+                "{} is not in the list; the tree is the standard {} layout, which any such agent \
+                 reads.",
+                harness.label,
+                harness.shape.label().to_lowercase()
+            ),
+            (None, Some(profile)) => profile.notes.to_owned(),
+            (None, None) => String::new(),
+        }
+    }
+}
+
+/// A registry label without its parenthetical explainer.
+fn short_label(label: &str) -> &str {
+    label
+        .split_once(" (")
+        .map_or(label, |(name, _)| name)
+        .trim()
+}
+
+/// The registry agent of a kind that a typed name refers to: its id, its
+/// label, or the label's short form, case-insensitively.
+fn registry_agent(kind: Shape, agent: &str) -> Option<&'static Profile<'static>> {
+    Profile::with_shape(kind).find(|p| {
+        p.id.eq_ignore_ascii_case(agent)
+            || p.label.eq_ignore_ascii_case(agent)
+            || short_label(p.label).eq_ignore_ascii_case(agent)
+    })
+}
+
+/// Resolve the form's choice. A kind with no agent takes the kind's first
+/// registry agent; a name outside the registry adds a custom agent (for a
+/// skills package, under `skills_dir` or the shared default); an invalid
+/// directory is reported as a problem rather than a request error so the
+/// page keeps working. A kind that is not one of the five is a 400.
+fn resolve_agent(
+    kind: &str,
+    agent: &str,
+    skills_dir: &str,
+    target: &str,
+) -> Result<Chosen, AppError> {
+    let kind_id = kind.trim();
+    let agent = agent.trim();
+    let skills_dir = skills_dir.trim();
+    if kind_id.is_empty() && agent.is_empty() {
+        let id = non_empty(target).unwrap_or_else(|| "agent-plugin".to_owned());
+        let profile = Profile::by_id(id.trim())
+            .ok_or_else(|| AppError::bad_request(format!("unknown target {id}")))?;
+        return Ok(Chosen::registry(profile));
+    }
+    let kind = if kind_id.is_empty() {
+        Shape::AgentPlugin
+    } else {
+        Shape::parse(kind_id)
+            .ok_or_else(|| AppError::bad_request(format!("unknown kind {kind_id}")))?
+    };
+    if agent.is_empty() {
+        let first = Profile::with_shape(kind)
+            .next()
+            .unwrap_or_else(|| kind.base());
+        return Ok(Chosen::registry(first));
+    }
+    if let Some(profile) = registry_agent(kind, agent) {
+        return Ok(Chosen::registry(profile));
+    }
+    let dir = if kind == Shape::Skills && skills_dir.is_empty() {
+        DEFAULT_SKILLS_DIR
+    } else {
+        skills_dir
+    };
+    match CustomHarness::new(agent, kind, Some(dir)) {
+        Ok(harness) => Ok(Chosen {
+            target: Target::Custom,
+            kind,
+            agent: harness.label.clone(),
+            skills_dir: harness.skills_dir.clone().unwrap_or_default(),
+            harness: Some(harness),
+            problem: None,
+        }),
+        Err(error) => Ok(Chosen {
+            target: kind.base().target,
+            harness: None,
+            kind,
+            agent: agent.to_owned(),
+            skills_dir: dir.to_owned(),
+            problem: Some(format!("{agent} cannot be built for yet: {error}")),
+        }),
+    }
+}
+
 /// The picks field: one `bundle_id:concept_id` per line, duplicates folded.
 /// A malformed line is not a request error - the preview must keep updating
 /// while the user types - so it comes back as a message for the page, with
@@ -2231,10 +2417,8 @@ fn split_list(raw: &str) -> Vec<String> {
 
 impl PluginParams {
     /// Validate into the builder's inputs plus the echoed form state.
-    fn normalize(&self) -> Result<(PluginForm, Target, Selection, Option<String>), AppError> {
-        let target_id = non_empty(&self.target).unwrap_or_else(|| "agent-plugin".to_owned());
-        let target = Target::parse(&target_id)
-            .ok_or_else(|| AppError::bad_request(format!("unknown target {target_id}")))?;
+    fn normalize(&self) -> Result<(PluginForm, Chosen, Selection, Option<String>), AppError> {
+        let chosen = resolve_agent(&self.kind, &self.agent, &self.skills_dir, &self.target)?;
         let bundle_id = match non_empty(&self.bundle) {
             None => None,
             Some(raw) => Some(
@@ -2256,37 +2440,62 @@ impl PluginParams {
                     })?,
             ),
         };
-        let verified = matches!(self.verified.as_str(), "1" | "true" | "on");
+        let on = |raw: &str| matches!(raw.trim(), "1" | "true" | "on");
+        let verified = on(&self.verified);
+        let all = on(&self.all);
         let components = self.components();
         let (picks, pick_problem) = parse_picks(&self.picks);
+        // The rule (everything in scope, narrowed) applies only when the
+        // user took everything; otherwise the bundle is just where they
+        // browse and the narrowing fields wait, echoed but inert.
         let selection = Selection {
-            bundle_ids: bundle_id.into_iter().collect(),
-            concept_ids: split_list(&self.ids),
-            tags: split_list(&self.tags),
-            types: split_list(&self.types),
-            query: non_empty(&self.q),
+            all,
+            bundle_ids: bundle_id.filter(|_| all).into_iter().collect(),
+            concept_ids: if all {
+                split_list(&self.ids)
+            } else {
+                Vec::new()
+            },
+            tags: if all {
+                split_list(&self.tags)
+            } else {
+                Vec::new()
+            },
+            types: if all {
+                split_list(&self.types)
+            } else {
+                Vec::new()
+            },
+            query: non_empty(&self.q).filter(|_| all),
             verified_only: verified,
             limit,
             picks,
         };
         let name = non_empty(&self.name).unwrap_or_else(|| DEFAULT_PLUGIN_NAME.to_owned());
         let query_string =
-            self.query_string(&target_id, &name, &selection, limit, verified, &components);
+            self.query_string(&chosen, &name, &selection, limit, verified, &components);
         let form = PluginForm {
-            target: target_id,
+            kind: chosen.kind.id().to_owned(),
+            agent: chosen.agent.clone(),
+            skills_dir: chosen.skills_dir.clone(),
+            custom: chosen.harness.is_some() || chosen.problem.is_some(),
+            agent_note: chosen.note(),
+            agent_problem: chosen.problem.clone(),
+            all,
+            selection_summary: selection.describe(),
             name,
             title: self.title.trim().to_owned(),
             bundle: bundle_id.map(|b| b.to_string()).unwrap_or_default(),
-            types: selection.types.join(", "),
-            tags: selection.tags.join(", "),
-            ids: selection.concept_ids.join("\n"),
+            types: split_list(&self.types).join(", "),
+            tags: split_list(&self.tags).join(", "),
+            ids: split_list(&self.ids).join("\n"),
             picks: selection
                 .picks
                 .iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join("\n"),
-            q: selection.query.clone().unwrap_or_default(),
+            q: self.q.trim().to_owned(),
             verified,
             limit: limit.map(|n| n.to_string()).unwrap_or_default(),
             base_model: self.base_model.trim().to_owned(),
@@ -2299,35 +2508,39 @@ impl PluginParams {
             query_string,
             pick_problem,
         };
-        Ok((form, target, selection, non_empty(&self.base_model)))
+        Ok((form, chosen, selection, non_empty(&self.base_model)))
     }
 
     /// The request as a query string, for the download link and the preview
     /// partial (empty fields dropped, one flag per chosen component).
     fn query_string(
         &self,
-        target_id: &str,
+        chosen: &Chosen,
         name: &str,
         selection: &Selection,
         limit: Option<usize>,
         verified: bool,
         components: &[Component],
     ) -> String {
+        let flag = |on: bool| if on { "1".to_owned() } else { String::new() };
         let pairs: Vec<(&str, String)> = vec![
-            ("target", target_id.to_owned()),
+            ("kind", chosen.kind.id().to_owned()),
+            ("agent", chosen.agent.clone()),
+            (
+                "skills_dir",
+                if chosen.target == Target::Custom || chosen.problem.is_some() {
+                    chosen.skills_dir.clone()
+                } else {
+                    String::new()
+                },
+            ),
             ("name", name.to_owned()),
             ("title", self.title.trim().to_owned()),
-            (
-                "bundle",
-                selection
-                    .bundle_ids
-                    .first()
-                    .map(ToString::to_string)
-                    .unwrap_or_default(),
-            ),
-            ("types", selection.types.join(", ")),
-            ("tags", selection.tags.join(", ")),
-            ("ids", selection.concept_ids.join(", ")),
+            ("bundle", self.bundle.trim().to_owned()),
+            ("all", flag(selection.all)),
+            ("types", split_list(&self.types).join(", ")),
+            ("tags", split_list(&self.tags).join(", ")),
+            ("ids", split_list(&self.ids).join(", ")),
             (
                 "picks",
                 selection
@@ -2337,15 +2550,8 @@ impl PluginParams {
                     .collect::<Vec<_>>()
                     .join("\n"),
             ),
-            ("q", selection.query.clone().unwrap_or_default()),
-            (
-                "verified",
-                if verified {
-                    "1".to_owned()
-                } else {
-                    String::new()
-                },
-            ),
+            ("q", self.q.trim().to_owned()),
+            ("verified", flag(verified)),
             ("limit", limit.map(|n| n.to_string()).unwrap_or_default()),
             ("base_model", self.base_model.trim().to_owned()),
             ("mcp_command", self.mcp_command.trim().to_owned()),
@@ -2374,44 +2580,33 @@ impl PluginParams {
     }
 }
 
-/// A human label for a profile's shape.
-trait ShapeLabel {
-    fn shape_label(&self) -> &'static str;
+/// The kinds of tree, the chosen one marked.
+fn kind_views(selected: Shape) -> Vec<KindView> {
+    Shape::all()
+        .iter()
+        .map(|shape| KindView {
+            id: shape.id().to_owned(),
+            label: shape.label().to_owned(),
+            description: shape.description().to_owned(),
+            selected: *shape == selected,
+        })
+        .collect()
 }
 
-impl ShapeLabel for Profile {
-    fn shape_label(&self) -> &'static str {
-        match self.shape {
-            pgokf_workspace::Shape::AgentPlugin => "Agent Plugin directory",
-            pgokf_workspace::Shape::Skills => "Agent Skills package",
-            pgokf_workspace::Shape::InstructionFile => "instruction file",
-            pgokf_workspace::Shape::PromptBundle => "prompt bundle",
-            pgokf_workspace::Shape::Generic => "index plus files",
-        }
-    }
-}
-
-fn target_views(selected: &str) -> Vec<TargetView> {
+/// Every registry agent under its kind, for the chooser's lists.
+fn agent_views() -> Vec<AgentView> {
     Profile::all()
         .iter()
-        .map(|p| TargetView {
+        .map(|p| AgentView {
             id: p.id.to_owned(),
-            // The card shows the name; its parenthetical explainer is what
-            // the shape line already says.
-            label: p
-                .label
-                .split_once(" (")
-                .map_or(p.label, |(name, _)| name)
-                .trim()
-                .to_owned(),
+            label: short_label(p.label).to_owned(),
+            kind: p.shape.id().to_owned(),
             root: match p.shape {
-                pgokf_workspace::Shape::AgentPlugin => "<name>/plugin.json".to_owned(),
+                Shape::AgentPlugin => "<name>/plugin.json".to_owned(),
                 _ if p.root.is_empty() => "workspace root".to_owned(),
                 _ => format!("{}/", p.root),
             },
             notes: p.notes.to_owned(),
-            shape: p.shape_label().to_owned(),
-            selected: p.id == selected,
         })
         .collect()
 }
@@ -2419,7 +2614,7 @@ fn target_views(selected: &str) -> Vec<TargetView> {
 fn build_options(
     app: &App,
     form: &PluginForm,
-    target: Target,
+    chosen: &Chosen,
     base_model: Option<String>,
 ) -> BuildOptions {
     let mut components = Vec::new();
@@ -2433,7 +2628,8 @@ fn build_options(
         components.push(Component::Tools);
     }
     BuildOptions {
-        target,
+        target: chosen.target,
+        harness: chosen.harness.clone(),
         name: form.name.clone(),
         title: non_empty(&form.title),
         catalog_name: app.catalog_name.clone(),
@@ -2465,7 +2661,7 @@ fn workspace_error(error: anyhow::Error) -> AppError {
 async fn plugin_preview(
     app: &App,
     form: &PluginForm,
-    target: Target,
+    chosen: &Chosen,
     selection: &Selection,
     base_model: Option<String>,
 ) -> Result<PluginPreview, AppError> {
@@ -2479,7 +2675,8 @@ async fn plugin_preview(
     // must show the same tree.
     drop_packaged_resources(&mut concepts);
     placeholder_contents(app, &mut concepts).await?;
-    let options = build_options(app, form, target, base_model);
+    let options = build_options(app, form, chosen, base_model);
+    let profile = options.profile().map_err(workspace_error)?;
     let snapshot = pgokf_workspace::Snapshot {
         version: app.version.clone(),
         sql_version: String::new(),
@@ -2496,10 +2693,11 @@ async fn plugin_preview(
     for c in &mut concepts {
         c.bytes.clear();
     }
-    let profile = Profile::of(target);
     let mcp_args = serde_json::json!({
-        "target": target.id(),
+        "target": chosen.target.id(),
+        "harness": chosen.harness,
         "name": pgokf_workspace::slug(&form.name),
+        "all": selection.all,
         "bundle_ids": selection.bundle_ids,
         "types": selection.types,
         "tags": selection.tags,
@@ -2558,7 +2756,7 @@ async fn plugin_preview(
         download_url: format!("/plugins/build.zip?{}", form.query_string),
         package_count: plugin.as_ref().map_or(0, |p| p.package_count),
         target_label: profile.label.to_owned(),
-        install_note: install_note(profile, &form.name),
+        install_note: install_note(&profile, &form.name),
         concepts,
     })
 }
@@ -2568,30 +2766,31 @@ async fn plugin_preview(
 async fn preview_or_message(
     app: &App,
     form: &PluginForm,
-    target: Target,
+    chosen: &Chosen,
     selection: &Selection,
     base_model: Option<String>,
 ) -> (Option<PluginPreview>, Option<String>) {
-    if !form.has_selection {
+    if !form.has_selection || form.agent_problem.is_some() {
         return (None, None);
     }
-    match plugin_preview(app, form, target, selection, base_model).await {
+    match plugin_preview(app, form, chosen, selection, base_model).await {
         Ok(preview) => (Some(preview), None),
         Err(error) => (None, Some(error.message)),
     }
 }
 
 async fn plugins_page(State(app): State<Shared>, Query(params): Query<PluginParams>) -> PageResult {
-    let (form, target, selection, base_model) = params.normalize()?;
-    let (preview, error) = preview_or_message(&app, &form, target, &selection, base_model).await;
-    let error = form.pick_problem.clone().or(error);
+    let (form, chosen, selection, base_model) = params.normalize()?;
+    let (preview, error) = preview_or_message(&app, &form, &chosen, &selection, base_model).await;
+    let error = form.problems().or(error);
     let bundles = app.db.bundles().await?;
     let type_facets = app.db.catalog_facets(None, "type").await?;
     let mut tag_facets = app.db.catalog_facets(None, "tag").await?;
     tag_facets.truncate(CHIP_TAGS);
     html(&PluginsPage {
         shell: Shell::new(&app, "Agent Plugin builder", "plugins"),
-        targets: target_views(&form.target),
+        kinds: kind_views(chosen.kind),
+        agents: agent_views(),
         form,
         bundles,
         type_facets,
@@ -2605,9 +2804,9 @@ async fn plugins_preview(
     State(app): State<Shared>,
     Query(params): Query<PluginParams>,
 ) -> PageResult {
-    let (form, target, selection, base_model) = params.normalize()?;
-    let (preview, error) = preview_or_message(&app, &form, target, &selection, base_model).await;
-    let error = form.pick_problem.clone().or(error);
+    let (form, chosen, selection, base_model) = params.normalize()?;
+    let (preview, error) = preview_or_message(&app, &form, &chosen, &selection, base_model).await;
+    let error = form.problems().or(error);
     let push_url = format!("/plugins?{}", form.query_string);
     let mut response = html(&PluginPreviewPartial {
         form,
@@ -2720,8 +2919,8 @@ async fn placeholder_contents(app: &App, concepts: &mut [ConceptRecord]) -> Resu
 /// Build the tree (sources read through the audited `get_concept_source`)
 /// and send it as a zip to unpack at the workspace root.
 async fn plugins_zip(State(app): State<Shared>, Query(params): Query<PluginParams>) -> PageResult {
-    let (form, target, selection, base_model) = params.normalize()?;
-    if let Some(problem) = form.pick_problem {
+    let (form, chosen, selection, base_model) = params.normalize()?;
+    if let Some(problem) = form.problems() {
         return Err(AppError::bad_request(problem));
     }
     if selection.is_empty() {
@@ -2730,7 +2929,7 @@ async fn plugins_zip(State(app): State<Shared>, Query(params): Query<PluginParam
         ));
     }
     let mut client = app.db.checkout().await?;
-    let options = build_options(&app, &form, target, base_model);
+    let options = build_options(&app, &form, &chosen, base_model);
     let plugin = pgokf_workspace::build(client.client(), &options, &selection)
         .await
         .map_err(workspace_error)?;
@@ -3199,10 +3398,13 @@ mod tests {
 
     #[test]
     fn plugin_params_split_lists_and_build_a_stable_query_string() {
-        // Arrange
+        // Arrange: the everything rule in a bundle, narrowed by tags and ids.
         let params = PluginParams {
-            target: "codex".to_owned(),
+            kind: "skills".to_owned(),
+            agent: "codex".to_owned(),
             name: "Ops".to_owned(),
+            bundle: "2".to_owned(),
+            all: "1".to_owned(),
             tags: "a, b".to_owned(),
             ids: "x\ny".to_owned(),
             verified: "on".to_owned(),
@@ -3210,16 +3412,18 @@ mod tests {
         };
 
         // Act
-        let (form, target, selection, _) = params.normalize().ok().expect("valid");
+        let (form, chosen, selection, _) = params.normalize().ok().expect("valid");
 
         // Assert
-        assert_eq!(target, Target::Codex);
+        assert_eq!(chosen.target, Target::Codex);
+        assert!(selection.all);
+        assert_eq!(selection.bundle_ids, vec![2]);
         assert_eq!(selection.tags, vec!["a", "b"]);
         assert_eq!(selection.concept_ids, vec!["x", "y"]);
         assert!(selection.verified_only);
         assert_eq!(
             form.query_string,
-            "target=codex&name=Ops&tags=a%2C%20b&ids=x%2C%20y&verified=1"
+            "kind=skills&agent=Codex&name=Ops&bundle=2&all=1&tags=a%2C%20b&ids=x%2C%20y&verified=1"
         );
         let with = PluginParams {
             tools: "1".to_owned(),
@@ -3236,6 +3440,132 @@ mod tests {
             }
             .normalize()
             .is_err()
+        );
+        assert!(
+            PluginParams {
+                kind: "plugin".to_owned(),
+                ..PluginParams::default()
+            }
+            .normalize()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn narrowing_fields_wait_until_everything_is_taken() {
+        // Arrange: a bundle browsed and types typed, but nothing taken.
+        let browsing = PluginParams {
+            bundle: "2".to_owned(),
+            types: "Runbook".to_owned(),
+            picks: "2:runbooks/a".to_owned(),
+            ..PluginParams::default()
+        };
+
+        // Act
+        let (form, _, selection, _) = browsing.normalize().ok().expect("valid");
+
+        // Assert: only the tick counts; the fields are echoed for later.
+        assert!(!selection.all && selection.bundle_ids.is_empty() && selection.types.is_empty());
+        assert_eq!(selection.picks.len(), 1);
+        assert_eq!(form.types, "Runbook");
+        assert_eq!(form.bundle, "2");
+        assert!(form.query_string.contains("bundle=2&types=Runbook"));
+        assert!(!form.query_string.contains("all="));
+    }
+
+    #[test]
+    fn the_agent_resolves_by_id_label_or_short_label_within_its_kind() {
+        // Arrange / Act
+        let by_id = resolve_agent("skills", "gemini-cli", "", "")
+            .ok()
+            .expect("ok");
+        let by_label = resolve_agent("skills", "github copilot", "", "")
+            .ok()
+            .expect("ok");
+        let by_short = resolve_agent("prompt-bundle", "Ollama / bare model", "", "")
+            .ok()
+            .expect("ok");
+        let defaulted = resolve_agent("skills", "", "", "").ok().expect("ok");
+        let legacy = resolve_agent("", "", "", "cursor").ok().expect("ok");
+        let wrong_kind = resolve_agent("agent-plugin", "Codex", "", "")
+            .ok()
+            .expect("ok");
+
+        // Assert
+        assert_eq!(by_id.target, Target::GeminiCli);
+        assert_eq!(by_label.target, Target::Copilot);
+        assert_eq!(by_label.agent, "GitHub Copilot");
+        assert_eq!(by_short.target, Target::Ollama);
+        assert_eq!(
+            defaulted.target,
+            Target::ClaudeCode,
+            "the kind's first agent"
+        );
+        assert_eq!(legacy.target, Target::Cursor);
+        assert_eq!(legacy.kind, Shape::Skills);
+        assert_eq!(
+            wrong_kind.target,
+            Target::Custom,
+            "a skills agent named under another kind is a new agent of that kind"
+        );
+        assert!(resolve_agent("", "", "", "nope").is_err());
+        assert!(resolve_agent("plugin", "x", "", "").is_err());
+    }
+
+    #[test]
+    fn an_unknown_agent_is_added_with_a_directory_or_reported() {
+        // Arrange / Act
+        let added = resolve_agent("skills", " Acme Agent ", "", "")
+            .ok()
+            .expect("ok");
+        let placed = resolve_agent("skills", "Acme", ".acme/skills/", "")
+            .ok()
+            .expect("ok");
+        let unsafe_dir = resolve_agent("skills", "Acme", "../up", "")
+            .ok()
+            .expect("ok");
+        let plugin = resolve_agent("agent-plugin", "Acme", "", "")
+            .ok()
+            .expect("ok");
+
+        // Assert
+        assert_eq!(added.target, Target::Custom);
+        assert_eq!(added.agent, "Acme Agent");
+        assert_eq!(added.skills_dir, DEFAULT_SKILLS_DIR);
+        assert!(added.note().contains(".agents/skills/"));
+        assert_eq!(placed.skills_dir, ".acme/skills");
+        assert_eq!(
+            placed
+                .harness
+                .as_ref()
+                .and_then(|h| h.skills_dir.as_deref()),
+            Some(".acme/skills")
+        );
+        assert!(
+            unsafe_dir
+                .problem
+                .as_deref()
+                .is_some_and(|p| p.contains("relative path"))
+        );
+        assert!(unsafe_dir.harness.is_none());
+        assert_eq!(plugin.target, Target::Custom);
+        assert_eq!(plugin.kind, Shape::AgentPlugin);
+        assert!(plugin.skills_dir.is_empty());
+        assert!(plugin.note().contains("standard agent plugin layout"));
+        let (form, ..) = PluginParams {
+            kind: "skills".to_owned(),
+            agent: "Acme".to_owned(),
+            skills_dir: "../up".to_owned(),
+            picks: "1:a".to_owned(),
+            ..PluginParams::default()
+        }
+        .normalize()
+        .ok()
+        .expect("valid");
+        assert!(form.custom && form.agent_problem.is_some());
+        assert!(
+            form.query_string
+                .starts_with("kind=skills&agent=Acme&skills_dir=..%2Fup")
         );
     }
 

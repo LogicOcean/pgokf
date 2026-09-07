@@ -11,8 +11,8 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::profile::{
-    AGENT_PLUGIN_MCP_SCHEMA, AGENT_PLUGIN_SCHEMA, EnvRef, McpFormat, McpSpec, Profile, Shape,
-    Target,
+    AGENT_PLUGIN_MCP_SCHEMA, AGENT_PLUGIN_SCHEMA, CustomHarness, EnvRef, McpFormat, McpSpec,
+    Profile, Shape, Target,
 };
 use crate::selection::{ConceptRecord, Selection, Snapshot, sha256_hex, yaml_string};
 
@@ -93,6 +93,31 @@ pub struct BuildOptions {
     /// Base URL of the pgokf web UI and JSON API, for the guide and the
     /// helper script.
     pub web_url: Option<String>,
+    /// The harness a [`Target::Custom`] build is for; ignored for registry
+    /// targets.
+    pub harness: Option<CustomHarness>,
+}
+
+impl BuildOptions {
+    /// The profile the build is laid out with: the registry's for a known
+    /// target, the described harness's for [`Target::Custom`].
+    ///
+    /// # Errors
+    ///
+    /// A custom target without a harness description.
+    pub fn profile(&self) -> Result<Profile<'_>> {
+        match self.target {
+            Target::Custom => self.harness.as_ref().map(CustomHarness::profile).ok_or_else(|| {
+                anyhow!(
+                    "target custom needs a harness: the agent's name and, for a skills package, \
+                     the directory it reads skills from"
+                )
+            }),
+            target => Profile::of(target)
+                .copied()
+                .ok_or_else(|| anyhow!("unknown target {target}")),
+        }
+    }
 }
 
 /// The MCP server name written into harness configurations.
@@ -263,7 +288,8 @@ pub fn assemble(
             empty.concept_id
         ));
     }
-    let profile = Profile::of(options.target);
+    let profile = options.profile()?;
+    let profile = &profile;
     let name = package_name(&options.name)?;
     let base_model = validated_base_model(options.base_model.as_deref())?;
     validated_web_url(options.web_url.as_deref())?;
@@ -322,13 +348,8 @@ pub fn assemble(
     }
     files.extend(content);
     files.extend(extras(profile, &layout, options)?);
-    files.push(file(
-        layout.meta_path(MANIFEST_FILE),
-        manifest_yaml(&name, options.target, selection, &options.components).into_bytes(),
-    ));
-    files.push(file(
-        layout.meta_path(LOCK_FILE),
-        lockfile(&name, options.target, &layout.root, snapshot, &entries).into_bytes(),
+    files.extend(meta_files(
+        &layout, &name, options, selection, snapshot, &entries,
     ));
     if profile.shape == Shape::AgentPlugin {
         // Last, so its version digest covers every other file of the plugin.
@@ -356,7 +377,7 @@ pub fn assemble(
 
 /// Everything the index file of a shape is rendered from.
 struct IndexInputs<'a> {
-    profile: &'a Profile,
+    profile: &'a Profile<'a>,
     name: &'a str,
     title: &'a str,
     options: &'a BuildOptions,
@@ -786,7 +807,7 @@ fn mcp_config(spec: &McpSpec, options: &BuildOptions) -> Result<String> {
     let url_ref = match spec.env_ref {
         EnvRef::Dollar => "${OKF_PG_URL}".to_owned(),
         EnvRef::DollarEnv => "${env:OKF_PG_URL}".to_owned(),
-        EnvRef::Forward | EnvRef::Placeholder | EnvRef::PluginData => {
+        EnvRef::Forward | EnvRef::Placeholder | EnvRef::PluginData | EnvRef::Inherit => {
             "postgresql://okf_reader:PASSWORD@HOST:5432/okf".to_owned()
         }
     };
@@ -825,6 +846,21 @@ fn mcp_config(spec: &McpSpec, options: &BuildOptions) -> Result<String> {
                     MCP_SERVER_NAME: { "command": command, "args": [], "env": env }
                 }
             });
+            serde_json::to_string_pretty(&doc).unwrap_or_default() + "\n"
+        }
+        McpFormat::CopilotJson => {
+            // Copilot documents no expansion form for env values, and a
+            // stdio server inherits the environment Copilot starts with, so
+            // no OKF_PG_URL entry is written at all.
+            let mut server = serde_json::Map::new();
+            server.insert("type".to_owned(), json!("local"));
+            server.insert("command".to_owned(), json!(command));
+            server.insert("args".to_owned(), json!([]));
+            if let Some(t) = tenant {
+                server.insert("env".to_owned(), json!({ "OKF_TENANT": t }));
+            }
+            server.insert("tools".to_owned(), json!(["*"]));
+            let doc = json!({ "mcpServers": { MCP_SERVER_NAME: server } });
             serde_json::to_string_pretty(&doc).unwrap_or_default() + "\n"
         }
         McpFormat::CodexToml => {
@@ -1008,6 +1044,13 @@ fn guide_md(profile: &Profile, options: &BuildOptions) -> String {
     if options.components.contains(&Component::Mcp) {
         out.push_str("\n## Live access through MCP\n\n");
         match profile.mcp {
+            Some(spec) if spec.auto_loaded && spec.env_ref == EnvRef::Inherit => {
+                let _ = writeln!(
+                    out,
+                    "`{}` configures the `{MCP_SERVER_NAME}` MCP server (the `pgokf-mcp` companion); the harness loads it from the workspace and starts the server with its own environment, so set `OKF_PG_URL` to a reader connection string in the environment that starts the harness (no value is written into the file).",
+                    spec.path
+                );
+            }
             Some(spec) if spec.auto_loaded => {
                 let _ = writeln!(
                     out,
@@ -1095,14 +1138,52 @@ esac
 echo
 "#;
 
+/// The two files that make a tree reproducible: the manifest (the
+/// selection) and the lockfile (the catalog snapshot and a hash per file).
+fn meta_files(
+    layout: &Layout,
+    name: &str,
+    options: &BuildOptions,
+    selection: &Selection,
+    snapshot: &Snapshot,
+    entries: &[serde_json::Value],
+) -> Vec<PluginFile> {
+    vec![
+        file(
+            layout.meta_path(MANIFEST_FILE),
+            manifest_yaml(
+                name,
+                options.target,
+                options.harness.as_ref(),
+                selection,
+                &options.components,
+            )
+            .into_bytes(),
+        ),
+        file(
+            layout.meta_path(LOCK_FILE),
+            lockfile(
+                name,
+                options.target,
+                options.harness.as_ref(),
+                &layout.root,
+                snapshot,
+                entries,
+            )
+            .into_bytes(),
+        ),
+    ]
+}
+
 fn lockfile(
     name: &str,
     target: Target,
+    harness: Option<&CustomHarness>,
     root: &str,
     snapshot: &Snapshot,
     entries: &[serde_json::Value],
 ) -> String {
-    let lock = json!({
+    let mut lock = json!({
         "version": 1,
         "name": name,
         "target": target.id(),
@@ -1114,6 +1195,9 @@ fn lockfile(
         },
         "entries": entries,
     });
+    if let Some(harness) = harness.filter(|_| target == Target::Custom) {
+        lock["harness"] = serde_json::to_value(harness).unwrap_or(serde_json::Value::Null);
+    }
     serde_json::to_string_pretty(&lock).unwrap_or_default() + "\n"
 }
 
@@ -1349,7 +1433,10 @@ fn skill_md(
          catalog snapshot and a content hash per file; `{MANIFEST_FILE}` reproduces the selection. \
          Files marked reconstructed in the lockfile were rebuilt from indexed text because the bundle \
          was ingested without stored source.",
-        if Profile::of(options.target).shape == Shape::AgentPlugin {
+        if options
+            .profile()
+            .is_ok_and(|p| p.shape == Shape::AgentPlugin)
+        {
             "in the plugin directory"
         } else {
             "at the workspace root"
@@ -1505,6 +1592,7 @@ fn strip_frontmatter(text: &str) -> &str {
 fn manifest_yaml(
     name: &str,
     target: Target,
+    harness: Option<&CustomHarness>,
     selection: &Selection,
     components: &[Component],
 ) -> String {
@@ -1516,6 +1604,16 @@ fn manifest_yaml(
     out.push_str("version: 1\n");
     let _ = writeln!(out, "name: {}", yaml_string(name));
     let _ = writeln!(out, "targets: [{}]", target.id());
+    if let Some(harness) = harness.filter(|_| target == Target::Custom) {
+        let mut fields = vec![
+            format!("label: {}", yaml_string(&harness.label)),
+            format!("kind: {}", harness.shape.id()),
+        ];
+        if let Some(dir) = &harness.skills_dir {
+            fields.push(format!("skills_dir: {}", yaml_string(dir)));
+        }
+        let _ = writeln!(out, "harness: {{ {} }}", fields.join(", "));
+    }
     let mut ids: Vec<&str> = components.iter().map(|c| c.id()).collect();
     ids.sort_unstable();
     ids.dedup();
@@ -1532,6 +1630,9 @@ fn manifest_yaml(
     );
     out.push_str("include:\n  - ");
     let mut fields: Vec<String> = Vec::new();
+    if selection.all {
+        fields.push("all: true".to_owned());
+    }
     if !selection.picks.is_empty() {
         let picks: Vec<String> = selection
             .picks
@@ -1640,6 +1741,7 @@ mod tests {
     fn options(target: Target) -> BuildOptions {
         BuildOptions {
             target,
+            harness: None,
             name: "Ops Runbooks!".to_owned(),
             title: None,
             catalog_name: "acme".to_owned(),
@@ -2094,7 +2196,7 @@ mod tests {
         };
 
         // Act
-        let yaml = manifest_yaml("ops", Target::Cursor, &selection, &[Component::Mcp]);
+        let yaml = manifest_yaml("ops", Target::Cursor, None, &selection, &[Component::Mcp]);
 
         // Assert
         assert!(yaml.contains("targets: [cursor]\ncomponents: [mcp]\n"));
@@ -2608,6 +2710,130 @@ mod tests {
     }
 
     #[test]
+    fn copilot_writes_a_typed_local_entry_without_a_connection_string() {
+        // Arrange
+        let records = vec![record(1, "runbooks/a", "Alpha", "human-reviewed", "Do A.")];
+        let mut opts = options(Target::Copilot);
+        opts.components = vec![Component::Mcp, Component::Guide];
+        opts.tenant = Some("acme".to_owned());
+
+        // Act
+        let plugin = assemble(&opts, &selection(), &snapshot(), &records).expect("assembles");
+
+        // Assert: the skill under .github/skills, the MCP entry Copilot's way.
+        let paths: Vec<&str> = plugin.files.iter().map(|f| f.path.as_str()).collect();
+        assert!(
+            paths.contains(&".github/skills/ops-runbooks/SKILL.md"),
+            "{paths:?}"
+        );
+        let mcp = plugin
+            .files
+            .iter()
+            .find(|f| f.path == ".github/mcp.json")
+            .expect("mcp file");
+        let doc: serde_json::Value = serde_json::from_slice(&mcp.bytes).expect("json");
+        let server = &doc["mcpServers"]["pgokf"];
+        assert_eq!(server["type"], "local");
+        assert_eq!(server["command"], "pgokf-mcp");
+        assert_eq!(server["tools"], serde_json::json!(["*"]));
+        assert_eq!(server["env"], serde_json::json!({ "OKF_TENANT": "acme" }));
+        assert!(!String::from_utf8_lossy(&mcp.bytes).contains("OKF_PG_URL"));
+        let guide = plugin
+            .files
+            .iter()
+            .find(|f| f.path.ends_with("USING-THE-CATALOG.md"))
+            .expect("guide");
+        assert!(
+            String::from_utf8_lossy(&guide.bytes)
+                .contains("starts the server with its own environment"),
+            "the guide says where OKF_PG_URL goes"
+        );
+    }
+
+    #[test]
+    fn a_custom_harness_builds_under_its_directory_and_is_recorded() {
+        // Arrange
+        let records = vec![record(1, "runbooks/a", "Alpha", "human-reviewed", "Do A.")];
+        let mut opts = options(Target::Custom);
+        opts.harness = Some(
+            CustomHarness::new("Acme Agent", Shape::Skills, Some(".acme/skills")).expect("valid"),
+        );
+        opts.components = vec![Component::Mcp];
+
+        // Act
+        let plugin = assemble(&opts, &selection(), &snapshot(), &records).expect("assembles");
+
+        // Assert
+        let paths: Vec<&str> = plugin.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(plugin.root, ".acme/skills/ops-runbooks");
+        assert!(
+            paths.contains(&".acme/skills/ops-runbooks/SKILL.md"),
+            "{paths:?}"
+        );
+        assert!(
+            paths.contains(&"okf-mcp.json"),
+            "the shared snippet: {paths:?}"
+        );
+        let manifest = plugin
+            .files
+            .iter()
+            .find(|f| f.path == MANIFEST_FILE)
+            .expect("manifest");
+        let text = String::from_utf8_lossy(&manifest.bytes);
+        assert!(text.contains("targets: [custom]\n"), "{text}");
+        assert!(
+            text.contains(
+                "harness: { label: \"Acme Agent\", kind: skills, skills_dir: \".acme/skills\" }\n"
+            ),
+            "{text}"
+        );
+        let lock: serde_json::Value =
+            serde_json::from_slice(&plugin.files.last().unwrap().bytes).expect("json");
+        assert_eq!(lock["target"], "custom");
+        assert_eq!(lock["harness"]["skills_dir"], ".acme/skills");
+        assert_eq!(lock["harness"]["kind"], "skills");
+    }
+
+    #[test]
+    fn a_custom_target_without_a_harness_is_refused() {
+        // Arrange
+        let records = vec![record(1, "runbooks/a", "Alpha", "human-reviewed", "Do A.")];
+
+        // Act
+        let error = assemble(
+            &options(Target::Custom),
+            &selection(),
+            &snapshot(),
+            &records,
+        )
+        .expect_err("no harness")
+        .to_string();
+
+        // Assert
+        assert!(error.contains("needs a harness"), "{error}");
+    }
+
+    #[test]
+    fn the_manifest_records_the_everything_scope() {
+        // Arrange
+        let selection = Selection {
+            all: true,
+            types: vec!["Runbook".to_owned()],
+            ..Selection::default()
+        };
+
+        // Act
+        let manifest = manifest_yaml("kit", Target::Generic, None, &selection, &[]);
+
+        // Assert
+        assert!(
+            manifest.contains("- { all: true, types: [\"Runbook\"], limit: 100 }"),
+            "{manifest}"
+        );
+        assert!(!manifest.contains("harness:"));
+    }
+
+    #[test]
     fn the_manifest_records_picks() {
         // Arrange
         let selection = Selection {
@@ -2619,7 +2845,7 @@ mod tests {
         };
 
         // Act
-        let manifest = manifest_yaml("kit", Target::AgentPlugin, &selection, &[]);
+        let manifest = manifest_yaml("kit", Target::AgentPlugin, None, &selection, &[]);
 
         // Assert
         assert!(

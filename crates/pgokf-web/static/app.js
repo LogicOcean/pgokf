@@ -59,18 +59,75 @@
   // ---- agent plugin builder ------------------------------------------------
   var builder = document.getElementById('pgokf-plugin-form');
   if (builder) {
-    // The chosen target drives the note under the grid and target-only fields.
-    var syncTarget = function () {
-      var picked = builder.querySelector('input[name=target]:checked');
-      var id = picked ? picked.value : '';
-      builder.setAttribute('data-target', id);
-      builder.querySelectorAll('.target-card').forEach(function (cardEl) {
-        cardEl.classList.toggle('selected', cardEl.contains(picked));
-      });
-      builder.querySelectorAll('[data-target-note]').forEach(function (note) {
-        note.hidden = note.getAttribute('data-target-note') !== id;
-      });
+    var splitList = function (value) {
+      return value.split(',').map(function (v) { return v.trim(); }).filter(Boolean);
     };
+    var fire = function (el) { el.dispatchEvent(new Event('change', { bubbles: true })); };
+
+    // Step 1: the kind decides which agents are listed; a name outside the
+    // list adds an agent (a skills agent also says where it reads skills).
+    var kindSelect = builder.querySelector('[data-kind-select]');
+    var agentInput = builder.querySelector('[data-agent-input]');
+    var agentNote = builder.querySelector('[data-agent-note]');
+    var kindNote = builder.querySelector('[data-kind-note]');
+    var customSkills = builder.querySelector('[data-custom-skills]');
+    var agentOptions = function (kind) {
+      var list = document.getElementById('pgokf-agents-' + kind);
+      return list ? Array.prototype.slice.call(list.options) : [];
+    };
+    var findAgent = function (kind, value) {
+      var wanted = value.trim().toLowerCase();
+      if (!wanted) return null;
+      return agentOptions(kind).filter(function (option) {
+        return option.value.toLowerCase() === wanted
+          || (option.getAttribute('data-id') || '').toLowerCase() === wanted;
+      })[0] || null;
+    };
+    var syncAgent = function () {
+      if (!kindSelect || !agentInput) return;
+      var kind = kindSelect.value;
+      var name = agentInput.value.trim();
+      var kindOption = kindSelect.options[kindSelect.selectedIndex];
+      builder.setAttribute('data-kind', kind);
+      agentInput.setAttribute('list', 'pgokf-agents-' + kind);
+      if (kindNote && kindOption) kindNote.textContent = kindOption.getAttribute('data-description') || '';
+      var match = findAgent(kind, name);
+      var custom = !match && name !== '';
+      builder.setAttribute('data-custom', custom ? 'true' : 'false');
+      if (customSkills) customSkills.hidden = !(custom && kind === 'skills');
+      builder.querySelectorAll('[data-agent-name]').forEach(function (el) { el.textContent = name; });
+      if (!agentNote) return;
+      if (match) {
+        agentNote.textContent = match.getAttribute('data-notes') || '';
+      } else if (custom) {
+        agentNote.textContent = kind === 'skills'
+          ? name + ' is not in the list: it is added as a new agent, with the skill package under the directory you give below.'
+          : name + ' is not in the list: it is added as a new agent and gets the standard '
+            + (kindOption ? kindOption.textContent.toLowerCase() : kind) + ' layout.';
+      } else {
+        agentNote.textContent = 'Choose an agent from the list, or type a new name to add one.';
+      }
+    };
+    if (kindSelect && agentInput) {
+      kindSelect.addEventListener('change', function () {
+        // Keep the agent when the new kind lists it; otherwise take the first.
+        var first = agentOptions(kindSelect.value)[0];
+        if (!findAgent(kindSelect.value, agentInput.value) && first) agentInput.value = first.value;
+        syncAgent();
+      });
+      agentInput.addEventListener('input', syncAgent);
+      var opener = builder.querySelector('[data-agent-open]');
+      if (opener) {
+        opener.addEventListener('click', function () {
+          // An empty field shows the whole list; the kind's first agent
+          // applies until one is picked.
+          agentInput.value = '';
+          syncAgent();
+          agentInput.focus();
+        });
+      }
+    }
+
     // An extra's own fields show only while that extra is ticked.
     var syncExtras = function () {
       builder.querySelectorAll('[data-needs]').forEach(function (field) {
@@ -82,11 +139,9 @@
         field.hidden = !on;
       });
     };
+
     // Chips toggle a value in the comma-separated text field beside them;
     // typing in the field keeps the chips in step.
-    var splitList = function (value) {
-      return value.split(',').map(function (v) { return v.trim(); }).filter(Boolean);
-    };
     builder.querySelectorAll('[data-chips-for]').forEach(function (group) {
       var input = document.getElementById(group.getAttribute('data-chips-for'));
       if (!input) return;
@@ -106,28 +161,44 @@
         if (index === -1) list.push(value); else list.splice(index, 1);
         input.value = list.join(', ');
         syncChips();
-        input.dispatchEvent(new Event('change', { bubbles: true }));
+        fire(input);
       });
       input.addEventListener('input', syncChips);
+      builder.addEventListener('change', syncChips);
       syncChips();
     });
-    builder.addEventListener('change', function () { syncTarget(); syncExtras(); });
-    syncTarget();
+
+    builder.addEventListener('change', function () { syncAgent(); syncExtras(); });
+    syncAgent();
     syncExtras();
-    initPicker(builder);
+    initBrowser(builder, splitList, fire);
   }
 
-  // ---- file picker: browse a bundle, tick files, feed the picks field -------
-  function initPicker(form) {
-    var picker = form.querySelector('[data-picker]');
+  // ---- content browser: browse bundles, tick files, or take everything -----
+  function initBrowser(form, splitList, fire) {
     var picks = document.getElementById('p-picks');
-    if (!picker || !picks) return;
-    var bundleSelect = picker.querySelector('[data-picker-bundle]');
-    var filter = picker.querySelector('[data-picker-filter]');
-    var status = picker.querySelector('[data-picker-status]');
-    var tree = picker.querySelector('[data-picker-tree]');
-    var loaded = null;   // { bundleId, entries }
-    var openDirs = {};   // dir -> true/false once the user toggled it
+    var tree = form.querySelector('[data-browse-tree]');
+    if (!picks || !tree) return;
+    var bundleSelect = form.querySelector('[data-browse-bundle]');
+    var find = form.querySelector('[data-browse-find]');
+    var status = form.querySelector('[data-browse-status]');
+    var scopeAll = form.querySelector('[data-scope-all]');
+    var scopeName = form.querySelector('[data-scope-name]');
+    var narrow = form.querySelector('[data-narrow]');
+    var chips = form.querySelector('[data-selection-chips]');
+    var clearButton = form.querySelector('[data-clear-selection]');
+    var typesInput = document.getElementById('p-types');
+    var tagsInput = document.getElementById('p-tags');
+    var qInput = document.getElementById('p-q');
+    var idsInput = document.getElementById('p-ids');
+    var verifiedBox = form.querySelector('input[name=verified]');
+    var loaded = [];      // entries of the browsed bundles, each with bundleId/bundleName
+    var truncated = false;
+    var loadToken = 0;
+    var openDirs = {};    // group -> true/false once the user toggled it
+    var lower = function (v) { return String(v || '').toLowerCase(); };
+    var valueOf = function (input) { return input ? input.value : ''; };
+
     var pickedSet = function () {
       var set = {};
       picks.value.split('\n').forEach(function (line) {
@@ -138,47 +209,87 @@
     };
     var writePicks = function (set) {
       picks.value = Object.keys(set).join('\n');
-      picks.dispatchEvent(new Event('change', { bubbles: true }));
+      fire(picks);
     };
-    var refOf = function (entry) { return loaded.bundleId + ':' + entry.id; };
+    var refOf = function (entry) { return entry.bundleId + ':' + entry.id; };
+    var scopeLabel = function () {
+      var option = bundleSelect && bundleSelect.options[bundleSelect.selectedIndex];
+      return option && option.value ? option.textContent : 'all bundles';
+    };
+    var pathOf = function (ref) {
+      for (var i = 0; i < loaded.length; i++) {
+        if (refOf(loaded[i]) === ref) {
+          return (bundleSelect && bundleSelect.value ? '' : loaded[i].bundleName + ' / ') + loaded[i].path;
+        }
+      }
+      return ref;
+    };
+    // The client-side reading of the rule (types and tags; a search query
+    // is ranked by the server and shows only in the preview).
+    var inRule = function (entry) {
+      if (!scopeAll || !scopeAll.checked) return false;
+      var types = splitList(valueOf(typesInput)).map(lower);
+      var tags = splitList(valueOf(tagsInput)).map(lower);
+      if (types.length && types.indexOf(lower(entry.type)) === -1) return false;
+      var have = (entry.tags || []).map(lower);
+      return tags.every(function (t) { return have.indexOf(t) !== -1; });
+    };
+
     var render = function () {
       tree.textContent = '';
-      if (!loaded) return;
       var set = pickedSet();
-      var needle = (filter.value || '').trim().toLowerCase();
-      // Group by directory (the part of the path before the file name).
-      var dirs = {};
+      var needle = lower(valueOf(find)).trim();
+      var byBundle = !(bundleSelect && bundleSelect.value);
+      var groups = {};
       var order = [];
-      loaded.entries.forEach(function (entry) {
-        if (needle && (entry.path + ' ' + (entry.title || '')).toLowerCase().indexOf(needle) === -1) return;
+      loaded.forEach(function (entry) {
+        var hay = entry.path + ' ' + (entry.title || '') + ' ' + (entry.type || '') + ' ' + (entry.tags || []).join(' ');
+        if (needle && lower(hay).indexOf(needle) === -1) return;
         var slash = entry.path.lastIndexOf('/');
         var dir = slash === -1 ? '' : entry.path.slice(0, slash);
-        if (!dirs[dir]) { dirs[dir] = []; order.push(dir); }
-        dirs[dir].push(entry);
+        var key = (byBundle ? entry.bundleName + ' / ' : '') + dir;
+        if (!groups[key]) { groups[key] = []; order.push(key); }
+        groups[key].push(entry);
       });
-      // Code-unit order puts a package directory before its subdirectories.
       order.sort();
+      var shown = 0;
       var root = document.createElement('ul');
-      order.forEach(function (dir) {
+      order.forEach(function (key) {
+        var entries = groups[key];
+        shown += entries.length;
+        var picked = entries.filter(function (e) { return !!set[refOf(e)]; }).length;
         var li = document.createElement('li');
+        var row = document.createElement('div');
+        row.className = 'dir-row';
+        var all = document.createElement('input');
+        all.type = 'checkbox';
+        all.title = 'Tick every file in this directory';
+        all.checked = picked === entries.length;
+        all.indeterminate = picked > 0 && picked < entries.length;
+        all.addEventListener('change', function () {
+          var next = pickedSet();
+          entries.forEach(function (e) {
+            if (all.checked) next[refOf(e)] = true; else delete next[refOf(e)];
+          });
+          writePicks(next);
+        });
         var details = document.createElement('details');
-        details.setAttribute('data-dir', dir);
-        // A directory the user toggled keeps its state; otherwise it opens
-        // when filtering, when the tree is short, or when it holds a pick,
-        // so a ticked file is never hidden behind a closed directory.
-        var holdsPick = dirs[dir].some(function (entry) { return !!set[refOf(entry)]; });
-        details.open = Object.prototype.hasOwnProperty.call(openDirs, dir)
-          ? openDirs[dir]
-          : (!!needle || order.length <= 6 || holdsPick);
+        details.setAttribute('data-dir', key);
+        details.open = Object.prototype.hasOwnProperty.call(openDirs, key)
+          ? openDirs[key]
+          : (!!needle || order.length <= 6 || picked > 0);
         var summary = document.createElement('summary');
-        summary.textContent = (dir || '(bundle root)') + ' ';
+        var name = document.createElement('span');
+        name.className = 'dir-name';
+        name.textContent = key.replace(/ \/ $/, '') || '(bundle root)';
+        summary.appendChild(name);
         var count = document.createElement('span');
         count.className = 'muted small';
-        count.textContent = dirs[dir].length;
+        count.textContent = picked ? picked + ' of ' + entries.length + ' ticked' : entries.length + ' file' + (entries.length === 1 ? '' : 's');
         summary.appendChild(count);
         details.appendChild(summary);
         var list = document.createElement('ul');
-        dirs[dir].forEach(function (entry) {
+        entries.forEach(function (entry) {
           var item = document.createElement('li');
           var label = document.createElement('label');
           var box = document.createElement('input');
@@ -187,7 +298,8 @@
           box.checked = !!set[refOf(entry)];
           var path = document.createElement('span');
           path.className = 'pick-path';
-          path.textContent = entry.path.slice(dir ? dir.length + 1 : 0);
+          var slash = entry.path.lastIndexOf('/');
+          path.textContent = slash === -1 ? entry.path : entry.path.slice(slash + 1);
           label.appendChild(box);
           label.appendChild(path);
           if (entry.package) {
@@ -206,37 +318,152 @@
             type.textContent = entry.type;
             label.appendChild(type);
           }
-          var fileName = entry.path.slice(dir ? dir.length + 1 : 0);
-          if (entry.title && entry.title !== entry.id && entry.title !== fileName) {
+          if (entry.title && entry.title !== path.textContent) {
             var title = document.createElement('span');
             title.className = 'pick-title';
             title.textContent = entry.title;
             label.appendChild(title);
           }
+          if (inRule(entry) && !box.checked) {
+            var rule = document.createElement('span');
+            rule.className = 'in-rule';
+            rule.textContent = 'in the rule';
+            label.appendChild(rule);
+          }
           item.appendChild(label);
           list.appendChild(item);
         });
         details.appendChild(list);
-        li.appendChild(details);
+        row.appendChild(all);
+        row.appendChild(details);
+        li.appendChild(row);
         root.appendChild(li);
       });
-      tree.appendChild(root);
-      var picked = Object.keys(set).length;
-      status.textContent = (loaded.truncated ? 'first ' + loaded.entries.length + ' files shown; ' : loaded.entries.length + ' files; ')
-        + picked + ' picked';
+      if (order.length) {
+        tree.appendChild(root);
+      } else if (loaded.length) {
+        var none = document.createElement('p');
+        none.className = 'browser-empty';
+        none.textContent = 'No file matches the filter.';
+        tree.appendChild(none);
+      }
+      if (status) {
+        var ticked = Object.keys(set).length;
+        status.textContent = (needle ? shown + ' of ' + loaded.length : loaded.length) + ' file'
+          + (loaded.length === 1 ? '' : 's') + (ticked ? '; ' + ticked + ' ticked' : '')
+          + (truncated ? '; list cut at ' + loaded.length : '');
+      }
     };
+
+    var chip = function (kind, label, text, remove) {
+      var el = document.createElement('span');
+      el.className = 'sel-chip ' + kind;
+      if (label) {
+        var k = document.createElement('span');
+        k.className = 'sel-kind';
+        k.textContent = label;
+        el.appendChild(k);
+      }
+      var t = document.createElement('span');
+      t.className = 'sel-text';
+      t.textContent = text;
+      t.title = text;
+      el.appendChild(t);
+      var x = document.createElement('button');
+      x.type = 'button';
+      x.className = 'sel-x';
+      x.setAttribute('aria-label', 'Remove ' + (label ? label + ' ' : '') + text);
+      x.textContent = '×';
+      x.addEventListener('click', remove);
+      el.appendChild(x);
+      return el;
+    };
+    var removeFromList = function (input, value) {
+      input.value = splitList(input.value).filter(function (v) { return v.toLowerCase() !== value.toLowerCase(); }).join(', ');
+      fire(input);
+    };
+    var renderChips = function () {
+      if (!chips) return;
+      chips.textContent = '';
+      var items = [];
+      if (scopeAll && scopeAll.checked) {
+        items.push(chip('rule', 'everything in', scopeLabel(), function () { scopeAll.checked = false; fire(scopeAll); }));
+        splitList(valueOf(typesInput)).forEach(function (t) {
+          items.push(chip('rule', 'type', t, function () { removeFromList(typesInput, t); }));
+        });
+        splitList(valueOf(tagsInput)).forEach(function (t) {
+          items.push(chip('rule', 'tag', t, function () { removeFromList(tagsInput, t); }));
+        });
+        if (valueOf(qInput).trim()) {
+          items.push(chip('rule', 'search', qInput.value.trim(), function () { qInput.value = ''; fire(qInput); }));
+        }
+        if (valueOf(idsInput).trim()) {
+          items.push(chip('rule', 'ids', valueOf(idsInput).split('\n').filter(function (v) { return v.trim(); }).length + ' concept id(s)', function () { idsInput.value = ''; fire(idsInput); }));
+        }
+      }
+      if (verifiedBox && verifiedBox.checked) {
+        items.push(chip('rule', '', 'verified only', function () { verifiedBox.checked = false; fire(verifiedBox); }));
+      }
+      Object.keys(pickedSet()).forEach(function (ref) {
+        items.push(chip('pick', '', pathOf(ref), function () {
+          var next = pickedSet();
+          delete next[ref];
+          writePicks(next);
+        }));
+      });
+      if (!items.length) {
+        var none = document.createElement('span');
+        none.className = 'muted';
+        none.textContent = 'nothing yet: tick files below, or take everything in a bundle';
+        chips.appendChild(none);
+      }
+      items.forEach(function (item) { chips.appendChild(item); });
+      if (clearButton) clearButton.hidden = !items.length;
+    };
+
     var load = function () {
-      var bundleId = bundleSelect.value;
-      if (!bundleId) { loaded = null; render(); return; }
-      status.textContent = 'loading…';
-      fetch('/api/bundles/' + encodeURIComponent(bundleId) + '/tree', { headers: { Accept: 'application/json' } })
-        .then(function (response) { if (!response.ok) throw new Error(response.status); return response.json(); })
-        .then(function (data) {
-          loaded = { bundleId: bundleId, entries: data.entries || [], truncated: !!data.truncated };
-          render();
-        })
-        .catch(function () { loaded = null; tree.textContent = ''; status.textContent = 'could not load this bundle'; });
+      var token = ++loadToken;
+      var ids = [];
+      if (bundleSelect) {
+        if (bundleSelect.value) {
+          ids.push({ id: bundleSelect.value, name: scopeLabel() });
+        } else {
+          Array.prototype.forEach.call(bundleSelect.options, function (option) {
+            if (option.value) ids.push({ id: option.value, name: option.textContent });
+          });
+        }
+      }
+      if (status) status.textContent = 'Loading…';
+      Promise.all(ids.map(function (bundle) {
+        return fetch('/api/bundles/' + encodeURIComponent(bundle.id) + '/tree', { headers: { Accept: 'application/json' } })
+          .then(function (response) { return response.ok ? response.json() : { entries: [], truncated: false }; })
+          .then(function (data) {
+            return { bundle: bundle, entries: data.entries || [], truncated: !!data.truncated };
+          });
+      })).then(function (results) {
+        if (token !== loadToken) return;
+        loaded = [];
+        truncated = false;
+        results.forEach(function (result) {
+          truncated = truncated || result.truncated;
+          result.entries.forEach(function (entry) {
+            entry.bundleId = result.bundle.id;
+            entry.bundleName = result.bundle.name;
+            loaded.push(entry);
+          });
+        });
+        render();
+        renderChips();
+      }).catch(function () {
+        if (token === loadToken && status) status.textContent = 'The file list could not be loaded.';
+      });
     };
+
+    var syncScope = function () {
+      if (scopeName) scopeName.textContent = scopeLabel();
+      if (narrow && scopeAll) narrow.hidden = !scopeAll.checked;
+    };
+
     tree.addEventListener('toggle', function (event) {
       var details = event.target;
       if (details && details.hasAttribute && details.hasAttribute('data-dir')) {
@@ -246,17 +473,32 @@
     tree.addEventListener('change', function (event) {
       var box = event.target.closest('[data-pick]');
       if (!box) return;
-      var set = pickedSet();
-      if (box.checked) set[box.getAttribute('data-pick')] = true; else delete set[box.getAttribute('data-pick')];
-      writePicks(set);
-      render();
+      var next = pickedSet();
+      if (box.checked) next[box.getAttribute('data-pick')] = true; else delete next[box.getAttribute('data-pick')];
+      writePicks(next);
     });
-    // The picks field is the source of truth; typing in it re-marks the tree.
-    picks.addEventListener('input', render);
-    filter.addEventListener('input', render);
-    bundleSelect.addEventListener('change', function () { openDirs = {}; load(); });
-    picker.addEventListener('toggle', function () { if (picker.open && !loaded) load(); });
-    if (picker.open) load();
+    if (find) find.addEventListener('input', render);
+    if (bundleSelect) bundleSelect.addEventListener('change', function () { openDirs = {}; syncScope(); load(); });
+    if (scopeAll) scopeAll.addEventListener('change', function () { syncScope(); render(); renderChips(); });
+    if (clearButton) {
+      clearButton.addEventListener('click', function () {
+        if (scopeAll) scopeAll.checked = false;
+        [typesInput, tagsInput, qInput, idsInput].forEach(function (input) { if (input) input.value = ''; });
+        if (verifiedBox) verifiedBox.checked = false;
+        picks.value = '';
+        syncScope();
+        fire(picks);
+      });
+    }
+    // Any change to the selection fields redraws the chips and the tree's
+    // ticks (the picks field fires change itself when written).
+    form.addEventListener('change', function () { render(); renderChips(); });
+    form.addEventListener('input', function (event) {
+      if (event.target === find) return;
+      renderChips();
+    });
+    syncScope();
+    load();
   }
 
   // ---- tabs (ARIA tabs pattern; the hash names the tab as #tab-<name>) ----
