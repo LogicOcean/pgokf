@@ -50,6 +50,9 @@ type Shared = Arc<App>;
 /// Wall-clock bound on one request, covering every statement it issues.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How many of the catalog's most used tags the builder offers as chips.
+const CHIP_TAGS: usize = 14;
+
 /// Requests handled at once; the rest queue (and time out) rather than
 /// piling onto the connection pool.
 const MAX_IN_FLIGHT: usize = 64;
@@ -661,13 +664,14 @@ pub(crate) struct PluginPreview {
     pub root: String,
     pub index_file: String,
     pub file_paths: Vec<String>,
-    pub manifest_hint: String,
     /// Where the MCP configuration lands for this target, when included.
     pub mcp_note: Option<String>,
     pub mcp_call: String,
     pub download_url: String,
     /// How many of the concepts are skill packages copied whole.
     pub package_count: usize,
+    /// The chosen target's display name.
+    pub target_label: String,
 }
 
 /// One custom-metadata row, value pretty-printed.
@@ -905,6 +909,10 @@ struct PluginsPage {
     form: PluginForm,
     targets: Vec<TargetView>,
     bundles: Vec<BundleInfo>,
+    /// The catalog's concept types and its most used tags, for one-click
+    /// selectors.
+    type_facets: Vec<Facet>,
+    tag_facets: Vec<Facet>,
     preview: Option<PluginPreview>,
     error: Option<String>,
 }
@@ -2282,7 +2290,14 @@ fn target_views(selected: &str) -> Vec<TargetView> {
         .iter()
         .map(|p| TargetView {
             id: p.id.to_owned(),
-            label: p.label.to_owned(),
+            // The card shows the name; its parenthetical explainer is what
+            // the shape line already says.
+            label: p
+                .label
+                .split_once(" (")
+                .map_or(p.label, |(name, _)| name)
+                .trim()
+                .to_owned(),
             root: if p.root.is_empty() {
                 "workspace root".to_owned()
             } else {
@@ -2427,7 +2442,6 @@ async fn plugin_preview(
             .as_ref()
             .map(|p| p.files.iter().map(|f| f.path.clone()).collect())
             .unwrap_or_default(),
-        manifest_hint: format!("{}: {}", profile.label, profile.notes),
         mcp_note,
         mcp_call: serde_json::to_string_pretty(&serde_json::json!({
             "name": "build_workspace_plugin",
@@ -2436,6 +2450,7 @@ async fn plugin_preview(
         .unwrap_or_default(),
         download_url: format!("/plugins/build.zip?{}", form.query_string),
         package_count: plugin.as_ref().map_or(0, |p| p.package_count),
+        target_label: profile.label.to_owned(),
         concepts,
     })
 }
@@ -2461,12 +2476,17 @@ async fn preview_or_message(
 async fn plugins_page(State(app): State<Shared>, Query(params): Query<PluginParams>) -> PageResult {
     let (form, target, selection, base_model) = params.normalize()?;
     let bundles = app.db.bundles().await?;
+    let type_facets = app.db.catalog_facets(None, "type").await?;
+    let mut tag_facets = app.db.catalog_facets(None, "tag").await?;
+    tag_facets.truncate(CHIP_TAGS);
     let (preview, error) = preview_or_message(&app, &form, target, &selection, base_model).await;
     html(&PluginsPage {
-        shell: Shell::new(&app, "Plugin builder", "plugins"),
+        shell: Shell::new(&app, "Agent Plugin builder", "plugins"),
         targets: target_views(&form.target),
         form,
         bundles,
+        type_facets,
+        tag_facets,
         preview,
         error,
     })

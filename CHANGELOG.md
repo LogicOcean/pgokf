@@ -96,6 +96,13 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
   texts; a node's card lists its connections for touch), zoom, center,
   2D/3D, and full-screen controls, a finder, and "explore from here".
   `/api/graph` serves the same document.
+- The **Agent Plugin builder** page is a five-step flow: choose the agent
+  (a card grid with each harness's directory and a note for the chosen
+  one), choose the content (bundle, search, one-click type and tag chips
+  from the catalog's facets, more selectors folded away), add extras (each
+  extra's own fields appear only when it is ticked), name it, then preview
+  and download. The result summarizes the build in one line with the
+  download button beside it; the MCP call is folded under it.
 - The UI is laid out for phones: scrolling navigation and tab strips,
   tables that scroll inside their panels, results before filters, the
   builder's target list folded behind its summary, and graph controls on

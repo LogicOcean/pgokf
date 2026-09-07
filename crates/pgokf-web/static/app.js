@@ -56,34 +56,64 @@
     });
   });
 
-  // ---- plugin builder: the chosen target drives which fields show -------
+  // ---- agent plugin builder ------------------------------------------------
   var builder = document.getElementById('pgokf-plugin-form');
   if (builder) {
-    var picker = builder.querySelector('details.targets-picker');
-    var pickerLabel = builder.querySelector('[data-target-label]');
+    // The chosen target drives the note under the grid and target-only fields.
     var syncTarget = function () {
       var picked = builder.querySelector('input[name=target]:checked');
-      builder.setAttribute('data-target', picked ? picked.value : '');
+      var id = picked ? picked.value : '';
+      builder.setAttribute('data-target', id);
       builder.querySelectorAll('.target-card').forEach(function (cardEl) {
         cardEl.classList.toggle('selected', cardEl.contains(picked));
       });
-      if (pickerLabel && picked) {
-        var label = picked.closest('.target-card').querySelector('.target-label');
-        pickerLabel.textContent = label ? label.textContent : picked.value;
-      }
-    };
-    builder.addEventListener('change', syncTarget);
-    syncTarget();
-    // On a phone the ten target cards fold behind their summary.
-    if (picker) {
-      var narrow = window.matchMedia('(max-width: 900px)');
-      var foldPicker = function () { picker.open = !narrow.matches; };
-      foldPicker();
-      narrow.addEventListener('change', foldPicker);
-      builder.addEventListener('change', function (event) {
-        if (event.target.name === 'target' && narrow.matches) picker.open = false;
+      builder.querySelectorAll('[data-target-note]').forEach(function (note) {
+        note.hidden = note.getAttribute('data-target-note') !== id;
       });
-    }
+    };
+    // An extra's own fields show only while that extra is ticked.
+    var syncExtras = function () {
+      builder.querySelectorAll('[data-needs]').forEach(function (field) {
+        var needs = field.getAttribute('data-needs').split(/\s+/);
+        var on = needs.some(function (name) {
+          var box = builder.querySelector('input[name="' + name + '"]');
+          return box && box.checked;
+        });
+        field.hidden = !on;
+      });
+    };
+    // Chips toggle a value in the comma-separated text field beside them;
+    // typing in the field keeps the chips in step.
+    var splitList = function (value) {
+      return value.split(',').map(function (v) { return v.trim(); }).filter(Boolean);
+    };
+    builder.querySelectorAll('[data-chips-for]').forEach(function (group) {
+      var input = document.getElementById(group.getAttribute('data-chips-for'));
+      if (!input) return;
+      var syncChips = function () {
+        var picked = splitList(input.value).map(function (v) { return v.toLowerCase(); });
+        group.querySelectorAll('[data-chip]').forEach(function (chip) {
+          var on = picked.indexOf(chip.getAttribute('data-chip').toLowerCase()) !== -1;
+          chip.setAttribute('aria-pressed', on ? 'true' : 'false');
+        });
+      };
+      group.addEventListener('click', function (event) {
+        var chip = event.target.closest('[data-chip]');
+        if (!chip) return;
+        var value = chip.getAttribute('data-chip');
+        var list = splitList(input.value);
+        var index = list.map(function (v) { return v.toLowerCase(); }).indexOf(value.toLowerCase());
+        if (index === -1) list.push(value); else list.splice(index, 1);
+        input.value = list.join(', ');
+        syncChips();
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      input.addEventListener('input', syncChips);
+      syncChips();
+    });
+    builder.addEventListener('change', function () { syncTarget(); syncExtras(); });
+    syncTarget();
+    syncExtras();
   }
 
   // ---- tabs (ARIA tabs pattern; the hash names the tab as #tab-<name>) ----

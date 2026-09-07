@@ -1,19 +1,21 @@
 {% if let Some(e) = error %}<p class="notice bad">{{ e }}</p>{% endif %}
 {% if let Some(p) = preview %}
-<div class="results-head">
-  <h2>{{ p.concepts.len() }} concept{{ p.concepts.len()|pluralize }} {{ p.description }}{% if p.package_count > 0 %} <span class="muted">· {{ p.package_count }} skill package{{ p.package_count|pluralize }} copied whole</span>{% endif %}</h2>
-  <p class="muted">{% if p.truncated %}The selection hit its limit; raise it or narrow the selection. {% endif %}{{ p.manifest_hint }}</p>
-</div>
 {% if p.concepts.is_empty() %}
-<div class="empty-state"><h2>Nothing matched</h2><p>No visible concept satisfies every selector. Loosen a filter or check the bundle.</p></div>
+<div class="empty-state"><h3>Nothing matched</h3><p>No visible concept satisfies every selector in step 2. Loosen a filter or pick another bundle.</p></div>
 {% else %}
-<div class="builder-actions">
-  <a class="btn primary" href="{{ p.download_url }}" download>Download {{ form.name }}.zip</a>
-  <span class="muted small">Unpack at the workspace root. Reading the sources for the download is recorded in the catalog's access log.</span>
+<div class="result-summary">
+  <div class="result-facts">
+    <p class="result-line"><strong>{{ p.concepts.len() }} concept{{ p.concepts.len()|pluralize }}</strong> {{ p.description }}{% if p.package_count > 0 %}, including <strong>{{ p.package_count }} skill package{{ p.package_count|pluralize }}</strong> copied whole{% endif %}.</p>
+    <p class="muted">For <strong>{{ p.target_label }}</strong>: the files go under <code>{{ p.root }}</code> and the harness reads <code>{{ p.index_file }}</code> first.{% if let Some(m) = p.mcp_note %} {{ m }}{% endif %}{% if p.truncated %} <span class="warn-text">The selection hit its limit; raise it in step 2 or narrow the selection.</span>{% endif %}</p>
+  </div>
+  <div class="result-cta">
+    <a class="btn primary big" href="{{ p.download_url }}" download>Download {{ form.name }}.zip</a>
+    <span class="muted small">Unpack at the workspace root. Reading the sources for the download is recorded in the catalog's access log.</span>
+  </div>
 </div>
 <div class="two-col">
   <section class="panel">
-    <div class="panel-head"><h3>Included concepts</h3></div>
+    <div class="panel-head"><h3>Included concepts <span class="count">{{ p.concepts.len() }}</span></h3></div>
     <ol class="hits compact">
       {% for c in p.concepts %}
       <li class="hit">
@@ -24,20 +26,19 @@
     </ol>
   </section>
   <section class="panel">
-    <div class="panel-head"><h3>Files in the zip</h3></div>
-    <p class="muted small">Written under <code>{{ p.root }}</code>; the harness reads <code>{{ p.index_file }}</code> first.{% if let Some(m) = p.mcp_note %} {{ m }}{% endif %}</p>
+    <div class="panel-head"><h3>Files in the zip <span class="count">{{ p.file_paths.len() }}</span></h3></div>
     <ul class="tree-list">{% for f in p.file_paths %}<li><code>{{ f }}</code></li>{% endfor %}</ul>
   </section>
 </div>
-<section class="panel">
-  <div class="panel-head"><h3>The same build from an agent</h3></div>
-  <p class="muted small">Any MCP client connected to <code>pgokf-mcp</code> can call the <code>build_workspace_plugin</code> tool with these arguments; with <code>output_dir</code> it writes the tree into the workspace directly.</p>
+<details class="panel agent-call">
+  <summary>The same build from an agent <span class="muted small">(the <code>build_workspace_plugin</code> MCP call)</span></summary>
+  <p class="muted small">Any MCP client connected to <code>pgokf-mcp</code> can call the tool with these arguments; with <code>output_dir</code> it writes the tree into the workspace directly.</p>
   <pre class="json">{{ p.mcp_call }}</pre>
-</section>
+</details>
 {% endif %}
 {% else if !form.has_selection %}
 <div class="empty-state">
-  <h2>Choose what to include</h2>
-  <p>A bundle, a query, types, tags, or concept ids. The preview lists the concepts the reader role can see and the files the plugin will contain; nothing is exported until you download.</p>
+  <h3>Nothing selected yet</h3>
+  <p>Pick a bundle, a type, a tag, a search, or concept ids in step 2. The preview appears here as soon as something matches.</p>
 </div>
 {% endif %}
