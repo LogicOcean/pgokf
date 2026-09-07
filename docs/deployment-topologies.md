@@ -291,7 +291,11 @@ outside the database and talks to the catalog through the public SQL surface.
 - **[`pgokf-mcp`](https://github.com/LogicOcean/pgokf/tree/main/crates/pgokf-mcp)** is a Model Context Protocol server that
   exposes read-only catalog tools (search, similar, neighbors, get-concept) to
   AI agents over stdio, connecting as a `pgokf_reader`-capable role and
-  optionally pinning `pgokf.tenant` with `--tenant`.
+  optionally pinning `pgokf.tenant` with `--tenant`. `--http <addr>` serves the
+  same tools over HTTP for clients that cannot launch a subprocess; that
+  endpoint is reachable, so every request carries a bearer token from
+  `--tokens-file` and the token's role (`reader` or `builder`) decides which
+  tools it may call.
 
 All three share one connection helper (the `pgokf-pgconn` crate): plaintext to
 PostgreSQL by default, with the same opt-in verified-TLS session (`--tls` or

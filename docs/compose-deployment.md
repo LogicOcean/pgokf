@@ -30,6 +30,7 @@ operations see [operations.md](operations.md); for the knobs see
 | `ingest` (profile `ingest`) | companions image | `pgokf-ingest --watch`: mountless ingestion of a bucket-hosted bundle. |
 | `ui` (profile `ui`) | companions image | `pgokf-web`: the read-only web UI and JSON API, published on `PGOKF_UI_BIND:PGOKF_UI_PORT` (loopback `8080` by default). See [the web UI](#the-web-ui). |
 | `mcp` (profile `tools`) | companions image | `pgokf-mcp` over stdio for AI-agent clients, as the reader role. |
+| `mcp-http` (profile `mcp-http`) | companions image | The same MCP server over HTTP, on `PGOKF_MCP_BIND:PGOKF_MCP_PORT` (loopback `8081` by default), for agent clients that cannot launch a subprocess. Every request carries a bearer token. See [MCP over HTTP](#mcp-over-http). |
 
 The network is **external** (created once, never owned by the stack) so
 `docker compose down` cannot destroy it out from under other containers that
@@ -88,6 +89,7 @@ the ones that matter most:
 | `PGOKF_BIND_ADDR`, `PGOKF_PORT` | Interface and port to publish PostgreSQL on. **Loopback by default**; use a private or VPN address to reach it from other hosts. Never a public interface without TLS and a firewall (see [Exposure](#exposure-and-tls)). |
 | `POSTGRES_PASSWORD`, `PGOKF_ADMIN_PASSWORD`, `PGOKF_WRITER_PASSWORD`, `PGOKF_READER_PASSWORD` | The superuser and the three tier accounts. Generate with `openssl rand -hex 24`: hex is URL-safe (the companions embed these in connection URLs) and contains no `$` (which compose interpolates; a literal one is `$$`). The `PGOKF_*` passwords may also be supplied as files through `PGOKF_*_PASSWORD_FILE` (compose secrets). |
 | `OKF_EMBED_TENANT`, `OKF_INGEST_TENANT`, `OKF_MCP_TENANT` | Optional `pgokf.tenant` scope for each companion's session (see [multi-tenancy](multi-tenancy.md#requiring-a-tenant-require_tenant)); required once the catalog policy `require_tenant` is on. |
+| `OKF_MCP_TOKENS_DIR`, `PGOKF_MCP_BIND`, `PGOKF_MCP_PORT`, `OKF_MCP_ALLOWED_ORIGINS` | The `mcp-http` profile: the host directory holding the `tokens` file, the interface and port to publish it on, and the browser origins allowed to call it. See [MCP over HTTP](#mcp-over-http). |
 | `PGOKF_POLICY` | JSON applied through `pgokf.set_config` on first init. **`embedding_dim` must equal your model's output dimension** (1024 for `Qwen3-Embedding-0.6B`, 768 for `nomic-embed-text`, 1536 for `text-embedding-3-small`); `store_source: true` keeps the source bytes in PostgreSQL so one dump is a complete backup; `allowed_roots: ["/bundles"]` confines registration to the mount; `search_backend` is `native` or `bm25`. |
 | `OKF_EMBED_ENDPOINT`, `OKF_EMBED_MODEL`, `OKF_EMBED_API_KEY` | Base URL (without `/v1/embeddings`), model name, optional bearer token. |
 | `PGOKF_SHARED_BUFFERS`, `PGOKF_EFFECTIVE_CACHE_SIZE`, `PGOKF_MAINTENANCE_WORK_MEM`, `PGOKF_WORK_MEM`, `PGOKF_SHM_SIZE` | Memory sizing. A common starting point is 25 % of RAM for `shared_buffers` and 50-75 % for `effective_cache_size`; the BM25 index and ANN index builds like a generous `maintenance_work_mem`. |
@@ -283,6 +285,63 @@ and `OKF_UI_OIDC_REDIRECT_URL`, and give the stack a
 `OKF_UI_SESSION_SECRET` as usual.
 
 See the crate README for the roles and the security model.
+
+---
+
+## MCP over HTTP
+
+Agent clients normally launch `pgokf-mcp` themselves and talk to it over
+stdio (`docker compose run --rm -T mcp`). A client that cannot start a
+subprocess - a hosted agent, a browser-based client, a fleet of agents that
+should share one connection to the catalog - reaches the same tools over
+HTTP instead.
+
+That endpoint is reachable, so it is never open: every request carries a
+bearer token, and the token's role decides which tools it may call. Create
+the token directory, mint a token, and start the profile:
+
+```sh
+mkdir -p ./mcp-tokens && chmod 700 ./mcp-tokens
+docker compose run --rm -T mcp \
+  pgokf-mcp hash-token --name fleet --role reader \
+    --tokens-file /etc/pgokf/mcp/tokens
+# the line is appended for you; the token is printed once, so copy it now
+docker compose --profile mcp-http up -d
+```
+
+Set `OKF_MCP_TOKENS_DIR=./mcp-tokens` in `.env` (that is also the default).
+The endpoint is `POST http://127.0.0.1:8081/mcp`; move it with
+`PGOKF_MCP_BIND` / `PGOKF_MCP_PORT`. `GET /healthz` answers without a token.
+
+```json
+{
+  "mcpServers": {
+    "pgokf": {
+      "type": "http",
+      "url": "https://catalog.example/mcp",
+      "headers": { "Authorization": "Bearer pgokf_..." }
+    }
+  }
+}
+```
+
+Two roles: `reader` searches and reads the catalog; `builder` may also build
+workspace plugins. Both are read-only against the database - the service
+connects as the reader role. `tools/list` shows only the tools the token's
+role may call. Removing a line from the tokens file revokes that token within
+a second, with no restart; emptying the file revokes everyone. `GET /healthz`
+needs no token and answers 503 when the tokens file has stopped reading or
+the catalog has stopped answering, and the service stops outright if its link
+to PostgreSQL closes, which `restart: unless-stopped` then heals.
+
+One process serves one tenant: `OKF_MCP_TENANT` scopes its single catalog
+session, and a token carries no tenant of its own.
+
+It does not terminate TLS, and it refuses any request carrying a browser
+`Origin` you have not named in `OKF_MCP_ALLOWED_ORIGINS` (the defence against
+a page in someone's browser reaching this server on your network). Keep it on
+loopback or a private network and put a TLS-terminating reverse proxy in
+front of it before exposing it, exactly as for the web UI.
 
 ## Backups and restore
 

@@ -166,6 +166,46 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
   (mounted read-write), editors change documents of directory bundles in
   place, written atomically and confined to the bundle, and the bundle is
   refreshed; the compose stack mounts the bundles into the UI for it.
+- **`pgokf-mcp --http`: the MCP server over HTTP, with tokens and roles.**
+  The same JSON-RPC messages the stdio transport carries, served at
+  `POST /mcp` for clients that cannot launch a subprocess (a hosted agent, a
+  fleet sharing one connection to the catalog). One implementation answers
+  both transports, so they cannot drift apart; the only difference is who is
+  asking. It is the Streamable HTTP transport without the parts a
+  request/response server does not need: the server never speaks first, so
+  it opens no event stream and issues no session id, and `GET`/`DELETE`
+  answer `405`. `initialize` answers with the revision the client asked for
+  (`2024-11-05`, `2025-03-26`, `2025-06-18`) and batches are refused.
+  Over stdio the client already holds the connection string and there is
+  nothing to authenticate; this endpoint is reachable, so it is never open.
+  Every request carries a bearer token from `--tokens-file`
+  (`name:role:sha256`, minted by `pgokf-mcp hash-token --tokens-file`, which
+  appends the line itself and shows the token once), read only from the
+  `Authorization` header, checked for the shape a minted token has before it
+  is hashed, and matched in constant time; the check runs before the body is
+  read and before a request takes a working slot, so an anonymous caller can
+  neither queue nor buffer anything. The file is re-read when it changes (at
+  most once a second), so removing a line revokes a token without a restart
+  and an emptied file revokes everyone; a file that stops reading keeps the
+  last good set for one minute and then refuses everything, so a revocation
+  cannot fail silently, and `GET /healthz` answers 503 while it — or the
+  catalog connection, which is never re-established — is unwell. The token's
+  role is the single decision point for what it may reach — `reader`
+  searches and reads, `builder` may also build workspace plugins — and
+  `tools/list` filters by the same answer `tools/call` enforces, showing
+  neither a tool (`-32001` if called) nor an argument the caller may not
+  use; a tool that does not exist is reported as unknown rather than as a
+  refusal. A request carrying a browser `Origin` is refused unless the
+  operator named it in `--allowed-origins`, which is the defence against a
+  page in someone's browser reaching a server on their network, and a named
+  origin gets the CORS answers a browser needs. Arguments that act on the
+  server's own filesystem are marked in the tool schemas and refused over
+  the network, so the next one is refused the day it is added. Bodies,
+  their arrival, request concurrency, request time, and catalog statements
+  are all bounded; TLS belongs in front of it, and the server says so if it
+  binds an address reachable from elsewhere. New compose profile `mcp-http`
+  with `PGOKF_MCP_BIND`, `PGOKF_MCP_PORT`, `OKF_MCP_TOKENS_DIR`, and
+  `OKF_MCP_ALLOWED_ORIGINS`.
 - **GitHub Copilot** is a target (`copilot`: `.github/skills/`, MCP entry
   in `.github/mcp.json` as a typed `local` server that inherits Copilot's
   environment). **Custom agents:** `target: custom` with a harness

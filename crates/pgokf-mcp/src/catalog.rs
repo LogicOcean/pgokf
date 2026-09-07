@@ -7,12 +7,14 @@
 //! exactly what the SQL functions return, with no per-column marshalling.
 
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use pgokf_workspace::{
     BuildOptions, Component, ConceptRef, CustomHarness, Profile, Selection, Shape, Target,
 };
 use serde_json::{Value, json};
+use tokio::task::JoinHandle;
 use tokio_postgres::Client;
 use tokio_postgres::types::ToSql;
 
@@ -23,8 +25,15 @@ const DEFAULT_SIMILAR_LIMIT: i32 = 10;
 /// Default `max_hops` for `concept_neighbors` when the caller omits it.
 const DEFAULT_MAX_HOPS: i32 = 2;
 /// Largest plugin whose file contents are returned inline (bytes); above
-/// it the caller is told to pass `output_dir` instead.
+/// it the caller is told to narrow the selection.
 const INLINE_PLUGIN_BYTES: usize = 1_048_576;
+
+/// The schema keyword marking an argument that acts on the host this server
+/// runs on rather than on the caller's. A transport that carries requests
+/// from somewhere else refuses every argument marked with it, and derives
+/// that set from the schemas below rather than keeping its own list, so a
+/// new host-only argument is refused the day it is added.
+pub const HOST_ONLY: &str = "x-okf-host-only";
 
 /// A live catalog connection, optionally scoped to one tenant.
 pub struct Catalog {
@@ -33,6 +42,10 @@ pub struct Catalog {
     database_name: String,
     /// The session's tenant, carried into generated MCP configurations.
     tenant: Option<String>,
+    /// The connection driver. It finishes only when the link to PostgreSQL
+    /// is gone for good, and this connection is never re-established, so a
+    /// long-running transport takes it and stops when it ends.
+    driver: Option<JoinHandle<()>>,
 }
 
 impl Catalog {
@@ -40,9 +53,9 @@ impl Catalog {
     /// session's `pgokf.tenant` so tenant row-level security is enforced.
     ///
     /// `force_tls` (the `--tls` flag) requires an encrypted link; TLS is also
-    /// negotiated for an `sslmode=require` connection URL. The connection driver
-    /// task is spawned by the shared helper; its handle is detached because the
-    /// server runs until stdin EOF and the process exit tears the task down.
+    /// negotiated for an `sslmode=require` connection URL. The connection
+    /// driver task is spawned by the shared helper; [`Catalog::take_driver`]
+    /// hands its handle to a transport that outlives one client.
     ///
     /// # Errors
     ///
@@ -52,7 +65,7 @@ impl Catalog {
         tenant: Option<&str>,
         force_tls: bool,
     ) -> Result<Self> {
-        let (client, _connection) = pgokf_pgconn::connect(database_url, force_tls)
+        let (client, driver) = pgokf_pgconn::connect(database_url, force_tls)
             .await
             .context("connecting to PostgreSQL")?;
 
@@ -69,7 +82,57 @@ impl Catalog {
             client,
             database_name,
             tenant: tenant.map(str::to_owned),
+            driver: Some(driver),
         })
+    }
+
+    /// Take the connection driver, to wait on it.
+    ///
+    /// It finishes only when the link to PostgreSQL is gone, and nothing
+    /// re-establishes it, so a server that means to keep running takes this
+    /// and stops when it ends rather than answering every later call with
+    /// the same failure. A second call returns `None`.
+    pub fn take_driver(&mut self) -> Option<JoinHandle<()>> {
+        self.driver.take()
+    }
+
+    /// Bound every statement this session runs.
+    ///
+    /// One connection is shared by every in-flight request, so a query that
+    /// outlives the caller's patience would otherwise keep running and hold
+    /// up everything pipelined behind it. Cancelling the future does not
+    /// cancel the query; a server-side timeout does.
+    ///
+    /// # Errors
+    ///
+    /// The `SET` failing.
+    pub async fn set_statement_timeout(&self, timeout: Duration) -> Result<()> {
+        let millis = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+        self.client
+            .execute(
+                "SELECT set_config('statement_timeout', $1, false)",
+                &[&millis.to_string()],
+            )
+            .await
+            .context("setting the statement timeout")?;
+        Ok(())
+    }
+
+    /// Whether the catalog still answers.
+    ///
+    /// The connection is never re-established, so a link that has died stays
+    /// dead: a health probe that reports this lets a supervisor restart the
+    /// process instead of leaving it up and failing every call.
+    ///
+    /// # Errors
+    ///
+    /// The query failing, which means the link is gone.
+    pub async fn ping(&self) -> Result<()> {
+        self.client
+            .query_one("SELECT 1", &[])
+            .await
+            .context("the catalog did not answer")?;
+        Ok(())
     }
 
     /// The MCP `tools/list` payload: the catalog tools this server exposes,
@@ -189,8 +252,8 @@ impl Catalog {
                         "components": {"type": "array", "items": {"type": "string", "enum": ["mcp", "guide", "tools"]}, "description": "Extra parts: mcp (the harness's MCP server config for pgokf-mcp; the connection string is never written), guide (how to use the catalog: identities, trust tiers, MCP tools, JSON API), tools (okf.sh helper over the JSON API). Default: all three."},
                         "mcp_command": {"type": "string", "description": "How the harness starts the MCP server (default pgokf-mcp)."},
                         "web_url": {"type": "string", "description": "Base URL of the pgokf web UI, for the guide and the helper script."},
-                        "output_dir": {"type": "string", "description": "Write the tree under this workspace directory instead of returning contents."},
-                        "overwrite": {"type": "boolean", "description": "With output_dir: replace files that already exist, including an existing AGENTS.md (default false; symbolic links are never followed)."}
+                        "output_dir": {"type": "string", HOST_ONLY: true, "description": "Write the tree under this workspace directory instead of returning contents. Local transports only: over HTTP the tree would be written on the server, so it is refused."},
+                        "overwrite": {"type": "boolean", HOST_ONLY: true, "description": "With output_dir: replace files that already exist, including an existing AGENTS.md (default false; symbolic links are never followed)."}
                     },
                     "required": ["target"]
                 }
@@ -441,7 +504,9 @@ impl Catalog {
             }
             None => {
                 result["note"] = Value::String(format!(
-                    "the tree is {} bytes; pass output_dir to write it instead of returning it inline",
+                    "the tree is {} bytes; narrow the selection (fewer concepts, or fewer \
+                     components), or on a local transport pass output_dir to write it instead \
+                     of returning it inline",
                     plugin.size()
                 ));
             }

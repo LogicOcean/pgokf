@@ -37,7 +37,7 @@ standalone companions built alongside the extension:
 | `crates/extension` | The pgrx extension (package `pgokf`): the SQL surface, base tables, the shared register/refresh engine, search, graph, provenance, history, audit, admin, configuration, roles, GUCs, and error mapping. |
 | `crates/pgokf-ingest` | Standalone mountless-ingestion companion: lists an S3-compatible bucket, diffs against the catalog, and streams changed files to `register_bundle_content`; one-shot or continuous with `--watch`. |
 | `crates/pgokf-embed` | Standalone embedding companion: computes concept embeddings against an OpenAI-compatible endpoint and streams them in via `set_concept_embedding`. |
-| `crates/pgokf-mcp` | Standalone MCP server exposing the catalog read surface (search, graph, provenance) to AI agents over the Model Context Protocol. |
+| `crates/pgokf-mcp` | Standalone MCP server exposing the catalog read surface (search, graph, provenance) to AI agents over the Model Context Protocol, on stdio or over HTTP with bearer tokens and roles. |
 | `crates/pgokf-pgconn` | Shared TLS-capable PostgreSQL connection helper used by the companions. |
 
 Keeping the parser and sync engine free of any pgrx dependency makes them unit

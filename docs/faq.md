@@ -397,7 +397,8 @@ PostgreSQL, and reach the catalog only through its public SQL functions:
   `pgokf.set_concept_embedding`.
 - **`pgokf-mcp`**: a Model Context Protocol server exposing the catalog to AI
   agents over stdio JSON-RPC (tools backed by `concept_search`, `find_similar`,
-  `concept_neighbors`, and a concept getter).
+  `concept_neighbors`, and a concept getter), or over HTTP (`--http`) with a
+  bearer token per request and a role deciding which tools it may call.
 - **`pgokf-pgconn`**: the shared connect helper the other three use; it adds
   optional TLS to PostgreSQL (`--tls`, env `OKF_PG_TLS`, or
   `sslmode=require`).

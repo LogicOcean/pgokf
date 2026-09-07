@@ -13,6 +13,9 @@ A production-shaped deployment of a pgokf catalog on one Docker host:
 - **ingest** (profile `ingest`) - `pgokf-ingest --watch` for a bucket-hosted
   bundle, if you have one.
 - **mcp** (profile `tools`) - the MCP server for AI-agent clients.
+- **mcp-http** (profile `mcp-http`) - the same MCP server over HTTP for
+  agent clients that cannot launch a subprocess; every request carries a
+  bearer token from `OKF_MCP_TOKENS_DIR/tokens`.
 
 The full runbook - sizing, exposure, embeddings, BM25, backups and restore,
 upgrades - is [docs/compose-deployment.md](../../docs/compose-deployment.md).

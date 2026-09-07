@@ -3,12 +3,17 @@
 A **Model Context Protocol** server that exposes the [`pgokf`](../extension)
 catalog to AI agents as MCP tools.
 
-`pgokf-mcp` is a standalone async binary that speaks MCP over **stdio**:
-newline-delimited JSON-RPC 2.0 on stdin/stdout. It implements the MCP handshake
-(`initialize` → `serverInfo`/`capabilities`, then `tools/list` and `tools/call`)
-and backs each tool with a query against the shipped `pgokf` public functions.
-The JSON-RPC layer is **hand-rolled on `serde_json`** - no MCP SDK dependency,
-so it adds nothing new to the workspace's `cargo deny` surface.
+`pgokf-mcp` is a standalone async binary that speaks MCP over **stdio** by
+default: newline-delimited JSON-RPC 2.0 on stdin/stdout. It implements the MCP
+handshake (`initialize` → `serverInfo`/`capabilities`, then `tools/list` and
+`tools/call`) and backs each tool with a query against the shipped `pgokf`
+public functions. The JSON-RPC layer is **hand-rolled on `serde_json`** - no MCP
+SDK dependency, so it adds nothing new to the workspace's `cargo deny` surface.
+
+`--http <addr>` serves the same messages over HTTP instead, for clients that
+cannot launch a subprocess. That endpoint is reachable, so it is never open:
+every request carries a bearer token and the token's role decides which tools it
+may call. See [Serving it over HTTP](#serving-it-over-http).
 
 ## Tools
 
@@ -43,6 +48,9 @@ package.
 | `--database-url` | `OKF_PG_URL` | PostgreSQL URL for a `pgokf_reader`-capable role (required) |
 | `--tenant` | `OKF_TENANT` | Apply a `pgokf.tenant` scope for the session (multi-tenant isolation; required once the catalog's `require_tenant` policy is on) |
 | `--tls` | `OKF_PG_TLS` | Require a TLS-encrypted link to PostgreSQL (default off) |
+| `--http` | `OKF_MCP_HTTP_BIND` | Serve MCP over HTTP on this address instead of over stdio (needs `--tokens-file`) |
+| `--tokens-file` | `OKF_MCP_TOKENS_FILE` | The tokens that may call the HTTP endpoint; also where `hash-token` appends a new one |
+| `--allowed-origins` | `OKF_MCP_ALLOWED_ORIGINS` | Browser origins allowed to call the HTTP endpoint, comma-separated (default: none, which refuses every request carrying an `Origin`) |
 
 ### PostgreSQL transport (TLS)
 
@@ -72,6 +80,148 @@ style client config:
 The agent then sees the tools above and can search, expand, and read the
 catalog. Prefer supplying the connection string through `OKF_PG_URL` in `env`
 rather than on the command line.
+
+## Serving it over HTTP
+
+Some clients cannot launch a subprocess: a hosted agent, a browser-based
+client, a fleet of agents that should share one connection to the catalog.
+`--http <addr>` serves the same JSON-RPC messages over HTTP - the same
+implementation answers both transports, so they cannot drift apart.
+
+```sh
+pgokf-mcp --http 127.0.0.1:8081 --tokens-file /etc/pgokf/mcp/tokens
+```
+
+The endpoint is `POST /mcp`. This is the MCP **Streamable HTTP** transport with
+the parts a request/response server does not need left out: the server never
+speaks first, so it opens no event stream and issues no session id, and
+`GET`/`DELETE` on the endpoint answer `405` as the specification allows. The
+`initialize` handshake answers with the revision the client asked for when it
+is one of `2024-11-05`, `2025-03-26`, or `2025-06-18`, and with the newest of
+those otherwise. JSON-RPC batches are refused (`-32600`), as the current
+revision requires.
+
+`GET /healthz` needs no token and answers `{"status":"ok"}`, or **503**
+`{"status":"degraded"}` when the catalog has stopped answering or the tokens
+file is no longer being believed - what is wrong goes to the log, not to
+whoever found the port. The connection to PostgreSQL is never re-established,
+so wire this to a container health check and let the supervisor restart the
+process.
+
+Over stdio the client launched the server and already holds the connection
+string, so there is nothing to authenticate. Over HTTP the server is
+**reachable**, so:
+
+- **Every request carries a bearer token.** No token, an unknown token, or a
+  token anywhere but the `Authorization: Bearer` header is `401`. A token in a
+  query string would be written to every access log between the client and
+  here, so it is not read from one. The check runs before the request body is
+  read and before a request takes one of the server's working slots, so an
+  anonymous caller cannot make this server buffer anything or queue anything.
+- **The token's role decides which tools it may call.** `tools/list` shows only
+  those tools - and only the arguments the caller may use - so a client is
+  never offered something it cannot use, and `tools/call` refuses the rest with
+  JSON-RPC error `-32001`. A tool that does not exist is reported as unknown,
+  not as a refusal.
+- **A request carrying a browser `Origin` is refused** unless the operator
+  named that origin in `--allowed-origins`. This is what stops a page in
+  someone's browser from reaching a server on their private network. A named
+  origin also gets the CORS answers a browser needs (preflight, and the
+  response marked readable); naming none allows no browser anything.
+- **`output_dir` and `overwrite` are refused** (`-32602`): they would write the
+  built plugin onto the *server's* filesystem, not the caller's. Leave them out
+  and the files come back inline in the result (up to 1 MiB; above that, narrow
+  the selection).
+- **Requests are bounded**: 1 MiB of body, 15 seconds to send it, 32 worked on
+  at once across every connection, 60 seconds each, and a statement timeout on
+  the catalog under that so a query the caller gave up on does not keep
+  running.
+- **TLS is not terminated here.** Bind it to the loopback interface and put a
+  reverse proxy in front of it, or keep it on a private network; the server
+  says so at startup if the address it binds is reachable from elsewhere.
+- **One process serves one tenant.** `--tenant` scopes the single catalog
+  session; a token carries no tenant of its own. Run one server per tenant.
+
+Authentication is a static token, not OAuth. A `401` says
+`WWW-Authenticate: Bearer realm="pgokf-mcp", error="invalid_token"` rather than
+pointing at an authorization server, so a client should be configured with the
+token rather than left to discover one.
+
+### Tokens and roles
+
+Mint a token with `hash-token`. Only the SHA-256 digest is stored, so the token
+is shown once and nothing can recover it later:
+
+```sh
+pgokf-mcp hash-token --name fleet --role reader --tokens-file /etc/pgokf/mcp/tokens
+pgokf_kQ8...                       # the token, on standard output, once
+pgokf-mcp: added fleet (reader) to /etc/pgokf/mcp/tokens; ...
+```
+
+With `--tokens-file` the line is appended for you (the file is created
+`chmod 600` if it does not exist) and only the token is printed, so nothing has
+to be redirected. Without it, the line goes to standard output and the token to
+standard error, so `hash-token >> tokens` writes only the digest - and
+`hash-token >> tokens 2>&1`, which would write the token beside its own digest,
+is refused.
+
+The file holds one `name:role:digest` line per token; `#` comments and blank
+lines are allowed, and the digest is the last field. `name` is what appears in
+the log beside every call that token makes. Keep it `chmod 600` - a digest is
+not a token, but the file still names who may call, and the server says so at
+startup if anyone else can read it.
+
+Only tokens this command minted are accepted: the server checks a presented
+token's shape (`pgokf_` and 43 base64url characters, 256 bits of randomness)
+before it hashes it. That is what makes one fast unsalted hash per request the
+right choice rather than a slow one, so writing the digest of a chosen password
+into the file gets you a line that can never authenticate.
+
+**Revoking** is removing the line. The server re-reads the file when it
+changes - at most once a second, so a revocation takes effect within a second
+and a flood of requests still costs one `stat`. An emptied file revokes
+everyone at once. A file that cannot be read or no longer parses is reported,
+and the last good set is kept for **one minute** so a half-written save is
+ridden out; after that every request is refused, so a revocation can never fail
+silently for good, and `/healthz` reports `degraded` throughout.
+
+| Role | May call |
+| --- | --- |
+| `reader` | `concept_search`, `find_similar`, `concept_neighbors`, `get_concept`, `get_skill` |
+| `builder` | everything a reader may, and `list_plugin_targets`, `build_workspace_plugin` |
+
+Roles are a ladder, least first. Both are read-only against the catalog (the
+server holds a `pgokf_reader` connection). The distinction is that building a
+plugin reads every selected source through the audited readers and returns the
+whole tree, so it leaves a much longer trail than a search.
+
+### Wiring an HTTP client to it
+
+```json
+{
+  "mcpServers": {
+    "pgokf": {
+      "type": "http",
+      "url": "https://catalog.example/mcp",
+      "headers": { "Authorization": "Bearer pgokf_..." }
+    }
+  }
+}
+```
+
+Or by hand:
+
+```sh
+curl -s https://catalog.example/mcp \
+  -H "Authorization: Bearer $PGOKF_MCP_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+A plugin built by `build_workspace_plugin` still configures the **stdio** form
+(`pgokf-mcp --env-file ${PLUGIN_DATA}/pgokf.env`), which is what a locally
+installed plugin wants; point a client at an HTTP endpoint with a config like
+the one above.
 
 ## Scripted stdio session (and how to test it)
 

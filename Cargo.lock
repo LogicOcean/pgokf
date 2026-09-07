@@ -2454,14 +2454,21 @@ name = "pgokf-mcp"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "axum",
+ "base64 0.23.1",
  "clap",
+ "getrandom 0.4.3",
  "pgokf-companion",
  "pgokf-pgconn",
  "pgokf-workspace",
+ "same-file",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tokio-postgres",
+ "tower",
+ "tower-http",
 ]
 
 [[package]]
@@ -3918,6 +3925,7 @@ dependencies = [
  "http",
  "http-body",
  "pin-project-lite",
+ "tokio",
  "tower",
  "tower-layer",
  "tower-service",

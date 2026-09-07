@@ -42,3 +42,9 @@ The companion tools (`pgokf-ingest`, `pgokf-embed`, `pgokf-mcp`) hold
 object-store / embedding-endpoint credentials in their own environment and never
 send them to PostgreSQL; they support TLS to PostgreSQL via `--tls` /
 `sslmode=require`.
+
+A companion that listens on a socket authenticates every request: `pgokf-web`
+signs people in (OpenID Connect, a trusted proxy's headers, or a local users
+file) and `pgokf-mcp --http` requires a bearer token whose role decides which
+tools it may call. Neither terminates TLS; both are meant to sit behind a
+TLS-terminating reverse proxy on a loopback or private interface.
