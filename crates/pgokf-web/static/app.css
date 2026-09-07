@@ -53,13 +53,21 @@ h3 { font-size: .95rem; margin: 1.2rem 0 .5rem; color: var(--muted); text-transf
 .brand:hover { text-decoration: none; }
 .brand-mark { width: 22px; height: 22px; border-radius: 6px; background: var(--accent); display: inline-block; position: relative; }
 .brand-mark::after { content: ""; position: absolute; inset: 6px; border: 2px solid var(--accent-ink); border-radius: 3px; border-right-color: transparent; }
-.topsearch { flex: 1; display: flex; gap: .5rem; max-width: 720px; }
+.topsearch { flex: 1 1 14rem; min-width: 14rem; display: flex; gap: .5rem; max-width: 720px; }
 .topsearch input { flex: 1; }
-.topnav { display: flex; gap: .25rem; }
-.topnav a { padding: .4rem .7rem; border-radius: var(--radius-sm); color: var(--muted); font-weight: 500; }
+.topnav { display: flex; gap: .25rem; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+.topnav::-webkit-scrollbar { display: none; }
+.topnav a { padding: .4rem .7rem; border-radius: var(--radius-sm); color: var(--muted); font-weight: 500; white-space: nowrap; }
 .topnav a:hover { background: var(--surface-2); text-decoration: none; color: var(--text); }
 .topnav a.active { background: var(--surface-2); color: var(--text); }
-.topmeta { display: flex; align-items: center; gap: .5rem; margin-left: auto; }
+.topmeta { display: flex; align-items: center; gap: .5rem; margin-left: auto; flex: none; }
+/* With the workflow's links the header is long: below a wide desktop the
+   navigation takes a row of its own rather than squeezing the search box. */
+@media (max-width: 1520px) {
+  .topbar { flex-wrap: wrap; row-gap: .35rem; }
+  .topnav { order: 3; width: 100%; }
+  .topmeta { margin-left: auto; }
+}
 .badge.tenant { font-family: var(--mono); font-size: .8em; }
 
 /* ---- controls: one size for every select, text and search box, and button ---- */
