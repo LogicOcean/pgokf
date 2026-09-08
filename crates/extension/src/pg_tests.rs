@@ -5782,6 +5782,77 @@ Steps for deploying widgets with the marmoset rollout strategy.\n";
         })
     }
 
+    /// Whether a skill row exists for one concept.
+    fn skill_row_exists(bundle_id: i64, concept_id: &str) -> bool {
+        Spi::get_one_with_args::<bool>(
+            "SELECT EXISTS(SELECT 1 FROM pgokf.skills WHERE bundle_id = $1 AND concept_id = $2)",
+            &[bundle_id.into(), concept_id.into()],
+        )
+        .expect("skill-existence query executes")
+        .unwrap_or(false)
+    }
+
+    #[pg_test]
+    fn an_existing_manifest_becomes_a_skill_on_refresh_when_its_row_is_missing() {
+        // A resource-less SKILL.md: under 0.1.x it was a plain concept, and the
+        // 0.2.0 upgrade adds pgokf.skills but leaves the concept row
+        // byte-identical. A refresh must still project the skill - it used to
+        // judge the manifest unchanged and leave it a document for ever.
+        const LONE_MANIFEST: &str = "---\n\
+name: solo\n\
+description: A skill package that carries no scripts, references, or assets.\n\
+---\n\
+\n\
+# When to Use\n\
+\n\
+Use the solo skill on its own.\n";
+        let bundle = FixtureBundle::create();
+        fs::create_dir_all(bundle.root.join("solo")).expect("package directory is creatable");
+        fs::write(bundle.root.join("solo/SKILL.md"), LONE_MANIFEST).expect("manifest is writable");
+        let skill_id = "solo/SKILL";
+        let bundle_id = Spi::connect(|client| {
+            client
+                .select(
+                    "SELECT bundle_id FROM pgokf.register_bundle($1) AS r",
+                    Some(1),
+                    &[bundle.path().into()],
+                )
+                .expect("register_bundle executes")
+                .first()
+                .get::<i64>(1)
+                .expect("bundle_id readable")
+                .expect("bundle_id not NULL")
+        });
+
+        // Registration projects the skill.
+        let projected_at_register = skill_row_exists(bundle_id, skill_id);
+
+        // Simulate the post-upgrade gap: the concept row survives, the skill
+        // row does not.
+        Spi::run_with_args(
+            "DELETE FROM pgokf.skills WHERE bundle_id = $1 AND concept_id = $2",
+            &[bundle_id.into(), skill_id.into()],
+        )
+        .expect("deleting the skill row executes");
+        let gone_after_delete = skill_row_exists(bundle_id, skill_id);
+
+        // A refresh with no file change must re-project it.
+        let (_, updated, _, _) = refresh_counts(bundle_id);
+        let restored = skill_row_exists(bundle_id, skill_id);
+
+        // Assert
+        assert!(projected_at_register, "registration projects the skill");
+        assert!(
+            !gone_after_delete,
+            "the delete simulates the post-upgrade gap"
+        );
+        assert!(
+            updated >= 1,
+            "the manifest is re-projected, not judged unchanged"
+        );
+        assert!(restored, "the refresh restores the skill row");
+    }
+
     #[pg_test]
     fn skill_package_projects_virtual_concepts_typed_rows_and_edges() {
         // Arrange / Act

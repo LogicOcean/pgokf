@@ -925,13 +925,14 @@ fn textsearch_config() -> Result<String, CatalogError> {
 
 /// Quote a text value as a SQL string literal for interpolation into DDL.
 ///
-/// An `E''` string with both the backslash and the quote escaped, because
-/// doubling the quote alone is only correct while
-/// `standard_conforming_strings` is on - and that is a `USERSET` GUC. With
-/// it off, a value ending in a backslash escapes the closing quote and runs
-/// on into the statement. `E''` means the same thing under either setting.
+/// An `E''` string with the backslash escaped and the quote doubled - the
+/// form the built-in `quote_literal()` produces. Doubling the quote and
+/// escaping the backslash is correct under every setting of both
+/// `standard_conforming_strings` and `backslash_quote`: in an `E''` string a
+/// doubled `''` is one quote and `\\` is one backslash, whereas `\'`
+/// (the earlier form) is refused outright when `backslash_quote = off`.
 fn quote_literal(value: &str) -> String {
-    format!("E'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
+    format!("E'{}'", value.replace('\\', "\\\\").replace('\'', "''"))
 }
 
 // The `SECURITY DEFINER` BM25 hit query (see `BM25_HITS_CALL` for why).
@@ -1227,10 +1228,13 @@ mod tests {
     fn quote_identifier_and_literal_escape_their_delimiters() {
         // Arrange & Act & Assert
         assert_eq!(quote_identifier("my\"schema"), "\"my\"\"schema\"");
-        assert_eq!(quote_literal("it's"), "E'it\\'s'");
+        // The quote is doubled, not backslash-escaped: `\'` is refused when
+        // `backslash_quote = off`, whereas `''` is accepted under every
+        // setting.
+        assert_eq!(quote_literal("it's"), "E'it''s'");
         // A trailing backslash used to escape the closing quote when
         // standard_conforming_strings was off, running the value on into
-        // the statement.
+        // the statement; escaped as `\\` it is one literal backslash.
         assert_eq!(quote_literal("cfg\\"), "E'cfg\\\\'");
     }
 

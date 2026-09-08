@@ -201,7 +201,12 @@ pub fn classify_changes(
                     .owner_of(&path_text)
                     .is_some_and(|root| packages::skill_concept_id_of(root) == *owner)
             });
-        let same_identity = same_id && same_owner;
+        // A manifest whose bytes and id are unchanged but whose skill row is
+        // missing (an upgrade added the skills table to a bundle already
+        // synced) must still be re-projected, or it stays a plain document.
+        let projected =
+            metadata.class != FileClass::SkillManifest || projection.skills.contains(&path_text);
+        let same_identity = same_id && same_owner && projected;
         match stored.get(&path_text) {
             None => {
                 delta.report.added += 1;
@@ -305,6 +310,11 @@ pub struct StoredProjection {
     pub hashes: BTreeMap<String, String>,
     pub ids: BTreeMap<String, String>,
     pub owners: BTreeMap<String, String>,
+    /// Paths of `SKILL.md` manifests that already have a `pgokf.skills` row.
+    /// A byte-identical manifest that is *not* here (an upgrade added the
+    /// typed tables to a bundle already synced, so its concept row survives
+    /// but no skill row exists) is re-projected rather than judged unchanged.
+    pub skills: BTreeSet<String>,
 }
 
 fn load_stored_projection(bundle_id: i64) -> Result<StoredProjection, CatalogError> {
@@ -342,6 +352,7 @@ fn load_stored_projection(bundle_id: i64) -> Result<StoredProjection, CatalogErr
         Ok::<_, CatalogError>(projection)
     })?;
     projection.owners = load_stored_owners(bundle_id)?;
+    projection.skills = load_stored_skill_paths(bundle_id)?;
     Ok(projection)
 }
 
@@ -395,6 +406,42 @@ fn load_stored_owners(bundle_id: i64) -> Result<BTreeMap<String, String>, Catalo
             owners.insert(path, owner);
         }
         Ok(owners)
+    })
+}
+
+/// The paths of the manifests that already have a `pgokf.skills` row, so a
+/// byte-identical manifest with no row (an upgrade added the skills table to
+/// an already-synced bundle) is re-projected rather than judged unchanged.
+fn load_stored_skill_paths(bundle_id: i64) -> Result<BTreeSet<String>, CatalogError> {
+    let table_exists =
+        Spi::get_one::<bool>("SELECT pg_catalog.to_regclass('pgokf.skills') IS NOT NULL")
+            .map_err(|error| spi_error("failed to probe the skills projection", &error))?
+            .unwrap_or(false);
+    if !table_exists {
+        return Ok(BTreeSet::new());
+    }
+    Spi::connect(|client| {
+        let table = client
+            .select(
+                "SELECT c.path
+                 FROM pgokf.concepts c
+                 JOIN pgokf.skills s ON s.bundle_id = c.bundle_id AND s.concept_id = c.id
+                 WHERE c.bundle_id = $1",
+                None,
+                &[bundle_id.into()],
+            )
+            .map_err(|error| spi_error("failed to load stored skill paths", &error))?;
+        let mut paths = BTreeSet::new();
+        for row in table {
+            let path: String = spi_read::required_column(
+                &row,
+                1,
+                "failed to read stored skill path",
+                "stored skill path is NULL",
+            )?;
+            paths.insert(path);
+        }
+        Ok(paths)
     })
 }
 
@@ -1816,6 +1863,42 @@ mod tests {
             .map(|metadata| metadata.path.to_string_lossy().into_owned())
             .collect();
         assert_eq!(staged_paths, vec!["added.md", "updated.md"]);
+    }
+
+    #[test]
+    fn a_manifest_with_no_skill_row_is_reprojected_even_when_unchanged() {
+        // Arrange: a byte-identical SKILL.md whose concept row survives an
+        // upgrade to 0.2.0 but whose pgokf.skills row does not exist yet.
+        let bundle = TempBundle::new();
+        bundle.write("pkg/SKILL.md", "---\nname: pkg\n---\n");
+        let current = bundle.snapshot();
+        let manifest = current
+            .iter()
+            .find(|m| m.class == FileClass::SkillManifest)
+            .expect("a SKILL.md classifies as a manifest");
+        let path = manifest.path.to_string_lossy().into_owned();
+        let stored = StoredProjection {
+            hashes: BTreeMap::from([(path.clone(), manifest.hash.clone())]),
+            ids: BTreeMap::from([(path.clone(), manifest.class.concept_id(&path))]),
+            ..StoredProjection::default()
+        };
+
+        // Act
+        let without = classify_changes(&stored, &PackageIndex::default(), &current);
+        let with = classify_changes(
+            &StoredProjection {
+                skills: BTreeSet::from([path.clone()]),
+                ..stored.clone()
+            },
+            &PackageIndex::default(),
+            &current,
+        );
+
+        // Assert: no skill row -> re-projected; once the row exists -> unchanged.
+        assert_eq!(without.report.updated, 1, "re-projected when no skill row");
+        assert_eq!(without.report.unchanged, 0);
+        assert_eq!(with.report.unchanged, 1, "unchanged once the row exists");
+        assert_eq!(with.report.updated, 0);
     }
 
     #[test]
