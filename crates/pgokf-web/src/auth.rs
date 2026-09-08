@@ -345,8 +345,15 @@ pub(crate) struct UsersAuth {
     path: Option<PathBuf>,
     loaded: RwLock<LoadedUsers>,
     sessions: Arc<Sessions>,
-    /// Failed sign-ins per user name, for the throttle.
-    failures: Mutex<HashMap<String, Failures>>,
+    /// Failed sign-ins per (user name, source address), for the throttle.
+    /// Keyed on both, because keyed on the name alone anyone who knew a
+    /// name could hold that account under cooldown indefinitely - and lock
+    /// its owner out of changing their own password, which shares the
+    /// counter.
+    failures: Mutex<HashMap<(String, Option<IpAddr>), Failures>>,
+    /// How many password verifications may run at once. Argon2id is meant
+    /// to be expensive, which cuts both ways on a public sign-in page.
+    verifying: tokio::sync::Semaphore,
 }
 
 /// Recent failed sign-ins for one name: after a few, each further attempt
@@ -357,6 +364,10 @@ struct Failures {
     until: Instant,
 }
 
+/// Password verifications allowed to run at once. Each is ~19 MiB and
+/// ~50 ms of one core, so this bounds what an unauthenticated flood of
+/// sign-in attempts can take from the rest of the server.
+const VERIFY_AT_ONCE: usize = 4;
 /// Failures before the cooldown starts.
 const FREE_FAILURES: u32 = 5;
 /// The longest cooldown between attempts.
@@ -580,6 +591,7 @@ impl UsersAuth {
             loaded: RwLock::new(LoadedUsers { modified, users }),
             sessions,
             failures: Mutex::new(HashMap::new()),
+            verifying: tokio::sync::Semaphore::new(VERIFY_AT_ONCE),
         })
     }
 
@@ -786,12 +798,25 @@ impl UsersAuth {
         Ok(users)
     }
 
-    /// The person a sign-in names, when the password verifies. A name under
-    /// cooldown is refused without checking; an unknown name still costs a
-    /// hash verification; a failure counts towards the cooldown.
-    pub(crate) fn verify(&self, name: &str, password: &str) -> Option<Principal> {
+    /// The person a sign-in names, when the password verifies.
+    ///
+    /// A name under cooldown is refused without checking; an unknown name
+    /// still costs a hash verification, so a name cannot be probed by
+    /// timing; a failure counts towards the cooldown.
+    ///
+    /// Verification is Argon2id at 19 MiB and ~50 ms, deliberately, and
+    /// this runs on a tokio worker thread. [`UsersAuth::permit`] bounds how
+    /// many run at once: without it, one unauthenticated client opening
+    /// enough connections turned "expensive to guess" into "expensive to
+    /// serve", allocating gigabytes and stalling every other request.
+    pub(crate) fn verify(
+        &self,
+        name: &str,
+        password: &str,
+        peer: Option<IpAddr>,
+    ) -> Option<Principal> {
         let name = name.trim();
-        if self.throttled(name) {
+        if self.throttled(name, peer) {
             return None;
         }
         let record = self.record(name);
@@ -803,7 +828,7 @@ impl UsersAuth {
         });
         match record {
             Some(record) if verified => {
-                self.forget_failures(name);
+                self.forget_failures(name, peer);
                 Some(Principal {
                     subject: name.to_owned(),
                     display: name.to_owned(),
@@ -811,30 +836,39 @@ impl UsersAuth {
                 })
             }
             _ => {
-                self.count_failure(name);
+                self.count_failure(name, peer);
                 None
             }
         }
     }
 
+    /// A permit to run one password verification, waiting for a turn when
+    /// [`VERIFY_AT_ONCE`] are already running.
+    pub(crate) async fn permit(&self) -> tokio::sync::SemaphorePermit<'_> {
+        self.verifying
+            .acquire()
+            .await
+            .expect("the verification semaphore is never closed")
+    }
+
     /// How long a name must wait before its next attempt is even checked.
-    pub(crate) fn cooldown(&self, name: &str) -> Option<Duration> {
+    pub(crate) fn cooldown(&self, name: &str, peer: Option<IpAddr>) -> Option<Duration> {
         let failures = self.failures.lock().ok()?;
-        let entry = failures.get(name.trim())?;
+        let entry = failures.get(&(name.trim().to_owned(), peer))?;
         entry.until.checked_duration_since(Instant::now())
     }
 
-    fn throttled(&self, name: &str) -> bool {
-        self.cooldown(name).is_some()
+    fn throttled(&self, name: &str, peer: Option<IpAddr>) -> bool {
+        self.cooldown(name, peer).is_some()
     }
 
-    fn count_failure(&self, name: &str) {
+    fn count_failure(&self, name: &str, peer: Option<IpAddr>) {
         let Ok(mut failures) = self.failures.lock() else {
             return;
         };
         let now = Instant::now();
         failures.retain(|_, f| now.duration_since(f.until) < FAILURE_MEMORY);
-        let entry = failures.entry(name.to_owned()).or_insert(Failures {
+        let entry = failures.entry((name.to_owned(), peer)).or_insert(Failures {
             count: 0,
             until: now,
         });
@@ -846,9 +880,9 @@ impl UsersAuth {
         }
     }
 
-    fn forget_failures(&self, name: &str) {
+    fn forget_failures(&self, name: &str, peer: Option<IpAddr>) {
         if let Ok(mut failures) = self.failures.lock() {
-            failures.remove(name);
+            failures.remove(&(name.to_owned(), peer));
         }
     }
 
@@ -988,6 +1022,9 @@ impl Authenticator {
 pub(crate) struct Session {
     pub principal: Option<Principal>,
     pub mode: Mode,
+    /// Where the request came from, when the server records it. The
+    /// sign-in throttle keys on it so one person cannot lock out another.
+    pub peer: Option<IpAddr>,
 }
 
 impl Session {
@@ -995,6 +1032,7 @@ impl Session {
         Self {
             principal: None,
             mode,
+            peer: None,
         }
     }
 
@@ -1024,6 +1062,25 @@ pub(crate) fn cookie_header(value: &str) -> Option<HeaderValue> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sign_in_throttle_cannot_be_used_to_lock_someone_out() {
+        // Arrange: a stranger hammers a name they know, from their own
+        // address. Keyed on the name alone, that used to hold the account
+        // shut for everyone, its owner included - and the owner shares the
+        // counter with changing their own password.
+        let auth = users_auth();
+        let stranger = Some("198.51.100.7".parse::<IpAddr>().expect("address"));
+        let owner = Some("203.0.113.9".parse::<IpAddr>().expect("address"));
+        for _ in 0..20 {
+            assert!(auth.verify("alice", "guess", stranger).is_none());
+        }
+
+        // Act / Assert: the stranger is throttled, the owner is not.
+        assert!(auth.cooldown("alice", stranger).is_some());
+        assert!(auth.cooldown("alice", owner).is_none());
+        assert!(auth.verify("alice", "correct horse", owner).is_some());
+    }
 
     #[test]
     fn roles_form_a_ladder_and_round_trip_their_ids() {
@@ -1146,6 +1203,7 @@ mod tests {
             }),
             sessions: Arc::new(Sessions::new(secret, 3600, false).expect("valid")),
             failures: Mutex::new(HashMap::new()),
+            verifying: tokio::sync::Semaphore::new(VERIFY_AT_ONCE),
         }
     }
 
@@ -1159,9 +1217,11 @@ mod tests {
         let auth = users_auth();
 
         // Act
-        let alice = auth.verify("alice", "correct horse").expect("verifies");
-        let wrong = auth.verify("alice", "wrong");
-        let nobody = auth.verify("carol", "correct horse");
+        let alice = auth
+            .verify("alice", "correct horse", None)
+            .expect("verifies");
+        let wrong = auth.verify("alice", "wrong", None);
+        let nobody = auth.verify("carol", "correct horse", None);
         let cookie = auth.issue_cookie(&alice).expect("issues");
         let mut headers = HeaderMap::new();
         let value = cookie.split(';').next().unwrap();
@@ -1188,7 +1248,9 @@ mod tests {
     fn tampered_or_foreign_session_cookies_identify_nobody() {
         // Arrange
         let auth = users_auth();
-        let alice = auth.verify("alice", "correct horse").expect("verifies");
+        let alice = auth
+            .verify("alice", "correct horse", None)
+            .expect("verifies");
         let cookie = auth.issue_cookie(&alice).expect("issues");
         let value = cookie.split(';').next().unwrap().to_owned();
         let (payload, tag) = value
@@ -1246,7 +1308,7 @@ mod tests {
         )
         .expect("loads");
         assert_eq!(
-            auth.verify("alice", "pw").map(|p| p.role),
+            auth.verify("alice", "pw", None).map(|p| p.role),
             Some(Role::Approver)
         );
 
@@ -1262,7 +1324,7 @@ mod tests {
 
         // Assert
         assert_eq!(
-            auth.verify("alice", "pw").map(|p| p.role),
+            auth.verify("alice", "pw", None).map(|p| p.role),
             Some(Role::Viewer)
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -1296,8 +1358,11 @@ mod tests {
         // Assert
         assert!(short.is_err() && duplicate.is_err());
         assert_eq!(auth.list(), vec![("bob".to_owned(), Role::Editor)]);
-        assert!(auth.verify("bob", "a different long password").is_some());
-        assert!(auth.verify("bob", "a long enough password").is_none());
+        assert!(
+            auth.verify("bob", "a different long password", None)
+                .is_some()
+        );
+        assert!(auth.verify("bob", "a long enough password", None).is_none());
         assert!(last.is_err(), "the last user stays");
         let text = std::fs::read_to_string(&path).expect("reads");
         assert!(text.contains("bob:editor:$argon2id$"), "{text}");
@@ -1312,12 +1377,12 @@ mod tests {
 
         // Act: five free failures, then the sixth starts the cooldown.
         for _ in 0..FREE_FAILURES {
-            assert!(auth.verify("alice", "wrong").is_none());
+            assert!(auth.verify("alice", "wrong", None).is_none());
         }
-        assert!(auth.cooldown("alice").is_none(), "still free");
-        assert!(auth.verify("alice", "wrong").is_none());
-        let waiting = auth.cooldown("alice");
-        let refused_even_when_right = auth.verify("alice", "correct horse");
+        assert!(auth.cooldown("alice", None).is_none(), "still free");
+        assert!(auth.verify("alice", "wrong", None).is_none());
+        let waiting = auth.cooldown("alice", None);
+        let refused_even_when_right = auth.verify("alice", "correct horse", None);
 
         // Assert
         assert!(waiting.is_some(), "a cooldown started");
@@ -1326,17 +1391,17 @@ mod tests {
             "not checked during the cooldown"
         );
         assert!(
-            auth.verify("bob", "correct horse").is_some(),
+            auth.verify("bob", "correct horse", None).is_some(),
             "other names are unaffected"
         );
-        auth.forget_failures("alice");
-        assert!(auth.verify("alice", "correct horse").is_some());
+        auth.forget_failures("alice", None);
+        assert!(auth.verify("alice", "correct horse", None).is_some());
         assert!(
-            auth.cooldown("alice").is_none(),
+            auth.cooldown("alice", None).is_none(),
             "a success clears the record"
         );
         assert!(
-            auth.verify("nobody", "x").is_none(),
+            auth.verify("nobody", "x", None).is_none(),
             "an unknown name costs a verification too"
         );
     }
@@ -1360,7 +1425,9 @@ mod tests {
             Arc::new(Sessions::new(vec![7_u8; 32], 3600, false).expect("valid")),
         )
         .expect("loads");
-        let alice = auth.verify("alice", "first password").expect("verifies");
+        let alice = auth
+            .verify("alice", "first password", None)
+            .expect("verifies");
         let cookie = auth.issue_cookie(&alice).expect("issues");
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -1375,7 +1442,9 @@ mod tests {
 
         // Assert
         assert!(auth.identify(&headers).is_none(), "the old session is over");
-        let again = auth.verify("alice", "second password!").expect("verifies");
+        let again = auth
+            .verify("alice", "second password!", None)
+            .expect("verifies");
         let fresh = auth.issue_cookie(&again).expect("issues");
         let mut fresh_headers = HeaderMap::new();
         fresh_headers.insert(

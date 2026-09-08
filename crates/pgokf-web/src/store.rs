@@ -83,6 +83,27 @@ impl DocumentStore {
         }
     }
 
+    /// Whether the bundle already holds a document at `path`.
+    ///
+    /// Used to tell adding from replacing: adding is an uploader's act,
+    /// replacing an editor's.
+    ///
+    /// # Errors
+    ///
+    /// A catalog failure, or a path that escapes the bundle directory.
+    pub(crate) async fn holds(&self, writer: &Db, path: &str) -> Result<bool> {
+        match self {
+            DocumentStore::Content(bundle) => Ok(writer
+                .bundle_files(bundle.id)
+                .await?
+                .iter()
+                .any(|f| f.path == path)),
+            DocumentStore::Directory { root, .. } => {
+                Ok(std::fs::symlink_metadata(confined(root, path)?).is_ok())
+            }
+        }
+    }
+
     /// Apply a change: some files replaced or added, some removed.
     pub(crate) async fn apply(
         &self,

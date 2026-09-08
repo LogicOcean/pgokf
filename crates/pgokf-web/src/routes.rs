@@ -55,6 +55,10 @@ pub(crate) struct App {
     /// Bundle rebuilds run one at a time: a content resync is a full
     /// snapshot, so two interleaved ones could lose each other's change.
     pub rebuilds: tokio::sync::Mutex<()>,
+    /// Plugin builds run a few at a time: each holds a pooled reader for
+    /// its whole run, so unbounded they take every connection and the rest
+    /// of the site answers "the catalog is busy".
+    pub builds: tokio::sync::Semaphore,
     /// Where directory bundles are reachable from this process, if at all.
     pub stores: crate::store::Stores,
     pub embedder: Option<EmbeddingsClient>,
@@ -78,6 +82,11 @@ const TREE_CAP: i64 = 5000;
 /// Requests handled at once; the rest queue (and time out) rather than
 /// piling onto the connection pool.
 const MAX_IN_FLIGHT: usize = 64;
+/// Plugin builds allowed to run at once. Each holds a pooled reader
+/// connection for its whole run - the selection, up to 500 audited source
+/// reads, and an in-memory deflate - so unbounded, a handful of them take
+/// every connection and the rest of the site answers "the catalog is busy".
+pub(crate) const MAX_PLUGIN_BUILDS: usize = 2;
 
 /// Build the router.
 pub(crate) fn router(app: Shared) -> Router {
@@ -118,14 +127,14 @@ pub(crate) fn router(app: Shared) -> Router {
         .route("/admin/bundles", post(admin_bundles))
         .route("/review", get(review_page))
         .route("/review/{bundle_id}/{*concept_id}", post(concept_review))
-        .route(
-            "/edit/{bundle_id}/{*concept_id}",
-            get(edit_page).post(edit_submit),
-        )
-        .route("/edit-check/{bundle_id}/{*concept_id}", post(edit_check))
         .merge(
             Router::new()
                 .route("/upload", get(upload_page).post(upload_submit))
+                .route(
+                    "/edit/{bundle_id}/{*concept_id}",
+                    get(edit_page).post(edit_submit),
+                )
+                .route("/edit-check/{bundle_id}/{*concept_id}", post(edit_check))
                 .layer(DefaultBodyLimit::max(UPLOAD_LIMIT)),
         )
         .route("/static/{file}", get(static_asset))
@@ -216,7 +225,11 @@ async fn authenticate(State(app): State<Shared>, mut request: Request, next: Nex
             .into_response()
         };
     }
-    request.extensions_mut().insert(Session { principal, mode });
+    request.extensions_mut().insert(Session {
+        principal,
+        mode,
+        peer,
+    });
     next.run(request).await
 }
 
@@ -2687,7 +2700,12 @@ async fn login_submit(
         .auth
         .users()
         .ok_or_else(|| AppError::not_found("This page"))?;
-    if let Some(person) = users.verify(&form.username, &form.password) {
+    // Held across the verification only: Argon2id is expensive by design,
+    // and this page is open to anyone.
+    let permit = users.permit().await;
+    let verified = users.verify(&form.username, &form.password, session.peer);
+    drop(permit);
+    if let Some(person) = verified {
         let cookie = users.issue_cookie(&person)?;
         let mut response = redirect(&safe_next(&form.next));
         if let Some(value) = cookie_header(&cookie) {
@@ -2698,7 +2716,7 @@ async fn login_submit(
     // A pause between attempts, so guessing costs time; after a few
     // failures the name waits out a cooldown.
     tokio::time::sleep(Duration::from_millis(400)).await;
-    let error = match users.cooldown(&form.username) {
+    let error = match users.cooldown(&form.username, session.peer) {
         Some(wait) => format!(
             "Too many failed attempts for this name; try again in {} second{}.",
             wait.as_secs().max(1),
@@ -2897,6 +2915,23 @@ async fn upload_documents(app: &App, access: &Access<'_>, multipart: Multipart) 
             path,
             bytes: document.render().into_bytes(),
         });
+    }
+    // Adding is an uploader's; replacing is an editor's. Without this an
+    // uploader could overwrite any document by uploading at its path - and
+    // the upload sets earlier verifications aside, so it also knocked an
+    // approved document back into the review queue.
+    if !access.who.role.allows(Role::Editor)
+        && let UploadTarget::Existing(store) = &target
+    {
+        for document in &documents {
+            if store.holds(access.writer, &document.path).await? {
+                return Err(AppError::bad_request(format!(
+                    "{} already exists in this bundle. Replacing a document needs the editor \
+                     role; upload it under a different name, or ask an editor.",
+                    document.path
+                )));
+            }
+        }
     }
     let count = documents.len();
     let outcome = match &target {
@@ -3259,7 +3294,10 @@ async fn profile_password(
         .auth
         .users()
         .ok_or_else(|| AppError::not_found("This page"))?;
-    let problem = if users.verify(&person.subject, &form.current).is_none() {
+    let problem = if users
+        .verify(&person.subject, &form.current, session.peer)
+        .is_none()
+    {
         Some("The current password is wrong.".to_owned())
     } else if form.new != form.again {
         Some("The new passwords do not match.".to_owned())
@@ -3270,10 +3308,24 @@ async fn profile_password(
             .map(|e| e.to_string())
     };
     match problem {
-        None => Ok(redirect(&format!(
-            "/profile?notice={}",
-            filters::percent_encode("Password changed.")
-        ))),
+        None => {
+            // The session's binding is derived from the password hash, so
+            // the change just invalidated this very session. Issue a fresh
+            // cookie with it, or the person is bounced to the sign-in page
+            // and never sees that it worked.
+            let mut response = redirect(&format!(
+                "/profile?notice={}",
+                filters::percent_encode("Password changed.")
+            ));
+            if let Some(value) = users
+                .issue_cookie(&person)
+                .ok()
+                .and_then(|c| cookie_header(&c))
+            {
+                response.headers_mut().insert(header::SET_COOKIE, value);
+            }
+            Ok(response)
+        }
         Some(problem) => {
             let mut response = render_profile(&app, &session, &person, None, Some(problem)).await?;
             *response.status_mut() = StatusCode::BAD_REQUEST;
@@ -4515,6 +4567,12 @@ async fn plugins_zip(State(app): State<Shared>, Query(params): Query<PluginParam
             "give a query, a bundle, a type, a tag, or concept ids to build a plugin",
         ));
     }
+    let _building = app.builds.acquire().await.map_err(|_| {
+        AppError::with(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The catalog is busy; try again.",
+        )
+    })?;
     let mut client = app.db.checkout().await?;
     let options = build_options(&app, &form, &chosen, base_model);
     let plugin = pgokf_workspace::build(client.client(), &options, &selection)

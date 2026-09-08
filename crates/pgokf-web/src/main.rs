@@ -83,6 +83,7 @@ async fn main() -> Result<()> {
         writer,
         auth: authenticator,
         rebuilds: tokio::sync::Mutex::new(()),
+        builds: tokio::sync::Semaphore::new(routes::MAX_PLUGIN_BUILDS),
         stores,
         embedder,
         catalog_name,
