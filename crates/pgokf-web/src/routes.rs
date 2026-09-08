@@ -126,8 +126,10 @@ pub(crate) fn router(app: Shared) -> Router {
         .route("/logout", post(logout))
         .route("/profile", get(profile_page))
         .route("/profile/password", post(profile_password))
+        .route("/profile/sessions", post(profile_sessions_end))
         .route("/admin", get(admin_page))
         .route("/admin/users", post(admin_users))
+        .route("/admin/sessions", post(admin_sessions_end))
         .route("/admin/bundles", post(admin_bundles))
         .route("/review", get(review_page))
         .route("/review/{bundle_id}/{*concept_id}", post(concept_review))
@@ -1262,6 +1264,11 @@ struct ProfilePage {
     how: String,
     permissions: Vec<PermissionView>,
     can_change_password: bool,
+    /// Whether sessions can be ended before they expire (a session store
+    /// is attached), so the page offers "sign out everywhere".
+    sessions_revocable: bool,
+    /// How many live sessions the person holds, when that is known.
+    session_count: Option<usize>,
     produced: Vec<PersonalItem>,
     verified: Vec<PersonalItem>,
     notice: Option<String>,
@@ -1282,6 +1289,13 @@ struct AdminPage {
     users: Vec<AdminUserView>,
     /// Whether the users file is managed here (`users` mode).
     users_managed_here: bool,
+    /// Whether sessions can be ended here (a session store is attached),
+    /// in any mode that issues them.
+    sessions_revocable: bool,
+    /// Everyone currently holding a live session, with how many - so an
+    /// admin can see whom there is to sign out where no users file lists
+    /// people (`oidc` mode).
+    live_sessions: Vec<LiveSubject>,
     roles: Vec<String>,
     bundles: Vec<AdminBundle>,
     config_json: String,
@@ -1292,6 +1306,13 @@ struct AdminPage {
 pub(crate) struct AdminUserView {
     pub name: String,
     pub role: String,
+    pub is_me: bool,
+}
+
+/// One person holding live sessions, for the admin page.
+pub(crate) struct LiveSubject {
+    pub subject: String,
+    pub count: usize,
     pub is_me: bool,
 }
 
@@ -2753,16 +2774,35 @@ async fn login_submit(
 }
 
 /// End this site's session, and the provider's too when it offers to.
-async fn logout(State(app): State<Shared>) -> PageResult {
+async fn logout(State(app): State<Shared>, headers: axum::http::HeaderMap) -> PageResult {
     let Some(sessions) = app.auth.sessions() else {
         return Ok(redirect("/"));
     };
-    let onward = app
-        .auth
-        .oidc()
-        .and_then(super::oidc::OidcAuth::end_session_url)
-        .unwrap_or_else(|| "/".to_owned());
-    let mut response = redirect(&onward);
+    // End the session itself, not merely this browser's copy of the cookie:
+    // a copy taken elsewhere stops working now too. If that fails, say so -
+    // this browser's cookie is still cleared, but a copy would keep working,
+    // and a sign-out that quietly did not happen is worse than an error.
+    let ended = sessions.end_session_from(&headers, app.auth.mode());
+    let mut response = match ended {
+        Ok(()) => {
+            let onward = app
+                .auth
+                .oidc()
+                .and_then(super::oidc::OidcAuth::end_session_url)
+                .unwrap_or_else(|| "/".to_owned());
+            redirect(&onward)
+        }
+        Err(error) => {
+            eprintln!("pgokf-web: ending a session on sign-out: {error:#}");
+            AppError::with(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Your session could not be ended on the server, so a copy of it elsewhere \
+                 would still work. This browser is signed out; try again, or ask an admin \
+                 to sign you out everywhere.",
+            )
+            .into_response()
+        }
+    };
     for cookie in [sessions.clear_session(), sessions.clear_flow()] {
         if let Some(value) = cookie_header(&cookie) {
             response.headers_mut().append(header::SET_COOKIE, value);
@@ -3270,6 +3310,14 @@ async fn render_profile(
         },
         permissions: permission_views(person.role),
         can_change_password: app.auth.users().is_some(),
+        sessions_revocable: app
+            .auth
+            .sessions()
+            .is_some_and(crate::auth::Sessions::revocable),
+        session_count: app
+            .auth
+            .sessions()
+            .and_then(|s| s.session_count_for(&person.subject)),
         produced: app.db.produced_by(&actor, PROFILE_ROWS).await?,
         verified: app.db.verified_by(&actor, PROFILE_ROWS).await?,
         notice,
@@ -3290,6 +3338,28 @@ async fn profile_page(
 ) -> PageResult {
     let person = signed_in(&session, "/profile")?;
     render_profile(&app, &session, &person, non_empty(&params.notice), None).await
+}
+
+/// "Sign out everywhere": end every session the person holds, this one
+/// included, so a cookie copied to another device stops working now.
+async fn profile_sessions_end(State(app): State<Shared>, session: Session) -> PageResult {
+    let person = signed_in(&session, "/profile")?;
+    let sessions = app
+        .auth
+        .sessions()
+        .ok_or_else(|| AppError::not_found("This page"))?;
+    sessions.end_all_sessions_of(&person.subject)?;
+    eprintln!(
+        "pgokf-web: {} ended every session they held",
+        person.actor()
+    );
+    let mut response = redirect("/login?next=%2Fprofile");
+    for cookie in [sessions.clear_session(), sessions.clear_flow()] {
+        if let Some(value) = cookie_header(&cookie) {
+            response.headers_mut().append(header::SET_COOKIE, value);
+        }
+    }
+    Ok(response)
 }
 
 #[derive(Debug, Deserialize)]
@@ -3387,6 +3457,22 @@ async fn render_admin(
         shell: Shell::new(app, session, "Administration", "admin"),
         users,
         users_managed_here: app.auth.users().is_some(),
+        sessions_revocable: app
+            .auth
+            .sessions()
+            .is_some_and(crate::auth::Sessions::revocable),
+        live_sessions: app
+            .auth
+            .sessions()
+            .map(crate::auth::Sessions::live_subjects)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(subject, count)| LiveSubject {
+                is_me: subject == person.subject,
+                subject,
+                count,
+            })
+            .collect(),
         roles: Role::all().iter().map(|r| r.id().to_owned()).collect(),
         bundles: app.db.admin_bundles().await?,
         config_json: serde_json::to_string_pretty(&app.db.config().await?).unwrap_or_default(),
@@ -3450,6 +3536,42 @@ fn change_user(
         }
         other => anyhow::bail!("unknown action {other:?}"),
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminSessionsForm {
+    #[serde(default)]
+    name: String,
+}
+
+/// End every session one person holds, whichever mode identified them:
+/// the lever for a cookie that may have been copied, or for someone
+/// disabled at the identity provider whose session here would otherwise
+/// last until it expired.
+async fn admin_sessions_end(
+    State(app): State<Shared>,
+    session: Session,
+    Form(form): Form<AdminSessionsForm>,
+) -> PageResult {
+    let person = admin(&session)?;
+    let sessions = app.auth.sessions().ok_or_else(|| {
+        AppError::bad_request("This site holds no sessions in this identity mode.")
+    })?;
+    let name = form.name.trim();
+    if !crate::auth::valid_subject(name) {
+        return Err(AppError::bad_request(
+            "Name the person to sign out, as their subject (one plain token).",
+        ));
+    }
+    sessions.end_all_sessions_of(name)?;
+    eprintln!(
+        "pgokf-web: {} ended every session of {name}",
+        person.actor()
+    );
+    Ok(redirect(&format!(
+        "/admin?notice={}",
+        filters::percent_encode(&format!("Ended every session of {name}."))
+    )))
 }
 
 async fn admin_users(

@@ -30,6 +30,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::session_store::SessionStore;
+
 use anyhow::{Context, Result, anyhow, bail};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use axum::extract::ConnectInfo;
@@ -475,6 +477,11 @@ pub(crate) struct Sessions {
     secret: Vec<u8>,
     seconds: u64,
     cookie_secure: bool,
+    /// The server's memory of which sessions are live, so one can be
+    /// ended rather than left to expire. Attached whenever a mode that
+    /// issues sessions is on; a signed cookie whose session is not here is
+    /// refused.
+    store: Option<SessionStore>,
 }
 
 impl fmt::Debug for Sessions {
@@ -483,6 +490,7 @@ impl fmt::Debug for Sessions {
             .field("secret", &"<redacted>")
             .field("seconds", &self.seconds)
             .field("cookie_secure", &self.cookie_secure)
+            .field("store", &self.store)
             .finish()
     }
 }
@@ -501,7 +509,20 @@ impl Sessions {
             secret,
             seconds,
             cookie_secure,
+            store: None,
         })
+    }
+
+    /// Remember issued sessions in `store`, so they can be ended.
+    #[must_use]
+    pub(crate) fn with_store(mut self, store: SessionStore) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    /// Whether sessions can be ended before they expire.
+    pub(crate) fn revocable(&self) -> bool {
+        self.store.is_some()
     }
 
     /// A `Set-Cookie` value that ends the session.
@@ -553,7 +574,61 @@ impl Sessions {
     /// opened by `mode`, and has not expired.
     pub(crate) fn read_session(&self, headers: &HeaderMap, mode: Mode) -> Option<SessionClaims> {
         let claims: SessionClaims = self.open(&cookie_value(headers, SESSION_COOKIE)?)?;
-        (claims.expires > now_unix() && claims.mode == mode.id()).then_some(claims)
+        let now = now_unix();
+        if claims.expires <= now || claims.mode != mode.id() {
+            return None;
+        }
+        // A cookie that verifies but whose session has been ended - signed
+        // out, revoked, or opened before a password change - is refused,
+        // whichever browser presents it.
+        if let Some(store) = &self.store
+            && !store.is_live(&claims.nonce, &claims.subject, now)
+        {
+            return None;
+        }
+        Some(claims)
+    }
+
+    /// End the session a request presents, so no copy of its cookie works
+    /// again. A request with no live session of `mode` ends nothing.
+    ///
+    /// # Errors
+    ///
+    /// The session store cannot be rewritten.
+    pub(crate) fn end_session_from(&self, headers: &HeaderMap, mode: Mode) -> Result<()> {
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
+        if let Some(claims) = self.read_session(headers, mode) {
+            store.remove(&claims.nonce, now_unix())?;
+        }
+        Ok(())
+    }
+
+    /// End every session of `subject`, on every device.
+    ///
+    /// # Errors
+    ///
+    /// The session store cannot be rewritten.
+    pub(crate) fn end_all_sessions_of(&self, subject: &str) -> Result<()> {
+        match &self.store {
+            Some(store) => store.remove_all_for(subject, now_unix()),
+            None => Ok(()),
+        }
+    }
+
+    /// How many live sessions `subject` holds, when that is known.
+    pub(crate) fn session_count_for(&self, subject: &str) -> Option<usize> {
+        self.store
+            .as_ref()
+            .map(|store| store.count_for(subject, now_unix()))
+    }
+
+    /// Everyone holding a live session, with how many, for the admin page.
+    pub(crate) fn live_subjects(&self) -> Vec<(String, usize)> {
+        self.store
+            .as_ref()
+            .map_or_else(Vec::new, |store| store.subjects(now_unix()))
     }
 
     /// A session cookie for `subject`, bound to `binding` (what the mode
@@ -585,15 +660,21 @@ impl Sessions {
         display: Option<String>,
         groups: Vec<String>,
     ) -> Result<String> {
+        let now = now_unix();
         let claims = SessionClaims {
             subject: subject.to_owned(),
-            expires: now_unix() + self.seconds,
+            expires: now + self.seconds,
             nonce: URL_SAFE_NO_PAD.encode(random_bytes(12)?),
             binding,
             display,
             groups,
             mode: mode.id().to_owned(),
         };
+        // Recorded before the cookie is handed out: a session the store
+        // does not know is refused, so an unrecorded one must never exist.
+        if let Some(store) = &self.store {
+            store.add(&claims.nonce, subject, claims.expires, now)?;
+        }
         Ok(self.cookie(SESSION_COOKIE, &self.seal(&claims)?, self.seconds))
     }
 
@@ -652,6 +733,43 @@ fn fingerprint(hash: &str) -> String {
     URL_SAFE_NO_PAD.encode(&digest[..12])
 }
 
+/// Write a private file whole: to a temporary beside it, mode `0600`,
+/// synced, then renamed into place, so a reader sees the old file or the
+/// new one and never a half-written one. The users file and the session
+/// store are both written this way.
+///
+/// # Errors
+///
+/// The temporary cannot be written or renamed.
+pub(crate) fn write_private(path: &Path, text: &str) -> Result<()> {
+    use std::io::Write as _;
+
+    // The temporary is `<name>.tmp` beside the target - appended, so `a.db`
+    // and `a` never share one - and created fresh: a link planted at that
+    // name is refused rather than written through, and a temporary left by
+    // a crash is cleared first so it cannot block every later write.
+    let mut temp_name = path
+        .file_name()
+        .context("a private file needs a file name")?
+        .to_os_string();
+    temp_name.push(".tmp");
+    let temp = path.with_file_name(temp_name);
+    let _ = std::fs::remove_file(&temp);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options
+        .open(&temp)
+        .with_context(|| format!("writing {}", temp.display()))?;
+    file.write_all(text.as_bytes())
+        .and_then(|()| file.sync_all())
+        .with_context(|| format!("writing {}", temp.display()))?;
+    drop(file);
+    std::fs::rename(&temp, path).with_context(|| format!("replacing {}", path.display()))?;
+    Ok(())
+}
+
 impl UsersAuth {
     /// Load a users file: one `name:role:$argon2id$...` per line, `#`
     /// comments and blank lines ignored.
@@ -669,30 +787,38 @@ impl UsersAuth {
         })
     }
 
+    /// The file's contents and the modification time they belong to. The
+    /// stamp is taken *before* the read, so a text older than its stamp is
+    /// impossible and a reload can never install a stale set under a fresh
+    /// stamp (and then stop noticing changes).
     fn read_file(path: &Path) -> Result<(Option<SystemTime>, HashMap<String, UserRecord>)> {
+        let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading the users file {}", path.display()))?;
-        let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
         Ok((modified, Self::parse_users(&text)?))
     }
 
-    /// Re-read the users file when its modification time moved. A file
-    /// that no longer parses is reported and the last good one kept.
+    /// Re-read the users file when its modification time moved. The reload
+    /// is installed only if nothing else moved the set meanwhile
+    /// (compare-and-install), so it never puts an older file back over a
+    /// change made in this process. A file that no longer parses is
+    /// reported and the last good one kept.
     fn refresh(&self) {
         let Some(path) = &self.path else {
             return;
         };
-        let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
-        let unchanged = self
-            .loaded
-            .read()
-            .is_ok_and(|loaded| loaded.modified == modified);
-        if unchanged {
+        let on_disk = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        let Ok(seen) = self.loaded.read().map(|loaded| loaded.modified) else {
+            return;
+        };
+        if seen == on_disk {
             return;
         }
         match Self::read_file(path) {
             Ok((modified, users)) if !users.is_empty() => {
-                if let Ok(mut loaded) = self.loaded.write() {
+                if let Ok(mut loaded) = self.loaded.write()
+                    && loaded.modified == seen
+                {
                     *loaded = LoadedUsers { modified, users };
                 }
             }
@@ -753,7 +879,7 @@ impl UsersAuth {
             let record = &users[name];
             let _ = writeln!(text, "{name}:{}:{}", record.role.id(), record.hash);
         }
-        Self::write_private(path, &text)?;
+        write_private(path, &text)?;
         let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
         *guard = LoadedUsers { modified, users };
         Ok(())
@@ -766,25 +892,6 @@ impl UsersAuth {
     /// the rename would then hand the operator's `chmod 600` away on the
     /// first edit through the Admin page - and is flushed to disk before it
     /// takes the name, so a crash leaves either the old file or the new one.
-    fn write_private(path: &Path, text: &str) -> Result<()> {
-        use std::io::Write as _;
-
-        let temp = path.with_extension("tmp");
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        let mut file = options
-            .open(&temp)
-            .with_context(|| format!("writing {}", temp.display()))?;
-        file.write_all(text.as_bytes())
-            .and_then(|()| file.sync_all())
-            .with_context(|| format!("writing {}", temp.display()))?;
-        drop(file);
-        std::fs::rename(&temp, path).with_context(|| format!("replacing {}", path.display()))?;
-        Ok(())
-    }
-
     /// Add a person (a new name) with a hashed password.
     pub(crate) fn add_user(&self, name: &str, role: Role, password: &str) -> Result<()> {
         let name = name.trim();
@@ -811,6 +918,10 @@ impl UsersAuth {
         })
     }
 
+    /// Change a password. Every session the person holds is ended: the
+    /// binding already stops them verifying, and the store forgets them too,
+    /// so nothing lingers on disk. The caller re-issues the changer's own
+    /// cookie so they stay signed in.
     pub(crate) fn set_password(&self, name: &str, password: &str) -> Result<()> {
         let hash = validated_password(password).and_then(hash_password)?;
         self.mutate(|users| {
@@ -819,9 +930,15 @@ impl UsersAuth {
                 .with_context(|| format!("{name} is not a user"))?;
             record.hash = hash;
             Ok(())
+        })?;
+        // The new hash is already on disk, and the changed binding alone
+        // stops every earlier session verifying; this only tidies the store.
+        self.sessions.end_all_sessions_of(name).with_context(|| {
+            format!("the password of {name} was changed, but its earlier sessions could not be cleared from the session store")
         })
     }
 
+    /// Remove a person, and end every session they hold.
     pub(crate) fn remove_user(&self, name: &str) -> Result<()> {
         self.mutate(|users| {
             if users.remove(name).is_none() {
@@ -831,6 +948,13 @@ impl UsersAuth {
                 bail!("the last user cannot be removed");
             }
             Ok(())
+        })?;
+        // The person is already gone from the file, which alone refuses
+        // their sessions; this only tidies the store.
+        self.sessions.end_all_sessions_of(name).with_context(|| {
+            format!(
+                "{name} was removed, but their sessions could not be cleared from the session store"
+            )
         })
     }
 
@@ -1030,7 +1154,7 @@ pub(crate) fn random_bytes(len: usize) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn now_unix() -> u64 {
+pub(crate) fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -1212,6 +1336,113 @@ mod tests {
         assert!(!valid_subject("alice smith"));
         assert!(!valid_subject("a:b"));
         assert!(!valid_subject(&"x".repeat(129)));
+    }
+
+    #[test]
+    fn an_ended_session_is_refused_in_every_browser_that_holds_its_cookie() {
+        // Arrange: sessions recorded in a store; alice signed in on two
+        // devices, bob on one.
+        let dir = std::env::temp_dir().join(format!("pgokf-sess-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let store = SessionStore::open(&dir.join("sessions")).expect("store");
+        let sessions = Sessions::new(vec![7_u8; 32], 3600, false)
+            .expect("valid")
+            .with_store(store);
+        let present = |set_cookie: &str| -> HeaderMap {
+            let pair = set_cookie.split(';').next().unwrap_or_default();
+            let mut headers = HeaderMap::new();
+            headers.insert("cookie", HeaderValue::from_str(pair).expect("cookie"));
+            headers
+        };
+        let a1 = present(
+            &sessions
+                .open_session("alice", Mode::Users, String::new())
+                .expect("a1"),
+        );
+        let a2 = present(
+            &sessions
+                .open_session("alice", Mode::Users, String::new())
+                .expect("a2"),
+        );
+        let b1 = present(
+            &sessions
+                .open_session("bob", Mode::Users, String::new())
+                .expect("b1"),
+        );
+        assert!(
+            sessions.read_session(&a1, Mode::Users).is_some(),
+            "issued sessions verify"
+        );
+
+        // Act: alice signs out on device 1 - a copy of that cookie elsewhere
+        // must die with it; then she signs out everywhere.
+        sessions
+            .end_session_from(&a1, Mode::Users)
+            .expect("ends one");
+        let a1_after_logout = sessions.read_session(&a1, Mode::Users).is_some();
+        let a2_after_logout = sessions.read_session(&a2, Mode::Users).is_some();
+        sessions.end_all_sessions_of("alice").expect("ends all");
+        let a2_after_all = sessions.read_session(&a2, Mode::Users).is_some();
+        let b1_after_all = sessions.read_session(&b1, Mode::Users).is_some();
+
+        // Assert
+        assert!(
+            !a1_after_logout,
+            "signing out ends that session for every copy of its cookie"
+        );
+        assert!(a2_after_logout, "the other device stays signed in");
+        assert!(!a2_after_all, "sign out everywhere ends the rest");
+        assert!(b1_after_all, "another person is untouched");
+        assert_eq!(sessions.session_count_for("alice"), Some(0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_validly_signed_cookie_the_store_never_recorded_is_refused() {
+        // Arrange: two signers sharing one secret - one without a store
+        // (which mints without recording, as a leaked secret would let an
+        // attacker do) and one with.
+        let dir = std::env::temp_dir().join(format!("pgokf-unrec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let secret = vec![9_u8; 32];
+        let storeless = Sessions::new(secret.clone(), 3600, false).expect("valid");
+        let store = SessionStore::open(&dir.join("sessions")).expect("store");
+        let with_store = Sessions::new(secret, 3600, false)
+            .expect("valid")
+            .with_store(store);
+        let present = |set_cookie: &str| -> HeaderMap {
+            let pair = set_cookie.split(';').next().unwrap_or_default();
+            let mut headers = HeaderMap::new();
+            headers.insert("cookie", HeaderValue::from_str(pair).expect("cookie"));
+            headers
+        };
+
+        // Act
+        let unrecorded = present(
+            &storeless
+                .open_session("alice", Mode::Users, String::new())
+                .expect("mints"),
+        );
+        let by_signature = storeless.read_session(&unrecorded, Mode::Users).is_some();
+        let by_store = with_store.read_session(&unrecorded, Mode::Users).is_some();
+        // Ending a session under the wrong mode ends nothing and is not an error.
+        let recorded = present(
+            &with_store
+                .open_session("bob", Mode::Users, String::new())
+                .expect("mints"),
+        );
+        with_store
+            .end_session_from(&recorded, Mode::Oidc)
+            .expect("wrong mode is a no-op");
+        let still_live = with_store.read_session(&recorded, Mode::Users).is_some();
+
+        // Assert
+        assert!(by_signature, "the signature alone verifies it");
+        assert!(!by_store, "but a session the store never issued is refused");
+        assert!(still_live, "a wrong-mode end touches nothing");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

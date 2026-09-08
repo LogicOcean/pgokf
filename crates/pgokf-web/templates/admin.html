@@ -27,6 +27,8 @@
           <form method="post" action="/admin/users"><input type="hidden" name="action" value="password"><input type="hidden" name="name" value="{{ u.name }}">
             <input type="password" name="password" placeholder="New password" minlength="12" aria-label="New password for {{ u.name }}" autocomplete="new-password">
             <button type="submit" class="btn">Reset password</button></form>
+          {% if sessions_revocable %}<form method="post" action="/admin/sessions"><input type="hidden" name="name" value="{{ u.name }}">
+            <button type="submit" class="btn" data-confirm="Sign {{ u.name }} out everywhere? Every session they hold ends now.">Sign out</button></form>{% endif %}
           {% if !u.is_me %}<form method="post" action="/admin/users"><input type="hidden" name="action" value="remove"><input type="hidden" name="name" value="{{ u.name }}">
             <button type="submit" class="btn danger" data-confirm="Remove {{ u.name }}? Their session ends at once.">Remove</button></form>{% endif %}
         </td>
@@ -44,7 +46,35 @@
     <div><button type="submit" class="btn primary">Add</button></div>
   </form>
   {% else %}
-  <p class="muted">People are identified by the proxy in front of this site and their roles come from its groups (<code>OKF_WEB_AUTH_ROLE_MAP</code>); manage them there.</p>
+  <p class="muted">People are identified by the identity provider in front of this site and their roles come from its groups (<code>OKF_WEB_AUTH_ROLE_MAP</code>); manage them there.</p>
+  {% if sessions_revocable %}
+  <h3>Signed in now <span class="muted">({{ live_sessions.len() }})</span></h3>
+  {% if live_sessions.is_empty() %}
+  <p class="muted">Nobody holds a live session.</p>
+  {% else %}
+  <div class="table-wrap">
+  <table class="table" id="pgokf-live-sessions">
+    <thead><tr><th>Subject</th><th>Sessions</th><th>Change</th></tr></thead>
+    <tbody>
+    {% for s in live_sessions %}
+      <tr>
+        <td><code>{{ s.subject }}</code>{% if s.is_me %} <span class="muted small">(you)</span>{% endif %}</td>
+        <td>{{ s.count }}</td>
+        <td class="row-actions"><form method="post" action="/admin/sessions"><input type="hidden" name="name" value="{{ s.subject }}">
+          <button type="submit" class="btn danger" data-confirm="Sign {{ s.subject }} out everywhere? Every session they hold ends now.">Sign out</button></form></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+  <h3>End someone's sessions</h3>
+  <p class="hint">Ends every session that person holds here at once - whether they were disabled at the provider, or a session may have been copied. Name them as the provider identifies them (their subject).</p>
+  <form method="post" action="/admin/sessions" class="step-grid three">
+    <div class="field"><label for="es-name">Subject</label><input id="es-name" type="text" name="name" required spellcheck="false" autocomplete="off"></div>
+    <div><button type="submit" class="btn danger" data-confirm="End every session of this person now?">Sign out everywhere</button></div>
+  </form>
+  {% endif %}
   {% endif %}
 </section>
 

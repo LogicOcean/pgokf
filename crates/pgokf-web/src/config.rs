@@ -158,6 +158,14 @@ pub(crate) struct Cli {
     #[arg(long, env = "OKF_WEB_COOKIE_SECURE", default_value_t = false)]
     pub cookie_secure: bool,
 
+    /// `users` / `oidc` mode: the file that records live sessions, so a
+    /// session can be ended (signing out, "sign out everywhere", or an
+    /// admin ending someone's) rather than left to expire. Defaults to
+    /// `sessions` beside the users file in `users` mode; `oidc` mode must
+    /// name it.
+    #[arg(long, env = "OKF_WEB_SESSION_STORE")]
+    pub session_store: Option<PathBuf>,
+
     /// Socket address to listen on.
     #[arg(long, env = "OKF_WEB_BIND", default_value = "127.0.0.1:8080")]
     pub bind: SocketAddr,
@@ -225,6 +233,7 @@ impl Cli {
         self.auth_groups_header = pgokf_companion::cli::non_empty(self.auth_groups_header);
         self.session_secret = pgokf_companion::cli::non_empty(self.session_secret);
         self.auth_users_file = self.auth_users_file.filter(|p| !p.as_os_str().is_empty());
+        self.session_store = self.session_store.filter(|p| !p.as_os_str().is_empty());
         self.oidc_issuer = pgokf_companion::cli::non_empty(self.oidc_issuer);
         self.oidc_client_id = pgokf_companion::cli::non_empty(self.oidc_client_id);
         self.oidc_client_secret = pgokf_companion::cli::non_empty(self.oidc_client_secret);
@@ -281,6 +290,13 @@ impl Cli {
                 if self.session_hours == 0 {
                     bail!("--session-hours must be at least 1");
                 }
+                if self.session_store.is_none() {
+                    bail!(
+                        "--auth oidc needs --session-store (the file that records live \
+                         sessions, so signing out ends a session and an admin can end \
+                         someone's)"
+                    );
+                }
             }
             other => bail!("--auth must be none, oidc, header, or users (not {other:?})"),
         }
@@ -318,20 +334,25 @@ mod tests {
                 .is_ok()
         );
         assert!(parse(&["--auth", "oidc"]).validate().is_err());
+        let oidc = [
+            "--auth",
+            "oidc",
+            "--oidc-issuer",
+            "https://id.example.test",
+            "--oidc-client-id",
+            "pgokf",
+            "--oidc-redirect-url",
+            "https://catalog.example.test/auth/callback",
+        ];
+        // oidc has no users file to keep the session store beside, so it
+        // must name one: without it sessions could not be ended.
         assert!(
-            parse(&[
-                "--auth",
-                "oidc",
-                "--oidc-issuer",
-                "https://id.example.test",
-                "--oidc-client-id",
-                "pgokf",
-                "--oidc-redirect-url",
-                "https://catalog.example.test/auth/callback",
-            ])
-            .validate()
-            .is_ok()
+            parse(&oidc).validate().is_err(),
+            "oidc needs a session store"
         );
+        let mut with_store = oidc.to_vec();
+        with_store.extend(["--session-store", "/tmp/sessions"]);
+        assert!(parse(&with_store).validate().is_ok());
         let sub = Cli::parse_from([
             "pgokf-web",
             "hash-password",

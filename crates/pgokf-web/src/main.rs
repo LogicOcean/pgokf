@@ -18,6 +18,7 @@ mod links;
 mod markdown;
 mod oidc;
 mod routes;
+mod session_store;
 mod store;
 
 use std::io::Read;
@@ -33,6 +34,7 @@ use crate::auth::{Authenticator, Cidr, HeaderAuth, Role, RoleMapping, Sessions, 
 use crate::config::{Cli, Command};
 use crate::db::{Db, DbConfig};
 use crate::routes::App;
+use crate::session_store::SessionStore;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -182,11 +184,30 @@ fn build_sessions(cli: &Cli) -> Result<Arc<Sessions>> {
         );
         auth::random_bytes(32)?
     };
-    Ok(Arc::new(Sessions::new(
+    let sessions = Sessions::new(
         secret,
         cli.session_hours.saturating_mul(3_600),
         cli.cookie_secure,
-    )?))
+    )?;
+    // The store is what makes a session endable rather than merely
+    // expiring: `users` mode keeps it beside the users file, `oidc` mode
+    // names it (the config check insists). Its absence is a hard error, never
+    // a silent fall-back to sessions that cannot be revoked.
+    let store_path = cli.session_store.clone().or_else(|| {
+        cli.auth_users_file
+            .as_ref()
+            .map(|users| users.with_file_name("sessions"))
+    });
+    let Some(path) = store_path else {
+        bail!("a mode that issues sessions needs --session-store");
+    };
+    let store = SessionStore::open(&path)
+        .with_context(|| format!("opening the session store {}", path.display()))?;
+    eprintln!(
+        "pgokf-web: live sessions are recorded in {}, so signing out ends a session everywhere",
+        path.display()
+    );
+    Ok(Arc::new(sessions.with_store(store)))
 }
 
 /// The way people are identified, from the flags.

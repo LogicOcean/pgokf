@@ -16,6 +16,15 @@
     </ul>
     <p class="hint">Roles are a ladder: each one holds everything below it. Signed in through {{ how }}.</p>
   </section>
+  {% if sessions_revocable %}
+  <section class="panel">
+    <div class="panel-head"><h2>Sessions</h2></div>
+    <p>{% if let Some(n) = session_count %}You are signed in on <strong>{{ n }}</strong> device(s). {% endif %}Signing out everywhere ends every session you hold at once, this one included. Use it if a device is lost or a session may have been copied.</p>
+    <form method="post" action="/profile/sessions">
+      <button type="submit" class="btn danger" data-confirm="Sign out everywhere? Every session you hold ends now, this one included.">Sign out everywhere</button>
+    </form>
+  </section>
+  {% endif %}
   {% if can_change_password %}
   <section class="panel">
     <div class="panel-head"><h2>Change password</h2></div>

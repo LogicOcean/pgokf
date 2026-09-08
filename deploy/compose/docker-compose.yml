@@ -212,6 +212,9 @@ services:
       OKF_WEB_AUTH: ${OKF_UI_AUTH:-none}
       OKF_WEB_AUTH_USERS_FILE: ${OKF_UI_USERS_FILE:-}
       OKF_WEB_SESSION_SECRET: ${OKF_UI_SESSION_SECRET:-}
+      # Live sessions are recorded here so signing out (or an admin) ends a
+      # session everywhere; the directory is the writable auth mount below.
+      OKF_WEB_SESSION_STORE: ${OKF_UI_SESSION_STORE:-/etc/pgokf/ui/sessions}
       OKF_WEB_COOKIE_SECURE: ${OKF_UI_COOKIE_SECURE:-false}
       OKF_WEB_AUTH_TRUSTED_PROXY: ${OKF_UI_TRUSTED_PROXY:-}
       OKF_WEB_AUTH_ROLE_MAP: ${OKF_UI_ROLE_MAP:-}

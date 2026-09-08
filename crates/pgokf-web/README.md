@@ -39,7 +39,7 @@ connections so an edge can be reached by a tap.
 | `--auth` | `OKF_WEB_AUTH` | How people are identified: `none` (everyone is a viewer; the default), `oidc` (this site signs people in against an OpenID Connect provider), `header` (a trusted reverse proxy forwards the identity), or `users` (a local users file with a login form). |
 | `--oidc-issuer`, `--oidc-client-id`, `--oidc-client-secret`, `--oidc-redirect-url` | `OKF_WEB_OIDC_ISSUER`, `OKF_WEB_OIDC_CLIENT_ID`, `OKF_WEB_OIDC_CLIENT_SECRET`, `OKF_WEB_OIDC_REDIRECT_URL` | `oidc` mode: the provider's issuer URL exactly as it declares it, the client this site is registered as, its secret (omit it for a public client, which PKCE alone protects), and this site's callback URL, which is its public address plus `/auth/callback` and must be registered with the provider. |
 | `--oidc-scopes`, `--oidc-subject-claims`, `--oidc-groups-claim`, `--oidc-provider-name` | `OKF_WEB_OIDC_SCOPES`, `OKF_WEB_OIDC_SUBJECT_CLAIMS`, `OKF_WEB_OIDC_GROUPS_CLAIM`, `OKF_WEB_OIDC_PROVIDER_NAME` | The scopes to ask for (default `openid profile email`; `openid` is always added), the claims tried in order for the person's identity (default `preferred_username,email,sub`), the claim carrying their groups (default `groups`), and what the sign-in button calls the provider. Roles come from `--auth-role-map` and `--auth-default-role`, and the session from `--session-secret` / `--session-hours` / `--cookie-secure`, exactly as in `users` mode. |
-| `--auth-users-file`, `--session-secret`, `--session-hours`, `--cookie-secure` | `OKF_WEB_AUTH_USERS_FILE`, `OKF_WEB_SESSION_SECRET`, `OKF_WEB_SESSION_HOURS`, `OKF_WEB_COOKIE_SECURE` | `users` mode: the file (`name:role:$argon2id$...` per line, made with `pgokf-web hash-password --user NAME --role ROLE < password.txt`), the key that signs session cookies (at least 32 characters; unset, a random one is used and sessions end with the process), the session length (default 12 h), and whether cookies are marked `Secure` (set it once the UI is served over HTTPS). |
+| `--auth-users-file`, `--session-secret`, `--session-hours`, `--cookie-secure`, `--session-store` | `OKF_WEB_AUTH_USERS_FILE`, `OKF_WEB_SESSION_SECRET`, `OKF_WEB_SESSION_HOURS`, `OKF_WEB_COOKIE_SECURE`, `OKF_WEB_SESSION_STORE` | `users` mode: the file (`name:role:$argon2id$...` per line, made with `pgokf-web hash-password --user NAME --role ROLE < password.txt`), the key that signs session cookies (at least 32 characters; unset, a random one is used and sessions end with the process), the session length (default 12 h), whether cookies are marked `Secure` (set it once the UI is served over HTTPS), and the file that records live sessions so they can be ended (default: `sessions` beside the users file; `oidc` mode must name it). |
 | `--auth-trusted-proxy`, `--auth-user-header`, `--auth-groups-header`, `--auth-name-header`, `--auth-role-map`, `--auth-default-role` | `OKF_WEB_AUTH_TRUSTED_PROXY`, `OKF_WEB_AUTH_USER_HEADER`, `OKF_WEB_AUTH_GROUPS_HEADER`, `OKF_WEB_AUTH_NAME_HEADER`, `OKF_WEB_AUTH_ROLE_MAP`, `OKF_WEB_AUTH_DEFAULT_ROLE` | `header` mode: the proxy's addresses or CIDR ranges (required; identity headers from any other peer are ignored; the word `any` believes every peer, for a server only the proxy can reach), the headers carrying the user (default `X-Forwarded-User`), the comma-separated groups (default `X-Forwarded-Groups`), and an optional display name, `group=role,...` (the highest matching role wins), and the role of a person in no mapped group (default `viewer`). |
 | `--bind` | `OKF_WEB_BIND` | Listen address (default `127.0.0.1:8080`). |
 | `--tenant` | `OKF_TENANT` | `pgokf.tenant` scope applied to every pooled connection; required once the catalog's `require_tenant` policy is on. |
@@ -77,9 +77,21 @@ every variable unconditionally.
   mode never honours another's, and carries no role: the role is derived on
   every request, so removing a user or changing the role map takes effect at
   once, and in `users` mode a changed password ends every session opened
-  before it. Sign-ins are throttled per name (after five failures each
-  attempt waits out a doubling cooldown), and an unknown name costs the
-  same time as a wrong password. State-changing requests are refused when
+  before it. Every issued session is also recorded in a store
+  (`--session-store`; `users` mode keeps it beside the users file, `oidc`
+  mode names it), and a cookie the store no longer lists is refused - so
+  signing out ends that session on every device holding a copy of its
+  cookie, the profile page offers **sign out everywhere**, an admin can end
+  anyone's sessions in either mode, and a removed person's end with them.
+  The store is rewritten at startup (so an unwritable directory fails then,
+  not at the first sign-in); a store that does not parse stops the server
+  rather than half-read an allowlist, and deleting the file starts it with
+  no live sessions - everyone signs in again, which is also the operator's
+  "end every session" lever.
+  Sign-ins are throttled per name *and* client address (after five failures
+  each attempt waits out a doubling cooldown; behind a trusted proxy the
+  address comes from `X-Forwarded-For`), and an unknown name costs the same
+  time as a wrong password. State-changing requests are refused when
   the browser says they came from another site (fetch metadata, else
   `Origin` against `Host`). In `header` mode the proxy MUST set the
   identity headers itself and never pass a client's copy through; the UI

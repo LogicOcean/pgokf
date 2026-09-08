@@ -406,6 +406,13 @@ connections) against slow-client floods.
 - **The web UI** is read-only until both a writer connection and an identity
   mode are configured (see [compose-deployment.md](compose-deployment.md)).
   Roles are server-derived and checked in each handler; sessions are signed,
-  `HttpOnly` cookies that name the mode that issued them; state-changing
-  requests are confined to the same origin; and catalog content is sanitized
+  `HttpOnly` cookies that name the mode that issued them, and every issued
+  session is also recorded server-side (`--session-store`), so a cookie the
+  server no longer lists is refused - signing out ends that session on every
+  device that holds a copy, "sign out everywhere" and an admin's "sign out"
+  end all of a person's, and a password change or removal ends them too.
+  That is a lever, not a detector: a copied cookie keeps working until its
+  session is ended or expires, which is why the cookie is `HttpOnly`,
+  `SameSite=Lax`, and `Secure` behind TLS, and why the lifetime is bounded.
+  State-changing requests are confined to the same origin; and catalog content is sanitized
   against an allow-list before rendering, under a Content-Security-Policy.

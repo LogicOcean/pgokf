@@ -349,6 +349,16 @@ leaving a plain document.
 - An OpenID Connect login mapped by the `email` claim accepted an unverified
   address, so an IdP account carrying someone else's email could assume their
   actor. An `email`-derived identity now requires `email_verified`.
+- Signing out only cleared the cookie in that one browser: a session cookie
+  was a signed value the server could verify but not forget, so a copy taken
+  beforehand kept working until it expired, and nothing could end a session
+  early - not even for a person disabled at the identity provider. Every
+  issued session is now recorded in a store beside the users file
+  (`--session-store` / `OKF_WEB_SESSION_STORE`; `oidc` mode must name it, and
+  the compose stack does), and a cookie the store does not list is refused.
+  Signing out ends that session everywhere, the profile page offers **sign
+  out everywhere**, the admin page can end anyone's sessions in either mode,
+  and a changed password or a removed person ends theirs.
 - The users file, which holds every password hash, was rewritten `0644` by
   the Admin page whatever the operator had set. It is created `0600` and
   synced before it takes the name.

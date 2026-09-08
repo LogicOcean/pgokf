@@ -286,7 +286,12 @@ provider, and their groups become roles through `OKF_UI_ROLE_MAP`. Register
 `https://<this site>/auth/callback` with the provider, set
 `OKF_UI_OIDC_ISSUER`, `OKF_UI_OIDC_CLIENT_ID`, `OKF_UI_OIDC_CLIENT_SECRET`,
 and `OKF_UI_OIDC_REDIRECT_URL`, and give the stack a
-`OKF_UI_SESSION_SECRET` as usual.
+`OKF_UI_SESSION_SECRET` as usual. Live sessions are recorded in
+`OKF_UI_SESSION_STORE` (default `/etc/pgokf/ui/sessions`, inside the same
+writable `ui-auth` mount the users file uses, so the directory must be owned
+by `OKF_UI_UID`); that is what lets signing out end a session on every
+device, and lets an admin end the sessions of someone you have disabled at
+the provider, instead of waiting for the cookie to expire.
 
 See the crate README for the roles and the security model.
 
