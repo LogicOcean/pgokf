@@ -16,7 +16,7 @@ Everything below is taken from `crates/extension/src/guc.rs` and
 
 ## GUCs (resource ceilings)
 
-Registered in `_PG_init`. The four numeric ceilings use the **`SIGHUP`**
+Registered in `_PG_init`. The five numeric ceilings use the **`SIGHUP`**
 context: they change only via `postgresql.conf` plus a configuration reload
 (`SELECT pg_reload_conf();` or `pg_ctl reload`), and **no session - not even a
 superuser `SET`** - can raise them. That is what makes them dependable hard

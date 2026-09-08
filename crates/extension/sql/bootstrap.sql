@@ -1,3 +1,4 @@
+-- SPDX-License-Identifier: AGPL-3.0-only
 -- pgokf extension bootstrap objects.
 -- PostgreSQL roles are cluster-wide and cannot be extension members, so the
 -- idempotent blocks below create them only when they do not already exist.

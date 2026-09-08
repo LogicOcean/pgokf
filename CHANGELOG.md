@@ -19,7 +19,12 @@ JSON API over the whole catalog, with an optional human workflow (upload,
 edit, review) once an identity mode and a writer connection are configured;
 `pgokf-workspace` turns a catalog selection into an agent-harness tree; and
 `pgokf-mcp` speaks HTTP as well as stdio, with bearer tokens and roles.
-`ALTER EXTENSION pgokf UPDATE TO '0.2.0'` is additive.
+`ALTER EXTENSION pgokf UPDATE TO '0.2.0'` is additive: it creates the new
+tables empty. A bundle that already carried a `SKILL.md` projects into
+`pgokf.skills` / `pgokf.scripts` / `pgokf.reference_documents` on its next
+`refresh_bundle` (or re-registration) - including a resource-less manifest
+whose bytes did not change, which the refresh now re-projects rather than
+leaving a plain document.
 
 ### Added
 
@@ -300,6 +305,16 @@ edit, review) once an identity mode and a writer connection are configured;
   mode are configured; with both, the human workflow and the admin page are
   on. It was read-only in every configuration before this release.
 
+### Fixed
+
+- Building a BM25 index quoted the `default_text_search_config` value with a
+  backslash-escaped quote (`\'`), which PostgreSQL refuses when
+  `backslash_quote = off`, and a trailing backslash could run a value on
+  into the statement when `standard_conforming_strings = off`. The literal
+  is now built the way the server's own `quote_literal()` builds it - the
+  quote doubled, the backslash escaped - which is correct under every
+  setting. (Affects the BM25 backend shipped since 0.1.15.)
+
 ### Security
 
 - The `okf.sh` helper a plugin build generates put the web URL inside a
@@ -316,12 +331,24 @@ edit, review) once an identity mode and a writer connection are configured;
   called a full-snapshot resync with only the files in hand, deleting
   everything else in that bundle. It is refused. Replacing an existing
   document now needs the editor role, as the ladder always said.
-- A disabled bundle stayed readable by direct URL: two read queries omitted
-  the `enabled` flag that search and browsing applied.
+- A disabled bundle stayed readable by direct URL: the source read, and the
+  bundle page's own concept listing, omitted the `enabled` flag that search
+  and browsing applied.
 - Sign-in ran unbounded Argon2id verifications and threw its throttle on the
   user name alone, so an unauthenticated flood could exhaust memory and CPU
   and a stranger could hold any named account shut. Verifications are
-  bounded and the throttle keys on the source address too.
+  bounded; the throttle keys on the client address too, refuses an
+  over-long name unheard, and is capped in size. Behind a reverse proxy the
+  client address is taken from a trusted `X-Forwarded-For` hop
+  (`OKF_WEB_AUTH_TRUSTED_PROXY`), so one attacker no longer shares a key
+  with everyone arriving through the proxy.
+- The directory-bundle editor wrote its temporary file with a call that
+  followed a symbolic link, so a link planted at that path could redirect an
+  edit outside the bundle. The temporary is now created fresh, refusing any
+  link, as the workspace tree writer already did.
+- An OpenID Connect login mapped by the `email` claim accepted an unverified
+  address, so an IdP account carrying someone else's email could assume their
+  actor. An `email`-derived identity now requires `email_verified`.
 - The users file, which holds every password hash, was rewritten `0644` by
   the Admin page whatever the operator had set. It is created `0600` and
   synced before it takes the name.

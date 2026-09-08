@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
 #
 # run_bench.sh - end-to-end YAML vs PostgreSQL vs Parquet benchmark for the OKF
 # catalog. Produces REAL, measured numbers on the host it runs on.

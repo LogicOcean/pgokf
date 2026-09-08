@@ -1,3 +1,4 @@
+-- SPDX-License-Identifier: AGPL-3.0-only
 -- pgokf extension upgrade: 0.1.11 -> 0.1.12
 --
 -- The 0.1.12 release is a COMPANION-TOOLING release: it ships three new

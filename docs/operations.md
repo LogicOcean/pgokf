@@ -469,6 +469,13 @@ Procedure:
    means the SQL was updated but the old library is still loaded (reconnect), or
    the library was replaced but `ALTER EXTENSION UPDATE` was not run.
 
+**Upgrading to 0.2.0** adds the package tables (`pgokf.skills`, `pgokf.scripts`,
+`pgokf.reference_documents`) empty. A bundle that already carried a `SKILL.md`
+projects into them on its next `SELECT * FROM pgokf.refresh_bundle(<id>)` (or a
+re-registration) - a resource-less manifest whose bytes are unchanged is
+re-projected too, not left a plain document. Bundles with no packages need
+nothing.
+
 See [api-stability.md](api-stability.md) for what may change across versions and
 [release-checklist.md](release-checklist.md) for the release process itself.
 

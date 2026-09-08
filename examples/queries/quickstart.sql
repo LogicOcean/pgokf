@@ -1,3 +1,4 @@
+-- SPDX-License-Identifier: AGPL-3.0-only
 -- pgokf quickstart
 --
 -- Run against the sample bundle shipped in examples/sample-bundle, passing its

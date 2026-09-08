@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
 #
 # fetch-pg-textsearch.sh -- download the pinned Tiger Data pg_textsearch .deb
 # for one (PostgreSQL major, Debian architecture) and verify it against

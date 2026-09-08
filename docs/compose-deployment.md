@@ -220,10 +220,14 @@ on the configured backend, bundle browsing, concept pages with the rendered
 source, provenance, metadata, an interactive 3D link graph, similar concepts
 and history, a catalog-wide graph explorer, a plugin builder that packages
 catalog knowledge for agent harnesses (Claude Code, Codex, Hermes Agent,
-Kimi, Gemini CLI, Cursor, `AGENTS.md`, Ollama), and an operations page. It connects as the reader role only, so it can never
-write, and it has no login of its own: keep it on loopback or a private
-network and put a TLS-terminating, authenticating reverse proxy in front of
-it before exposing it. When the stack's embedding endpoint is configured the
+Kimi, Gemini CLI, Cursor, `AGENTS.md`, Ollama), and an operations page. By
+default it connects as the reader role and has no login of its own, so it can
+never write; setting `OKF_UI_WRITER_URL` **and** an identity mode
+(`OKF_UI_AUTH`) turns on the human workflow - sign-in, upload, in-place edit,
+and review - and those changes are made as the writer role (see [The human
+workflow](#the-human-workflow-upload-edit-review) below). Either way, keep it on loopback or a
+private network and put a TLS-terminating, authenticating reverse proxy in
+front of it before exposing it. When the stack's embedding endpoint is configured the
 search page also offers semantic and hybrid modes, embedding the query with
 the same model the `embed` daemon uses. `OKF_UI_TENANT` scopes its sessions to
 one tenant (required once `require_tenant` is on). The same data is available
@@ -344,7 +348,12 @@ It does not terminate TLS, and it refuses any request carrying a browser
 `Origin` you have not named in `OKF_MCP_ALLOWED_ORIGINS` (the defence against
 a page in someone's browser reaching this server on your network). Keep it on
 loopback or a private network and put a TLS-terminating reverse proxy in
-front of it before exposing it, exactly as for the web UI.
+front of it before exposing it, exactly as for the web UI. Authentication runs
+before any request body is read, the body is bounded and buffered before a
+work slot is taken (so a slow body cannot pin one), and `/healthz` is outside
+that budget; the connection-level limits - a header-read timeout and a cap on
+simultaneous connections against a slow-client (slowloris) flood - are the
+proxy's job, which is one more reason not to expose the port directly.
 
 ## Backups and restore
 
@@ -426,6 +435,11 @@ installed SQL version ([operations.md](operations.md#upgrades)).
 4. `docker compose exec db psql -U postgres -d okf -c "ALTER EXTENSION pgokf UPDATE;"`
 5. Confirm `SELECT extversion FROM pg_extension WHERE extname='pgokf'` and
    `SELECT pgokf.version()` match.
+6. **Upgrading to 0.2.0:** the new package tables (`pgokf.skills`,
+   `pgokf.scripts`, `pgokf.reference_documents`) are created empty. Run
+   `SELECT * FROM pgokf.refresh_bundle(id)` for each bundle that carries a
+   `SKILL.md` so its package projects into them; a bundle with no packages
+   needs nothing.
 
 Between steps 3 and 4 the new library is loaded while the SQL objects are
 still the old version, so a companion that calls the catalog in that window

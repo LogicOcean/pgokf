@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
 #
 # build-deb.sh -- build a Debian package of the pgokf extension for one
 # PostgreSQL major version (15-19).

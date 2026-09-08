@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 // Interactive 3D graph: the concept page's neighborhood and the catalog-wide
 // explorer share this script.
 //

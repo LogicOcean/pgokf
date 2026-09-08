@@ -1,3 +1,4 @@
+-- SPDX-License-Identifier: AGPL-3.0-only
 -- pgokf extension upgrade: 0.1.13 -> 0.1.14
 --
 -- 0.1.14 makes a logical backup of the catalog complete. Before it, pg_dump

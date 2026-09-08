@@ -71,6 +71,8 @@ services:
       - -c
       - pgokf.max_bundle_files=${PGOKF_MAX_BUNDLE_FILES:-250000}
       - -c
+      - pgokf.max_bundle_bytes=${PGOKF_MAX_BUNDLE_BYTES:-1073741824}
+      - -c
       - pgokf.max_frontmatter_bytes=${PGOKF_MAX_FRONTMATTER_BYTES:-262144}
       - -c
       - pgokf.max_graph_hops=${PGOKF_MAX_GRAPH_HOPS:-8}

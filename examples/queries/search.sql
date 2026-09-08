@@ -1,3 +1,4 @@
+-- SPDX-License-Identifier: AGPL-3.0-only
 -- Full-text search examples for pgokf.
 --
 -- pgokf.concept_search(query, bundle_id, limit_count) is the stable API; the

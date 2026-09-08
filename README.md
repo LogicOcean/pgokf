@@ -123,11 +123,13 @@ RUST_TEST_THREADS=1 cargo pgrx test pg18 --no-default-features --features pg18 #
 
 Pre-1.0 (`0.2.x`). The enumerated SQL surface is treated as stable and every change ships an upgrade script verified `upgrade == fresh`, but per SemVer a `0.MINOR` bump may still carry a breaking change (called out in [CHANGELOG.md](CHANGELOG.md)). Reaching `1.0.0` is a deliberate decision, not an automatic bump.
 
+The extension builds from source on PostgreSQL 15–19 (`pg15`…`pg19`). Published binaries and Docker images cover 15–18; a 19 image builds once PGDG ships packages, and carries no BM25 provider until Tiger Data publishes a pg19 `pg_textsearch`.
+
 ## License
 
 Copyright (c) 2026 LogicOcean.
 
-pgokf is **dual-licensed**: **AGPL-3.0-only** for all crates ([`LICENSE`](LICENSE); every source file carries an SPDX header), plus a **commercial license** for use the AGPL does not permit - embedding in a proprietary product, offering it as a managed service without releasing source, or an organizational no-AGPL policy. See [`LICENSING.md`](LICENSING.md) for the model and [`COMM-LICENSE.md`](COMM-LICENSE.md) for the commercial terms.
+pgokf is **dual-licensed**: **AGPL-3.0-only** for all crates ([`LICENSE`](LICENSE); every first-party source file carries an SPDX header), plus a **commercial license** for use the AGPL does not permit - embedding in a proprietary product, offering it as a managed service without releasing source, or an organizational no-AGPL policy. See [`LICENSING.md`](LICENSING.md) for the model and [`COMM-LICENSE.md`](COMM-LICENSE.md) for the commercial terms.
 
 ## Security & contributing
 

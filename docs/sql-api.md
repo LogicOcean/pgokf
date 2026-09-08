@@ -135,7 +135,7 @@ Behavior:
 - The canonical path must not already be registered - a duplicate raises
   `23505`; use `refresh_bundle` to re-synchronize instead.
 - Discovery is symlink-escape safe and bounded by the `pgokf.*` GUCs
-  (`max_file_bytes`, `max_bundle_files`, `max_frontmatter_bytes`). Reserved
+  (`max_file_bytes`, `max_bundle_files`, `max_bundle_bytes`, `max_frontmatter_bytes`). Reserved
   files (`index.md`, `log.md`) at any depth are skipped.
 - Parsing is strict: the first malformed file aborts the whole sync (`22023`) and
   the surrounding transaction rolls back, so a partial projection is never
@@ -590,7 +590,7 @@ Run it after enabling pgvector, after bulk-loading embeddings, or after changing
 Register a recurring `refresh_bundle` on the external
 [`pg_cron`](https://github.com/citusdata/pg_cron) scheduler. The job command
 pins the bundle's tenant (`set_config('pgokf.tenant', ...)` before the call)
-since 0.2.0, so the cron worker's own session satisfies the tenant rules;
+since 0.1.16, so the cron worker's own session satisfies the tenant rules;
 jobs scheduled by earlier releases run the bare call and must be
 re-scheduled once `require_tenant` is on. Like the pgvector and
 BM25-provider surfaces, the coupling is **runtime-only**: `CREATE EXTENSION pgokf`
@@ -982,7 +982,7 @@ that has not set `pgokf.tenant`).
 
 ### `pgokf.tenant_required() → boolean`
 
-Whether the durable `require_tenant` policy is on (since 0.2.0). `STABLE`,
+Whether the durable `require_tenant` policy is on (since 0.1.16). `STABLE`,
 `SECURITY DEFINER` (reads the admin-only config), executable by **any role
 with `USAGE` on schema `pgokf`** because every row-level-security policy
 depends on it.
@@ -1736,7 +1736,7 @@ Cluster-persistent policy: a single row, managed only through `set_config` /
 | `store_source` | `boolean` | `false` |
 | `search_backend` | `text` | `'native'` (`CHECK IN ('native','bm25')`) |
 | `bm25_provider` | `text` | `'auto'` (`CHECK IN ('auto','pg_search','pg_textsearch')`; since 0.1.15) |
-| `require_tenant` | `boolean` | `false` (since 0.2.0; `true` denies an unscoped session) |
+| `require_tenant` | `boolean` | `false` (since 0.1.16; `true` denies an unscoped session) |
 | `notify_channel` | `text` | `''` (empty disables) |
 | `okf_version_policy` | `text` | `'warn'` (`CHECK IN ('warn','reject')`) |
 | `embedding_dim` | `integer` | `1536` (`CHECK BETWEEN 1 AND 16000`) |
@@ -1826,7 +1826,7 @@ See [security.md](security.md) for the authorization model.
 
 ## GUCs
 
-Six `pgokf.*` server settings. The four resource ceilings use the `SIGHUP`
+Seven `pgokf.*` server settings. The five resource ceilings use the `SIGHUP`
 context, settable only in `postgresql.conf` plus a reload, **never** from a SQL
 `SET`, so they stay trustworthy as hard safety limits. `log_level` uses `SUSET`,
 so a superuser can change it at runtime, and `pgokf.tenant` uses `USERSET` (any
@@ -1837,6 +1837,7 @@ Full detail in [configuration.md](configuration.md).
 | --- | ---- | ------- | ----- | ------- |
 | `pgokf.max_file_bytes` | integer | `4194304` (4 MiB) | `1 .. 2147483647` | `SIGHUP` |
 | `pgokf.max_bundle_files` | integer | `100000` | `1 .. 2147483647` | `SIGHUP` |
+| `pgokf.max_bundle_bytes` | integer | `1073741824` (1 GiB) | `1 .. 2147483647` | `SIGHUP` |
 | `pgokf.max_frontmatter_bytes` | integer | `262144` (256 KiB) | `1 .. 2147483647` | `SIGHUP` |
 | `pgokf.max_graph_hops` | integer | `5` | `1 .. 1000` | `SIGHUP` |
 | `pgokf.log_level` | string | `warning` | - | `SUSET` |

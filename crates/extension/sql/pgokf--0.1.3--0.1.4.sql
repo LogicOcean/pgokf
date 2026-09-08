@@ -1,3 +1,4 @@
+-- SPDX-License-Identifier: AGPL-3.0-only
 -- pgokf extension upgrade: 0.1.3 -> 0.1.4
 --
 -- This upgrade carries the COMPLETE delta from the tagged v0.1.3 release

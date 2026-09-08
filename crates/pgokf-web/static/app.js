@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 // pgokf-web client behaviour: theme toggle, keyboard focus, copy buttons,
 // tab panels, list filtering, auto-submitting selects, and "load more" list
 // merging. No framework; htmx handles the partial swaps declared in the

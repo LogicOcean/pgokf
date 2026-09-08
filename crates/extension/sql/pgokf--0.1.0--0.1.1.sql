@@ -1,3 +1,4 @@
+-- SPDX-License-Identifier: AGPL-3.0-only
 -- pgokf extension upgrade: 0.1.0 -> 0.1.1
 --
 -- This is a documented, forward-compatible EXAMPLE upgrade script. It exists

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
 #
 # 20-roles.sh -- create the pgokf login roles on first cluster initialization.
 #

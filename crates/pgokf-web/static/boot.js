@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 // Runs before first paint: marks that scripting is available (the stylesheet
 // hides the tab panels only then, so every panel is readable without it)
 // and applies the saved theme so the page never flashes the wrong one.

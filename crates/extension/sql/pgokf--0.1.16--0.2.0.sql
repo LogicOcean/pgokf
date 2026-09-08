@@ -1,3 +1,4 @@
+-- SPDX-License-Identifier: AGPL-3.0-only
 -- pgokf extension upgrade: 0.1.16 -> 0.2.0
 --
 -- 0.2.0 stores agent plugin content in the catalog. A bundle may carry Agent

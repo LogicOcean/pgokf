@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
 #
 # update-pg-textsearch-checksums.sh -- regenerate packaging/docker/pg_textsearch.sha256,
 # the pinned SHA256 table that install-optional-extensions.sh verifies the

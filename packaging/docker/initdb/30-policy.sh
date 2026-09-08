@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
 #
 # 30-policy.sh -- apply the durable pgokf catalog policy on first initialization.
 #

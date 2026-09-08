@@ -1,3 +1,4 @@
+-- SPDX-License-Identifier: AGPL-3.0-only
 -- pgokf extension upgrade: 0.1.1 -> 0.1.2
 --
 -- Additive, forward-compatible upgrade for the opt-in "raw source storage"

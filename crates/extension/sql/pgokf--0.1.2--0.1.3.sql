@@ -1,3 +1,4 @@
+-- SPDX-License-Identifier: AGPL-3.0-only
 -- pgokf extension upgrade: 0.1.2 -> 0.1.3
 --
 -- Re-models the OKF provenance/trust/lifecycle projection to faithfully match

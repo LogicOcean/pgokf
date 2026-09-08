@@ -1,3 +1,4 @@
+-- SPDX-License-Identifier: AGPL-3.0-only
 -- Runs once, on first cluster initialization, via the postgres image's
 -- /docker-entrypoint-initdb.d hook. Makes `pgokf` available in the default
 -- database so the image is usable with zero extra steps, and creates the

@@ -381,3 +381,31 @@ Every error carries the offending bundle-relative path so operators can identify
 the object at fault. Server logs should include bundle identity and high-level
 failure categories, not full concept bodies. See
 [troubleshooting.md](troubleshooting.md) for causes and fixes.
+
+## Companion network services (web UI, MCP over HTTP)
+
+The extension does no network I/O; the companions that do carry their own
+boundary. Both `pgokf-web` and `pgokf-mcp` (in its HTTP mode) connect to the
+catalog as `pgokf_reader` unless a writer connection is explicitly configured,
+speak plain HTTP, and are meant to sit on loopback or a private network behind
+a TLS-terminating, authenticating reverse proxy - which is also what supplies
+connection-level limits (a header-read timeout, a cap on simultaneous
+connections) against slow-client floods.
+
+- **MCP over HTTP** authenticates every request but `/healthz` with a bearer
+  token (`pgokf_` + 43 base64url characters; only the SHA-256 digest is
+  stored, and it is compared in constant time). The check runs before the
+  request body is read, so an unauthenticated caller neither buffers a body
+  nor takes a work slot; the body is then bounded and buffered before a slot
+  is taken, and `/healthz` sits outside that budget. Two roles form a ladder
+  (`reader` < `builder`); host-only tool arguments (a plugin's `output_dir`)
+  are refused over HTTP so a remote caller cannot make the server write to its
+  own disk. The browser `Origin` is validated against an allow-list, and no
+  token, body, or digest is written to a log line. One process serves one
+  tenant.
+- **The web UI** is read-only until both a writer connection and an identity
+  mode are configured (see [compose-deployment.md](compose-deployment.md)).
+  Roles are server-derived and checked in each handler; sessions are signed,
+  `HttpOnly` cookies that name the mode that issued them; state-changing
+  requests are confined to the same origin; and catalog content is sanitized
+  against an allow-list before rendering, under a Content-Security-Policy.

@@ -1,3 +1,4 @@
+-- SPDX-License-Identifier: AGPL-3.0-only
 -- pgokf extension upgrade: 0.1.14 -> 0.1.15
 --
 -- 0.1.15 makes the BM25 search backend provider-selectable. The `bm25`

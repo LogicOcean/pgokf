@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
 #
 # smoke-test.sh -- prove a built pgokf server image actually works, end to end.
 #

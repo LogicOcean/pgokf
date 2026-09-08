@@ -1,3 +1,4 @@
+-- SPDX-License-Identifier: AGPL-3.0-only
 -- OKF v0.2 link-graph examples.
 -- pgokf.links stores directed Markdown links extracted during synchronization.
 

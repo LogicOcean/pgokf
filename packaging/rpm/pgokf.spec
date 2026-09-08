@@ -101,7 +101,7 @@ cp -a target/release/%{sname}-pg%{pgmajorversion}/. %{buildroot}/
 %{pginstdir}/share/extension/%{sname}--*--*.sql
 
 %changelog
-* Sun Sep 06 2026 David Saroka <david.saroka@gmail.com> - 0.2.0-1
+* Tue Sep 08 2026 David Saroka <david.saroka@gmail.com> - 0.2.0-1
 - Release 0.2.0: Agent Skills packages (SKILL.md with scripts/, references/,
   assets/) are catalog content: virtual Skill/Script/Reference concepts, exact
   bytes in pgokf.skills / pgokf.scripts / pgokf.reference_documents, package

@@ -1,3 +1,4 @@
+-- SPDX-License-Identifier: AGPL-3.0-only
 -- pgokf extension upgrade: 0.1.12 -> 0.1.13
 --
 -- The 0.1.13 release is a SECURITY / BUGFIX remediation release. Every fix is

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
 #
 # smoke-test-companions.sh -- prove a built pgokf-companions image runs each
 # binary, as an unprivileged user, on the daemon's native architecture.

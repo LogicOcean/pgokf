@@ -12,8 +12,11 @@ project, and a separate **commercial license** for use the AGPL does not permit.
 libraries (`okf-parser`, `okf-sync`), and the companion tools (`pgokf-ingest`,
 `pgokf-embed`, `pgokf-mcp`, `pgokf-pgconn`) - is licensed under the **GNU Affero
 General Public License, version 3.0 only** (`AGPL-3.0-only`). The full text is in
-[`LICENSE`](LICENSE), and every source file carries an
-`SPDX-License-Identifier: AGPL-3.0-only` header.
+[`LICENSE`](LICENSE), and every first-party source file carries an
+`SPDX-License-Identifier: AGPL-3.0-only` header. The only exceptions are the
+vendored third-party assets under `crates/pgokf-web/static/vendor/`, which keep
+their upstream licenses and are recorded in
+[`THIRD-PARTY-NOTICES.txt`](THIRD-PARTY-NOTICES.txt).
 
 In plain terms, under the AGPL you may use, study, modify, and redistribute
 pgokf for free - including inside your own organization - **provided that** if
