@@ -37,6 +37,8 @@
   var graph = null;
   var data = null;
   var labels = new Map();
+  // Each label's measured box, by node id.
+  var sizes = new Map();
   var dims = 3;
   var frame = null;
   var started = false;
@@ -204,6 +206,7 @@
   function rebuildLabels() {
     labelHost.textContent = '';
     labels = new Map();
+    sizes = new Map();
     if (!data) return;
     labelledNodes(data.nodes).forEach(function (node) {
       var el = document.createElement('a');
@@ -213,6 +216,9 @@
       el.title = node.path;
       el.addEventListener('click', function (event) { event.preventDefault(); selectNode(node, true); });
       labelHost.appendChild(el);
+      // Measured once, after it is in the document: the text never changes,
+      // and reading layout every frame would reflow the page.
+      sizes.set(node.id, { w: el.offsetWidth, h: el.offsetHeight });
       labels.set(node.id, el);
     });
   }
@@ -228,11 +234,24 @@
     // entering full screen.
     var width = graph.width() || canvasHost.clientWidth;
     var height = graph.height() || canvasHost.clientHeight;
+    var placed = [];
     labels.forEach(function (el, id) {
       var node = nodeById(id);
       if (!node || node.x === undefined) { el.style.display = 'none'; return; }
       var pos = project(camera, node.x, node.y, dims === 3 ? node.z : 0, width, height);
       if (!pos || pos.x < -80 || pos.x > width + 80 || pos.y < -40 || pos.y > height + 40) { el.style.display = 'none'; return; }
+      // Two titles printed over each other read as neither, so a label that
+      // would land on one already placed stands down. The lit one always
+      // gets its place; the rest are in the order they were listed, which
+      // is best-connected first.
+      var size = sizes.get(id) || { w: 0, h: 0 };
+      var box = { l: pos.x - size.w / 2, t: pos.y - 10 - size.h, r: pos.x + size.w / 2, b: pos.y - 10 };
+      var lit = nodeIsLit(node);
+      if (!lit && placed.some(function (o) { return box.l < o.r && box.r > o.l && box.t < o.b && box.b > o.t; })) {
+        el.style.display = 'none';
+        return;
+      }
+      placed.push(box);
       el.style.display = '';
       el.style.transform = 'translate(' + pos.x.toFixed(1) + 'px,' + (pos.y - 10).toFixed(1) + 'px) translate(-50%, -100%)';
       el.style.opacity = String(Math.max(0.35, Math.min(1, 1.6 - pos.depth)));
@@ -413,9 +432,16 @@
   });
   root.querySelectorAll('[data-graph-fullscreen]').forEach(function (button) {
     button.addEventListener('click', function () {
-      if (document.fullscreenElement === root) { document.exitFullscreen(); return; }
-      if (root.requestFullscreen) root.requestFullscreen().catch(function () { root.classList.toggle('fullscreen'); });
-      else root.classList.toggle('fullscreen');
+      // Refit whichever way the box changes shape: `fullscreenchange` does
+      // not fire for the class-toggle fallback.
+      var settle = function () { setTimeout(function () { resize(); fit(); }, 400); };
+      if (document.fullscreenElement === root) { document.exitFullscreen(); settle(); return; }
+      if (root.requestFullscreen) {
+        root.requestFullscreen().catch(function () { root.classList.toggle('fullscreen'); });
+      } else {
+        root.classList.toggle('fullscreen');
+      }
+      settle();
     });
   });
   document.addEventListener('fullscreenchange', function () {
