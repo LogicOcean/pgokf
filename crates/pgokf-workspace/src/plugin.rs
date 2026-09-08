@@ -281,6 +281,33 @@ fn layout(profile: &Profile, name: &str) -> Layout {
     }
 }
 
+/// The records a build was handed: there must be some, and each must carry
+/// the content it stands for.
+///
+/// # Errors
+///
+/// An empty selection, or a document whose source did not load.
+fn validate_records(records: &[ConceptRecord]) -> Result<()> {
+    if records.is_empty() {
+        return Err(anyhow!("the selection matched no visible concept"));
+    }
+    // A resource may legitimately be empty - an `assets/.gitkeep`, an empty
+    // script - and `load_sources` keeps it for that reason. Only a document
+    // that loaded nothing is a fault; refusing an empty resource here made
+    // one `.gitkeep` in a package poison every build that selected it.
+    if let Some(empty) = records
+        .iter()
+        .find(|r| r.bytes.is_empty() && r.resource.is_none())
+    {
+        return Err(anyhow!(
+            "concept {}:{} has no content loaded",
+            empty.bundle_id,
+            empty.concept_id
+        ));
+    }
+    Ok(())
+}
+
 /// Everything about a request that can be judged before any content is
 /// read: the URLs it carries, and whether the harness can do what it asks.
 ///
@@ -327,16 +354,7 @@ pub fn assemble(
     snapshot: &Snapshot,
     records: &[ConceptRecord],
 ) -> Result<Plugin> {
-    if records.is_empty() {
-        return Err(anyhow!("the selection matched no visible concept"));
-    }
-    if let Some(empty) = records.iter().find(|r| r.bytes.is_empty()) {
-        return Err(anyhow!(
-            "concept {}:{} has no content loaded",
-            empty.bundle_id,
-            empty.concept_id
-        ));
-    }
+    validate_records(records)?;
     let profile = options.profile()?;
     let profile = &profile;
     let name = package_name(&options.name)?;

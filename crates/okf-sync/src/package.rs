@@ -116,19 +116,50 @@ pub struct PackageIndex {
 
 impl PackageIndex {
     /// Index the packages declared by a set of bundle-relative paths: every
-    /// path whose basename is exactly `SKILL.md` contributes its directory.
+    /// path whose basename is exactly `SKILL.md` contributes its directory,
+    /// unless that manifest is itself a resource of a package already
+    /// indexed (see [`PackageIndex::insert_manifest`]).
     pub fn from_paths<'a>(paths: impl IntoIterator<Item = &'a str>) -> Self {
-        let roots = paths
+        let mut manifests: Vec<&str> = paths
             .into_iter()
-            .filter_map(Self::manifest_directory)
-            .map(str::to_owned)
+            .filter(|path| Self::manifest_directory(path).is_some())
             .collect();
-        Self { roots }
+        // Shortest first, so an enclosing package is always decided before
+        // anything nested inside it.
+        manifests.sort_unstable_by_key(|path| (path.len(), *path));
+        let mut index = Self::default();
+        for path in manifests {
+            index.insert_manifest(path);
+        }
+        index
     }
 
-    /// Add one package root (the directory of a `SKILL.md`).
-    pub fn insert_root(&mut self, root: impl Into<String>) {
-        self.roots.insert(root.into());
+    /// Register the package a `SKILL.md` declares, and say whether it was.
+    ///
+    /// A `SKILL.md` under another package's `scripts/`, `references/` or
+    /// `assets/` is **that package's resource**, not a new package. Taking
+    /// it for a root would make every sibling file package-relative to it,
+    /// and since those siblings are then not under a resource directory of
+    /// their own they would stop being package members at all - a one-file
+    /// commit quietly removing a subtree from the catalog. Callers that
+    /// build an index incrementally must add manifests shortest path first,
+    /// which [`PackageIndex::from_paths`] does.
+    pub fn insert_manifest(&mut self, path: &str) -> bool {
+        let Some(directory) = Self::manifest_directory(path) else {
+            return false;
+        };
+        if self.resource_of_indexed_package(path) {
+            return false;
+        }
+        self.roots.insert(directory.to_owned());
+        true
+    }
+
+    /// Whether an already-indexed package owns `path` as one of its
+    /// resources.
+    fn resource_of_indexed_package(&self, path: &str) -> bool {
+        self.owner_of(path)
+            .is_some_and(|root| resource_class(root, path).is_some())
     }
 
     /// The indexed package roots in path order.
@@ -169,17 +200,21 @@ impl PackageIndex {
     /// catalog content and must not be discovered.
     #[must_use]
     pub fn classify(&self, path: &str) -> Option<FileClass> {
+        // Ownership first: inside a package's `scripts/`, `references/` or
+        // `assets/` every file is that package's resource, whatever it is
+        // called. A `references/index.md` is an ordinary reference, and a
+        // `references/SKILL.md` is a reference too, not a second package.
+        if let Some(root) = self.owner_of(path)
+            && let Some(class) = resource_class(root, path)
+        {
+            return Some(class);
+        }
         let (_, name) = split_parent(path);
         if RESERVED_FILE_NAMES.contains(&name) {
             return Some(FileClass::Reserved);
         }
         if name == SKILL_MANIFEST {
             return Some(FileClass::SkillManifest);
-        }
-        if let Some(root) = self.owner_of(path)
-            && let Some(class) = resource_class(root, path)
-        {
-            return Some(class);
         }
         is_markdown(name).then_some(FileClass::OkfDocument)
     }
@@ -236,6 +271,78 @@ fn is_markdown(name: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_manifest_inside_another_package_is_that_package_s_resource() {
+        // Arrange: a SKILL.md committed under a package's references/ used
+        // to become a package root of its own, which made every sibling
+        // package-relative to it - and so no longer a member of anything.
+        let index = PackageIndex::from_paths([
+            "tools/kit/SKILL.md",
+            "tools/kit/references/SKILL.md",
+            "tools/kit/assets/SKILL.md",
+        ]);
+
+        // Act / Assert: one package, and the nested manifests are its
+        // resources like any other file there.
+        assert_eq!(index.roots().collect::<Vec<_>>(), ["tools/kit"]);
+        assert_eq!(
+            index.classify("tools/kit/references/SKILL.md"),
+            Some(FileClass::SkillReference)
+        );
+        assert_eq!(
+            index.classify("tools/kit/references/guide.md"),
+            Some(FileClass::SkillReference)
+        );
+        assert_eq!(
+            index.classify("tools/kit/assets/logo.png"),
+            Some(FileClass::SkillAsset)
+        );
+        assert_eq!(
+            index.classify("tools/kit/SKILL.md"),
+            Some(FileClass::SkillManifest)
+        );
+    }
+
+    #[test]
+    fn a_package_still_nests_outside_a_resource_directory() {
+        // Arrange / Act: only the three resource directories make a nested
+        // manifest a resource; anywhere else it is its own package.
+        let index = PackageIndex::from_paths(["tools/kit/SKILL.md", "tools/kit/inner/SKILL.md"]);
+
+        // Assert
+        assert_eq!(
+            index.roots().collect::<Vec<_>>(),
+            ["tools/kit", "tools/kit/inner"]
+        );
+        assert_eq!(
+            index.classify("tools/kit/inner/scripts/run.sh"),
+            Some(FileClass::SkillScript)
+        );
+    }
+
+    #[test]
+    fn a_reserved_name_inside_a_resource_directory_is_a_resource() {
+        // Arrange: index.md and log.md are directory bookkeeping at a
+        // bundle or package root, but an ordinary file inside references/.
+        let index = PackageIndex::from_paths(["tools/kit/SKILL.md"]);
+
+        // Act / Assert
+        assert_eq!(
+            index.classify("tools/kit/references/index.md"),
+            Some(FileClass::SkillReference)
+        );
+        assert_eq!(
+            index.classify("tools/kit/scripts/log.md"),
+            Some(FileClass::SkillScript)
+        );
+        assert_eq!(index.classify("index.md"), Some(FileClass::Reserved));
+        assert_eq!(
+            index.classify("tools/kit/index.md"),
+            Some(FileClass::Reserved),
+            "still bookkeeping at the package root itself"
+        );
+    }
+
     fn index(paths: &[&str]) -> PackageIndex {
         PackageIndex::from_paths(paths.iter().copied())
     }
@@ -264,15 +371,13 @@ mod tests {
 
     #[test]
     fn owner_is_the_nearest_enclosing_package() {
-        // Arrange
+        // Arrange: the second manifest sits inside the first package's
+        // scripts/, so it is that package's script, not a package.
         let index = index(&["a/SKILL.md", "a/scripts/inner/SKILL.md"]);
 
-        // Act / Assert
+        // Act / Assert: everything under a/scripts/ belongs to a.
         assert_eq!(index.owner_of("a/scripts/run.sh"), Some("a"));
-        assert_eq!(
-            index.owner_of("a/scripts/inner/scripts/x.sh"),
-            Some("a/scripts/inner")
-        );
+        assert_eq!(index.owner_of("a/scripts/inner/scripts/x.sh"), Some("a"));
         assert_eq!(index.owner_of("a/SKILL.md"), Some("a"));
         assert_eq!(index.owner_of("other/x.sh"), None);
     }
@@ -282,10 +387,12 @@ mod tests {
         // Arrange
         let index = index(&["pkg/SKILL.md"]);
 
-        // Act / Assert: reserved names win even inside a resource directory.
+        // Act / Assert: inside a resource directory every file is a
+        // resource, reserved names included - index.md is bookkeeping at a
+        // root, but an ordinary reference under references/.
         assert_eq!(
             index.classify("pkg/references/index.md"),
-            Some(FileClass::Reserved)
+            Some(FileClass::SkillReference)
         );
         assert_eq!(index.classify("pkg/log.md"), Some(FileClass::Reserved));
         assert_eq!(
@@ -319,25 +426,32 @@ mod tests {
     }
 
     #[test]
-    fn a_resource_directory_of_a_nested_package_belongs_to_the_nested_package() {
-        // Arrange: the nested package is inside the outer package's references.
+    fn everything_under_a_resource_directory_belongs_to_the_enclosing_package() {
+        // Arrange: a manifest committed inside the outer package's
+        // references/. Treating it as a package of its own orphaned every
+        // sibling - they were no longer under a resource directory of the
+        // nested root, so they stopped being catalog content at all.
         let index = index(&["a/SKILL.md", "a/references/inner/SKILL.md"]);
 
-        // Act / Assert: the nested manifest is a manifest, its sibling file is
-        // not a resource of either package (it sits directly under the nested
-        // root), and its own scripts belong to it.
+        // Act / Assert: the whole subtree is references of `a`, so nothing
+        // is lost, and no second package is declared.
+        assert_eq!(index.roots().collect::<Vec<_>>(), ["a"]);
         assert_eq!(
             index.classify("a/references/inner/SKILL.md"),
-            Some(FileClass::SkillManifest)
+            Some(FileClass::SkillReference)
         );
-        assert_eq!(index.classify("a/references/inner/notes.txt"), None);
+        assert_eq!(
+            index.classify("a/references/inner/notes.txt"),
+            Some(FileClass::SkillReference)
+        );
         assert_eq!(
             index.classify("a/references/inner/scripts/x.sh"),
-            Some(FileClass::SkillScript)
+            Some(FileClass::SkillReference)
         );
         assert_eq!(
             index.package_relative("a/references/inner/scripts/x.sh"),
-            Some("scripts/x.sh")
+            Some("references/inner/scripts/x.sh"),
+            "relative to `a`, the package it really belongs to"
         );
     }
 

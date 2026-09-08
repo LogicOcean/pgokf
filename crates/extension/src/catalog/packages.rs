@@ -1325,15 +1325,18 @@ fn relate_body_links(bundle_id: i64, skill_ids: &[String]) -> Result<(), Catalog
         UPDATE pgokf.links l
         SET link_relation = t.relation
         FROM (
-            SELECT s.concept_id, $3::text AS relation
+            SELECT s.concept_id, s.package_concept_id, $3::text AS relation
             FROM pgokf.scripts s WHERE s.bundle_id = $1
             UNION ALL
-            SELECT r.concept_id, $4::text
+            SELECT r.concept_id, r.package_concept_id, $4::text
             FROM pgokf.reference_documents r WHERE r.bundle_id = $1
         ) AS t
         WHERE l.bundle_id = $1
           AND l.source_id = ANY($2)
           AND l.target_id = t.concept_id
+          -- Its own resources: a link to another package's script is an
+          -- ordinary reference, not this skill's USES edge.
+          AND t.package_concept_id = l.source_id
           AND l.link_relation = 'reference'";
     for chunk in skill_ids.chunks(BATCH_SIZE) {
         Spi::run_with_args(

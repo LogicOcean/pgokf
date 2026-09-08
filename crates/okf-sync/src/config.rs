@@ -25,6 +25,12 @@ pub struct SyncConfig {
     pub max_file_bytes: Option<u64>,
     /// Upper bound on the number of discovered files; `None` is unlimited.
     pub max_files: Option<usize>,
+    /// Upper bound on the discovered files' total size in bytes; `None` is
+    /// unlimited. The per-file and file-count bounds multiply out to far
+    /// more than a sync can hold in memory, and since 0.2.0 a package
+    /// resource is kept whole whatever its type, so the total is the bound
+    /// that decides whether a bundle can be ingested at all.
+    pub max_total_bytes: Option<u64>,
 }
 
 impl SyncConfig {
@@ -38,6 +44,7 @@ impl SyncConfig {
             exclude: Vec::new(),
             max_file_bytes: None,
             max_files: None,
+            max_total_bytes: None,
         }
     }
 
@@ -66,6 +73,13 @@ impl SyncConfig {
     #[must_use]
     pub fn with_max_files(mut self, limit: usize) -> Self {
         self.max_files = Some(limit);
+        self
+    }
+
+    /// Bound the discovered files' total size in bytes.
+    #[must_use]
+    pub fn with_max_total_bytes(mut self, limit: u64) -> Self {
+        self.max_total_bytes = Some(limit);
         self
     }
 }

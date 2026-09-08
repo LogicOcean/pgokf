@@ -24,6 +24,12 @@ use std::ffi::CString;
 pub const DEFAULT_MAX_FILE_BYTES: i32 = 4 * 1024 * 1024;
 /// Default ceiling for the number of files discovered in one bundle.
 pub const DEFAULT_MAX_BUNDLE_FILES: i32 = 100_000;
+/// Default ceiling for a whole bundle's discovered files, in bytes (1 GiB).
+/// The per-file and file-count ceilings multiply out to far more than one
+/// sync can hold, and since 0.2.0 a package resource is stored whole
+/// whatever its type, so the total is what decides whether a bundle can be
+/// ingested at all.
+pub const DEFAULT_MAX_BUNDLE_BYTES: i32 = 1024 * 1024 * 1024;
 /// Default ceiling for the size of YAML frontmatter, in bytes (256 KiB).
 pub const DEFAULT_MAX_FRONTMATTER_BYTES: i32 = 256 * 1024;
 /// Default ceiling for graph traversal depth.
@@ -36,6 +42,7 @@ const MAX_GRAPH_HOPS_CEILING: i32 = 1_000;
 
 static MAX_FILE_BYTES: GucSetting<i32> = GucSetting::<i32>::new(DEFAULT_MAX_FILE_BYTES);
 static MAX_BUNDLE_FILES: GucSetting<i32> = GucSetting::<i32>::new(DEFAULT_MAX_BUNDLE_FILES);
+static MAX_BUNDLE_BYTES: GucSetting<i32> = GucSetting::<i32>::new(DEFAULT_MAX_BUNDLE_BYTES);
 static MAX_FRONTMATTER_BYTES: GucSetting<i32> =
     GucSetting::<i32>::new(DEFAULT_MAX_FRONTMATTER_BYTES);
 static MAX_GRAPH_HOPS: GucSetting<i32> = GucSetting::<i32>::new(DEFAULT_MAX_GRAPH_HOPS);
@@ -71,6 +78,16 @@ pub fn register_gucs() {
         c"Maximum files accepted in one bundle.",
         c"Hard safety limit for files discovered while indexing an OKF bundle.",
         &MAX_BUNDLE_FILES,
+        1,
+        i32::MAX,
+        GucContext::Sighup,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pgokf.max_bundle_bytes",
+        c"Maximum total bytes accepted in one bundle.",
+        c"Hard safety limit for the combined size of the files discovered while indexing an OKF bundle.",
+        &MAX_BUNDLE_BYTES,
         1,
         i32::MAX,
         GucContext::Sighup,
@@ -141,6 +158,12 @@ pub fn max_file_bytes() -> usize {
 #[must_use]
 pub fn max_bundle_files() -> usize {
     to_limit(MAX_BUNDLE_FILES.get())
+}
+
+/// Effective `pgokf.max_bundle_bytes`: ceiling for a bundle's total size.
+#[must_use]
+pub fn max_bundle_bytes() -> usize {
+    to_limit(MAX_BUNDLE_BYTES.get())
 }
 
 /// Effective `pgokf.max_frontmatter_bytes`: ceiling for YAML frontmatter, in

@@ -29,6 +29,7 @@ threshold uses **`SUSET`**, so a superuser can adjust it at runtime.
 | --- | ---- | ------- | ----- | ------- | ------ |
 | `pgokf.max_file_bytes` | integer | `4194304` (4 MiB) | `1 .. 2147483647` | `SIGHUP` | Maximum bytes read from one bundle file; larger files abort the sync. |
 | `pgokf.max_bundle_files` | integer | `100000` | `1 .. 2147483647` | `SIGHUP` | Maximum files discovered in one bundle. |
+| `pgokf.max_bundle_bytes` | integer | `1073741824` | `1 .. 2147483647` | `SIGHUP` | Maximum **total** bytes of the files discovered in one bundle. The per-file and file-count ceilings multiply out to far more than one sync can hold in memory, and a package resource is stored whole whatever its type, so this is what decides whether a bundle can be ingested. |
 | `pgokf.max_frontmatter_bytes` | integer | `262144` (256 KiB) | `1 .. 2147483647` | `SIGHUP` | Maximum bytes parsed as YAML frontmatter in one document. |
 | `pgokf.max_graph_hops` | integer | `5` | `1 .. 1000` | `SIGHUP` | Hard ceiling for graph traversal depth; `concept_neighbors(max_hops)` is capped to this. |
 | `pgokf.log_level` | string | `warning` | - | `SUSET` | Logging threshold used by `pgokf`. |

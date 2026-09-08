@@ -6467,9 +6467,9 @@ Steps for deploying widgets with the marmoset rollout strategy.\n";
     }
 
     #[pg_test]
-    fn a_nested_manifest_moves_resources_between_packages() {
-        // Arrange: the fixture package, plus a script that will be claimed
-        // by a nested package created below it.
+    fn a_manifest_inside_a_resource_directory_stays_that_package_s_resource() {
+        // Arrange: the fixture package, plus a script nested under its own
+        // scripts/ directory.
         let bundle = FixtureBundle::create();
         add_package(&bundle);
         let nested = bundle.root.join(PACKAGE_ROOT).join("scripts/inner");
@@ -6504,7 +6504,10 @@ Steps for deploying widgets with the marmoset rollout strategy.\n";
         );
         let outer_hash_before = package_hash();
 
-        // Act: a nested SKILL.md appears; x.sh is unchanged as a file.
+        // Act: a SKILL.md appears inside the package's own scripts/. It is
+        // not a documented shape, and taking it for a package root would
+        // take every file beside it out of the enclosing package.
+        let nested_manifest_id = "skills/deploy/scripts/inner/SKILL.md";
         fs::write(
             nested.join("SKILL.md"),
             "---\nname: inner\ndescription: nested\n---\n# Inner\n",
@@ -6512,46 +6515,39 @@ Steps for deploying widgets with the marmoset rollout strategy.\n";
         .expect("nested manifest is writable");
         let counts = refresh_counts(bundle_id);
 
-        // Assert: the manifest is added, x.sh is updated (owner changed with
-        // identical bytes), the outer package is re-projected.
-        assert_eq!(counts, (1, 1, 0, 6));
-        let inner_id = "skills/deploy/scripts/inner/SKILL";
+        // Assert: it is simply another script of the outer package, which
+        // now has one more member; nothing moved, so nothing is updated and
+        // nothing was lost.
+        assert_eq!(counts, (1, 0, 0, 7));
         assert_eq!(
             owner(x_id).as_deref(),
-            Some(format!("{inner_id} scripts/x.sh").as_str())
+            Some(format!("{SKILL_ID} scripts/inner/scripts/x.sh").as_str()),
+            "x.sh stayed where it was"
         );
+        assert_eq!(
+            owner(nested_manifest_id).as_deref(),
+            Some(format!("{SKILL_ID} scripts/inner/SKILL.md").as_str()),
+            "the nested manifest is a script of the enclosing package"
+        );
+        let packages = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.skills WHERE bundle_id = $1",
+            &[bundle_id.into()],
+        )
+        .expect("skills query executes")
+        .expect("count not NULL");
+        assert_eq!(packages, 1, "no second package was declared");
         assert_ne!(
             outer_hash_before,
             package_hash(),
-            "the outer package lost a member"
+            "the outer package gained a member"
         );
-        let outer_edges_to_x = Spi::get_one_with_args::<i64>(
-            "SELECT count(*) FROM pgokf.links
-             WHERE bundle_id = $1 AND source_id = $2 AND target_id = $3",
-            &[bundle_id.into(), SKILL_ID.into(), x_id.into()],
-        )
-        .expect("links query executes")
-        .expect("count not NULL");
-        assert_eq!(outer_edges_to_x, 0, "the outer skill no longer USES x.sh");
-        let inner_resources = Spi::get_one_with_args::<i32>(
-            "SELECT jsonb_array_length((pgokf.get_skill($1, $2)).resources)",
-            &[bundle_id.into(), inner_id.into()],
-        )
-        .expect("get_skill executes")
-        .expect("count not NULL");
-        assert_eq!(inner_resources, 1);
 
         // Act: the nested manifest goes away again.
         fs::remove_file(nested.join("SKILL.md")).expect("nested manifest delete succeeds");
         let counts = refresh_counts(bundle_id);
 
-        // Assert: x.sh returns to the outer package with its outer path, and
-        // the outer hash is what it was at the start.
-        assert_eq!(counts, (0, 1, 1, 6));
-        assert_eq!(
-            owner(x_id).as_deref(),
-            Some(format!("{SKILL_ID} scripts/inner/scripts/x.sh").as_str())
-        );
+        // Assert: back to exactly the package that was there before.
+        assert_eq!(counts, (0, 0, 1, 7));
         assert_eq!(outer_hash_before, package_hash());
     }
 

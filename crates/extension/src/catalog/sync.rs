@@ -409,6 +409,7 @@ fn sync_config_from_gucs(root: &Path, exclude: &[String]) -> SyncConfig {
     SyncConfig::new(root)
         .with_max_file_bytes(u64::try_from(guc::max_file_bytes()).unwrap_or(u64::MAX))
         .with_max_files(guc::max_bundle_files())
+        .with_max_total_bytes(u64::try_from(guc::max_bundle_bytes()).unwrap_or(u64::MAX))
         .with_exclude(exclude.iter().cloned())
 }
 

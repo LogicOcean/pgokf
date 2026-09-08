@@ -111,6 +111,7 @@ pub fn discover(config: &SyncConfig) -> Result<Snapshot, SyncError> {
         packages: locate_packages(config, &includes, &excludes)?,
     };
     let mut files = BTreeMap::new();
+    let mut total_bytes: u64 = 0;
 
     for entry in WalkDir::new(&config.root).follow_links(false) {
         let entry = entry.map_err(|source| SyncError::Walk {
@@ -142,6 +143,15 @@ pub fn discover(config: &SyncConfig) -> Result<Snapshot, SyncError> {
             });
         }
         let file = read_candidate_file(absolute, &path, config, class)?;
+        if let Some(limit) = config.max_total_bytes {
+            total_bytes = total_bytes.saturating_add(file.size_bytes);
+            if total_bytes > limit {
+                return Err(SyncError::BundleTooLarge {
+                    total_bytes,
+                    limit_bytes: limit,
+                });
+            }
+        }
         tracing::debug!(path = %path.display(), hash = %file.hash, class = class.label(), "discovered catalog file");
         files.insert(path, file);
     }
@@ -155,7 +165,10 @@ fn locate_packages(
     includes: &GlobSet,
     excludes: &GlobSet,
 ) -> Result<PackageIndex, SyncError> {
-    let mut packages = PackageIndex::default();
+    // Collected, then indexed in one pass: a manifest nested in another
+    // package's resource directory is that package's resource, and deciding
+    // that needs the enclosing packages known first.
+    let mut manifests: Vec<String> = Vec::new();
     for entry in WalkDir::new(&config.root).follow_links(false) {
         let entry = entry.map_err(|source| SyncError::Walk {
             path: config.root.clone(),
@@ -166,13 +179,15 @@ fn locate_packages(
         }
         let path = bundle_relative_path(entry.path(), &config.root)?;
         let text = path.to_string_lossy();
-        if let Some(root) = PackageIndex::manifest_directory(&text)
+        if PackageIndex::manifest_directory(&text).is_some()
             && selected_by_globs(&path, config, includes, excludes)
         {
-            packages.insert_root(root);
+            manifests.push(text.into_owned());
         }
     }
-    Ok(packages)
+    Ok(PackageIndex::from_paths(
+        manifests.iter().map(String::as_str),
+    ))
 }
 
 /// The scan's selection rules: globs plus the packages of this snapshot.
@@ -445,6 +460,34 @@ mod tests {
                 limit_bytes: 4,
             }) if path == root.path().join("huge.md")
         ));
+    }
+
+    #[test]
+    fn a_bundle_whose_files_add_up_past_max_total_bytes_is_rejected() {
+        // Arrange: two files, each under the per-file ceiling, together over
+        // the total - which is the shape that matters now that a package
+        // resource is stored whole whatever its type.
+        let root = TempDir::new().unwrap();
+        write_file(&root, "a.md", "aaaaaaaa");
+        write_file(&root, "b.md", "bbbbbbbb");
+        let config = SyncConfig::new(root.path())
+            .with_max_file_bytes(64)
+            .with_max_total_bytes(12);
+
+        // Act
+        let error = discover(&config).expect_err("refused");
+
+        // Assert
+        assert!(
+            matches!(
+                error,
+                SyncError::BundleTooLarge {
+                    limit_bytes: 12,
+                    ..
+                }
+            ),
+            "{error}"
+        );
     }
 
     #[test]

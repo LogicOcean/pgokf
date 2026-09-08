@@ -12,6 +12,16 @@ use tokio_postgres::types::ToSql;
 
 /// The largest selection one build materializes.
 pub const MAX_CONCEPTS: usize = 500;
+/// The most members one skill package contributes to a build. A package is
+/// copied whole, so without this one hostile package makes the row limit
+/// meaningless.
+pub const MAX_PACKAGE_MEMBERS: usize = 2_000;
+/// The most content bytes one build loads, across every concept and every
+/// package member. The row limit bounds how many things are loaded, not how
+/// big they are; this bounds the build, which is assembled and zipped in
+/// memory and is reachable without signing in when the UI has no identity
+/// mode.
+pub const MAX_CONTENT_BYTES: u64 = 256 * 1024 * 1024;
 /// The default when a caller gives no limit.
 pub const DEFAULT_LIMIT: usize = 100;
 
@@ -604,6 +614,24 @@ pub async fn load_sources<C: GenericClient>(
                 .unwrap_or_default();
         }
     }
+    let total: u64 = records
+        .iter()
+        .map(|r| {
+            let members: u64 = r.package.as_ref().map_or(0, |p| {
+                p.resources
+                    .iter()
+                    .map(|f| u64::try_from(f.bytes.len()).unwrap_or(u64::MAX))
+                    .sum()
+            });
+            u64::try_from(r.bytes.len()).unwrap_or(u64::MAX) + members
+        })
+        .sum();
+    if total > MAX_CONTENT_BYTES {
+        return Err(anyhow!(
+            "the selection loads {total} bytes; a build takes at most {MAX_CONTENT_BYTES}. \
+             Narrow the selection."
+        ));
+    }
     let mut index = 0;
     records.retain(|r| {
         // A document that loaded nothing vanished; a resource may legitimately
@@ -685,6 +713,14 @@ async fn load_package<C: GenericClient>(client: &C, record: &mut ConceptRecord) 
     let hash: String = row.try_get(2)?;
     let name: Option<String> = row.try_get(3)?;
     let listing: serde_json::Value = row.try_get(4)?;
+    let members = listing.as_array().map_or(0, Vec::len);
+    if members > MAX_PACKAGE_MEMBERS {
+        return Err(anyhow!(
+            "package {} has {members} members; a build takes at most \
+             {MAX_PACKAGE_MEMBERS}. Narrow the selection.",
+            record.concept_id
+        ));
+    }
     let mut resources = Vec::new();
     for entry in listing.as_array().into_iter().flatten() {
         let concept_id = entry["concept_id"].as_str().unwrap_or_default().to_owned();

@@ -92,6 +92,17 @@ pub enum SyncError {
         /// The configured `max_files` limit.
         limit: usize,
     },
+    /// A scan's files add up to more than the configured total.
+    #[error(
+        "bundle contains at least {total_bytes} bytes of matching files, exceeding the \
+         configured maximum of {limit_bytes}; raise the limit or narrow the include patterns"
+    )]
+    BundleTooLarge {
+        /// The running total when the limit was breached.
+        total_bytes: u64,
+        /// The configured `max_total_bytes` limit.
+        limit_bytes: u64,
+    },
 }
 
 #[cfg(test)]
