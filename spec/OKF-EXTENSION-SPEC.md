@@ -536,15 +536,15 @@ Every projection carries `tenant_id`, enables and forces the authorization model
 
 ### 5.4 Raw staging, classification, and projection pipeline
 
-Sync MUST stage the complete source snapshot before calling `parse_concept`. Each entry contains normalized confined path, exact bytes, byte length, lowercase BLAKE3 hash, adapter/source kind, snapshot ID, owning package root if any, and one source-file class. Classification is deterministic and uses this precedence:
+Sync MUST stage the complete source snapshot before calling `parse_concept`. Each entry contains normalized confined path, exact bytes, byte length, lowercase BLAKE3 hash, adapter/source kind, snapshot ID, owning package root if any, and one source-file class. Classification is deterministic and uses this precedence, **ownership first**:
 
-1. basename `index.md` or `log.md` → `Ignored` by this classifier and handled by existing reserved-file logic;
-2. exact case-sensitive basename `SKILL.md` → `SkillManifest`;
-3. within the nearest containing Skill package, `scripts/**` → `SkillScript`, `references/**` → `SkillReference`, `assets/**` → `SkillAsset`;
-4. `.md` with frontmatter containing non-empty `type` and `title` → `OkfDocument`;
+1. within the nearest enclosing Skill package's resource directories - `scripts/**` → `SkillScript`, `references/**` → `SkillReference`, `assets/**` → `SkillAsset` - **whatever the file is called**: a `references/index.md` is an ordinary reference, and a nested `references/SKILL.md` is a reference too, not a second package;
+2. otherwise, basename `index.md` or `log.md` → `Ignored` by this classifier and handled by existing reserved-file logic;
+3. otherwise, exact case-sensitive basename `SKILL.md` → `SkillManifest`, opening a package;
+4. otherwise, `.md` with frontmatter containing non-empty `type` and `title` → `OkfDocument`;
 5. everything else → `Ignored`.
 
-The nearest ancestor with `SKILL.md` owns a resource; nested packages form a new ownership boundary. A path cannot have multiple owners. Ambiguous case collisions, generated-ID collisions, nested ownership ambiguity, invalid path normalization, and a `.md` that appears intended as OKF but lacks required fields produce stable diagnostics and follow strict/warn policy.
+A path is owned by the nearest ancestor package whose resource directory contains it, and everything under that directory belongs to that package - so a nested `SKILL.md` inside another package's `scripts/`, `references/`, or `assets/` is a resource of the enclosing package, not the root of a new one. A `SKILL.md` anywhere else does open its own package. A path therefore never has two owners. Ambiguous case collisions, generated-ID collisions, invalid path normalization, and a `.md` that appears intended as OKF but lacks required fields produce stable diagnostics and follow strict/warn policy.
 
 Optional package metadata has exactly one reserved filename, `.okf-package.yaml`, at the package root. It is `Ignored` as a concept but included in package hashing. Its schema is:
 

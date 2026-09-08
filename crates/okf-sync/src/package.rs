@@ -11,19 +11,24 @@
 //! [`PackageIndex`] holds the package roots of one snapshot and answers, for
 //! any bundle-relative path, which package owns it and which [`FileClass`] it
 //! has. Classification is deterministic and follows the precedence of the
-//! extension specification (§5.4):
+//! extension specification (§5.4), **ownership first**:
 //!
-//! 1. a reserved OKF basename (`index.md` / `log.md`) is [`FileClass::Reserved`];
-//! 2. the exact, case-sensitive basename `SKILL.md` is
-//!    [`FileClass::SkillManifest`];
-//! 3. inside the nearest enclosing package, a file below `scripts/`,
-//!    `references/`, or `assets/` is a [`FileClass::SkillScript`],
-//!    [`FileClass::SkillReference`], or [`FileClass::SkillAsset`];
-//! 4. any other `.md` file is an [`FileClass::OkfDocument`];
+//! 1. inside the nearest enclosing package's `scripts/`, `references/`, or
+//!    `assets/` directory, a file is that package's [`FileClass::SkillScript`],
+//!    [`FileClass::SkillReference`], or [`FileClass::SkillAsset`] - whatever it
+//!    is called, so a `references/index.md` is a reference and a nested
+//!    `references/SKILL.md` is a reference too, not a second package;
+//! 2. otherwise a reserved OKF basename (`index.md` / `log.md`) is
+//!    [`FileClass::Reserved`];
+//! 3. otherwise the exact, case-sensitive basename `SKILL.md` is a
+//!    [`FileClass::SkillManifest`], opening a package;
+//! 4. otherwise any `.md` file is an [`FileClass::OkfDocument`];
 //! 5. everything else is ignored (it never enters a snapshot).
 //!
-//! The nearest ancestor with a `SKILL.md` owns a resource; a nested package
-//! starts a new ownership boundary, so a path never has two owners.
+//! Everything under a package's resource directories belongs to that package,
+//! so a nested `SKILL.md` inside another package's `scripts/`/`references/`/
+//! `assets/` is a resource of the enclosing one, not a new boundary; a
+//! `SKILL.md` elsewhere opens its own package. A path never has two owners.
 
 use std::collections::BTreeSet;
 
