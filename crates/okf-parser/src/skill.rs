@@ -82,17 +82,35 @@ impl SkillDiagnostic {
     }
 }
 
+/// How much of a declared value a diagnostic quotes back. The value comes
+/// from a manifest's frontmatter, which is bounded only by
+/// `max_frontmatter_bytes`, and the diagnostic reaches the client and the
+/// server log once per sync per manifest.
+const QUOTED_MAX: usize = 80;
+
+/// A caller-supplied value, bounded, for a message that reaches a log.
+fn quoted(value: &str) -> String {
+    let mut shown: String = value.chars().take(QUOTED_MAX).collect();
+    if value.chars().nth(QUOTED_MAX).is_some() {
+        shown.push('\u{2026}');
+    }
+    format!("{shown:?}")
+}
+
 impl std::fmt::Display for SkillDiagnostic {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NameInvalid(name) => write!(
                 f,
-                "skill name {name:?} must be 1-{NAME_MAX_LEN} lowercase letters, digits, and single \
-                 hyphens (no leading or trailing hyphen)"
+                "skill name {} must be 1-{NAME_MAX_LEN} lowercase letters, digits, and single \
+                 hyphens (no leading or trailing hyphen)",
+                quoted(name)
             ),
             Self::NameDirectoryMismatch { name, directory } => write!(
                 f,
-                "skill name {name:?} differs from its package directory {directory:?}"
+                "skill name {} differs from its package directory {}",
+                quoted(name),
+                quoted(directory)
             ),
             Self::DescriptionTooLong(length) => write!(
                 f,

@@ -2364,6 +2364,9 @@ An added concept for the resync diff.\n";
             "pgokf.concept_provenance",
             "pgokf.concept_verification",
             "pgokf.concept_provenance_source",
+            "pgokf.skills",
+            "pgokf.scripts",
+            "pgokf.reference_documents",
         ] {
             let mismatched = Spi::get_one_with_args::<i64>(
                 &format!(
@@ -6126,6 +6129,86 @@ Steps for deploying widgets with the marmoset rollout strategy.\n";
                 "{reader}({concept}) as tenant {tenant:?} is not disclosed"
             );
         }
+    }
+
+    #[pg_test]
+    fn a_package_is_invisible_and_unreadable_from_another_tenant() {
+        // Arrange: a package registered under acme, and its three rows.
+        let bundle = FixtureBundle::create();
+        Spi::run("SET pgokf.tenant = 'acme'").expect("pgokf.tenant is settable");
+        let bundle_id = register_package_bundle(&bundle);
+        for table in ["pgokf.skills", "pgokf.scripts", "pgokf.reference_documents"] {
+            let stamped = Spi::get_one_with_args::<i64>(
+                &format!(
+                    "SELECT count(*) FROM {table} WHERE bundle_id = $1 AND tenant_id = 'acme'"
+                ),
+                &[bundle_id.into()],
+            )
+            .expect("stamp query executes")
+            .expect("count not NULL");
+            assert!(stamped > 0, "{table} has acme rows to hide");
+        }
+
+        // Act: another tenant asks for each of them by identity. The
+        // refusal is a raised error, so it is caught in plpgsql and
+        // reported as its SQLSTATE.
+        Spi::run("SET pgokf.tenant = 'other'").expect("pgokf.tenant is settable");
+        Spi::run(
+            "CREATE FUNCTION pg_temp.reader_state(kind text, b bigint, c text) RETURNS text
+             LANGUAGE plpgsql AS $probe$
+             DECLARE result text;
+             BEGIN
+                 IF kind = 'skill' THEN
+                     SELECT (pgokf.get_skill(b, c)).concept_id INTO result;
+                 ELSIF kind = 'script' THEN
+                     SELECT (pgokf.get_script(b, c)).concept_id INTO result;
+                 ELSE
+                     SELECT (pgokf.get_reference(b, c)).concept_id INTO result;
+                 END IF;
+                 RETURN 'returned ' || coalesce(result, 'NULL');
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("probe is creatable");
+        let state = |kind: &str, id: &str| -> String {
+            Spi::get_one_with_args::<String>(
+                "SELECT pg_temp.reader_state($1, $2, $3)",
+                &[kind.into(), bundle_id.into(), id.into()],
+            )
+            .expect("probe executes")
+            .expect("state not NULL")
+        };
+
+        // Assert: refused with the shared 22023, the same answer an unknown
+        // id gets, so another tenant's catalog cannot be told from an empty
+        // one.
+        assert_eq!(state("skill", SKILL_ID), "22023");
+        assert_eq!(state("script", SCRIPT_ID), "22023");
+        assert_eq!(state("reference", GUIDE_ID), "22023");
+        // And the rows themselves are invisible to an application role.
+        // (Row-level security is ENABLE, not FORCE, throughout the
+        // extension, so the owner of the tables still sees them - which is
+        // why this probes as a role granted only pgokf_reader.)
+        Spi::run("CREATE ROLE pgokf_tenant_reader").expect("reader role is creatable");
+        Spi::run("GRANT pgokf_reader TO pgokf_tenant_reader").expect("reader role is grantable");
+        Spi::run(
+            "CREATE FUNCTION pg_temp.reader_rows(b bigint) RETURNS bigint
+             LANGUAGE plpgsql SET role TO pgokf_tenant_reader AS $probe$
+             BEGIN
+                 RETURN (SELECT count(*) FROM pgokf.skills WHERE bundle_id = b)
+                      + (SELECT count(*) FROM pgokf.scripts WHERE bundle_id = b)
+                      + (SELECT count(*) FROM pgokf.reference_documents WHERE bundle_id = b);
+             END
+             $probe$;",
+        )
+        .expect("reader probe is creatable");
+        let visible =
+            Spi::get_one_with_args::<i64>("SELECT pg_temp.reader_rows($1)", &[bundle_id.into()])
+                .expect("visibility query executes")
+                .expect("count not NULL");
+        assert_eq!(visible, 0, "row-level security hides the rows themselves");
     }
 
     #[pg_test]

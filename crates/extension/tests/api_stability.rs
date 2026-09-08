@@ -153,8 +153,6 @@ const CATALOG_PG_EXTERN_COUNT: usize = PUBLIC_FUNCTIONS.len() - 2;
 
 /// SQL keywords that must never appear in an executable upgrade statement,
 /// because they would break the no-data-loss guarantee.
-const DESTRUCTIVE_KEYWORDS: &[&str] = &["DROP", "TRUNCATE", "DELETE"];
-
 fn crate_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -272,31 +270,75 @@ fn public_function_surface_count_is_locked() {
 }
 
 #[test]
-fn upgrade_script_exists_and_is_forward_compatible() {
-    // Arrange
-    let script = crate_dir().join("sql").join("pgokf--0.1.0--0.1.1.sql");
-    let raw = read_to_string(&script);
-
-    // Strip line comments so prose that mentions destructive keywords (e.g.
-    // the "never DROP/TRUNCATE/DELETE" guidance) is not mistaken for
-    // executable SQL; only the statement body is scanned.
-    let executable: String = raw
-        .lines()
-        .map(|line| line.split("--").next().unwrap_or(""))
-        .collect::<Vec<_>>()
-        .join("\n")
-        .to_uppercase();
+fn every_upgrade_script_is_forward_compatible() {
+    // Arrange: every shipped upgrade script, not just the first. An
+    // upgrade runs against a live catalog, so none of them may lose data.
+    let sql = crate_dir().join("sql");
+    let mut scripts: Vec<PathBuf> = std::fs::read_dir(&sql)
+        .expect("sql directory is readable")
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|path| {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|name| name.starts_with("pgokf--") && name.contains("--"))
+        })
+        .filter(|path| {
+            // An upgrade script names two versions; the base install script
+            // names one.
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|name| name.matches("--").count() == 2)
+        })
+        .collect();
+    scripts.sort();
+    assert!(
+        scripts.len() >= 2,
+        "expected several upgrade scripts, found {}",
+        scripts.len()
+    );
 
     // Act / Assert
-    for keyword in DESTRUCTIVE_KEYWORDS {
-        assert!(
-            !executable.contains(keyword),
-            "upgrade script pgokf--0.1.0--0.1.1.sql contains the destructive keyword `{keyword}` \
-             in an executable statement; upgrades must be forward-compatible and lose no data",
-        );
+    for script in &scripts {
+        let name = script.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if RESHAPED_DELIBERATELY.contains(&name) {
+            continue;
+        }
+        // Strip line comments so prose that mentions destructive keywords
+        // (the "never DROP/TRUNCATE/DELETE" guidance, say) is not mistaken
+        // for an executable statement.
+        let executable: String = read_to_string(script)
+            .lines()
+            .map(|line| line.split("--").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .to_uppercase();
+        for statement in executable.split(';') {
+            let statement = statement.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(
+                !destroys_data(&statement),
+                "upgrade script {name} has a destructive statement; upgrades must lose no \
+                 data:\n  {statement}"
+            );
+        }
     }
-    assert!(
-        executable.contains("DO"),
-        "upgrade script should contain the documented no-op DO block",
-    );
+}
+
+/// The one shipped script that drops columns, and did so on purpose: 0.1.3
+/// re-modelled `concept_provenance` from the boolean `verified` shape to
+/// the event shape the catalog has now. It is history and cannot change;
+/// every script since is held to the rule.
+const RESHAPED_DELIBERATELY: &[&str] = &["pgokf--0.1.2--0.1.3.sql"];
+
+/// Whether one normalized, upper-cased statement would lose data.
+///
+/// `ON DELETE CASCADE` is a foreign-key clause, and dropping a `CHECK`
+/// constraint to re-add a wider one keeps every row - so the rule is about
+/// what is dropped, not about the word.
+fn destroys_data(statement: &str) -> bool {
+    statement.contains("TRUNCATE ")
+        || statement.starts_with("DELETE FROM")
+        || statement.contains("DROP TABLE")
+        || statement.contains("DROP COLUMN")
+        || statement.contains("DROP SCHEMA")
+        || statement.contains("DROP DATABASE")
 }

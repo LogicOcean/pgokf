@@ -554,16 +554,22 @@ pub fn stage_script(
     context: &ResourceContext<'_>,
     store_source: bool,
 ) -> Result<StagedConcept, CatalogError> {
-    let text = std::str::from_utf8(&bytes).map_err(|_| {
-        CatalogError::invalid_parameter(
-            format!(
-                "{} is not valid UTF-8; a binary file below scripts/ is not a Script (place it \
-                 under assets/ instead)",
-                context.path
-            ),
-            Path::new(context.path),
-        )
-    })?;
+    let text = std::str::from_utf8(&bytes)
+        .ok()
+        // PostgreSQL's `text` cannot hold U+0000, and a script is stored as
+        // text as well as bytes, so one would either abort the sync or
+        // leave the two disagreeing. It is not a script; it is a binary.
+        .filter(|text| !text.contains('\0'))
+        .ok_or_else(|| {
+            CatalogError::invalid_parameter(
+                format!(
+                    "{} is not text a script can be stored as; a binary file below scripts/ is \
+                     not a Script (place it under assets/ instead)",
+                    context.path
+                ),
+                Path::new(context.path),
+            )
+        })?;
     let (language, runtime) = infer_language(context.package_path, text);
     let mut metadata = resource_metadata(context, "script");
     metadata.insert("language".to_owned(), Value::String(language.clone()));
@@ -612,7 +618,13 @@ pub fn stage_reference(
     let text_body = if format == "binary" || format == "image" {
         None
     } else {
-        std::str::from_utf8(&bytes).ok().map(str::to_owned)
+        std::str::from_utf8(&bytes)
+            .ok()
+            // PostgreSQL's `text` cannot hold U+0000. The exact bytes are
+            // kept either way; only the searchable text is dropped, so the
+            // two never disagree about what the file contains.
+            .filter(|text| !text.contains('\0'))
+            .map(str::to_owned)
     };
     let (title, body_text) = match text_body.as_deref() {
         Some(text) if format == "markdown" => {
@@ -2038,16 +2050,34 @@ mod tests {
     }
 
     #[test]
-    fn stage_script_rejects_binary_bytes() {
-        // Arrange
-        let bytes = vec![0xff, 0xfe, 0x00, 0x41];
+    fn stage_script_rejects_bytes_it_could_not_store_as_text() {
+        // Arrange: bytes that are not UTF-8 at all, and bytes that are
+        // valid UTF-8 but hold U+0000 - which PostgreSQL's `text` cannot
+        // represent, so storing one would leave the bytes and the text
+        // disagreeing about the file.
+        let binary = vec![0xff, 0xfe, 0x00, 0x41];
+        let with_nul = b"#!/bin/sh\0echo\n".to_vec();
 
         // Act
-        let error = stage_script(bytes, &context("pkg/scripts/tool", "scripts/tool"), false)
+        let from_binary = stage_script(binary, &context("pkg/scripts/tool", "scripts/tool"), false)
             .expect_err("binary is not a script");
+        let from_nul = stage_script(
+            with_nul,
+            &context("pkg/scripts/tool", "scripts/tool"),
+            false,
+        )
+        .expect_err("a NUL is not text");
 
         // Assert
-        assert!(error.message().contains("not valid UTF-8"));
+        for error in [from_binary, from_nul] {
+            assert!(
+                error
+                    .message()
+                    .contains("not text a script can be stored as"),
+                "{}",
+                error.message()
+            );
+        }
     }
 
     #[test]
