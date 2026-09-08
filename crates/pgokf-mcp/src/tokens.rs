@@ -354,6 +354,10 @@ impl Tokens {
     /// visible rather than silent.
     #[must_use]
     pub fn stale(&self) -> Option<String> {
+        // Observe the file now (subject to the same one-second throttle as
+        // any check), so the health endpoint reports a breakage even during a
+        // quiet period when no bearer request has arrived to trigger a reload.
+        self.refresh();
         let loaded = self.loaded.read().ok()?;
         loaded
             .degraded

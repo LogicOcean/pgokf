@@ -175,17 +175,24 @@ pub async fn serve(mut server: Server, bind: SocketAddr) -> Result<()> {
     let driver = server.catalog.take_driver();
     let tokens = server.tokens.count();
     let shared: Shared = Arc::new(server);
-    // Layers wrap, so the *last* one added is the outermost. Read from the
-    // bottom up: a request is bounded in time, then answered outright if it
-    // is a browser preflight, then authenticated, then queued against one
-    // shared budget, and only then is its body read.
+    // Layers wrap, so the *last* one added is the outermost, and a layer
+    // applies only to the routes named before it. Read the `/mcp` stack from
+    // the bottom up: a request is bounded in time, answered outright if it is
+    // a browser preflight, authenticated, then its body is buffered whole
+    // (bounded in size and time) *before* one of the few shared work slots is
+    // taken - so a client trickling its body cannot hold a slot for the whole
+    // request budget and starve the rest, including the health probe. The
+    // health route and the fallback are added *after* the concurrency limit
+    // and body layers, so they carry neither: a flood on `/mcp` can never stop
+    // the probe from answering.
     let router = Router::new()
         .route("/mcp", post(rpc).get(no_stream).delete(no_stream))
-        .route(HEALTH_PATH, get(health))
-        .fallback(not_found)
+        .layer(GlobalConcurrencyLimitLayer::new(MAX_IN_FLIGHT))
+        .layer(middleware::from_fn(buffer_body))
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .layer(RequestBodyTimeoutLayer::new(BODY_TIMEOUT))
-        .layer(GlobalConcurrencyLimitLayer::new(MAX_IN_FLIGHT))
+        .route(HEALTH_PATH, get(health))
+        .fallback(not_found)
         .layer(middleware::from_fn_with_state(Arc::clone(&shared), guard))
         .layer(cors)
         .layer(middleware::from_fn(timeout))
@@ -265,6 +272,38 @@ fn cors_layer(allowed: &[String]) -> Result<CorsLayer> {
 /// Bound every request, so one slow query cannot hold a slot for ever. This
 /// is the outermost layer, so the budget covers the wait for a slot too: a
 /// queued request is answered rather than left waiting.
+/// Read the whole request body into memory before the concurrency slot is
+/// taken, bounded in both size ([`MAX_BODY`]) and total time ([`BODY_TIMEOUT`]
+/// for the whole body, not per frame). A client that trickles its body then
+/// holds only a task and its own connection, never one of the few shared work
+/// slots, so it cannot stall other callers or the health probe.
+async fn buffer_body(request: HttpRequest, next: Next) -> HttpResponse {
+    let (parts, body) = request.into_parts();
+    let buffered = tokio::time::timeout(BODY_TIMEOUT, axum::body::to_bytes(body, MAX_BODY)).await;
+    let bytes = match buffered {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(_)) => {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(json!({ "error": "the request body is too large" })),
+            )
+                .into_response();
+        }
+        Err(_) => {
+            return (
+                StatusCode::REQUEST_TIMEOUT,
+                Json(json!({ "error": "the request body was too slow to arrive" })),
+            )
+                .into_response();
+        }
+    };
+    next.run(HttpRequest::from_parts(
+        parts,
+        axum::body::Body::from(bytes),
+    ))
+    .await
+}
+
 async fn timeout(request: HttpRequest, next: Next) -> HttpResponse {
     match tokio::time::timeout(REQUEST_TIMEOUT, next.run(request)).await {
         Ok(response) => response,

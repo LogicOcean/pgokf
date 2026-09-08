@@ -178,12 +178,14 @@ right choice rather than a slow one, so writing the digest of a chosen password
 into the file gets you a line that can never authenticate.
 
 **Revoking** is removing the line. The server re-reads the file when it
-changes - at most once a second, so a revocation takes effect within a second
-and a flood of requests still costs one `stat`. An emptied file revokes
-everyone at once. A file that cannot be read or no longer parses is reported,
-and the last good set is kept for **one minute** so a half-written save is
-ridden out; after that every request is refused, so a revocation can never fail
-silently for good, and `/healthz` reports `degraded` throughout.
+changes - at most once a second, so a revocation takes effect within a second;
+a flood of requests is throttled to that one re-read a second. An emptied file
+revokes everyone at once. A file that cannot be read or no longer parses is
+reported, and the last good set is kept for **one minute** so a half-written
+save is ridden out; after that every request is refused, so a revocation can
+never fail silently for good. `/healthz` re-checks the file on each probe, so a
+supervisor watching it sees `degraded` for the whole outage even during a quiet
+period with no other traffic.
 
 | Role | May call |
 | --- | --- |
