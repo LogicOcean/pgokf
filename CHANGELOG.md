@@ -365,13 +365,26 @@ leaving a plain document.
   mode, and a changed password or a removed person ends theirs. A session
   is a lever, not a detector: a copied cookie works until its session is
   ended or expires.
-- **The web UI's people, sessions, and MCP tokens live in the catalog.**
-  Three extension-owned tables, `pgokf_web.users`, `pgokf_web.sessions`, and
-  `pgokf_web.mcp_tokens`, hold the `users` mode's people, every live session
-  of the `users` and `oidc` modes, and the digests of the bearer tokens
-  `pgokf-mcp` accepts over HTTP; they are granted to `pgokf_writer` only (a
-  reader never sees a hash, a session identifier, or which tokens exist),
-  transactional, shared by every UI instance, and carried by `pg_dump`. The
+- **The web UI's people, sessions, MCP tokens, and identity provider live
+  in the catalog.** Four extension-owned tables, `pgokf_web.users`,
+  `pgokf_web.sessions`, `pgokf_web.mcp_tokens`, and `pgokf_web.oidc`, hold
+  the `users` mode's people, every live session of the `users` and `oidc`
+  modes, the digests of the bearer tokens `pgokf-mcp` accepts over HTTP, and
+  the identity provider an admin set up; they are granted to `pgokf_writer`
+  only (a reader never sees a hash, a session identifier, which tokens
+  exist, or the provider's settings), transactional, shared by every UI
+  instance, and carried by `pg_dump`. **An admin sets the identity provider
+  up on the Admin page** in `users` mode - issuer, client id and secret,
+  callback URL, claims, and the group-to-role map - and the sign-in page then
+  offers "Sign in with …" beside the password form; saving reads the
+  provider's discovery document first, so a wrong issuer is refused before it
+  is stored, switching the provider off or removing it ends the sessions it
+  opened, and every UI instance picks a change up on its next sign-in. The
+  client secret is stored sealed (AES-256-GCM under a key derived from
+  `OKF_WEB_SESSION_SECRET`), the table refuses anything but the sealed form,
+  and without a session secret of its own the UI keeps no client secret (a
+  public client with PKCE still works). The env-configured `oidc` mode
+  remains for a site with no local people at all. The
   Admin page mints a token - shown once, on the page that minted it, with
   `Cache-Control: no-store` and never in a URL - and revokes one;
   `pgokf-web mcp-token mint|list|revoke` does the same from a shell for a

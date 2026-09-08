@@ -367,13 +367,29 @@ read or write the tables directly; `list_access_log` stays admin-only.
 
 `pgokf_web` holds the web UI's identity state - `users` (the people a local
 sign-in knows, with Argon2id password hashes), `sessions` (the sessions the
-UI has issued and not yet ended), and `mcp_tokens` (the SHA-256 digests of
-the bearer tokens `pgokf-mcp` accepts over HTTP, minted on the Admin page).
+UI has issued and not yet ended), `mcp_tokens` (the SHA-256 digests of the
+bearer tokens `pgokf-mcp` accepts over HTTP, minted on the Admin page), and
+`oidc` (the identity provider an admin set up on the Admin page, one row).
+The one secret among them that is not a one-way hash is the provider's
+client secret, which the UI must present to the provider: it is stored
+sealed - AES-256-GCM under a key derived by HKDF-SHA256 from
+`OKF_WEB_SESSION_SECRET` - so the catalog, a backup, and every writer
+credential hold ciphertext, the table's own constraint refuses anything but
+the sealed form, and without a session secret of its own the UI stores no
+client secret at all (a public client with PKCE still works, where the
+provider allows one). Rotating `OKF_WEB_SESSION_SECRET` therefore also
+retires the sealed secret: the password sign-in goes on, the provider is not
+offered until an admin enters the client secret again on the Admin page,
+which says so. As with `users` and `mcp_tokens`, any `pgokf_writer`
+credential may rewrite this row - and so point sign-in at a provider of its
+own choosing with any role map - so the writer credential is the boundary
+here as it is for people and tokens.
 The extension owns the tables so they are transactional, shared by every UI
 instance, and dumped with the catalog, but never reads them; `USAGE` and DML
 are granted to `pgokf_writer` only (so to `pgokf_admin`), and `pgokf_reader`
 has no access at all - a reader must not learn a password hash, a session
-identifier, or which tokens exist. The one thing a reader may ask is
+identifier, which tokens exist, or the provider's settings. The one thing a
+reader may ask is
 `pgokf.mcp_token_bearer(digest)`, a `SECURITY DEFINER` function with a pinned
 `search_path` that answers for the digest it is given and lists nothing: it
 is how the MCP server, a reader, authenticates a request without the token
@@ -385,9 +401,9 @@ tenant, so one tenant's admin can neither see nor squat another's. As with
 `users`, any `pgokf_writer` credential may insert a row here - a compromised
 writer (an ingestion pipeline, say) could mint itself an MCP token - so the
 writer credential is the boundary, as it already is for people. The UI
-reaches all three through a pool of its own on the writer URL - never behind
+reaches all four through a pool of its own on the writer URL - never behind
 the human workflow's long resyncs - which the `users` and `oidc` modes
-therefore require, and without which the Admin page mints nothing. All three
+therefore require, and without which the Admin page mints nothing. All four
 tables are carried by `pg_dump`: a backup holds password hashes (as any
 credential store does), live session identifiers, which are useless without
 the site's session secret and end at their expiry regardless, and token

@@ -49,7 +49,7 @@
   {% if stats.is_empty() %}
   <p class="empty">No bundles are registered yet. Register one with <code>SELECT pgokf.register_bundle('/bundles/&lt;name&gt;');</code> as a writer.</p>
   {% else %}
-  <table class="table">
+  <div class="table-wrap"><table class="table">
     <thead><tr><th>Bundle</th><th>Concepts</th><th>Links</th><th>Files</th><th>Last sync</th><th>State</th></tr></thead>
     <tbody>
     {% for s in stats %}
@@ -58,7 +58,7 @@
         <td>{{ s.indexed_concepts }}</td>
         <td>{{ s.resolved_link_count }}<span class="muted">/{{ s.link_count }}</span></td>
         <td>{{ s.file_count }}</td>
-        <td><time>{{ s.last_synced_at.as_deref().unwrap_or("never")|datetime }}</time>{% if let Some(age) = s.sync_age_seconds %} <span class="muted small">({{ age|duration }} ago)</span>{% endif %}</td>
+        <td class="when"><time>{{ s.last_synced_at.as_deref().unwrap_or("never")|datetime }}</time>{% if let Some(age) = s.sync_age_seconds %} <span class="muted small">({{ age|duration }} ago)</span>{% endif %}</td>
         <td>
           {% if s.retired_at.is_some() %}<span class="pill muted">retired</span>
           {% else if !s.enabled %}<span class="pill warn">disabled</span>
@@ -68,7 +68,7 @@
       </tr>
     {% endfor %}
     </tbody>
-  </table>
+  </table></div>
   {% endif %}
 </section>
 

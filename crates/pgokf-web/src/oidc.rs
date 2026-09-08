@@ -241,6 +241,36 @@ impl OidcAuth {
         &self.config.provider_name
     }
 
+    /// The configured issuer.
+    pub(crate) fn issuer(&self) -> &str {
+        &self.config.issuer
+    }
+
+    /// What a session this provider opens is bound to: the issuer and the
+    /// client, so a session survives neither a change of provider nor a
+    /// re-registration - on every instance, with no store to consult.
+    pub(crate) fn binding(&self) -> String {
+        let digest = Sha256::digest(
+            format!(
+                "{}\n{}",
+                self.config.issuer.trim_end_matches('/'),
+                self.config.client_id
+            )
+            .as_bytes(),
+        );
+        URL_SAFE_NO_PAD.encode(&digest[..16])
+    }
+
+    /// Reach the provider's discovery document, so settings an admin is
+    /// about to save are known to name a provider that answers.
+    ///
+    /// # Errors
+    ///
+    /// The document cannot be read, or declares another issuer.
+    pub(crate) async fn probe(&self) -> Result<()> {
+        self.metadata().await.map(|_| ())
+    }
+
     /// Where to send someone to sign in, with the cookie that remembers
     /// this attempt. The cookie is the only state: nothing is held here
     /// between the two requests, so a restart or a second instance loses
@@ -323,7 +353,9 @@ impl OidcAuth {
         let Some(claims) = self.sessions.read_session(headers, Mode::Oidc).await? else {
             return Ok(None);
         };
-        if !valid_subject(&claims.subject) {
+        if !valid_subject(&claims.subject) || claims.binding != self.binding() {
+            // Opened by another provider, or by this one under another
+            // registration: not a session of this configuration.
             return Ok(None);
         }
         Ok(Some(Principal {
@@ -398,6 +430,11 @@ impl OidcAuth {
             (&discovery.jwks_uri, "keys endpoint"),
         ] {
             check_url(url, &format!("the provider's {what}"))?;
+        }
+        if let Some(url) = &discovery.end_session_endpoint {
+            // A sign-out sends the browser there: no scheme but the ones
+            // a provider may use.
+            check_url(url, "the provider's end-session endpoint")?;
         }
         if discovery
             .code_challenge_methods_supported

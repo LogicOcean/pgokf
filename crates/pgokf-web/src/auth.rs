@@ -30,6 +30,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::oidc::OidcAuth;
+use crate::provider::ProviderSlot;
 use crate::session_store::SessionStore;
 use crate::user_store::UserStore;
 
@@ -160,6 +162,13 @@ impl Mode {
     /// offer its own sign-in page.
     pub(crate) const fn is_local_session(self) -> bool {
         matches!(self, Mode::Users | Mode::Oidc)
+    }
+
+    /// The mode a session cookie names, if this build knows it.
+    pub(crate) fn parse(id: &str) -> Option<Self> {
+        [Mode::None, Mode::Header, Mode::Users, Mode::Oidc]
+            .into_iter()
+            .find(|mode| mode.id() == id)
     }
 }
 
@@ -423,6 +432,9 @@ pub(crate) struct UsersAuth {
     /// How many password verifications may run at once. Argon2id is meant
     /// to be expensive, which cuts both ways on a public sign-in page.
     verifying: tokio::sync::Semaphore,
+    /// The identity provider an admin set up on the Admin page, offered
+    /// beside the password sign-in; sessions it opens are recognized here.
+    provider: Option<ProviderSlot>,
 }
 
 /// Recent failed sign-ins for one name: after a few, each further attempt
@@ -587,6 +599,15 @@ impl Sessions {
         Ok(Some(claims))
     }
 
+    /// The mode that opened the session a request presents, by the cookie
+    /// alone - so a site that offers two ways in knows which one to ask.
+    pub(crate) fn presented_mode(&self, headers: &HeaderMap) -> Option<Mode> {
+        let claims: SessionClaims = self.open(&cookie_value(headers, SESSION_COOKIE)?)?;
+        (claims.expires > now_unix())
+            .then(|| Mode::parse(&claims.mode))
+            .flatten()
+    }
+
     /// The claims of a request's session cookie when it is this site's, was
     /// opened by `mode`, and has not expired - by the cookie alone, before
     /// the store is asked whether the session is still live.
@@ -621,6 +642,19 @@ impl Sessions {
     pub(crate) async fn end_all_sessions_of(&self, subject: &str) -> Result<()> {
         match &self.store {
             Some(store) => store.remove_all_for(subject).await,
+            None => Ok(()),
+        }
+    }
+
+    /// End every session `mode` opened - when the way in that opened them
+    /// is switched off or removed.
+    ///
+    /// # Errors
+    ///
+    /// The catalog cannot be written.
+    pub(crate) async fn end_sessions_opened_by(&self, mode: Mode) -> Result<()> {
+        match &self.store {
+            Some(store) => store.remove_mode(mode.id()).await,
             None => Ok(()),
         }
     }
@@ -765,6 +799,31 @@ impl UsersAuth {
             sessions,
             failures: Mutex::new(HashMap::new()),
             verifying: tokio::sync::Semaphore::new(VERIFY_AT_ONCE),
+            provider: None,
+        }
+    }
+
+    /// Offer the identity provider kept in the catalog beside the
+    /// password sign-in.
+    pub(crate) fn with_provider(mut self, slot: ProviderSlot) -> Self {
+        self.provider = Some(slot);
+        self
+    }
+
+    /// The slot the provider lives in, for the Admin page.
+    pub(crate) fn provider_slot(&self) -> Option<&ProviderSlot> {
+        self.provider.as_ref()
+    }
+
+    /// The provider as the catalog has it now, if an enabled one is set up.
+    ///
+    /// # Errors
+    ///
+    /// The catalog cannot be read, or the settings do not build a provider.
+    pub(crate) async fn provider(&self) -> Result<Option<Arc<OidcAuth>>> {
+        match &self.provider {
+            Some(slot) => slot.current().await,
+            None => Ok(None),
         }
     }
 
@@ -953,6 +1012,9 @@ impl UsersAuth {
     /// not expired, still a person in the store (whose role applies), and
     /// opened under the password the store holds now.
     async fn identify(&self, headers: &HeaderMap) -> Result<Option<Principal>> {
+        if self.sessions.presented_mode(headers) == Some(Mode::Oidc) {
+            return self.identify_through_provider(headers).await;
+        }
         let Some(claims) = self.sessions.read_session(headers, Mode::Users).await? else {
             return Ok(None);
         };
@@ -968,6 +1030,22 @@ impl UsersAuth {
             display: claims.subject,
             role: record.role,
         }))
+    }
+
+    /// A session the identity provider opened, recognized by the provider
+    /// built from the catalog's settings - believed for a short while, then
+    /// read again, so a change saved on another instance (a role-map
+    /// demotion) is seen here within that while. A session the store no
+    /// longer lists (the provider was removed, or the person signed out
+    /// everywhere) is refused as any other.
+    async fn identify_through_provider(&self, headers: &HeaderMap) -> Result<Option<Principal>> {
+        let Some(slot) = &self.provider else {
+            return Ok(None);
+        };
+        let Some(provider) = slot.recent().await? else {
+            return Ok(None);
+        };
+        provider.identify(headers).await
     }
 }
 
@@ -1023,10 +1101,13 @@ pub(crate) fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
 pub(crate) enum Authenticator {
     Anonymous,
     Header(HeaderAuth),
-    Users(UsersAuth),
-    // Boxed: the provider mode carries an HTTP client and cached metadata,
-    // several times the size of the others.
-    Oidc(Box<crate::oidc::OidcAuth>),
+    // Boxed: the users mode carries the throttle, the verification gate,
+    // and the provider slot, several times the size of the others.
+    Users(Box<UsersAuth>),
+    // Shared: the provider mode carries an HTTP client and cached metadata,
+    // several times the size of the others, and the sign-in pages hold it
+    // across a request.
+    Oidc(Arc<OidcAuth>),
 }
 
 impl Authenticator {
@@ -1066,10 +1147,19 @@ impl Authenticator {
         }
     }
 
-    pub(crate) fn oidc(&self) -> Option<&crate::oidc::OidcAuth> {
+    /// The identity provider people may sign in with, if there is one: the
+    /// `oidc` mode's own, or - in the `users` mode - the one an admin set
+    /// up on the Admin page, read from the catalog so a change made on any
+    /// instance is seen by this one.
+    ///
+    /// # Errors
+    ///
+    /// The catalog cannot be read, or its settings do not build a provider.
+    pub(crate) async fn provider(&self) -> Result<Option<Arc<OidcAuth>>> {
         match self {
-            Authenticator::Oidc(o) => Some(o),
-            _ => None,
+            Authenticator::Oidc(o) => Ok(Some(Arc::clone(o))),
+            Authenticator::Users(u) => u.provider().await,
+            _ => Ok(None),
         }
     }
 
@@ -1494,6 +1584,172 @@ mod tests {
             .expect("valid")
             .with_store(SessionStore::memory());
         UsersAuth::new(store, Arc::new(sessions))
+    }
+
+    /// A users mode with an identity provider set up in its (memory)
+    /// catalog, mapping `okf-approvers` to approver.
+    async fn users_auth_with_provider(secret: Vec<u8>) -> UsersAuth {
+        use crate::oidc_settings::OidcSettingsStore;
+        use crate::provider::{ProviderDraft, ProviderSlot, SecretChange};
+
+        let users = users_auth_with(secret);
+        let slot = ProviderSlot::new(
+            OidcSettingsStore::memory(),
+            None,
+            Arc::clone(&users.sessions),
+        );
+        let draft = ProviderDraft {
+            enabled: true,
+            issuer: "https://id.example".to_owned(),
+            client_id: "catalog".to_owned(),
+            client_secret: SecretChange::Clear,
+            redirect_url: "https://catalog.example/auth/callback".to_owned(),
+            scopes: "openid".to_owned(),
+            subject_claims: "sub".to_owned(),
+            groups_claim: "groups".to_owned(),
+            provider_name: "Okta".to_owned(),
+            role_map: "okf-approvers=approver".to_owned(),
+            default_role: Role::Viewer,
+        };
+        let (settings, provider) = slot.prepare(&draft, None, "root").expect("prepares");
+        slot.store(&settings, provider).await.expect("stores");
+        users.with_provider(slot)
+    }
+
+    #[tokio::test]
+    async fn a_session_the_provider_opened_is_recognized_beside_the_password_ones() {
+        // Arrange: one person signed in with a password, another through
+        // the provider, on the same site.
+        let users = users_auth_with_provider(b"0123456789abcdef0123456789abcdef".to_vec()).await;
+        let alice = users
+            .verify_ok("alice", "correct horse", None)
+            .await
+            .expect("alice signs in");
+        let by_password = users.issue_cookie(&alice).await.expect("a cookie");
+        let binding = users
+            .provider()
+            .await
+            .expect("reads")
+            .expect("a provider")
+            .binding();
+        let by_provider = users
+            .sessions
+            .open_session_with(
+                "carol@example.com",
+                Mode::Oidc,
+                binding.clone(),
+                Some("Carol".to_owned()),
+                vec!["okf-approvers".to_owned()],
+            )
+            .await
+            .expect("a cookie");
+
+        let by_another = users
+            .sessions
+            .open_session_with(
+                "dave@example.com",
+                Mode::Oidc,
+                "another-provider".to_owned(),
+                None,
+                Vec::new(),
+            )
+            .await
+            .expect("a cookie");
+
+        // Act
+        let alice_again = users.identify_ok(&cookie_headers(&by_password)).await;
+        let carol = users.identify_ok(&cookie_headers(&by_provider)).await;
+        let dave = users.identify_ok(&cookie_headers(&by_another)).await;
+
+        // Assert
+        assert_eq!(alice_again.map(|p| p.subject), Some("alice".to_owned()));
+        assert!(
+            dave.is_none(),
+            "a session another provider opened is not this one's"
+        );
+        let carol = carol.expect("recognized through the provider");
+        assert_eq!(carol.subject, "carol@example.com");
+        assert_eq!(carol.display, "Carol");
+        assert_eq!(carol.role, Role::Approver, "the role her groups map to");
+        assert_eq!(
+            users.sessions.presented_mode(&cookie_headers(&by_provider)),
+            Some(Mode::Oidc)
+        );
+    }
+
+    #[tokio::test]
+    async fn switching_the_provider_off_ends_the_sessions_it_opened_and_no_other() {
+        // Arrange
+        let users = users_auth_with_provider(b"0123456789abcdef0123456789abcdef".to_vec()).await;
+        let alice = users
+            .verify_ok("alice", "correct horse", None)
+            .await
+            .expect("alice signs in");
+        let by_password = users.issue_cookie(&alice).await.expect("a cookie");
+        let binding = users
+            .provider()
+            .await
+            .expect("reads")
+            .expect("a provider")
+            .binding();
+        let by_provider = users
+            .sessions
+            .open_session_with(
+                "carol@example.com",
+                Mode::Oidc,
+                binding.clone(),
+                None,
+                Vec::new(),
+            )
+            .await
+            .expect("a cookie");
+
+        // Act
+        users
+            .sessions
+            .end_sessions_opened_by(Mode::Oidc)
+            .await
+            .expect("ends");
+
+        // Assert
+        assert!(
+            users
+                .identify_ok(&cookie_headers(&by_provider))
+                .await
+                .is_none()
+        );
+        assert!(
+            users
+                .identify_ok(&cookie_headers(&by_password))
+                .await
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_provider_session_names_nobody_where_no_provider_is_set_up() {
+        // Arrange: a cookie the provider mode would have issued, at a site
+        // that has no provider.
+        let users = users_auth_with(b"0123456789abcdef0123456789abcdef".to_vec());
+        let by_provider = users
+            .sessions
+            .open_session_with(
+                "carol@example.com",
+                Mode::Oidc,
+                String::new(),
+                None,
+                Vec::new(),
+            )
+            .await
+            .expect("a cookie");
+
+        // Act / Assert
+        assert!(
+            users
+                .identify_ok(&cookie_headers(&by_provider))
+                .await
+                .is_none()
+        );
     }
 
     fn users_auth_with(secret: Vec<u8>) -> UsersAuth {

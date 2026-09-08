@@ -181,6 +181,29 @@ impl SessionStore {
         }
     }
 
+    /// Forget every session `mode` opened.
+    ///
+    /// # Errors
+    ///
+    /// The catalog cannot be written.
+    pub(crate) async fn remove_mode(&self, mode: &str) -> Result<()> {
+        match self {
+            Self::Pg(db) => {
+                db.execute("DELETE FROM pgokf_web.sessions WHERE mode = $1", &[&mode])
+                    .await
+                    .context("ending every session a mode opened")?;
+                Ok(())
+            }
+            #[cfg(test)]
+            Self::Memory(live) => {
+                live.lock()
+                    .expect("session lock")
+                    .retain(|_, s| s.mode != mode);
+                Ok(())
+            }
+        }
+    }
+
     /// How many live sessions `subject` holds.
     ///
     /// # Errors

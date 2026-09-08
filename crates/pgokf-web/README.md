@@ -130,6 +130,26 @@ PKCE, which is what the OAuth 2.1 draft asks of a server-side client. It
 works with any OpenID Connect provider: Entra ID, Okta, Keycloak, Auth0,
 Google, a GitLab instance.
 
+There are two ways to set one up. **From the Admin page**, in `users` mode:
+an admin enters the issuer, client id and secret, the callback URL, the
+claims and the group-to-role map, and *Save and test* reads the provider's
+discovery document before anything is stored; the sign-in page then offers
+"Sign in with …" beside the password form, people who sign in that way get
+the role their groups map to, switching the provider off or removing it ends
+the sessions it opened, and every instance of the UI picks a change up on
+its next sign-in. The settings live in the catalog (`pgokf_web.oidc`,
+writer-only), and the client secret only sealed under a key derived from
+`OKF_WEB_SESSION_SECRET` - so set that first; without it the UI keeps no
+client secret, and only a public client (PKCE alone) can be used, which
+some providers (Google, Entra ID's web registrations) refuse. Rotating the
+session secret retires the sealed client secret: the password sign-in goes
+on, the provider is not offered until an admin enters the secret again, and
+the Admin page says so. People the provider identifies share one namespace
+with the local people - `human:<subject>` is the same actor whether the
+subject came from a password or a claim - so keep the identity claim `sub`
+unless the provider's user names are the local ones on purpose. **From the
+environment**, for a site with no local people at all - `OKF_WEB_AUTH=oidc`:
+
 ```sh
 OKF_WEB_AUTH=oidc \
 OKF_WEB_OIDC_ISSUER=https://id.example.com/realms/okf \
@@ -187,7 +207,7 @@ Roles are a ladder; each holds the ones below it:
 | `uploader` | **Upload** Markdown documents into a content bundle (new or existing); a document without `generated`/`author` is stamped with the person's OKF actor, `human:<name>` |
 | `editor` | **Edit** a document (frontmatter and body, with a validating preview) or delete it; any earlier verification is set aside, `generated` names the editor, and the document returns to the review queue |
 | `approver` | **Review**: the queue of unverified documents; approving records a `verified` event under the person's name (the document becomes *human-reviewed*, a draft becomes active), sending back makes it a draft and keeps the note under `reviews` |
-| `admin` | everything above, plus **Admin**: people (in `users` mode: add, change role, reset password, remove, sign out everywhere), the MCP tokens (mint, revoke), and bundles (register a directory bundle, refresh, enable or disable, retire or bring back, unregister) |
+| `admin` | everything above, plus **Admin**: people (in `users` mode: add, change role, reset password, remove, sign out everywhere), the identity provider (in `users` mode: set up, change, switch off, remove), the MCP tokens (mint, revoke), and bundles (register a directory bundle, refresh, enable or disable, retire or bring back, unregister) |
 
 The **MCP tokens** an admin mints there are the bearer tokens `pgokf-mcp`
 accepts over HTTP (see [its README](../pgokf-mcp/README.md#serving-it-over-http)).

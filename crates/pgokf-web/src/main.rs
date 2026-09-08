@@ -18,7 +18,10 @@ mod links;
 mod markdown;
 mod mcp_tokens;
 mod oidc;
+mod oidc_settings;
+mod provider;
 mod routes;
+mod seal;
 mod session_store;
 mod store;
 mod user_store;
@@ -37,7 +40,10 @@ use crate::auth::{Authenticator, Cidr, HeaderAuth, Role, RoleMapping, Sessions, 
 use crate::config::{Cli, Command, McpTokenCommand, UserCommand};
 use crate::db::{Db, DbConfig};
 use crate::mcp_tokens::{McpTokenStore, McpTokens, Minted};
+use crate::oidc_settings::OidcSettingsStore;
+use crate::provider::ProviderSlot;
 use crate::routes::App;
+use crate::seal::Sealer;
 use crate::session_store::SessionStore;
 use crate::user_store::UserStore;
 
@@ -175,7 +181,7 @@ const IDENTITY_STATEMENT_MS: u64 = 5_000;
 
 /// The `pgokf_web` tables the identity modes keep people and sessions in,
 /// and the one every writer-backed deployment keeps its MCP tokens in.
-const IDENTITY_TABLES: &[&str] = &["pgokf_web.users", "pgokf_web.sessions"];
+const IDENTITY_TABLES: &[&str] = &["pgokf_web.users", "pgokf_web.sessions", "pgokf_web.oidc"];
 const MCP_TOKEN_TABLES: &[&str] = &["pgokf_web.mcp_tokens"];
 
 /// The identity pool, whenever there is a writer URL: the `users` and
@@ -322,7 +328,7 @@ fn build_authenticator(cli: &Cli, identity: Option<&Db>) -> Result<Authenticator
                 roles: RoleMapping::parse(&cli.auth_role_map, default_role)?,
                 provider_name: cli.oidc_provider_name.trim().to_owned(),
             };
-            Ok(Authenticator::Oidc(Box::new(oidc::OidcAuth::new(
+            Ok(Authenticator::Oidc(Arc::new(oidc::OidcAuth::new(
                 config,
                 build_sessions(cli, identity_for("oidc")?, true)?,
             )?)))
@@ -356,9 +362,22 @@ fn build_authenticator(cli: &Cli, identity: Option<&Db>) -> Result<Authenticator
         }
         "users" => {
             let identity = identity_for("users")?;
-            Ok(Authenticator::Users(UsersAuth::new(
-                UserStore::Pg(identity.clone()),
-                build_sessions(cli, identity, true)?,
+            let sessions = build_sessions(cli, identity.clone(), true)?;
+            // The identity provider an admin sets up on the Admin page: its
+            // client secret can be kept only under a session secret of the
+            // operator's own, so that it survives a restart.
+            let sealer = cli
+                .session_secret
+                .as_deref()
+                .map(|secret| Sealer::from_secret(secret.as_bytes()))
+                .transpose()?;
+            let provider = ProviderSlot::new(
+                OidcSettingsStore::Pg(identity.clone()),
+                sealer,
+                Arc::clone(&sessions),
+            );
+            Ok(Authenticator::Users(Box::new(
+                UsersAuth::new(UserStore::Pg(identity), sessions).with_provider(provider),
             )))
         }
         _ => Ok(Authenticator::Anonymous),

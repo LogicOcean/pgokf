@@ -7,20 +7,22 @@
     <h2>Sign in</h2>
     {% if let Some(e) = error %}<p class="notice bad">{{ e }}</p>{% endif %}
     {% if let Some(p) = provider %}
-    <p class="muted">This catalog signs you in with {{ p }}.</p>
-    <a class="btn primary wide" href="/login?next={{ next|urlencode }}">Sign in with {{ p }}</a>
-    {% else %}
+    {% if !password_form %}<p class="muted">This catalog signs you in with {{ p }}.</p>{% endif %}
+    <a class="btn primary wide" href="/login/provider?next={{ next|urlencode }}">Sign in with {{ p }}</a>
+    {% if password_form %}<p class="or"><span>or with a password</span></p>{% endif %}
+    {% endif %}
+    {% if password_form %}
     <form method="post" action="/login">
       <input type="hidden" name="next" value="{{ next }}">
       <div class="field">
         <label for="l-user">User name</label>
-        <input id="l-user" type="text" name="username" autocomplete="username" required autofocus spellcheck="false">
+        <input id="l-user" type="text" name="username" autocomplete="username" required{% if provider.is_none() %} autofocus{% endif %} spellcheck="false">
       </div>
       <div class="field">
         <label for="l-pass">Password</label>
         <input id="l-pass" type="password" name="password" autocomplete="current-password" required>
       </div>
-      <button type="submit" class="btn primary wide">Sign in</button>
+      <button type="submit" class="btn {% if provider.is_none() %}primary {% endif %}wide">Sign in</button>
     </form>
     {% endif %}
     <p class="hint">Signing in unlocks what your role allows: uploading documents, editing them, or approving them.</p>

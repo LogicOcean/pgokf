@@ -3,7 +3,8 @@
 //! beside it: the people a local sign-in knows (`pgokf_web.users`) and the
 //! sessions the UI has issued and not yet ended (`pgokf_web.sessions`), and
 //! the bearer tokens that may call `pgokf-mcp` over HTTP
-//! (`pgokf_web.mcp_tokens`, minted on the UI's Admin page).
+//! (`pgokf_web.mcp_tokens`, minted on the UI's Admin page), and the identity
+//! provider an admin set up there (`pgokf_web.oidc`, one row).
 //!
 //! The extension owns these tables but never reads them; `pgokf-web` does.
 //! They live in the database for the reasons everything else does: a change
@@ -15,9 +16,9 @@
 //! database enforces.
 //!
 //! Least privilege: `pgokf_writer` (and so `pgokf_admin`, which inherits it)
-//! may read and write all three; `pgokf_reader` sees none of them, since it
-//! must not learn password hashes, session identifiers, or which tokens
-//! exist. The UI therefore reaches them through its writer connection,
+//! may read and write all four; `pgokf_reader` sees none of them, since it
+//! must not learn password hashes, session identifiers, which tokens exist,
+//! or a provider's client secret (which is stored sealed even so). The UI therefore reaches them through its writer connection,
 //! which any identity mode that persists state requires. The one thing a
 //! reader may ask is `pgokf.mcp_token_bearer(digest)`: the name and role
 //! behind one digest it already holds, which is how the MCP server - a
@@ -32,7 +33,7 @@ CREATE SCHEMA pgokf_web;
 REVOKE ALL ON SCHEMA pgokf_web FROM PUBLIC;
 GRANT USAGE ON SCHEMA pgokf_web TO pgokf_writer;
 COMMENT ON SCHEMA pgokf_web IS
-    'The web UI''s identity state: the people a local sign-in knows, the sessions the UI has issued, and the bearer tokens the MCP server accepts over HTTP. Owned by the extension so it is transactional, shared by every UI instance, and dumped with the catalog; read and written by pgokf_writer only, and never by the extension itself.';
+    'The web UI''s identity state: the people a local sign-in knows, the sessions the UI has issued, the bearer tokens the MCP server accepts over HTTP, and the identity provider an admin set up. Owned by the extension so it is transactional, shared by every UI instance, and dumped with the catalog; read and written by pgokf_writer only, and never by the extension itself.';
 
 CREATE TABLE pgokf_web.users (
     name          text        NOT NULL,
@@ -109,6 +110,59 @@ COMMENT ON COLUMN pgokf_web.mcp_tokens.digest IS
     'The SHA-256 of the token, as 64 lower-case hex characters, and the row''s identity. A token is 256 random bits, so a fast hash is the right way to store it; the token itself is never kept.';
 COMMENT ON COLUMN pgokf_web.mcp_tokens.created_by IS 'Who minted it: the admin''s sign-in name or subject, or cli.';
 COMMENT ON COLUMN pgokf_web.mcp_tokens.created_at IS 'When it was minted.';
+
+CREATE TABLE pgokf_web.oidc (
+    singleton      boolean     NOT NULL DEFAULT true
+        CONSTRAINT oidc_singleton_check CHECK (singleton),
+    enabled        boolean     NOT NULL DEFAULT true,
+    issuer         text        NOT NULL
+        CONSTRAINT oidc_issuer_check
+        CHECK (issuer ~ '^https?://[^[:space:][:cntrl:]]+$' AND char_length(issuer) <= 2048),
+    client_id      text        NOT NULL
+        CONSTRAINT oidc_client_id_check
+        CHECK (client_id ~ '^[^[:cntrl:]]+$' AND char_length(client_id) <= 512),
+    client_secret  text
+        CONSTRAINT oidc_client_secret_check CHECK (client_secret ~ '^v1:[A-Za-z0-9_-]{16}:[A-Za-z0-9_-]{22,}$'),
+    redirect_url   text        NOT NULL
+        CONSTRAINT oidc_redirect_url_check
+        CHECK (redirect_url ~ '^https?://[^[:space:][:cntrl:]]+$' AND char_length(redirect_url) <= 2048),
+    scopes         text        NOT NULL DEFAULT 'openid profile email'
+        CONSTRAINT oidc_scopes_check CHECK (scopes ~ '^[^[:cntrl:]]*$' AND char_length(scopes) <= 512),
+    subject_claims text        NOT NULL DEFAULT 'sub'
+        CONSTRAINT oidc_subject_claims_check
+        CHECK (subject_claims ~ '^[^[:cntrl:]]+$' AND char_length(subject_claims) <= 512),
+    groups_claim   text        NOT NULL DEFAULT 'groups'
+        CONSTRAINT oidc_groups_claim_check CHECK (groups_claim ~ '^[^[:space:][:cntrl:]]{1,128}$'),
+    provider_name  text        NOT NULL DEFAULT 'your identity provider'
+        CONSTRAINT oidc_provider_name_check CHECK (provider_name ~ '^[^[:cntrl:]]{1,64}$'),
+    role_map       text        NOT NULL DEFAULT ''
+        CONSTRAINT oidc_role_map_check CHECK (role_map ~ '^[^[:cntrl:]]*$' AND char_length(role_map) <= 4096),
+    default_role   text        NOT NULL DEFAULT 'viewer'
+        CONSTRAINT oidc_default_role_check
+        CHECK (default_role IN ('viewer', 'uploader', 'editor', 'approver', 'admin')),
+    updated_at     timestamptz NOT NULL DEFAULT now(),
+    updated_by     text        NOT NULL,
+    CONSTRAINT oidc_pkey PRIMARY KEY (singleton)
+);
+REVOKE ALL ON TABLE pgokf_web.oidc FROM PUBLIC;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE pgokf_web.oidc TO pgokf_writer;
+
+COMMENT ON TABLE pgokf_web.oidc IS
+    'The identity provider the web UI signs people in against, when an admin has set one up on the Admin page (the users mode''s own sign-in stays beside it): one row at most. The client secret is stored sealed by pgokf-web under a key derived from its session secret, so the catalog - and any writer credential - holds ciphertext, never the secret. pgokf_writer only.';
+COMMENT ON COLUMN pgokf_web.oidc.singleton IS 'Always true: the key of the one row.';
+COMMENT ON COLUMN pgokf_web.oidc.enabled IS 'Whether the provider is offered on the sign-in page. Off keeps the settings for later.';
+COMMENT ON COLUMN pgokf_web.oidc.issuer IS 'The issuer URL, exactly as the provider declares it in its discovery document.';
+COMMENT ON COLUMN pgokf_web.oidc.client_id IS 'The client id this site is registered with at the provider.';
+COMMENT ON COLUMN pgokf_web.oidc.client_secret IS 'The client secret for a confidential client, sealed (v1:<nonce>:<ciphertext>, AES-256-GCM under a key derived from the UI''s session secret); NULL for a public client, which PKCE alone protects. The constraint refuses anything that is not the sealed form, so a plaintext secret can never be stored.';
+COMMENT ON COLUMN pgokf_web.oidc.redirect_url IS 'This site''s callback URL (<site>/auth/callback), as registered with the provider.';
+COMMENT ON COLUMN pgokf_web.oidc.scopes IS 'The scopes asked for, space-separated; openid is always included.';
+COMMENT ON COLUMN pgokf_web.oidc.subject_claims IS 'The claims tried in order for the person''s identity, comma-separated (sub is always stable; email only when the provider says it is verified).';
+COMMENT ON COLUMN pgokf_web.oidc.groups_claim IS 'The claim carrying the person''s groups, which the role map turns into a role.';
+COMMENT ON COLUMN pgokf_web.oidc.provider_name IS 'What the sign-in button calls the provider.';
+COMMENT ON COLUMN pgokf_web.oidc.role_map IS 'group=role entries, comma-separated; the highest matching role wins.';
+COMMENT ON COLUMN pgokf_web.oidc.default_role IS 'The role of a person in no mapped group.';
+COMMENT ON COLUMN pgokf_web.oidc.updated_at IS 'When the settings last changed; every UI instance notices a change through it.';
+COMMENT ON COLUMN pgokf_web.oidc.updated_by IS 'The admin who last changed them.';
 
 CREATE FUNCTION pgokf.mcp_token_bearer(digest text)
 RETURNS TABLE (name text, role text, tenant text)

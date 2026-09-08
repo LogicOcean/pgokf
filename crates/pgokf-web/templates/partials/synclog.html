@@ -6,7 +6,7 @@
   <tbody>
   {% for e in sync_log %}
     <tr>
-      <td><time>{{ e.synced_at|datetime }}</time></td>
+      <td class="when"><time>{{ e.synced_at|datetime }}</time></td>
       <td>{% if let Some(id) = e.bundle_id %}{% if e.op.as_str() == "unregister" %}<span class="muted">{{ e.bundle_path.as_deref().unwrap_or("") }}</span>{% else %}<a href="/bundles/{{ id }}">{{ e.bundle_path.as_deref().unwrap_or("") }}</a>{% endif %}{% else %}<span class="muted">{{ e.bundle_path.as_deref().unwrap_or("(unregistered)") }}</span>{% endif %}</td>
       <td><span class="pill muted">{{ e.op }}</span></td>
       <td class="muted">{{ e.actor }}</td>

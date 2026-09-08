@@ -76,9 +76,9 @@
     </dl>
     <h3>Resources</h3>
     {% if pkg.resources.is_empty() %}<p class="empty">This package has no scripts, references, or assets.</p>{% else %}
-    <table class="table compact"><thead><tr><th>Kind</th><th>Path</th><th>Detail</th><th class="num">Bytes</th><th>SHA-256</th><th></th></tr></thead><tbody>
+    <div class="table-wrap"><table class="table compact"><thead><tr><th>Kind</th><th>Path</th><th>Detail</th><th class="num">Bytes</th><th>SHA-256</th><th></th></tr></thead><tbody>
     {% for r in pkg.resources %}<tr><td><span class="pill muted">{{ r.class }}</span></td><td><a href="/concepts/{{ c.bundle_id }}/{{ r.concept_id|urlencode_path }}"><code>{{ r.path }}</code></a></td><td>{{ r.detail }}</td><td class="num">{{ r.byte_size }}</td><td><code class="hash">{{ r.sha256 }}</code></td><td><a href="/resource/{{ c.bundle_id }}/{{ r.concept_id|urlencode_path }}" download>Download</a></td></tr>{% endfor %}
-    </tbody></table>
+    </tbody></table></div>
     {% endif %}
   </section>
   {% endif %}
@@ -123,9 +123,9 @@
     {% endif %}
     <h3>Sources</h3>
     {% if c.sources.is_empty() %}<p class="empty">No sources declared.</p>{% else %}
-    <table class="table compact"><thead><tr><th>#</th><th>Id</th><th>Title</th><th>Resource</th><th>Author</th><th>Last modified</th></tr></thead><tbody>
-    {% for s in c.sources %}<tr><td>{{ s.ordinal }}</td><td>{{ s.source_id.as_deref().unwrap_or("") }}</td><td>{{ s.title.as_deref().unwrap_or("") }}</td><td>{% if let Some(r) = s.resource %}{{ r|linkify|safe }}{% endif %}</td><td>{{ s.author.as_deref().unwrap_or("") }}</td><td>{{ s.last_modified.as_deref().unwrap_or("")|datetime }}</td></tr>{% endfor %}
-    </tbody></table>
+    <div class="table-wrap"><table class="table compact"><thead><tr><th>#</th><th>Id</th><th>Title</th><th>Resource</th><th>Author</th><th>Last modified</th></tr></thead><tbody>
+    {% for s in c.sources %}<tr><td>{{ s.ordinal }}</td><td>{{ s.source_id.as_deref().unwrap_or("") }}</td><td>{{ s.title.as_deref().unwrap_or("") }}</td><td>{% if let Some(r) = s.resource %}{{ r|linkify|safe }}{% endif %}</td><td>{{ s.author.as_deref().unwrap_or("") }}</td><td class="when">{{ s.last_modified.as_deref().unwrap_or("")|datetime }}</td></tr>{% endfor %}
+    </tbody></table></div>
     {% endif %}
   </section>
 
@@ -186,9 +186,9 @@
   <section role="tabpanel" id="panel-metadata" aria-labelledby="tab-metadata" data-panel="metadata" class="panel">
     <h2 class="nojs">Metadata</h2>
     {% if metadata.is_empty() %}<p class="empty">No custom frontmatter.</p>{% else %}
-    <table class="table compact"><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody>
+    <div class="table-wrap"><table class="table compact"><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody>
     {% for m in metadata %}<tr><td><code>{{ m.key }}</code></td><td><pre class="json">{{ m.value }}</pre></td></tr>{% endfor %}
-    </tbody></table>
+    </tbody></table></div>
     {% endif %}
   </section>
 
@@ -200,9 +200,9 @@
   {% if !history.is_empty() %}
   <section role="tabpanel" id="panel-history" aria-labelledby="tab-history" data-panel="history" class="panel">
     <h2 class="nojs">History</h2>
-    <table class="table compact"><thead><tr><th>Version</th><th>Valid from</th><th>Valid to</th><th>Change</th><th>Title</th><th>Hash</th></tr></thead><tbody>
-    {% for v in history %}<tr><td>{{ v.number }}</td><td>{{ v.valid_from|datetime }}</td><td>{{ v.valid_to.as_deref().unwrap_or("current")|datetime }}</td><td><span class="pill muted">{{ v.change_kind }}</span></td><td>{{ v.title.as_deref().unwrap_or("") }}</td><td>{% if let Some(h) = v.file_hash %}<code class="hash">{{ h }}</code>{% else %}<span class="muted">removed</span>{% endif %}</td></tr>{% endfor %}
-    </tbody></table>
+    <div class="table-wrap"><table class="table compact"><thead><tr><th>Version</th><th>Valid from</th><th>Valid to</th><th>Change</th><th>Title</th><th>Hash</th></tr></thead><tbody>
+    {% for v in history %}<tr><td>{{ v.number }}</td><td class="when">{{ v.valid_from|datetime }}</td><td class="when">{{ v.valid_to.as_deref().unwrap_or("current")|datetime }}</td><td><span class="pill muted">{{ v.change_kind }}</span></td><td>{{ v.title.as_deref().unwrap_or("") }}</td><td>{% if let Some(h) = v.file_hash %}<code class="hash">{{ h }}</code>{% else %}<span class="muted">removed</span>{% endif %}</td></tr>{% endfor %}
+    </tbody></table></div>
   </section>
   {% endif %}
 </div>

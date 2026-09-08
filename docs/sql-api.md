@@ -1422,15 +1422,16 @@ Readers hold `SELECT` on all eleven public projection tables: `pgokf.bundles`,
 writes go through the `SECURITY DEFINER` sync/admin functions; no role has
 direct DML. The four administrator-only `pgokf_private` state tables (`config`,
 `sync_log`, `sync_log_change`, `access_log`) are reachable only through the
-config and `list_*` functions. The three `pgokf_web` tables (`users`,
-`sessions`, `mcp_tokens`) hold the web UI's identity state - the people its
-`users` mode signs in, the sessions it has issued, and the bearer tokens
-`pgokf-mcp` accepts over HTTP - and are the one exception to "no direct DML":
-`pgokf_writer` holds `SELECT`, `INSERT`, `UPDATE`, and `DELETE` on the first
-two and `SELECT`, `INSERT`, and `DELETE` on the third, so `pgokf-web` reads
-and writes them through its writer connection, while `pgokf_reader` has no
-access at all (a reader must never see a password hash, a session identifier,
-or which tokens exist; the one thing it may ask is
+config and `list_*` functions. The four `pgokf_web` tables (`users`,
+`sessions`, `mcp_tokens`, `oidc`) hold the web UI's identity state - the
+people its `users` mode signs in, the sessions it has issued, the bearer
+tokens `pgokf-mcp` accepts over HTTP, and the identity provider an admin set
+up - and are the one exception to "no direct DML": `pgokf_writer` holds
+`SELECT`, `INSERT`, `UPDATE`, and `DELETE` on all but `mcp_tokens`, which it
+may not `UPDATE`, so `pgokf-web` reads and writes them through its writer
+connection, while `pgokf_reader` has no access at all (a reader must never
+see a password hash, a session identifier, which tokens exist, or the
+provider's settings; the one thing it may ask is
 [`mcp_token_bearer(digest)`](#pgokfmcp_token_bearerdigest-text-table-name-text-role-text-tenant-text)).
 The extension owns them but never reads them; they are not tenant-scoped.
 
@@ -1471,6 +1472,28 @@ token.
 | `digest` | `text` | Primary key: the SHA-256 of the token as 64 lower-case hex characters (a `CHECK`). The token itself is never stored. |
 | `created_by` | `text` | Who minted it: the admin's subject, or `cli`. |
 | `created_at` | `timestamptz` | When it was minted. |
+
+### `pgokf_web.oidc`
+
+The identity provider the web UI's `users` mode offers beside its own
+sign-in, as set up on the Admin page: one row at most.
+
+| Column | Type | Notes |
+| ------ | ---- | ----- |
+| `singleton` | `boolean` | Primary key, always `true` (a `CHECK`): the key of the one row. |
+| `enabled` | `boolean` | Whether the provider is offered on the sign-in page; off keeps the settings. |
+| `issuer` | `text` | The issuer URL as the provider declares it (`https?://…`, a `CHECK`). |
+| `client_id` | `text` | The client id this site is registered with. |
+| `client_secret` | `text` | `NULL` for a public client; otherwise the secret sealed by `pgokf-web` (`v1:<nonce>:<ciphertext>`, AES-256-GCM under a key derived from `OKF_WEB_SESSION_SECRET`). A `CHECK` refuses anything but the sealed form, so a plaintext secret can never be stored. |
+| `redirect_url` | `text` | This site's callback URL, as registered with the provider. |
+| `scopes` | `text` | Space-separated; `openid` is always included. |
+| `subject_claims` | `text` | Comma-separated claims tried in order for the person's identity. |
+| `groups_claim` | `text` | The claim carrying the person's groups. |
+| `provider_name` | `text` | What the sign-in button calls the provider. |
+| `role_map` | `text` | `group=role` entries, comma-separated; the highest matching role wins. |
+| `default_role` | `text` | The role of a person in no mapped group (a `CHECK` on the ladder). |
+| `updated_at` | `timestamptz` | When the settings last changed; every UI instance notices a change through it. |
+| `updated_by` | `text` | The admin who last changed them. |
 
 ### `pgokf.bundles`
 

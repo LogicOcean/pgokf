@@ -20,6 +20,9 @@ path = "src/main.rs"
 ammonia = "4.0"
 anyhow = "1.0"
 askama = { version = "0.13", features = ["urlencode"] }
+# Already linked through rustls and jsonwebtoken; here it seals an identity
+# provider's client secret at rest (AES-256-GCM under an HKDF-derived key).
+aws-lc-rs = "1"
 argon2 = { version = "0.6", default-features = false, features = ["alloc", "password-hash"] }
 axum = { version = "0.8", default-features = false, features = [
     "form",

@@ -5993,6 +5993,61 @@ Steps for deploying widgets with the marmoset rollout strategy.\n";
         );
     }
 
+    #[pg_test]
+    fn oidc_settings_are_one_writer_only_row_that_never_holds_a_plain_secret() {
+        // Arrange
+        let probe = install_web_probe();
+        let row = |values: &str| {
+            probe(&format!(
+                "INSERT INTO pgokf_web.oidc (issuer, client_id, client_secret, redirect_url, updated_by)
+                 VALUES ({values})"
+            ))
+        };
+        let sealed = format!("'v1:{}:{}'", "a".repeat(16), "b".repeat(40));
+        Spi::run("SET ROLE pgokf_web_probe_writer").expect("writer role is assumable");
+
+        // Act
+        let saved = row(&format!(
+            "'https://id.example', 'catalog', {sealed}, 'https://catalog.example/auth/callback', 'root'"
+        ));
+        let second_row = row(&format!(
+            "'https://other.example', 'x', NULL, 'https://catalog.example/auth/callback', 'root'"
+        ));
+        let changed = probe("UPDATE pgokf_web.oidc SET enabled = false, updated_at = now()");
+        let removed = probe("DELETE FROM pgokf_web.oidc");
+        let plain_secret = row(
+            "'https://id.example', 'catalog', 'hunter2-not-sealed', 'https://catalog.example/auth/callback', 'root'",
+        );
+        let plain_issuer = row(&format!(
+            "'id.example', 'catalog', {sealed}, 'https://catalog.example/auth/callback', 'root'"
+        ));
+        let bad_role = probe(
+            "INSERT INTO pgokf_web.oidc (issuer, client_id, redirect_url, default_role, updated_by)
+             VALUES ('https://id.example', 'catalog', 'https://catalog.example/auth/callback', 'owner', 'root')",
+        );
+        let public_client = row(
+            "'https://id.example', 'catalog', NULL, 'https://catalog.example/auth/callback', 'root'",
+        );
+        Spi::run("RESET ROLE").expect("role resets");
+        Spi::run("SET ROLE pgokf_web_probe_reader").expect("reader role is assumable");
+        let reader_reads = probe("SELECT client_id FROM pgokf_web.oidc");
+        Spi::run("RESET ROLE").expect("role resets");
+
+        // Assert
+        assert_eq!(saved, "ok");
+        assert_eq!(second_row, "23505", "one provider at most");
+        assert_eq!(changed, "ok");
+        assert_eq!(removed, "ok");
+        assert_eq!(plain_secret, "23514", "only a sealed secret can be stored");
+        assert_eq!(plain_issuer, "23514", "an issuer is a URL");
+        assert_eq!(bad_role, "23514", "the default role is on the ladder");
+        assert_eq!(public_client, "ok", "a public client has no secret");
+        assert_eq!(
+            reader_reads, "42501",
+            "a reader never sees the provider settings"
+        );
+    }
+
     /// Whether a skill row exists for one concept.
     fn skill_row_exists(bundle_id: i64, concept_id: &str) -> bool {
         Spi::get_one_with_args::<bool>(

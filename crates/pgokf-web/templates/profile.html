@@ -46,18 +46,18 @@
   <section class="panel">
     <div class="panel-head"><h2>Documents you produced <span class="muted">({{ produced.len() }})</span></h2></div>
     {% if produced.is_empty() %}<p class="empty">No document names you in <code>generated</code> yet.</p>{% else %}
-    <table class="table compact">
+    <div class="table-wrap"><table class="table compact">
       <thead><tr><th>Document</th><th>Bundle</th><th>Trust</th><th>When</th></tr></thead>
       <tbody>{% for i in produced %}<tr><td><a href="/concepts/{{ i.bundle_id }}/{{ i.concept_id|urlencode_path }}">{{ i.title.as_deref().unwrap_or(i.concept_id.as_str()) }}</a><span class="desc path">{{ i.path }}</span></td><td>{{ i.bundle_name }}</td><td><span class="pill trust-{{ i.trust_tier }}">{{ i.trust_tier }}</span></td><td class="when">{% if let Some(w) = i.when %}{{ w|datetime }}{% endif %}</td></tr>{% endfor %}</tbody>
-    </table>{% endif %}
+    </table></div>{% endif %}
   </section>
   <section class="panel">
     <div class="panel-head"><h2>Documents you verified <span class="muted">({{ verified.len() }})</span></h2></div>
     {% if verified.is_empty() %}<p class="empty">No verification under your name yet.</p>{% else %}
-    <table class="table compact">
+    <div class="table-wrap"><table class="table compact">
       <thead><tr><th>Document</th><th>Bundle</th><th>Trust</th><th>When</th></tr></thead>
       <tbody>{% for i in verified %}<tr><td><a href="/concepts/{{ i.bundle_id }}/{{ i.concept_id|urlencode_path }}">{{ i.title.as_deref().unwrap_or(i.concept_id.as_str()) }}</a><span class="desc path">{{ i.path }}</span></td><td>{{ i.bundle_name }}</td><td><span class="pill trust-{{ i.trust_tier }}">{{ i.trust_tier }}</span></td><td class="when">{% if let Some(w) = i.when %}{{ w|datetime }}{% endif %}</td></tr>{% endfor %}</tbody>
-    </table>{% endif %}
+    </table></div>{% endif %}
   </section>
 </div>
 {% endblock %}

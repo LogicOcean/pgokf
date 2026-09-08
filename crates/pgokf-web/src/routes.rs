@@ -43,6 +43,8 @@ use crate::documents::{Document, now_iso};
 use crate::graph::{GraphEdge, GraphNode};
 use crate::links::Resolver;
 use crate::mcp_tokens::{McpToken, McpTokens, Minted};
+use crate::oidc::OidcAuth;
+use crate::provider::{ProviderDraft, SecretChange};
 use crate::store::DocumentStore;
 use crate::{graph, markdown};
 use pgokf_workspace::drop_packaged_resources;
@@ -127,6 +129,7 @@ pub(crate) fn router(app: Shared) -> Router {
         .route("/plugins/preview", get(plugins_preview))
         .route("/plugins/build.zip", get(plugins_zip))
         .route("/login", get(login_page).post(login_submit))
+        .route("/login/provider", get(login_provider))
         .route("/auth/callback", get(auth_callback))
         .route("/logout", post(logout))
         .route("/profile", get(profile_page))
@@ -136,6 +139,7 @@ pub(crate) fn router(app: Shared) -> Router {
         .route("/admin/users", post(admin_users))
         .route("/admin/sessions", post(admin_sessions_end))
         .route("/admin/mcp-tokens", post(admin_mcp_tokens))
+        .route("/admin/provider", post(admin_provider))
         .route("/admin/bundles", post(admin_bundles))
         .route("/review", get(review_page))
         .route("/review/{bundle_id}/{*concept_id}", post(concept_review))
@@ -284,7 +288,7 @@ fn identity_unavailable(error: anyhow::Error, path: &str) -> Response {
 fn open_to_anyone(path: &str) -> bool {
     matches!(
         path,
-        "/login" | "/logout" | "/auth/callback" | "/api/health"
+        "/login" | "/login/provider" | "/logout" | "/auth/callback" | "/api/health"
     ) || path.starts_with("/static/")
 }
 
@@ -1249,9 +1253,12 @@ struct LoginPage {
     shell: Shell,
     next: String,
     error: Option<String>,
-    /// In `oidc` mode, what the provider is called: the page then offers a
-    /// button to it instead of a user name and password.
+    /// What the identity provider is called, when there is one: the page
+    /// then offers a button to it - beside the password form in `users`
+    /// mode, instead of it on a provider-only site.
     provider: Option<String>,
+    /// Whether a user name and password are taken here (`users` mode).
+    password_form: bool,
 }
 
 #[derive(Template)]
@@ -1325,6 +1332,9 @@ pub(crate) struct PermissionView {
 
 #[derive(Template)]
 #[template(path = "admin.html")]
+// Each flag is an independent switch the template reads; a page model is
+// the one place they belong together.
+#[allow(clippy::struct_excessive_bools)]
 struct AdminPage {
     shell: Shell,
     users: Vec<AdminUserView>,
@@ -1338,6 +1348,10 @@ struct AdminPage {
     /// admin can see whom there is to sign out where no users table lists
     /// people (`oidc` mode).
     live_sessions: Vec<LiveSubject>,
+    /// In `users` mode, the people holding a session who are not in the
+    /// users table: those who signed in through the identity provider,
+    /// whom the People table cannot show.
+    provider_sessions: Vec<LiveSubject>,
     roles: Vec<String>,
     /// The MCP bearer tokens (everything but the tokens), newest first.
     mcp_tokens: Vec<McpToken>,
@@ -1346,12 +1360,81 @@ struct AdminPage {
     /// The tenant every token minted here is for, when this UI serves one.
     mcp_tenant: Option<String>,
     mcp_roles: Vec<String>,
+    /// Whether an identity provider can be set up here (`users` mode).
+    provider_managed_here: bool,
+    /// Whether a client secret could be kept (a session secret is set).
+    provider_can_seal: bool,
+    /// Why the stored settings cannot be used by this instance, if so.
+    provider_trouble: Option<String>,
+    /// The provider's settings as the form shows them (defaults when none
+    /// is set up).
+    provider: ProviderView,
     bundles: Vec<AdminBundle>,
     config_json: String,
     notice: Option<String>,
     error: Option<String>,
     /// A token minted by the request this page answers: shown here, once.
     minted: Option<MintedToken>,
+}
+
+/// The identity provider's settings as the Admin page's form shows them:
+/// everything but the client secret, which is never shown.
+pub(crate) struct ProviderView {
+    pub configured: bool,
+    pub enabled: bool,
+    pub issuer: String,
+    pub client_id: String,
+    pub has_secret: bool,
+    pub redirect_url: String,
+    pub scopes: String,
+    pub subject_claims: String,
+    pub groups_claim: String,
+    pub provider_name: String,
+    pub role_map: String,
+    pub default_role: String,
+    pub updated_at: String,
+    pub updated_by: String,
+}
+
+impl ProviderView {
+    /// The form for a site with no provider yet.
+    fn blank() -> Self {
+        Self {
+            configured: false,
+            enabled: true,
+            issuer: String::new(),
+            client_id: String::new(),
+            has_secret: false,
+            redirect_url: String::new(),
+            scopes: "openid profile email".to_owned(),
+            subject_claims: "sub".to_owned(),
+            groups_claim: "groups".to_owned(),
+            provider_name: String::new(),
+            role_map: String::new(),
+            default_role: Role::Viewer.id().to_owned(),
+            updated_at: String::new(),
+            updated_by: String::new(),
+        }
+    }
+
+    fn from_settings(s: &crate::oidc_settings::OidcSettings) -> Self {
+        Self {
+            configured: true,
+            enabled: s.enabled,
+            issuer: s.issuer.clone(),
+            client_id: s.client_id.clone(),
+            has_secret: s.client_secret.is_some(),
+            redirect_url: s.redirect_url.clone(),
+            scopes: s.scopes.clone(),
+            subject_claims: s.subject_claims.clone(),
+            groups_claim: s.groups_claim.clone(),
+            provider_name: s.provider_name.clone(),
+            role_map: s.role_map.clone(),
+            default_role: s.default_role.id().to_owned(),
+            updated_at: s.updated_at.clone(),
+            updated_by: s.updated_by.clone(),
+        }
+    }
 }
 
 /// A token just minted, for the one page that shows it.
@@ -1376,6 +1459,7 @@ pub(crate) struct AdminUserView {
 }
 
 /// One person holding live sessions, for the admin page.
+#[derive(Clone)]
 pub(crate) struct LiveSubject {
     pub subject: String,
     pub count: usize,
@@ -2643,9 +2727,10 @@ struct NextParams {
     next: String,
 }
 
-/// The sign-in page. In `oidc` mode there is nothing to type: the person
-/// goes straight to the provider, and this page appears only when that
-/// could not be started, with a button to try again.
+/// The sign-in page: a user name and password in `users` mode, with a
+/// button to the identity provider beside them when an admin has set one
+/// up; on a provider-only site there is nothing to type, and the person
+/// goes straight to the provider.
 async fn login_page(
     State(app): State<Shared>,
     session: Session,
@@ -2658,15 +2743,52 @@ async fn login_page(
     if session.principal.is_some() {
         return Ok(redirect(&next));
     }
-    let Some(oidc) = app.auth.oidc() else {
-        return html(&LoginPage {
-            shell: Shell::new(&app, &session, "Sign in", "login"),
-            next,
-            error: None,
-            provider: None,
-        });
+    let provider = app.auth.provider().await?;
+    if matches!(session.mode, Mode::Oidc) {
+        return match provider {
+            Some(provider) => start_provider(&app, &session, &provider, &next).await,
+            None => Err(AppError::not_found("This page")),
+        };
+    }
+    html(&LoginPage {
+        shell: Shell::new(&app, &session, "Sign in", "login"),
+        next,
+        error: None,
+        provider: provider.map(|p| p.provider_name().to_owned()),
+        password_form: true,
+    })
+}
+
+/// The identity provider's sign-in, from the button beside the password
+/// form - or the only way in, on a provider-only site.
+async fn login_provider(
+    State(app): State<Shared>,
+    session: Session,
+    Query(params): Query<NextParams>,
+) -> PageResult {
+    if !session.mode.is_local_session() {
+        return Err(AppError::not_found("This page"));
+    }
+    let next = safe_next(&params.next);
+    if session.principal.is_some() {
+        return Ok(redirect(&next));
+    }
+    let Some(provider) = app.auth.provider().await? else {
+        return Err(AppError::not_found("This page"));
     };
-    match oidc.start(&next).await {
+    start_provider(&app, &session, &provider, &next).await
+}
+
+/// Send the person to the provider, with the cookie that remembers this
+/// attempt; when the provider cannot be reached, say so on the sign-in
+/// page instead.
+async fn start_provider(
+    app: &App,
+    session: &Session,
+    provider: &OidcAuth,
+    next: &str,
+) -> PageResult {
+    match provider.start(next).await {
         Ok((url, cookie)) => {
             let mut response = redirect(&url);
             if let Some(value) = cookie_header(&cookie) {
@@ -2677,13 +2799,14 @@ async fn login_page(
         Err(error) => {
             eprintln!("pgokf-web: the sign-in could not be started: {error:#}");
             let mut response = html(&LoginPage {
-                shell: Shell::new(&app, &session, "Sign in", "login"),
-                next,
+                shell: Shell::new(app, session, "Sign in", "login"),
+                next: next.to_owned(),
                 error: Some(format!(
                     "{} could not be reached just now.",
-                    oidc.provider_name()
+                    provider.provider_name()
                 )),
-                provider: Some(oidc.provider_name().to_owned()),
+                provider: Some(provider.provider_name().to_owned()),
+                password_form: matches!(session.mode, Mode::Users),
             })?;
             *response.status_mut() = StatusCode::BAD_GATEWAY;
             Ok(response)
@@ -2712,7 +2835,8 @@ async fn auth_callback(
 ) -> PageResult {
     let oidc = app
         .auth
-        .oidc()
+        .provider()
+        .await?
         .ok_or_else(|| AppError::not_found("This page"))?;
     // Whatever happens, this attempt is over: the cookie goes.
     let drop_flow = oidc.sessions().clear_flow();
@@ -2722,6 +2846,7 @@ async fn auth_callback(
             next: "/".to_owned(),
             error: Some(message),
             provider: Some(oidc.provider_name().to_owned()),
+            password_form: matches!(session.mode, Mode::Users),
         })?;
         *response.status_mut() = status;
         if let Some(value) = cookie_header(&drop_flow) {
@@ -2757,7 +2882,7 @@ async fn auth_callback(
                 .open_session_with(
                     &person.subject,
                     Mode::Oidc,
-                    String::new(),
+                    oidc.binding(),
                     Some(person.display.clone()),
                     groups,
                 )
@@ -2786,7 +2911,8 @@ async fn auth_callback(
     }
 }
 
-#[derive(Debug, Deserialize)]
+// No `Debug`: the form carries a password.
+#[derive(Deserialize)]
 struct LoginForm {
     username: String,
     password: String,
@@ -2838,7 +2964,12 @@ async fn login_submit(
         shell: Shell::new(&app, &session, "Sign in", "login"),
         next: safe_next(&form.next),
         error: Some(error),
-        provider: None,
+        provider: app
+            .auth
+            .provider()
+            .await?
+            .map(|p| p.provider_name().to_owned()),
+        password_form: true,
     })?;
     *response.status_mut() = StatusCode::UNAUTHORIZED;
     Ok(response)
@@ -2853,15 +2984,25 @@ async fn logout(State(app): State<Shared>, headers: axum::http::HeaderMap) -> Pa
     // a copy taken elsewhere stops working now too. If that fails, say so -
     // this browser's cookie is still cleared, but a copy would keep working,
     // and a sign-out that quietly did not happen is worse than an error.
-    let ended = sessions.end_session_from(&headers, app.auth.mode()).await;
+    let mode = sessions
+        .presented_mode(&headers)
+        .unwrap_or_else(|| app.auth.mode());
+    let ended = sessions.end_session_from(&headers, mode).await;
     let mut response = match ended {
         Ok(()) => {
-            let onward = app
-                .auth
-                .oidc()
-                .and_then(super::oidc::OidcAuth::end_session_url)
-                .unwrap_or_else(|| "/".to_owned());
-            redirect(&onward)
+            // The provider's own sign-out, when it was the provider that
+            // signed the person in and it offers one.
+            let onward = match mode {
+                Mode::Oidc => app
+                    .auth
+                    .provider()
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|provider| provider.end_session_url()),
+                _ => None,
+            };
+            redirect(&onward.unwrap_or_else(|| "/".to_owned()))
         }
         Err(error) => {
             eprintln!("pgokf-web: ending a session on sign-out: {error:#}");
@@ -3371,11 +3512,16 @@ async fn render_profile(
         role: person.role.id().to_owned(),
         actor: actor.clone(),
         how: match session.mode {
-            Mode::Users => "this site's own sign-in (people kept in the catalog)".to_owned(),
+            Mode::Users => "this site's own sign-in (a password kept in the catalog, or the \
+                            identity provider set up on the Admin page)"
+                .to_owned(),
             Mode::Header => "the identity provider in front of this site".to_owned(),
             Mode::Oidc => app
                 .auth
-                .oidc()
+                .provider()
+                .await
+                .ok()
+                .flatten()
                 .map_or_else(String::new, |o| o.provider_name().to_owned()),
             Mode::None => String::new(),
         },
@@ -3520,6 +3666,10 @@ async fn admin_page_data(
     person: &Principal,
     outcome: AdminOutcome,
 ) -> Result<AdminPage, AppError> {
+    let provider_slot = app
+        .auth
+        .users()
+        .and_then(crate::auth::UsersAuth::provider_slot);
     let users = match app.auth.users() {
         Some(u) => u
             .list()
@@ -3533,6 +3683,24 @@ async fn admin_page_data(
             .collect(),
         None => Vec::new(),
     };
+    let live_sessions: Vec<LiveSubject> = match app.auth.sessions() {
+        Some(sessions) => sessions
+            .live_subjects()
+            .await?
+            .into_iter()
+            .map(|(subject, count)| LiveSubject {
+                is_me: subject == person.subject,
+                subject,
+                count,
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    let provider_sessions: Vec<LiveSubject> = live_sessions
+        .iter()
+        .filter(|live| !users.iter().any(|u| u.name == live.subject))
+        .cloned()
+        .collect();
     Ok(AdminPage {
         shell: Shell::new(app, session, "Administration", "admin"),
         users,
@@ -3541,19 +3709,8 @@ async fn admin_page_data(
             .auth
             .sessions()
             .is_some_and(crate::auth::Sessions::revocable),
-        live_sessions: match app.auth.sessions() {
-            Some(sessions) => sessions
-                .live_subjects()
-                .await?
-                .into_iter()
-                .map(|(subject, count)| LiveSubject {
-                    is_me: subject == person.subject,
-                    subject,
-                    count,
-                })
-                .collect(),
-            None => Vec::new(),
-        },
+        live_sessions,
+        provider_sessions,
         roles: Role::all().iter().map(|r| r.id().to_owned()).collect(),
         mcp_tokens: match &app.mcp_tokens {
             Some(tokens) => tokens.list().await?,
@@ -3565,6 +3722,25 @@ async fn admin_page_data(
             .as_ref()
             .and_then(|tokens| tokens.tenant().map(str::to_owned)),
         mcp_roles: McpRole::all().iter().map(|r| r.id().to_owned()).collect(),
+        provider_managed_here: provider_slot.is_some(),
+        provider_can_seal: provider_slot.is_some_and(crate::provider::ProviderSlot::can_seal),
+        provider_trouble: match provider_slot {
+            // Read afresh, so the notice is about the settings as they
+            // stand now, not as this instance last saw them.
+            Some(slot) => {
+                slot.current().await?;
+                slot.trouble()
+            }
+            None => None,
+        },
+        provider: match provider_slot {
+            Some(slot) => slot
+                .settings()
+                .await?
+                .as_ref()
+                .map_or_else(ProviderView::blank, ProviderView::from_settings),
+            None => ProviderView::blank(),
+        },
         bundles: app.db.admin_bundles().await?,
         config_json: serde_json::to_string_pretty(&app.db.config().await?).unwrap_or_default(),
         notice: outcome.notice,
@@ -3728,6 +3904,168 @@ async fn admin_users(
         }
         Err(error) => admin_refused(&app, &session, &person, error.to_string()).await,
     }
+}
+
+// No `Debug`: the form carries a client secret.
+#[derive(Deserialize)]
+struct ProviderForm {
+    #[serde(default)]
+    action: String,
+    #[serde(default)]
+    enabled: String,
+    #[serde(default)]
+    issuer: String,
+    #[serde(default)]
+    client_id: String,
+    #[serde(default)]
+    client_secret: String,
+    #[serde(default)]
+    clear_secret: String,
+    #[serde(default)]
+    redirect_url: String,
+    #[serde(default)]
+    scopes: String,
+    #[serde(default)]
+    subject_claims: String,
+    #[serde(default)]
+    groups_claim: String,
+    #[serde(default)]
+    provider_name: String,
+    #[serde(default)]
+    role_map: String,
+    #[serde(default)]
+    default_role: String,
+}
+
+/// Set up, change, or remove the identity provider people may sign in
+/// with. Saving reaches the provider's discovery document first, so what
+/// is stored is known to name a provider that answers; switching it off or
+/// removing it ends the sessions it opened.
+async fn admin_provider(
+    State(app): State<Shared>,
+    session: Session,
+    Form(form): Form<ProviderForm>,
+) -> PageResult {
+    let person = admin(&session)?;
+    let slot = app
+        .auth
+        .users()
+        .and_then(crate::auth::UsersAuth::provider_slot)
+        .ok_or_else(|| {
+            AppError::bad_request("An identity provider is set up here in the users mode only.")
+        })?;
+    let sessions = app
+        .auth
+        .sessions()
+        .ok_or_else(|| AppError::bad_request("This site holds no sessions."))?;
+    let notice = match form.action.as_str() {
+        "save" => {
+            let draft = match provider_draft(&form) {
+                Ok(draft) => draft,
+                Err(why) => return admin_refused(&app, &session, &person, why.to_owned()).await,
+            };
+            let stored = slot.settings().await?;
+            let (settings, provider) = match slot.prepare(&draft, stored.as_ref(), &person.subject)
+            {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    return admin_refused(&app, &session, &person, format!("{error:#}.")).await;
+                }
+            };
+            if let Err(error) = provider.probe().await {
+                eprintln!(
+                    "pgokf-web: the identity provider at {} did not answer: {error:#}",
+                    provider.issuer()
+                );
+                return admin_refused(
+                    &app,
+                    &session,
+                    &person,
+                    format!(
+                        "{} did not answer at {}: {error:#}. Nothing was saved.",
+                        provider.provider_name(),
+                        provider.issuer()
+                    ),
+                )
+                .await;
+            }
+            // Another provider, or this one re-registered, is not the one
+            // that signed anyone in: those sessions end now, everywhere.
+            let changed_provider = stored.as_ref().is_some_and(|before| {
+                before.issuer.trim_end_matches('/') != settings.issuer.trim_end_matches('/')
+                    || before.client_id != settings.client_id
+            });
+            let saved = slot.store(&settings, provider).await?;
+            if !saved.enabled || changed_provider {
+                sessions.end_sessions_opened_by(Mode::Oidc).await?;
+            }
+            eprintln!(
+                "pgokf-web: {} set the identity provider to {} at {} ({})",
+                person.actor(),
+                saved.provider_name,
+                saved.issuer,
+                if saved.enabled { "on" } else { "off" }
+            );
+            format!(
+                "Saved: {} answers at {}.{}",
+                saved.provider_name,
+                saved.issuer,
+                if saved.enabled {
+                    " People can sign in with it now."
+                } else {
+                    " It is off until you enable it; sessions it had opened are ended."
+                }
+            )
+        }
+        "remove" => {
+            if !slot.remove().await? {
+                return admin_refused(
+                    &app,
+                    &session,
+                    &person,
+                    "No identity provider is set up.".to_owned(),
+                )
+                .await;
+            }
+            sessions.end_sessions_opened_by(Mode::Oidc).await?;
+            eprintln!(
+                "pgokf-web: {} removed the identity provider",
+                person.actor()
+            );
+            "Removed the identity provider; the sessions it had opened are ended.".to_owned()
+        }
+        other => return Err(AppError::bad_request(format!("Unknown action {other:?}."))),
+    };
+    Ok(redirect(&format!(
+        "/admin?notice={}",
+        filters::percent_encode(&notice)
+    )))
+}
+
+/// The form as a draft, or what is wrong with it before anything is read.
+fn provider_draft(form: &ProviderForm) -> Result<ProviderDraft, &'static str> {
+    let default_role =
+        Role::parse(&form.default_role).ok_or("Choose the role of everyone else.")?;
+    let client_secret = if form.clear_secret == "1" {
+        SecretChange::Clear
+    } else if form.client_secret.is_empty() {
+        SecretChange::Keep
+    } else {
+        SecretChange::Set(form.client_secret.clone())
+    };
+    Ok(ProviderDraft {
+        enabled: form.enabled == "1",
+        issuer: form.issuer.clone(),
+        client_id: form.client_id.clone(),
+        client_secret,
+        redirect_url: form.redirect_url.clone(),
+        scopes: form.scopes.clone(),
+        subject_claims: form.subject_claims.clone(),
+        groups_claim: form.groups_claim.clone(),
+        provider_name: form.provider_name.clone(),
+        role_map: form.role_map.clone(),
+        default_role,
+    })
 }
 
 #[derive(Debug, Deserialize)]

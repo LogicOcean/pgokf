@@ -155,7 +155,7 @@ a.tag:hover { color: var(--accent); text-decoration: none; }
 .table th[data-sort]::after { content: "\25B4\25BE"; margin-left: .35em; opacity: .35; letter-spacing: -.15em; }
 .table th[aria-sort="ascending"]::after { content: "\25B4"; opacity: 1; letter-spacing: 0; }
 .table th[aria-sort="descending"]::after { content: "\25BE"; opacity: 1; letter-spacing: 0; }
-.table .path { font-family: var(--mono); font-size: .9em; overflow-wrap: anywhere; }
+.table .path { font-family: var(--mono); font-size: .9em; overflow-wrap: anywhere; min-width: 14rem; }
 .table .desc { display: block; color: var(--muted); font-size: .85em; max-width: 44ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 400; }
 .table tr[hidden] { display: none; }
 .table .when { white-space: nowrap; }
@@ -248,7 +248,9 @@ svg.graph .node text { font-size: 12px; text-anchor: middle; fill: var(--text); 
 svg.graph a:hover circle { stroke-width: 3; }
 
 @media (max-width: 900px) {
-  .topbar { flex-wrap: wrap; }
+  /* Four rows tall on a phone: it scrolls away with the page rather than
+     keeping half the screen. */
+  .topbar { flex-wrap: wrap; position: static; }
   .topsearch { order: 3; width: 100%; max-width: none; }
   .search-layout, .two-col, .graph-layout { grid-template-columns: 1fr; }
   /* Results first on a phone; the filter panel follows them. */
@@ -368,6 +370,10 @@ html:not([data-js]) .tabs [role=tabpanel] { margin-bottom: 1.5rem; }
 .form-row.fields-2 { grid-template-columns: 1fr 1fr auto; }
 .form-row.fields-3 { grid-template-columns: 1fr 1fr 1fr auto; }
 .form-row .field { margin-bottom: 0; }
+/* Two ways in on one sign-in page. */
+.or { display: flex; align-items: center; gap: .6rem; color: var(--muted); font-size: .85em; margin: .9rem 0; }
+.or::before, .or::after { content: ""; flex: 1; border-top: 1px solid var(--border); }
+.check { display: flex; align-items: center; gap: .5rem; margin: .5rem 0; }
 .form-row > div:not(.field) { display: flex; }
 .step .field { margin-bottom: .8rem; }
 /* One of two alternatives is in use; the other stays readable but plainly

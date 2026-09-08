@@ -116,7 +116,7 @@ and the `pgokf_reader` < `pgokf_writer` < `pgokf_admin` role tier, and hardens
 schema access, before the feature SQL blocks run. Public entry points are
 schema-qualified everywhere in documentation and examples. See
 [sql-api.md](sql-api.md) for exact signatures: 44 public functions, 14 public,
-4 private, and 3 `pgokf_web` tables, and 17 composite types, locked by the stable-API
+4 private, and 4 `pgokf_web` tables, and 17 composite types, locked by the stable-API
 guardrail tests in `crates/extension/tests/api_stability.rs` (see
 [api-stability.md](api-stability.md)).
 
