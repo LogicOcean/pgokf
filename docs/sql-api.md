@@ -33,6 +33,7 @@ exercised against a live PostgreSQL 18 cluster.
 | -------- | ------- | ---------- | -------- | ------------- |
 | `version()` | `text` | IMMUTABLE | invoker | `pgokf_reader` |
 | `tenant_required()` | `boolean` | STABLE | DEFINER | any role with `USAGE` on `pgokf` |
+| `mcp_token_bearer(digest)` | `TABLE (name text, role text, tenant text)` | STABLE | DEFINER | `pgokf_reader` |
 | `register_bundle(path, name, options)` | `bundle_sync_result` | VOLATILE | DEFINER | `pgokf_writer` |
 | `register_bundle_content(name, paths, contents, options)` | `bundle_sync_result` | VOLATILE | DEFINER | `pgokf_writer` |
 | `refresh_bundle(bundle_id)` | `bundle_sync_result` | VOLATILE | DEFINER | `pgokf_writer` |
@@ -991,6 +992,24 @@ sub-select, so the cost is one evaluation per statement. A client can call it
 before reading to learn whether it must scope its session with
 `SET pgokf.tenant`; see [multi-tenancy](multi-tenancy.md#requiring-a-tenant-require_tenant).
 
+### `pgokf.mcp_token_bearer(digest text) → TABLE (name text, role text, tenant text)`
+
+The name, role, and tenant of the MCP bearer token whose SHA-256 digest this
+is, or no row (since 0.2.0); the server admits only a token minted for the
+tenant it serves. `STABLE`, `STRICT`, `SECURITY DEFINER` over
+[`pgokf_web.mcp_tokens`](#pgokf_webmcp_tokens) (which no reader may see),
+executable by **`pgokf_reader`**. How `pgokf-mcp` authenticates a request over
+HTTP: it hashes the presented token itself and asks for that digest, so the
+token never travels to the database, and a reader learns the bearer of a digest
+it holds and nothing about any other. Tokens are minted and revoked by
+`pgokf-web` (the Admin page, or `pgokf-web mcp-token`); a revoked token is
+refused with the next request, since nothing is cached.
+
+```sql
+-- The SHA-256 of the presented token, as 64 hex characters; no row means no such token.
+SELECT name, role, tenant FROM pgokf.mcp_token_bearer('3f1a…');
+```
+
 ### `pgokf.stale_concepts(bundle_id bigint DEFAULT NULL, as_of timestamptz DEFAULT NULL) → SETOF pgokf.stale_concept`
 
 List concepts whose OKF `stale_after` instant has passed. `STABLE`,
@@ -1403,14 +1422,17 @@ Readers hold `SELECT` on all eleven public projection tables: `pgokf.bundles`,
 writes go through the `SECURITY DEFINER` sync/admin functions; no role has
 direct DML. The four administrator-only `pgokf_private` state tables (`config`,
 `sync_log`, `sync_log_change`, `access_log`) are reachable only through the
-config and `list_*` functions. The two `pgokf_web` tables (`users`, `sessions`)
-hold the web UI's identity state - the people its `users` mode signs in and
-the sessions it has issued - and are the one exception to "no direct DML":
-`pgokf_writer` holds `SELECT`, `INSERT`, `UPDATE`, and `DELETE` on both, so
-`pgokf-web` reads and writes them through its writer connection, while
-`pgokf_reader` has no access at all (a reader must never see a password hash
-or a session identifier). The extension owns them but never reads them; they
-are not tenant-scoped.
+config and `list_*` functions. The three `pgokf_web` tables (`users`,
+`sessions`, `mcp_tokens`) hold the web UI's identity state - the people its
+`users` mode signs in, the sessions it has issued, and the bearer tokens
+`pgokf-mcp` accepts over HTTP - and are the one exception to "no direct DML":
+`pgokf_writer` holds `SELECT`, `INSERT`, `UPDATE`, and `DELETE` on the first
+two and `SELECT`, `INSERT`, and `DELETE` on the third, so `pgokf-web` reads
+and writes them through its writer connection, while `pgokf_reader` has no
+access at all (a reader must never see a password hash, a session identifier,
+or which tokens exist; the one thing it may ask is
+[`mcp_token_bearer(digest)`](#pgokfmcp_token_bearerdigest-text-table-name-text-role-text-tenant-text)).
+The extension owns them but never reads them; they are not tenant-scoped.
 
 ### `pgokf_web.users`
 
@@ -1435,6 +1457,20 @@ One session the web UI has issued and not yet ended (`users` or `oidc` mode).
 | `mode` | `text` | `users` or `oidc` (a `CHECK`); a mode never honours the other's sessions. |
 | `expires_at` | `timestamptz` | When the session ends by itself; expired rows are pruned as sessions are opened. Indexed. |
 | `created_at` | `timestamptz` | When the person signed in. |
+
+### `pgokf_web.mcp_tokens`
+
+One bearer token that may call `pgokf-mcp` over HTTP - everything but the
+token.
+
+| Column | Type | Notes |
+| ------ | ---- | ----- |
+| `name` | `text` | What the MCP server's log calls it, one plain token (`^[A-Za-z0-9._@+-]{1,128}$`); unique within its tenant (`UNIQUE NULLS NOT DISTINCT (tenant, name)`). |
+| `role` | `text` | `reader` (search and read the catalog) or `builder` (also build workspace plugins) - a `CHECK`. |
+| `tenant` | `text` | The tenant it was minted for (the minting UI's or command's `pgokf.tenant` scope), or `NULL` for a catalog served without one; one to 128 printable characters (a `CHECK`). An MCP endpoint admits only tokens minted for its own tenant, and a UI lists and revokes its own tenant's tokens alone - a label the companions check, not a policy the database enforces. |
+| `digest` | `text` | Primary key: the SHA-256 of the token as 64 lower-case hex characters (a `CHECK`). The token itself is never stored. |
+| `created_by` | `text` | Who minted it: the admin's subject, or `cli`. |
+| `created_at` | `timestamptz` | When it was minted. |
 
 ### `pgokf.bundles`
 

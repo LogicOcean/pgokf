@@ -2415,8 +2415,11 @@ name = "pgokf-companion"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "base64 0.23.1",
+ "getrandom 0.4.3",
  "reqwest",
  "serde",
+ "sha2",
  "tokio",
 ]
 
@@ -2455,16 +2458,12 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
- "base64 0.23.1",
  "clap",
- "getrandom 0.4.3",
  "pgokf-companion",
  "pgokf-pgconn",
  "pgokf-workspace",
- "same-file",
  "serde",
  "serde_json",
- "sha2",
  "tokio",
  "tokio-postgres",
  "tower",

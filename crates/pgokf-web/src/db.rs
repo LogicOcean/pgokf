@@ -542,7 +542,7 @@ pub(crate) fn db_message(error: &anyhow::Error) -> Option<String> {
 /// needed on this side.
 const ISO: &str = "to_char($COL AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')";
 
-fn iso(column: &str) -> String {
+pub(crate) fn iso(column: &str) -> String {
     ISO.replace("$COL", column)
 }
 
@@ -2044,6 +2044,20 @@ fn link(r: &Row) -> Result<Link> {
         is_external: col::<Option<bool>>(r, 8)?.unwrap_or(false),
         counterpart_title: col(r, 9)?,
     })
+}
+
+/// A pool to a port nothing listens on, for tests of what a catalog outage
+/// does to a code path: every checkout fails, quickly, and nothing panics.
+#[cfg(test)]
+pub(crate) fn dead_db() -> Db {
+    Db::connect(&DbConfig {
+        database_url: "postgresql://nobody:nothing@127.0.0.1:9/okf",
+        force_tls: false,
+        pool_size: 1,
+        tenant: None,
+        statement_timeout_ms: 1_000,
+    })
+    .expect("a pool builds without a server")
 }
 
 #[cfg(test)]

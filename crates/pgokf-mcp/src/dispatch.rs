@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 use crate::catalog::{self, Catalog};
 use crate::rpc::{INVALID_PARAMS, METHOD_NOT_FOUND, Request, Response};
-use crate::tokens::{Bearer, Role};
+use crate::tokens::{Bearer, Role, ToolAccess as _};
 
 /// The MCP protocol revisions this server implements, oldest first. The
 /// messages are the same across all three for the tools surface; the last
@@ -258,6 +258,7 @@ mod tests {
 
     fn remote(role: Role) -> Caller {
         Caller::Remote(Bearer {
+            tenant: None,
             name: "fleet".to_owned(),
             role,
         })

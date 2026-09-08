@@ -554,6 +554,20 @@
   document.querySelectorAll('[data-tabs]').forEach(initTabs);
 
   // ---- confirmations and small form helpers --------------------------------
+  // A form that must not be sent twice (minting a token, adding a person):
+  // its submit buttons are disabled once it is on its way. The page that
+  // answers replaces this one, so nothing has to re-enable them.
+  document.addEventListener('submit', function (event) {
+    var form = event.target.closest('form[data-once]');
+    if (!form || event.defaultPrevented) return;
+    form.querySelectorAll('button[type=submit]').forEach(function (button) { button.disabled = true; });
+  });
+  // ...except when the browser brings the very page back from its cache
+  // (Back after minting), which restores the disabled state with it.
+  window.addEventListener('pageshow', function (event) {
+    if (!event.persisted) return;
+    document.querySelectorAll('form[data-once] button[type=submit]').forEach(function (button) { button.disabled = false; });
+  });
   document.addEventListener('click', function (event) {
     var button = event.target.closest('[data-confirm]');
     if (button && !window.confirm(button.getAttribute('data-confirm'))) event.preventDefault();

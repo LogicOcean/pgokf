@@ -23,6 +23,7 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use pgokf_companion::embeddings::EmbeddingsClient;
+use pgokf_companion::mcp_token::{Role as McpRole, valid_token_name};
 use pgokf_workspace::{
     BuildOptions, Component, ConceptRecord, ConceptRef, CustomHarness, Profile, Selection, Shape,
     Target,
@@ -41,6 +42,7 @@ use crate::db::{
 use crate::documents::{Document, now_iso};
 use crate::graph::{GraphEdge, GraphNode};
 use crate::links::Resolver;
+use crate::mcp_tokens::{McpToken, McpTokens, Minted};
 use crate::store::DocumentStore;
 use crate::{graph, markdown};
 use pgokf_workspace::drop_packaged_resources;
@@ -51,6 +53,9 @@ pub(crate) struct App {
     /// The writer connection the human workflow uses; `None` keeps the UI
     /// read-only.
     pub writer: Option<Db>,
+    /// The MCP bearer tokens, minted and revoked on the Admin page; `None`
+    /// without a writer connection, since they live in the catalog.
+    pub mcp_tokens: Option<McpTokens>,
     pub auth: Authenticator,
     /// Reverse proxies whose `X-Forwarded-For` is believed, so the sign-in
     /// throttle keys on the real client behind them and not on the one proxy
@@ -130,6 +135,7 @@ pub(crate) fn router(app: Shared) -> Router {
         .route("/admin", get(admin_page))
         .route("/admin/users", post(admin_users))
         .route("/admin/sessions", post(admin_sessions_end))
+        .route("/admin/mcp-tokens", post(admin_mcp_tokens))
         .route("/admin/bundles", post(admin_bundles))
         .route("/review", get(review_page))
         .route("/review/{bundle_id}/{*concept_id}", post(concept_review))
@@ -1333,10 +1339,34 @@ struct AdminPage {
     /// people (`oidc` mode).
     live_sessions: Vec<LiveSubject>,
     roles: Vec<String>,
+    /// The MCP bearer tokens (everything but the tokens), newest first.
+    mcp_tokens: Vec<McpToken>,
+    /// Whether tokens can be minted here (a writer connection is on).
+    mcp_tokens_managed_here: bool,
+    /// The tenant every token minted here is for, when this UI serves one.
+    mcp_tenant: Option<String>,
+    mcp_roles: Vec<String>,
     bundles: Vec<AdminBundle>,
     config_json: String,
     notice: Option<String>,
     error: Option<String>,
+    /// A token minted by the request this page answers: shown here, once.
+    minted: Option<MintedToken>,
+}
+
+/// A token just minted, for the one page that shows it.
+pub(crate) struct MintedToken {
+    pub name: String,
+    pub role: McpRole,
+    pub token: String,
+}
+
+/// What the Admin page has to say about the action that led to it.
+#[derive(Default)]
+struct AdminOutcome {
+    notice: Option<String>,
+    error: Option<String>,
+    minted: Option<MintedToken>,
 }
 
 pub(crate) struct AdminUserView {
@@ -3315,7 +3345,7 @@ fn permission_views(role: Role) -> Vec<PermissionView> {
                 Role::Uploader => "Upload documents into a content bundle.",
                 Role::Editor => "Edit or delete documents (they go back to review).",
                 Role::Approver => "Approve documents or send them back with a note.",
-                Role::Admin => "Manage people and bundles.",
+                Role::Admin => "Manage people, MCP tokens, and bundles.",
             }
             .to_owned(),
             held: role.allows(*r),
@@ -3478,9 +3508,18 @@ async fn render_admin(
     app: &App,
     session: &Session,
     person: &Principal,
-    notice: Option<String>,
-    error: Option<String>,
+    outcome: AdminOutcome,
 ) -> PageResult {
+    html(&admin_page_data(app, session, person, outcome).await?)
+}
+
+/// Everything the Admin page shows, read from the catalog.
+async fn admin_page_data(
+    app: &App,
+    session: &Session,
+    person: &Principal,
+    outcome: AdminOutcome,
+) -> Result<AdminPage, AppError> {
     let users = match app.auth.users() {
         Some(u) => u
             .list()
@@ -3494,7 +3533,7 @@ async fn render_admin(
             .collect(),
         None => Vec::new(),
     };
-    html(&AdminPage {
+    Ok(AdminPage {
         shell: Shell::new(app, session, "Administration", "admin"),
         users,
         users_managed_here: app.auth.users().is_some(),
@@ -3516,11 +3555,51 @@ async fn render_admin(
             None => Vec::new(),
         },
         roles: Role::all().iter().map(|r| r.id().to_owned()).collect(),
+        mcp_tokens: match &app.mcp_tokens {
+            Some(tokens) => tokens.list().await?,
+            None => Vec::new(),
+        },
+        mcp_tokens_managed_here: app.mcp_tokens.is_some(),
+        mcp_tenant: app
+            .mcp_tokens
+            .as_ref()
+            .and_then(|tokens| tokens.tenant().map(str::to_owned)),
+        mcp_roles: McpRole::all().iter().map(|r| r.id().to_owned()).collect(),
         bundles: app.db.admin_bundles().await?,
         config_json: serde_json::to_string_pretty(&app.db.config().await?).unwrap_or_default(),
-        notice,
-        error,
+        notice: outcome.notice,
+        error: outcome.error,
+        minted: outcome.minted,
     })
+}
+
+/// A response that carries a secret shown once: no cache - the browser's,
+/// a proxy's - may keep it.
+fn shown_once(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+/// The Admin page again, saying what was wrong with the last action, as a
+/// 400.
+async fn admin_refused(
+    app: &App,
+    session: &Session,
+    person: &Principal,
+    error: String,
+) -> PageResult {
+    let page = admin_page_data(app, session, person, AdminOutcome::default()).await?;
+    refused_page(page, error)
+}
+
+/// A page already read, rendered as the refusal of the last action.
+fn refused_page(mut page: AdminPage, error: String) -> PageResult {
+    page.error = Some(error);
+    let mut response = html(&page)?;
+    *response.status_mut() = StatusCode::BAD_REQUEST;
+    Ok(response)
 }
 
 async fn admin_page(
@@ -3529,7 +3608,16 @@ async fn admin_page(
     Query(params): Query<NoticeParams>,
 ) -> PageResult {
     let person = admin(&session)?;
-    render_admin(&app, &session, &person, non_empty(&params.notice), None).await
+    render_admin(
+        &app,
+        &session,
+        &person,
+        AdminOutcome {
+            notice: non_empty(&params.notice),
+            ..AdminOutcome::default()
+        },
+    )
+    .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -3638,12 +3726,112 @@ async fn admin_users(
                 filters::percent_encode(&notice)
             )))
         }
-        Err(error) => {
-            let mut response =
-                render_admin(&app, &session, &person, None, Some(error.to_string())).await?;
-            *response.status_mut() = StatusCode::BAD_REQUEST;
-            Ok(response)
+        Err(error) => admin_refused(&app, &session, &person, error.to_string()).await,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminTokenForm {
+    #[serde(default)]
+    action: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    role: String,
+}
+
+/// Mint or revoke an MCP bearer token. A minted token is shown on this
+/// response alone - rendered directly rather than after a redirect, so it
+/// never enters a URL, a log, or a referer - and the response is marked
+/// `no-store`, so no cache keeps it either.
+async fn admin_mcp_tokens(
+    State(app): State<Shared>,
+    session: Session,
+    Form(form): Form<AdminTokenForm>,
+) -> PageResult {
+    let person = admin(&session)?;
+    let tokens = app.mcp_tokens.as_ref().ok_or_else(|| {
+        AppError::bad_request("MCP tokens need the writer connection (OKF_PG_WRITER_URL).")
+    })?;
+    let name = form.name.trim();
+    match form.action.as_str() {
+        "mint" => {
+            let Some(role) = McpRole::parse(&form.role) else {
+                return admin_refused(
+                    &app,
+                    &session,
+                    &person,
+                    "Choose a role: reader or builder.".to_owned(),
+                )
+                .await;
+            };
+            if valid_token_name(name).is_err() {
+                return admin_refused(
+                    &app,
+                    &session,
+                    &person,
+                    "Name the token: letters, digits, and . _ - @ + (at most 128).".to_owned(),
+                )
+                .await;
+            }
+            // Everything the page needs is read *before* the token is
+            // minted, so a catalog that fails afterwards cannot leave a
+            // token minted and never shown; the new row is added by hand.
+            let mut page =
+                admin_page_data(&app, &session, &person, AdminOutcome::default()).await?;
+            let (token, record) = match tokens.mint(name, role, &person.subject).await? {
+                Minted::Token { token, record } => (token, record),
+                Minted::NameTaken => {
+                    return refused_page(
+                        page,
+                        format!(
+                            "A token named {name} already exists; revoke it first, or choose another name."
+                        ),
+                    );
+                }
+                // Checked above; the service checks again on its own account.
+                Minted::InvalidName(why) => return Err(AppError::bad_request(why)),
+            };
+            eprintln!(
+                "pgokf-web: {} minted MCP token {name} ({role})",
+                person.actor()
+            );
+            page.mcp_tokens.insert(0, record);
+            page.minted = Some(MintedToken {
+                name: name.to_owned(),
+                role,
+                token,
+            });
+            Ok(shown_once(html(&page)?))
         }
+        "revoke" => {
+            if valid_token_name(name).is_err() {
+                return admin_refused(
+                    &app,
+                    &session,
+                    &person,
+                    "Name the token to revoke.".to_owned(),
+                )
+                .await;
+            }
+            if !tokens.revoke(name).await? {
+                return admin_refused(
+                    &app,
+                    &session,
+                    &person,
+                    format!("No token is named {name}."),
+                )
+                .await;
+            }
+            eprintln!("pgokf-web: {} revoked MCP token {name}", person.actor());
+            Ok(redirect(&format!(
+                "/admin?notice={}",
+                filters::percent_encode(&format!(
+                    "Revoked the MCP token {name}; every request it makes is refused from now on."
+                ))
+            )))
+        }
+        other => Err(AppError::bad_request(format!("Unknown action {other:?}."))),
     }
 }
 
@@ -4958,6 +5146,24 @@ pub(crate) mod filters {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_secret_shown_once_is_never_cached() {
+        // Arrange
+        let response = Html("pgokf_secret").into_response();
+
+        // Act
+        let response = shown_once(response);
+
+        // Assert
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+    }
 
     fn params(pairs: &[(&str, &str)]) -> SearchParams {
         let mut p = SearchParams::default();

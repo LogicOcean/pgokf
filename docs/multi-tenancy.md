@@ -183,7 +183,11 @@ Use one of:
 - **A constrained access layer.** Let the tenant reach PostgreSQL only through a
   trusted connection pooler or a restricted API that pins `pgokf.tenant` on every
   checkout and refuses to pass through raw `SET` or ad-hoc SQL. The GUC is then
-  set by infrastructure the tenant cannot influence.
+  set by infrastructure the tenant cannot influence. `pgokf-mcp --http
+  --tenant <id>` is such a layer for agents: one process serves one tenant,
+  and it admits only bearer tokens minted for that tenant (a token records
+  the tenant of the UI or command that minted it), so a token for one
+  tenant's endpoint opens no other's.
 - **A per-tenant database role.** Give each tenant its own login role and let
   ordinary PostgreSQL privileges - not a session GUC - enforce isolation
   (optionally combined with `FORCE ROW LEVEL SECURITY` and per-tenant grants).

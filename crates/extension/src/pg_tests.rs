@@ -5782,11 +5782,11 @@ Steps for deploying widgets with the marmoset rollout strategy.\n";
         })
     }
 
-    #[pg_test]
-    fn web_identity_tables_are_the_writers_and_invisible_to_a_reader() {
-        // Arrange: one role granted only pgokf_writer, one granted only
-        // pgokf_reader, and a probe that reports the SQLSTATE a statement
-        // raises rather than aborting the test.
+    /// One role granted only `pgokf_writer`, one granted only
+    /// `pgokf_reader`, and a probe that reports the SQLSTATE a statement
+    /// raises rather than aborting the test - the fixture every test of the
+    /// `pgokf_web` grants starts from.
+    fn install_web_probe() -> impl Fn(&str) -> String {
         for (role, api_role) in [
             ("pgokf_web_probe_writer", "pgokf_writer"),
             ("pgokf_web_probe_reader", "pgokf_reader"),
@@ -5806,11 +5806,17 @@ Steps for deploying widgets with the marmoset rollout strategy.\n";
              $probe$;",
         )
         .expect("probe is creatable");
-        let probe = |statement: &str| -> String {
+        |statement: &str| -> String {
             Spi::get_one_with_args::<String>("SELECT pgokf_test_web_probe($1)", &[statement.into()])
                 .expect("probe executes")
                 .expect("probe answers")
-        };
+        }
+    }
+
+    #[pg_test]
+    fn web_identity_tables_are_the_writers_and_invisible_to_a_reader() {
+        // Arrange
+        let probe = install_web_probe();
 
         // Act: the writer adds a person and opens a session; the reader
         // tries to look at either.
@@ -5851,6 +5857,140 @@ Steps for deploying widgets with the marmoset rollout strategy.\n";
         assert_eq!(reader_reads_users, "42501", "a reader never sees a hash");
         assert_eq!(reader_reads_sessions, "42501", "nor a session identifier");
         assert_eq!(reader_writes, "42501");
+    }
+
+    /// One `INSERT` into `pgokf_web.mcp_tokens`, as the probe reports it.
+    fn mint_probe(probe: &impl Fn(&str) -> String, values: &str) -> String {
+        probe(&format!(
+            "INSERT INTO pgokf_web.mcp_tokens (name, role, tenant, digest, created_by)
+             VALUES ({values})"
+        ))
+    }
+
+    #[pg_test]
+    fn mcp_token_constraints_refuse_the_malformed_and_a_change_in_place() {
+        // Arrange: a minted token is stored as its SHA-256 digest (64 hex
+        // characters); this test uses recognizable ones.
+        let probe = install_web_probe();
+        let digest = "ab".repeat(32);
+        Spi::run("SET ROLE pgokf_web_probe_writer").expect("writer role is assumable");
+
+        // Act
+        let minted = mint_probe(
+            &probe,
+            &format!("'fleet', 'builder', NULL, '{digest}', 'root'"),
+        );
+        let same_name = mint_probe(
+            &probe,
+            &format!("'fleet', 'reader', NULL, '{}', 'root'", "cd".repeat(32)),
+        );
+        let same_digest = mint_probe(
+            &probe,
+            &format!("'other', 'reader', NULL, '{digest}', 'root'"),
+        );
+        let same_name_elsewhere = mint_probe(
+            &probe,
+            &format!("'fleet', 'reader', 'acme', '{}', 'root'", "67".repeat(32)),
+        );
+        let control_tenant = mint_probe(
+            &probe,
+            &format!("'w', 'reader', E'ac\\nme', '{}', 'root'", "89".repeat(32)),
+        );
+        let bad_role = mint_probe(
+            &probe,
+            &format!("'x', 'admin', NULL, '{}', 'root'", "ef".repeat(32)),
+        );
+        let bad_digest = mint_probe(&probe, "'y', 'reader', NULL, 'not-a-digest', 'root'");
+        let bad_name = mint_probe(
+            &probe,
+            &format!("'a b', 'reader', NULL, '{}', 'root'", "01".repeat(32)),
+        );
+        let empty_tenant = mint_probe(
+            &probe,
+            &format!("'z', 'reader', '', '{}', 'root'", "23".repeat(32)),
+        );
+        let changed_in_place =
+            probe("UPDATE pgokf_web.mcp_tokens SET role = 'reader' WHERE name = 'fleet'");
+        Spi::run("RESET ROLE").expect("role resets");
+
+        // Assert
+        assert_eq!(minted, "ok");
+        assert_eq!(same_name, "23505", "a name is taken once within its tenant");
+        assert_eq!(same_digest, "23505", "a digest belongs to one token");
+        assert_eq!(
+            same_name_elsewhere, "ok",
+            "another tenant may use the same name"
+        );
+        assert_eq!(control_tenant, "23514", "a tenant label is printable");
+        assert_eq!(bad_role, "23514", "only reader and builder exist");
+        assert_eq!(bad_digest, "23514", "a digest is 64 hex characters");
+        assert_eq!(bad_name, "23514", "a name is one plain token");
+        assert_eq!(
+            empty_tenant, "23514",
+            "a tenant is named or NULL, never empty"
+        );
+        assert_eq!(
+            changed_in_place, "42501",
+            "a live credential's role is never changed in place: revoke and mint again"
+        );
+    }
+
+    #[pg_test]
+    fn mcp_tokens_are_minted_and_revoked_by_the_writer_and_a_reader_learns_only_a_bearer() {
+        // Arrange: a scalar sub-select, so "no such token" is one NULL
+        // rather than no row at all.
+        let probe = install_web_probe();
+        let digest = "ab".repeat(32);
+        let bearer_of = |digest: &str| -> Option<String> {
+            Spi::get_one_with_args::<String>(
+                "SELECT (SELECT name || ':' || role || ':' || coalesce(tenant, '-')
+                         FROM pgokf.mcp_token_bearer($1))",
+                &[digest.into()],
+            )
+            .expect("lookup executes")
+        };
+
+        // Act: the writer mints; the reader - which cannot see the table -
+        // asks about digests; the writer revokes; the reader asks again.
+        Spi::run("SET ROLE pgokf_web_probe_writer").expect("writer role is assumable");
+        let minted = mint_probe(
+            &probe,
+            &format!("'fleet', 'builder', 'acme', '{digest}', 'root'"),
+        );
+        Spi::run("RESET ROLE").expect("role resets");
+        Spi::run("SET ROLE pgokf_web_probe_reader").expect("reader role is assumable");
+        let reader_reads_table = probe("SELECT count(*) FROM pgokf_web.mcp_tokens");
+        let reader_mints = mint_probe(
+            &probe,
+            &format!("'z', 'reader', NULL, '{}', 'reader'", "45".repeat(32)),
+        );
+        let known = bearer_of(&digest);
+        let unknown = bearer_of(&"cd".repeat(32));
+        let malformed = bearer_of("fleet");
+        Spi::run("RESET ROLE").expect("role resets");
+        Spi::run("SET ROLE pgokf_web_probe_writer").expect("writer role is assumable");
+        let revoked = probe("DELETE FROM pgokf_web.mcp_tokens WHERE name = 'fleet'");
+        Spi::run("RESET ROLE").expect("role resets");
+        Spi::run("SET ROLE pgokf_web_probe_reader").expect("reader role is assumable");
+        let after_revocation = bearer_of(&digest);
+        Spi::run("RESET ROLE").expect("role resets");
+
+        // Assert
+        assert_eq!(minted, "ok");
+        assert_eq!(reader_reads_table, "42501", "a reader never lists tokens");
+        assert_eq!(reader_mints, "42501", "nor mints one");
+        assert_eq!(
+            known.as_deref(),
+            Some("fleet:builder:acme"),
+            "but learns the bearer of a digest it holds, tenant included"
+        );
+        assert_eq!(unknown, None, "and nothing about one it does not");
+        assert_eq!(malformed, None, "a non-digest matches nothing");
+        assert_eq!(revoked, "ok");
+        assert_eq!(
+            after_revocation, None,
+            "a revoked token is unknown with the next lookup"
+        );
     }
 
     /// Whether a skill row exists for one concept.

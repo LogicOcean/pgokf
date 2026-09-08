@@ -16,7 +16,7 @@
 #   mcp-http (profile "mcp-http") the same MCP server over HTTP on
 #            ${PGOKF_MCP_BIND}:${PGOKF_MCP_PORT} (loopback:8081 by default),
 #            for agent clients that cannot launch a subprocess; every request
-#            carries a bearer token from OKF_MCP_TOKENS_DIR/tokens
+#            carries a bearer token minted on the UI's Admin page
 #
 # Everything is parameterized through .env - copy .env.example and fill it in.
 # The network is external (create it once with `docker network create
@@ -210,9 +210,10 @@ services:
       # way of knowing who is asking. Off until both are set; see .env.example.
       OKF_PG_WRITER_URL: ${OKF_UI_WRITER_URL:-}
       OKF_WEB_AUTH: ${OKF_UI_AUTH:-none}
-      # People (users mode) and live sessions (users and oidc modes) live in
-      # the catalog - pgokf_web.users / pgokf_web.sessions - reached through
-      # OKF_PG_WRITER_URL above, which those modes therefore require.
+      # People (users mode), live sessions (users and oidc modes), and the
+      # MCP tokens the Admin page mints live in the catalog - pgokf_web.users
+      # / sessions / mcp_tokens - reached through OKF_PG_WRITER_URL above,
+      # which the identity modes therefore require.
       OKF_WEB_SESSION_SECRET: ${OKF_UI_SESSION_SECRET:-}
       OKF_WEB_COOKIE_SECURE: ${OKF_UI_COOKIE_SECURE:-false}
       OKF_WEB_AUTH_TRUSTED_PROXY: ${OKF_UI_TRUSTED_PROXY:-}
@@ -251,27 +252,20 @@ services:
     profiles: ["tools"]
     stdin_open: true
     command: ["pgokf-mcp"]
-    # The image's unprivileged user, unless the tokens directory below
-    # belongs to a host user; then name that one, as the UI does.
-    user: "${OKF_MCP_UID:-10001}:${OKF_MCP_GID:-10001}"
     environment:
       OKF_PG_URL: "postgresql://${PGOKF_READER_ROLE:-okf_reader}:${PGOKF_READER_PASSWORD}@db:5432/${POSTGRES_DB:-okf}"
       OKF_TENANT: ${OKF_MCP_TENANT:-}
-    volumes:
-      # Writable, because this is also the service that mints tokens for
-      # mcp-http:  docker compose run --rm -T mcp \
-      #              pgokf-mcp hash-token --name fleet --role reader
-      - ${OKF_MCP_TOKENS_DIR:-./mcp-tokens}:/etc/pgokf/mcp
     networks:
       - pgokf-net
 
   # The same MCP server over HTTP, for agent clients that cannot launch a
   # subprocess. Unlike the stdio service above it is reachable, so it is
-  # never open: every request carries a bearer token minted with
-  #   docker compose run --rm -T mcp pgokf-mcp hash-token --name fleet --role reader
-  # which appends the line to <OKF_MCP_TOKENS_DIR>/tokens and prints the
-  # token once. Bound to the loopback interface by default; put a
-  # TLS-terminating reverse proxy in front of it to expose it.
+  # never open: every request carries a bearer token minted on the UI's
+  # Admin page (or with `pgokf-web mcp-token mint`), which the catalog keeps
+  # as a digest and this server checks against on every request - so a token
+  # revoked there is refused here at once, with no restart. Bound to the
+  # loopback interface by default; put a TLS-terminating reverse proxy in
+  # front of it to expose it.
   mcp-http:
     image: ${PGOKF_COMPANIONS_IMAGE}
     container_name: pgokf-mcp-http
@@ -281,24 +275,18 @@ services:
       db:
         condition: service_healthy
     command: ["pgokf-mcp", "--http", "0.0.0.0:8081"]
-    user: "${OKF_MCP_UID:-10001}:${OKF_MCP_GID:-10001}"
     environment:
       OKF_PG_URL: "postgresql://${PGOKF_READER_ROLE:-okf_reader}:${PGOKF_READER_PASSWORD}@db:5432/${POSTGRES_DB:-okf}"
       OKF_TENANT: ${OKF_MCP_TENANT:-}
-      OKF_MCP_TOKENS_FILE: /etc/pgokf/mcp/tokens
       # Browser origins allowed to call it; empty refuses every request that
       # carries an Origin at all, which is the defence against a page in
       # someone's browser reaching this server on their network.
       OKF_MCP_ALLOWED_ORIGINS: ${OKF_MCP_ALLOWED_ORIGINS:-}
-    volumes:
-      # Home of the tokens file. Read-only: the server only reads it, and it
-      # re-reads it whenever it changes, so revoking a token needs no restart.
-      - ${OKF_MCP_TOKENS_DIR:-./mcp-tokens}:/etc/pgokf/mcp:ro
     ports:
       - "${PGOKF_MCP_BIND:-127.0.0.1}:${PGOKF_MCP_PORT:-8081}:8081"
-    # GET /healthz needs no token and reports the catalog link and the
-    # tokens file, for an external probe. The server itself stops when the
-    # link to PostgreSQL closes, which restart: unless-stopped then heals.
+    # GET /healthz needs no token and reports the catalog link, for an
+    # external probe. The server itself stops when the link to PostgreSQL
+    # closes, which restart: unless-stopped then heals.
     networks:
       - pgokf-net
     logging:

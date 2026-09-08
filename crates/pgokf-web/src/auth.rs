@@ -1129,6 +1129,7 @@ pub(crate) fn cookie_header(value: &str) -> Option<HeaderValue> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::dead_db;
 
     /// Test conveniences over stores that cannot fail: the in-memory backends
     /// never error, so a test reads better without the `Result` the production
@@ -1742,17 +1743,6 @@ mod tests {
     /// A pool that no server answers: connecting is lazy, so it builds, and
     /// the first statement fails at once. What every `Pg` store does then is
     /// the seam under test.
-    fn dead_db() -> crate::db::Db {
-        crate::db::Db::connect(&crate::db::DbConfig {
-            database_url: "postgresql://nobody:nothing@127.0.0.1:9/okf",
-            force_tls: false,
-            pool_size: 1,
-            tenant: None,
-            statement_timeout_ms: 1_000,
-        })
-        .expect("a pool builds without a server")
-    }
-
     #[tokio::test]
     async fn sign_out_is_loud_when_the_catalog_cannot_be_consulted() {
         // Arrange: a cookie minted by a signer sharing the secret, presented

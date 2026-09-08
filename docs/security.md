@@ -366,18 +366,33 @@ and the sync history through `list_sync_log` / `list_sync_changes`, but cannot
 read or write the tables directly; `list_access_log` stays admin-only.
 
 `pgokf_web` holds the web UI's identity state - `users` (the people a local
-sign-in knows, with Argon2id password hashes) and `sessions` (the sessions
-the UI has issued and not yet ended). The extension owns the tables so they
-are transactional, shared by every UI instance, and dumped with the catalog,
-but never reads them; `USAGE` and DML are granted to `pgokf_writer` only
-(so to `pgokf_admin`), and `pgokf_reader` has no access at all - a reader
-must not learn a password hash or a session identifier. The UI reaches them
-through a pool of its own on the writer URL, which the `users` and `oidc`
-modes therefore require. Both tables are carried by `pg_dump`: a backup
-holds password hashes (as any credential store does) and live session
-identifiers, which are useless without the site's session secret and end at
-their expiry regardless - so treat a backup as you would the catalog's
-credentials.
+sign-in knows, with Argon2id password hashes), `sessions` (the sessions the
+UI has issued and not yet ended), and `mcp_tokens` (the SHA-256 digests of
+the bearer tokens `pgokf-mcp` accepts over HTTP, minted on the Admin page).
+The extension owns the tables so they are transactional, shared by every UI
+instance, and dumped with the catalog, but never reads them; `USAGE` and DML
+are granted to `pgokf_writer` only (so to `pgokf_admin`), and `pgokf_reader`
+has no access at all - a reader must not learn a password hash, a session
+identifier, or which tokens exist. The one thing a reader may ask is
+`pgokf.mcp_token_bearer(digest)`, a `SECURITY DEFINER` function with a pinned
+`search_path` that answers for the digest it is given and lists nothing: it
+is how the MCP server, a reader, authenticates a request without the token
+ever reaching the database. A token is minted for the tenant the minting
+UI serves and admitted only by an endpoint serving that tenant, so one
+tenant's tokens open no other's endpoint on a shared catalog; a UI lists
+and revokes its own tenant's tokens alone, and a name is unique within a
+tenant, so one tenant's admin can neither see nor squat another's. As with
+`users`, any `pgokf_writer` credential may insert a row here - a compromised
+writer (an ingestion pipeline, say) could mint itself an MCP token - so the
+writer credential is the boundary, as it already is for people. The UI
+reaches all three through a pool of its own on the writer URL - never behind
+the human workflow's long resyncs - which the `users` and `oidc` modes
+therefore require, and without which the Admin page mints nothing. All three
+tables are carried by `pg_dump`: a backup holds password hashes (as any
+credential store does), live session identifiers, which are useless without
+the site's session secret and end at their expiry regardless, and token
+digests, which are not tokens - so treat a backup as you would the
+catalog's credentials.
 
 ## Error handling and SQLSTATEs
 
@@ -408,10 +423,16 @@ connections) against slow-client floods.
 
 - **MCP over HTTP** authenticates every request but `/healthz` with a bearer
   token (`pgokf_` + 43 base64url characters; only the SHA-256 digest is
-  stored, and it is compared in constant time). The check runs before the
-  request body is read, so an unauthenticated caller neither buffers a body
-  nor takes a work slot; the body is then bounded and buffered before a slot
-  is taken, and `/healthz` sits outside that budget. Two roles form a ladder
+  stored, in `pgokf_web.mcp_tokens`, and the server - a reader - asks
+  `pgokf.mcp_token_bearer(digest)` for its bearer, so the token never reaches
+  the database and a revocation takes effect with the next request; a token
+  minted for another tenant is refused). The check runs before the request
+  body is read, so an unauthenticated caller neither buffers a body nor
+  takes a work slot; the lookups run on a connection of their own, bounded
+  in number and wait, so a flood of well-shaped wrong tokens costs the
+  catalog a fixed amount and never queues behind work; the body is then
+  bounded and buffered before a slot is taken, and `/healthz` - which proves
+  both connections, the lookup included - sits outside that budget. Two roles form a ladder
   (`reader` < `builder`); host-only tool arguments (a plugin's `output_dir`)
   are refused over HTTP so a remote caller cannot make the server write to its
   own disk. The browser `Origin` is validated against an allow-list, and no

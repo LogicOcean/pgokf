@@ -34,7 +34,7 @@ connections so an edge can be reached by a tap.
 | Flag | Environment | Meaning |
 | ---- | ----------- | ------- |
 | `--database-url` | `OKF_PG_URL` | Connection string for a `pgokf_reader` role (required): everything the UI shows comes through it. |
-| `--writer-url` | `OKF_PG_WRITER_URL` | Connection string for a `pgokf_writer` role, used only by the human workflow (upload, edit, review) and only for signed-in people whose role allows it. Without it those pages are off and the UI is read-only. |
+| `--writer-url` | `OKF_PG_WRITER_URL` | Connection string for a `pgokf_writer` role, used by the human workflow (upload, edit, review) for signed-in people whose role allows it, and - through a pool of its own - by the `users` and `oidc` modes for the people and sessions they keep in the catalog and by the Admin page for the MCP tokens it mints. Without it those pages are off and the UI is read-only. |
 | `--bundles-dir`, `--bundles-db-dir` | `OKF_WEB_BUNDLES_DIR`, `OKF_WEB_BUNDLES_DB_DIR` | The directory under which directory bundles are reachable from this process (mounted read-write), and the path the database server uses for the same directory when it differs. With it set, editors change documents of directory bundles in place: the file is written atomically, confined to the bundle (no `..`, no symbolic links), and the bundle is refreshed, so the directory stays the source of truth. Unset, such bundles are read-only in the UI. |
 | `--auth` | `OKF_WEB_AUTH` | How people are identified: `none` (everyone is a viewer; the default), `oidc` (this site signs people in against an OpenID Connect provider), `header` (a trusted reverse proxy forwards the identity), or `users` (people kept in the catalog, with a login form). |
 | `--oidc-issuer`, `--oidc-client-id`, `--oidc-client-secret`, `--oidc-redirect-url` | `OKF_WEB_OIDC_ISSUER`, `OKF_WEB_OIDC_CLIENT_ID`, `OKF_WEB_OIDC_CLIENT_SECRET`, `OKF_WEB_OIDC_REDIRECT_URL` | `oidc` mode: the provider's issuer URL exactly as it declares it, the client this site is registered as, its secret (omit it for a public client, which PKCE alone protects), and this site's callback URL, which is its public address plus `/auth/callback` and must be registered with the provider. |
@@ -187,7 +187,17 @@ Roles are a ladder; each holds the ones below it:
 | `uploader` | **Upload** Markdown documents into a content bundle (new or existing); a document without `generated`/`author` is stamped with the person's OKF actor, `human:<name>` |
 | `editor` | **Edit** a document (frontmatter and body, with a validating preview) or delete it; any earlier verification is set aside, `generated` names the editor, and the document returns to the review queue |
 | `approver` | **Review**: the queue of unverified documents; approving records a `verified` event under the person's name (the document becomes *human-reviewed*, a draft becomes active), sending back makes it a draft and keeps the note under `reviews` |
-| `admin` | everything above, plus **Admin**: people (in `users` mode: add, change role, reset password, remove; the file is rewritten in place and reloaded) and bundles (register a directory bundle, refresh, enable or disable, retire or bring back, unregister) |
+| `admin` | everything above, plus **Admin**: people (in `users` mode: add, change role, reset password, remove, sign out everywhere), the MCP tokens (mint, revoke), and bundles (register a directory bundle, refresh, enable or disable, retire or bring back, unregister) |
+
+The **MCP tokens** an admin mints there are the bearer tokens `pgokf-mcp`
+accepts over HTTP (see [its README](../pgokf-mcp/README.md#serving-it-over-http)).
+Each is shown once, on the page that minted it, and the catalog keeps only its
+SHA-256 digest (`pgokf_web.mcp_tokens`), so a token can be revoked but never
+read back - and a revoked one is refused by the MCP server with the next
+request. A token is minted for the tenant this UI serves (`--tenant`, or
+none), and an MCP endpoint admits only tokens minted for the tenant it serves.
+Without the UI, `pgokf-web mcp-token mint|list|revoke` does the same against
+the writer URL; `mint` prints the token alone on standard output, once.
 
 Once identities are on (any mode but `none`), nobody reaches the site
 without signing in: only the login page, the static assets, and the health

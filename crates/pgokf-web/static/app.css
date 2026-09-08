@@ -182,6 +182,12 @@ a.tag:hover { color: var(--accent); text-decoration: none; }
 .user-name { font-weight: 600; }
 form.inline { display: inline; }
 .notice.ok { border-color: var(--ok); background: var(--ok-bg); }
+/* A secret shown once: selectable in one click, never wrapped mid-glyph
+   into something that looks like two tokens. */
+.token-reveal { margin: .6rem 0 1rem; }
+.token-reveal p { margin: .25rem 0; }
+.token-line { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+.token-line code { font-size: 1.05em; padding: .3em .5em; user-select: all; overflow-wrap: anywhere; }
 .editor textarea.code { font-family: var(--mono); font-size: .9em; min-height: 60vh; line-height: 1.45; white-space: pre; overflow-wrap: normal; overflow-x: auto; }
 .editor-actions { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
 .editor-spacer { flex: 1; }
@@ -353,6 +359,16 @@ html:not([data-js]) .tabs [role=tabpanel] { margin-bottom: 1.5rem; }
 .step-result .step-no { background: var(--surface-2); color: var(--text); }
 .step-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 1.25rem; }
 .step-grid.three { grid-template-columns: 1fr 1fr 1fr; }
+/* A row of fields with its button at the end: the fields share the width,
+   the button takes its own, and everything sits on one baseline - the
+   button's bottom edge on the inputs' bottom edge, not at the top of the
+   row beside their labels. The fields keep their spacing through the row
+   gap once the row wraps to one column. */
+.form-row { display: grid; grid-template-columns: 1fr auto; gap: .9rem 1.25rem; align-items: end; margin-bottom: .9rem; }
+.form-row.fields-2 { grid-template-columns: 1fr 1fr auto; }
+.form-row.fields-3 { grid-template-columns: 1fr 1fr 1fr auto; }
+.form-row .field { margin-bottom: 0; }
+.form-row > div:not(.field) { display: flex; }
 .step .field { margin-bottom: .8rem; }
 /* One of two alternatives is in use; the other stays readable but plainly
    out of play rather than disappearing under the cursor. */
@@ -437,7 +453,7 @@ form[data-kind="prompt-bundle"] [data-only-kind="prompt-bundle"] { display: bloc
 html[data-js] [data-needs][hidden] { display: none; }
 @media (max-width: 900px) {
   .step { padding: .9rem .9rem .75rem; }
-  .step-grid, .step-grid.three, .options { grid-template-columns: 1fr; }
+  .step-grid, .step-grid.three, .options, .form-row, .form-row.fields-2, .form-row.fields-3 { grid-template-columns: 1fr; }
   .browser-toolbar { grid-template-columns: 1fr; }
   .result-summary { flex-direction: column; align-items: stretch; }
   .result-cta { justify-items: stretch; max-width: none; text-align: left; }

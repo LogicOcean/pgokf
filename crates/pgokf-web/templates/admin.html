@@ -3,7 +3,7 @@
 <section class="hero">
   <div>
     <h1>Administration</h1>
-    <p class="lede">People and their roles, and the bundles the catalog holds. Every action here runs through the writer role under your name; catalog settings themselves are changed by a database admin with <code>pgokf.set_config</code>.</p>
+    <p class="lede">People and their roles, the tokens that let agents reach the MCP endpoint, and the bundles the catalog holds. Every action here runs through the writer role under your name; catalog settings themselves are changed by a database admin with <code>pgokf.set_config</code>.</p>
   </div>
 </section>
 {% if let Some(n) = notice %}<p class="notice ok">{{ n }}</p>{% endif %}
@@ -38,7 +38,7 @@
   </table>
   </div>
   <h3>Add a person</h3>
-  <form method="post" action="/admin/users" class="step-grid three">
+  <form method="post" action="/admin/users" class="form-row fields-3" data-once>
     <input type="hidden" name="action" value="add">
     <div class="field"><label for="au-name">User name</label><input id="au-name" type="text" name="name" required pattern="[A-Za-z0-9._@+-]{1,128}" spellcheck="false" autocomplete="off"></div>
     <div class="field"><label for="au-role">Role</label><select id="au-role" name="role">{% for r in roles %}<option value="{{ r }}">{{ r }}</option>{% endfor %}</select></div>
@@ -70,11 +70,55 @@
   {% endif %}
   <h3>End someone's sessions</h3>
   <p class="hint">Ends every session that person holds here at once - whether they were disabled at the provider, or a session may have been copied. Name them as the provider identifies them (their subject).</p>
-  <form method="post" action="/admin/sessions" class="step-grid three">
+  <form method="post" action="/admin/sessions" class="form-row" data-once>
     <div class="field"><label for="es-name">Subject</label><input id="es-name" type="text" name="name" required spellcheck="false" autocomplete="off"></div>
     <div><button type="submit" class="btn danger" data-confirm="End every session of this person now?">Sign out everywhere</button></div>
   </form>
   {% endif %}
+  {% endif %}
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>MCP tokens{% if mcp_tokens_managed_here %} <span class="muted">({{ mcp_tokens.len() }})</span>{% endif %}</h2></div>
+  <p class="muted small">An agent that cannot launch <code>pgokf-mcp</code> itself calls it over HTTP, and every such request carries a bearer token. A token is shown once, when it is minted; only its digest is kept, so it can be revoked here but never read back. A <code>reader</code> token searches and reads the catalog; a <code>builder</code> token may also build workspace plugins. A token is minted for the tenant this site serves, an MCP endpoint accepts only tokens minted for its own, and this page shows that tenant's tokens alone. Revoking takes effect with the next request.</p>
+  {% if !mcp_tokens_managed_here %}
+  <p class="muted">Minting needs the writer connection (<code>OKF_PG_WRITER_URL</code>).</p>
+  {% else %}
+  {% if let Some(m) = minted %}
+  <div class="notice ok token-reveal" id="pgokf-minted-token">
+    <p><strong>Token <code>{{ m.name }}</code> ({{ m.role }})</strong> - copy it now; it is not shown again.</p>
+    <p class="token-line"><code>{{ m.token }}</code> <button type="button" class="btn js-only" data-copy="{{ m.token }}">Copy</button></p>
+    <p class="hint">The client sends it as <code>Authorization: Bearer …</code> to the MCP endpoint (<code>POST /mcp</code>); a plugin built on the <a href="/plugins">Plugins</a> page expects it as <code>OKF_MCP_TOKEN</code>.</p>
+  </div>
+  {% endif %}
+  {% if mcp_tokens.is_empty() %}
+  <p class="muted">No token has been minted, so the HTTP endpoint refuses every request.</p>
+  {% else %}
+  <div class="table-wrap">
+  <table class="table" id="pgokf-mcp-tokens">
+    <thead><tr><th>Name</th><th>Role</th><th>Minted by</th><th>Minted</th><th>Change</th></tr></thead>
+    <tbody>
+    {% for t in mcp_tokens %}
+      <tr>
+        <td><code>{{ t.name }}</code></td>
+        <td>{{ t.role }}</td>
+        <td>{{ t.created_by }}</td>
+        <td class="when">{{ t.created_at|datetime }}</td>
+        <td class="row-actions"><form method="post" action="/admin/mcp-tokens"><input type="hidden" name="action" value="revoke"><input type="hidden" name="name" value="{{ t.name }}">
+          <button type="submit" class="btn danger" data-confirm="Revoke {{ t.name }}? Every request it makes is refused from now on.">Revoke</button></form></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+  <h3>Mint a token{% if let Some(tenant) = mcp_tenant %} <span class="muted">for tenant {{ tenant }}</span>{% endif %}</h3>
+  <form method="post" action="/admin/mcp-tokens" class="form-row fields-2" data-once>
+    <input type="hidden" name="action" value="mint">
+    <div class="field"><label for="mt-name">Name <span class="muted">(what the MCP log calls it)</span></label><input id="mt-name" type="text" name="name" required pattern="[A-Za-z0-9._@+-]{1,128}" placeholder="fleet" spellcheck="false" autocomplete="off"></div>
+    <div class="field"><label for="mt-role">Role</label><select id="mt-role" name="role">{% for r in mcp_roles %}<option value="{{ r }}">{{ r }}</option>{% endfor %}</select></div>
+    <div><button type="submit" class="btn primary">Mint</button></div>
+  </form>
   {% endif %}
 </section>
 
@@ -107,7 +151,7 @@
   </table>
   </div>
   <h3>Register a directory bundle</h3>
-  <form method="post" action="/admin/bundles" class="step-grid three">
+  <form method="post" action="/admin/bundles" class="form-row fields-2" data-once>
     <input type="hidden" name="action" value="register">
     <div class="field"><label for="ab-path">Path <span class="muted">(as the database server sees it)</span></label><input id="ab-path" type="text" name="path" placeholder="/bundles/team-docs" required spellcheck="false"></div>
     <div class="field"><label for="ab-name">Name <span class="muted">(optional)</span></label><input id="ab-name" type="text" name="name" spellcheck="false"></div>

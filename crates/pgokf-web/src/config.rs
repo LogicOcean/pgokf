@@ -26,8 +26,9 @@ pub(crate) struct Cli {
     /// `PostgreSQL` connection string for a `pgokf_writer` role, used by the
     /// human workflow (upload, edit, review) for people whose role allows
     /// it, and - through a pool of its own - by the `users` and `oidc`
-    /// modes for the people and sessions they keep in the catalog. Without
-    /// it those pages and modes are off.
+    /// modes for the people and sessions they keep in the catalog and by
+    /// the Admin page (and `pgokf-web mcp-token`) for the MCP tokens it
+    /// mints. Without it those pages and modes are off.
     #[arg(long, env = "OKF_PG_WRITER_URL", hide_env_values = true)]
     pub writer_url: Option<String>,
 
@@ -205,6 +206,37 @@ pub(crate) enum Command {
     /// the catalog (`pgokf_web.users`), so these need `--writer-url`.
     #[command(subcommand)]
     User(UserCommand),
+    /// Manage the bearer tokens that may call `pgokf-mcp` over HTTP. They
+    /// live in the catalog (`pgokf_web.mcp_tokens`), so these need
+    /// `--writer-url`; the Admin page does the same.
+    #[command(subcommand)]
+    McpToken(McpTokenCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum McpTokenCommand {
+    /// Mint a token for this process's `--tenant` (or none) and print it
+    /// once, alone on standard output; only its digest is stored, so
+    /// nothing can recover it later.
+    Mint {
+        /// What to call the token in the MCP server's log (letters,
+        /// digits, . _ - @ +).
+        #[arg(long)]
+        name: String,
+        /// What it may do: reader (search and read the catalog) or builder
+        /// (also build workspace plugins).
+        #[arg(long, default_value = "reader")]
+        role: String,
+    },
+    /// List the tokens, one per line: name, role, tenant (`-` for none), who
+    /// minted it, and when - tab-separated, without a header, for scripts.
+    List,
+    /// Revoke a token; the MCP server refuses it from the next request on.
+    Revoke {
+        /// The token's name.
+        #[arg(long)]
+        name: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]

@@ -48,8 +48,7 @@ package.
 | `--database-url` | `OKF_PG_URL` | PostgreSQL URL for a `pgokf_reader`-capable role (required) |
 | `--tenant` | `OKF_TENANT` | Apply a `pgokf.tenant` scope for the session (multi-tenant isolation; required once the catalog's `require_tenant` policy is on) |
 | `--tls` | `OKF_PG_TLS` | Require a TLS-encrypted link to PostgreSQL (default off) |
-| `--http` | `OKF_MCP_HTTP_BIND` | Serve MCP over HTTP on this address instead of over stdio (needs `--tokens-file`) |
-| `--tokens-file` | `OKF_MCP_TOKENS_FILE` | The tokens that may call the HTTP endpoint; also where `hash-token` appends a new one |
+| `--http` | `OKF_MCP_HTTP_BIND` | Serve MCP over HTTP on this address instead of over stdio; every request then carries a bearer token minted on the catalog's Admin page |
 | `--allowed-origins` | `OKF_MCP_ALLOWED_ORIGINS` | Browser origins allowed to call the HTTP endpoint, comma-separated (default: none, which refuses every request carrying an `Origin`) |
 
 ### PostgreSQL transport (TLS)
@@ -89,7 +88,7 @@ client, a fleet of agents that should share one connection to the catalog.
 implementation answers both transports, so they cannot drift apart.
 
 ```sh
-pgokf-mcp --http 127.0.0.1:8081 --tokens-file /etc/pgokf/mcp/tokens
+pgokf-mcp --http 127.0.0.1:8081
 ```
 
 The endpoint is `POST /mcp`. This is the MCP **Streamable HTTP** transport with
@@ -140,7 +139,8 @@ string, so there is nothing to authenticate. Over HTTP the server is
   reverse proxy in front of it, or keep it on a private network; the server
   says so at startup if the address it binds is reachable from elsewhere.
 - **One process serves one tenant.** `--tenant` scopes the single catalog
-  session; a token carries no tenant of its own. Run one server per tenant.
+  session, and only tokens minted for that tenant are admitted (see below).
+  Run one server per tenant, with tokens of its own.
 
 Authentication is a static token, not OAuth. A `401` says
 `WWW-Authenticate: Bearer realm="pgokf-mcp", error="invalid_token"` rather than
@@ -149,43 +149,44 @@ token rather than left to discover one.
 
 ### Tokens and roles
 
-Mint a token with `hash-token`. Only the SHA-256 digest is stored, so the token
-is shown once and nothing can recover it later:
+Tokens are minted on the catalog's Admin page (`pgokf-web`, signed in as an
+admin) or, without the UI, with `pgokf-web mcp-token mint --name fleet --role
+reader` against the writer URL. Only the SHA-256 digest is stored, in the
+catalog's `pgokf_web.mcp_tokens`, so the token is shown once and nothing can
+recover it later. `name` is what appears in this server's log beside every call
+the token makes.
 
-```sh
-pgokf-mcp hash-token --name fleet --role reader --tokens-file /etc/pgokf/mcp/tokens
-pgokf_kQ8...                       # the token, on standard output, once
-pgokf-mcp: added fleet (reader) to /etc/pgokf/mcp/tokens; ...
-```
+This server connects as a reader, and a reader cannot see that table. It hashes
+the token a request presents - only if it has the shape a minted token has - and
+asks `pgokf.mcp_token_bearer(digest)`, a `SECURITY DEFINER` lookup that answers
+for the one digest it is given and lists nothing: the token never travels to
+the database, and the reader learns nothing about tokens it does not hold.
+Revoking a token on the Admin page (or with `pgokf-web mcp-token revoke --name
+fleet`) takes effect with the next request; there is no file to re-read and no
+cache to expire. The lookups run on a connection of their own, so they never
+wait behind a tool call, and are bounded in number and in wait, so a flood of
+wrong tokens costs the catalog a fixed amount; at startup the server proves the
+lookup exists, so a catalog older than 0.2.0 is refused with the reason rather
+than answering 503 later. A token is minted for the tenant of the UI (or
+`pgokf-web --tenant`) that minted it, and this server admits only tokens minted
+for the tenant it serves (`--tenant`, or none): one process serves one tenant,
+with tokens of its own.
 
-With `--tokens-file` the line is appended for you (the file is created
-`chmod 600` if it does not exist) and only the token is printed, so nothing has
-to be redirected. Without it, the line goes to standard output and the token to
-standard error, so `hash-token >> tokens` writes only the digest - and
-`hash-token >> tokens 2>&1`, which would write the token beside its own digest,
-is refused.
-
-The file holds one `name:role:digest` line per token; `#` comments and blank
-lines are allowed, and the digest is the last field. `name` is what appears in
-the log beside every call that token makes. Keep it `chmod 600` - a digest is
-not a token, but the file still names who may call, and the server says so at
-startup if anyone else can read it.
-
-Only tokens this command minted are accepted: the server checks a presented
+Only tokens the catalog minted are accepted: the server checks a presented
 token's shape (`pgokf_` and 43 base64url characters, 256 bits of randomness)
 before it hashes it. That is what makes one fast unsalted hash per request the
-right choice rather than a slow one, so writing the digest of a chosen password
-into the file gets you a line that can never authenticate.
+right choice rather than a slow one, so a row holding the digest of a chosen
+password could never authenticate - and the table's own constraints refuse a
+digest that is not 64 hex characters or a role that is not `reader` or
+`builder`.
 
-**Revoking** is removing the line. The server re-reads the file when it
-changes - at most once a second, so a revocation takes effect within a second;
-a flood of requests is throttled to that one re-read a second. An emptied file
-revokes everyone at once. A file that cannot be read or no longer parses is
-reported, and the last good set is kept for **one minute** so a half-written
-save is ridden out; after that every request is refused, so a revocation can
-never fail silently for good. `/healthz` re-checks the file on each probe, so a
-supervisor watching it sees `degraded` for the whole outage even during a quiet
-period with no other traffic.
+**Revoking** is one click on the Admin page, or `pgokf-web mcp-token revoke`.
+It is a `DELETE` in the catalog, and the server asks the catalog on every
+request, so it takes effect with the next one. While the catalog cannot be
+asked at all, a request is answered `503` with `Retry-After` rather than `401`,
+so a client does not discard a good token over an outage; `/healthz` reports
+the same condition, so a supervisor watching it sees `degraded` for the whole
+outage even during a quiet period with no other traffic.
 
 | Role | May call |
 | --- | --- |

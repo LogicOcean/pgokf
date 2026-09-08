@@ -1506,8 +1506,8 @@ fn remote_mcp_guide(spec: &McpSpec, url: &str) -> String {
     );
     let _ = writeln!(
         out,
-        "Mint one with `pgokf-mcp hash-token --name <who> --role reader --tokens-file <path>` on \
-         the server. Source for this layout: {}",
+        "Mint one on the catalog's Admin page (pgokf-web), or with `pgokf-web mcp-token mint \
+         --name <who> --role reader` on the server. Source for this layout: {}",
         remote.source
     );
     out

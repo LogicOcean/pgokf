@@ -88,7 +88,7 @@ FROM pg_roles r WHERE r.rolname LIKE 'pgokf_%' ORDER BY 1;
 ```
 
 Each of the first three queries must return **no rows**. As a positive check,
-this confirms full coverage (expect `44/44`, `17/17`, `18/18`: the 43 public
+this confirms full coverage (expect `45/45`, `17/17`, `18/18`: the 44 public
 functions plus the internal `bm25_hits` helper, 17 composite types, and 18
 catalog tables = the 14 public `pgokf` tables plus the 4
 `pgokf_private` tables `config` / `sync_log` / `sync_log_change` / `access_log`):

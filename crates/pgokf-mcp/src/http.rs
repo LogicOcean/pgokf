@@ -38,7 +38,7 @@ use tower_http::timeout::RequestBodyTimeoutLayer;
 
 use crate::catalog::Catalog;
 use crate::dispatch::{self, Caller};
-use crate::tokens::{Bearer, Tokens};
+use crate::tokens::{self, Bearer, Lookup, TokenLookups};
 
 /// The one path that needs no token, so a container's health probe works.
 const HEALTH_PATH: &str = "/healthz";
@@ -63,8 +63,23 @@ const HEALTH_INTERVAL: Duration = Duration::from_secs(1);
 /// How long the health probe waits for that answer. A probe must report
 /// quickly; the request budget is far too long for one.
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(3);
-/// How often refused requests are summarized into the log.
-const REFUSAL_LOG_INTERVAL: Duration = Duration::from_secs(1);
+/// How often one kind of refusal or failure is summarized into the log: a
+/// flood of them must not become the denial of service itself.
+const SUMMARY_INTERVAL: Duration = Duration::from_secs(1);
+/// Token lookups in flight at once. Every request costs one index probe on
+/// the lookup connection before it is believed, and that runs before the
+/// body is read and before a work slot is taken, so it is bounded on its
+/// own: a flood of well-shaped wrong tokens can hold this many lookups and
+/// no more.
+const MAX_LOOKUPS: usize = MAX_IN_FLIGHT;
+/// How long a request waits for one of those before it is shed. A lookup
+/// takes microseconds, so a wait this long means the catalog is not
+/// answering, and the queue would only grow.
+const LOOKUP_WAIT: Duration = Duration::from_secs(2);
+/// Bound on the lookup itself, from this side: past the catalog's own
+/// statement budget, a link that has gone silent would otherwise hold its
+/// permit until TCP gave up.
+const LOOKUP_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// The `MCP-Protocol-Version` header a Streamable HTTP client may send. It
 /// is not read — every revision this server speaks carries these messages
@@ -74,46 +89,49 @@ const PROTOCOL_HEADER: HeaderName = HeaderName::from_static("mcp-protocol-versio
 /// What the HTTP transport needs.
 pub struct Server {
     pub catalog: Catalog,
-    pub tokens: Tokens,
+    /// Who may go further, and how that is decided.
+    pub admission: Admission,
     /// Browser origins allowed to call this server. Empty (the default)
     /// refuses every request that carries an `Origin` at all, which is what
     /// keeps a page in someone's browser from reaching a server on their
     /// network.
     pub allowed_origins: Vec<String>,
     /// The last catalog check, so the health probe costs one query a second
-    /// however often it is called.
-    health: RwLock<Option<Check>>,
-    /// Requests refused for want of a token, summarized rather than logged
-    /// one by one.
-    refusals: RwLock<(Instant, u64)>,
+    /// however often it is called - and one at a time: probes that arrive
+    /// while a check runs wait for its answer rather than each asking.
+    health: tokio::sync::Mutex<Option<Check>>,
 }
 
 impl Server {
     /// Assemble the transport's state.
     #[must_use]
-    pub fn new(catalog: Catalog, tokens: Tokens, allowed_origins: Vec<String>) -> Self {
+    pub fn new(catalog: Catalog, admission: Admission, allowed_origins: Vec<String>) -> Self {
         Self {
             catalog,
-            tokens,
+            admission,
             allowed_origins,
-            health: RwLock::new(None),
-            refusals: RwLock::new((Instant::now(), 0)),
+            health: tokio::sync::Mutex::new(None),
         }
     }
 
-    /// Why the catalog is not answering, if it is not. The link is never
-    /// re-established, so a health probe that reports this lets a
-    /// supervisor restart the process rather than leave it up and failing.
+    /// Why the catalog is not answering, if it is not - on either
+    /// connection, the work one or the token lookups', since a server that
+    /// cannot authenticate anyone is as down as one that cannot answer. The
+    /// links are never re-established, so a health probe that reports this
+    /// lets a supervisor restart the process rather than leave it up and
+    /// failing.
     async fn catalog_failure(&self) -> Option<String> {
+        let mut seen = self.health.lock().await;
+        if let Some(check) = seen.as_ref()
+            && check.at.elapsed() < HEALTH_INTERVAL
         {
-            if let Ok(seen) = self.health.read()
-                && let Some(check) = seen.as_ref()
-                && check.at.elapsed() < HEALTH_INTERVAL
-            {
-                return check.failure.clone();
-            }
+            return check.failure.clone();
         }
-        let failure = match tokio::time::timeout(HEALTH_TIMEOUT, self.catalog.ping()).await {
+        let both = async {
+            self.catalog.ping().await?;
+            self.admission.check().await
+        };
+        let failure = match tokio::time::timeout(HEALTH_TIMEOUT, both).await {
             Ok(Ok(())) => None,
             Ok(Err(error)) => Some(format!("{error:#}")),
             Err(_) => Some(format!(
@@ -121,31 +139,186 @@ impl Server {
                 HEALTH_TIMEOUT.as_secs()
             )),
         };
-        if let Ok(mut seen) = self.health.write() {
-            *seen = Some(Check {
-                at: Instant::now(),
-                failure: failure.clone(),
-            });
+        // Said here, where a fresh answer is computed at most once an
+        // interval, not per probe: the probe is anonymous and unlimited,
+        // and must not be a way to write the log at will.
+        if let Some(why) = &failure {
+            eprintln!("pgokf-mcp: unhealthy: {why}");
         }
+        *seen = Some(Check {
+            at: Instant::now(),
+            failure: failure.clone(),
+        });
         failure
     }
+}
 
-    /// Count one refused request, and say so at most once a second: a flood
-    /// of them must not become the denial of service itself.
-    fn note_refusal(&self, peer: Option<SocketAddr>) {
-        let Ok(mut refusals) = self.refusals.write() else {
-            return;
-        };
-        refusals.1 += 1;
-        if refusals.0.elapsed() < REFUSAL_LOG_INTERVAL {
-            return;
+/// A log line written at most once per [`SUMMARY_INTERVAL`], carrying a
+/// count of what it stands for since the last one.
+struct Summary {
+    state: RwLock<(Instant, u64)>,
+}
+
+impl Summary {
+    fn new() -> Self {
+        Self {
+            state: RwLock::new((Instant::now(), 0)),
         }
-        let from = peer.map_or_else(|| "an unknown address".to_owned(), |peer| peer.to_string());
-        eprintln!(
-            "pgokf-mcp: refused {} request(s) with no valid token (most recently from {from})",
-            refusals.1
-        );
-        *refusals = (Instant::now(), 0);
+    }
+
+    /// Count one more, and write the line if it is time to.
+    fn note(&self, line: impl FnOnce(u64) -> String) {
+        // The count is taken under the lock and the line written outside
+        // it: a write that fails (standard error gone) must not poison the
+        // lock and silence the summary for good.
+        let due = {
+            let Ok(mut state) = self.state.write() else {
+                return;
+            };
+            state.1 += 1;
+            if state.0.elapsed() < SUMMARY_INTERVAL {
+                return;
+            }
+            let count = state.1;
+            *state = (Instant::now(), 0);
+            count
+        };
+        eprintln!("pgokf-mcp: {}", line(due));
+    }
+}
+
+/// Who may go further, by their bearer token, and the bounds on deciding
+/// it. Separate from [`Server`] so the decision can be exercised without a
+/// catalog.
+pub struct Admission {
+    tokens: Box<dyn TokenLookups>,
+    /// The tenant this process serves; only a token minted for it is
+    /// admitted, so one process serves one tenant with tokens of its own.
+    tenant: Option<String>,
+    /// The bound on lookups in flight ([`MAX_LOOKUPS`]), and how long a
+    /// request waits for one.
+    lookups: tokio::sync::Semaphore,
+    wait: Duration,
+    /// Each kind of refusal or failure, summarized rather than logged one
+    /// by one.
+    refusals: Summary,
+    outages: Summary,
+    sheds: Summary,
+    foreign: Summary,
+}
+
+impl Admission {
+    /// Decide by `tokens`, for the process serving `tenant`.
+    #[must_use]
+    pub fn new(tokens: Box<dyn TokenLookups>, tenant: Option<String>) -> Self {
+        Self {
+            tokens,
+            tenant,
+            lookups: tokio::sync::Semaphore::new(MAX_LOOKUPS),
+            wait: LOOKUP_WAIT,
+            refusals: Summary::new(),
+            outages: Summary::new(),
+            sheds: Summary::new(),
+            foreign: Summary::new(),
+        }
+    }
+
+    /// The same, with the lookup bounds a test asks for.
+    #[cfg(test)]
+    fn bounded(mut self, permits: usize, wait: Duration) -> Self {
+        self.lookups = tokio::sync::Semaphore::new(permits);
+        self.wait = wait;
+        self
+    }
+
+    /// Prove the lookup can be asked (startup, and the health probe).
+    async fn check(&self) -> Result<()> {
+        self.tokens.check().await
+    }
+
+    /// The lookup connection's driver, to stop with when it ends.
+    pub fn take_driver(&mut self) -> Option<JoinHandle<()>> {
+        self.tokens.take_driver()
+    }
+
+    /// Who a request is from, by its bearer token, or the response that
+    /// turns it away: the shape check first (no lookup for a string that
+    /// cannot be a token), then one bounded lookup, then the tenant rule.
+    async fn admit(
+        &self,
+        headers: &HeaderMap,
+        peer: Option<SocketAddr>,
+    ) -> Result<Bearer, HttpResponse> {
+        let Some(digest) =
+            presented_token(headers).and_then(|token| tokens::presented_digest(&token))
+        else {
+            self.note_refusal(peer);
+            return Err(unauthorized());
+        };
+        let Ok(Ok(_lookup)) = tokio::time::timeout(self.wait, self.lookups.acquire()).await else {
+            self.sheds.note(|count| {
+                format!(
+                    "shed {count} request(s) that waited more than {}s to be authenticated",
+                    LOOKUP_WAIT.as_secs()
+                )
+            });
+            return Err(overloaded());
+        };
+        // Asked of the catalog every time, so a token revoked on the Admin
+        // page is refused with the next request.
+        let looked_up = tokio::time::timeout(LOOKUP_TIMEOUT, self.tokens.lookup(&digest))
+            .await
+            .unwrap_or_else(|_| {
+                Err(anyhow::anyhow!(
+                    "the lookup took longer than {}s",
+                    LOOKUP_TIMEOUT.as_secs()
+                ))
+            });
+        match looked_up {
+            Ok(Lookup::Bearer(bearer)) if bearer.tenant == self.tenant => Ok(bearer),
+            Ok(Lookup::Bearer(bearer)) => {
+                self.foreign.note(|count| {
+                    format!(
+                        "refused {count} request(s) whose token was minted for another tenant \
+                         (most recently {} for {})",
+                        bearer.name,
+                        bearer
+                            .tenant
+                            .as_deref()
+                            .map_or("no tenant".to_owned(), |t| format!("{t:?}"))
+                    )
+                });
+                Err(unauthorized())
+            }
+            Ok(Lookup::Unknown) => {
+                self.note_refusal(peer);
+                Err(unauthorized())
+            }
+            Ok(Lookup::ForeignRole { name, role }) => {
+                self.foreign.note(|count| {
+                    format!(
+                        "refused {count} request(s) whose token has a role this server does not \
+                         know (most recently {name} as {role:?}): the catalog is newer than this \
+                         build"
+                    )
+                });
+                Err(unauthorized())
+            }
+            Err(error) => {
+                self.outages.note(|count| {
+                    format!("could not look {count} token(s) up (most recently: {error:#})")
+                });
+                Err(catalog_unavailable())
+            }
+        }
+    }
+
+    fn note_refusal(&self, peer: Option<SocketAddr>) {
+        self.refusals.note(|count| {
+            let from =
+                peer.map_or_else(|| "an unknown address".to_owned(), |peer| peer.to_string());
+            format!("refused {count} request(s) with no valid token (most recently from {from})")
+        });
     }
 }
 
@@ -170,10 +343,13 @@ pub async fn serve(mut server: Server, bind: SocketAddr) -> Result<()> {
         .catalog
         .set_statement_timeout(STATEMENT_TIMEOUT)
         .await?;
-    // Nothing re-establishes this link, so when its driver ends the server
+    // Nothing re-establishes either link, so when a driver ends the server
     // stops rather than answering every later call with the same failure.
     let driver = server.catalog.take_driver();
-    let tokens = server.tokens.count();
+    let lookups_driver = server.admission.take_driver();
+    // A socket is opened on the strength of the catalog's token lookup, so
+    // a catalog that cannot answer it is a startup error, not a 503 later.
+    server.admission.check().await?;
     let shared: Shared = Arc::new(server);
     // Layers wrap, so the *last* one added is the outermost, and a layer
     // applies only to the routes named before it. Read the `/mcp` stack from
@@ -200,7 +376,10 @@ pub async fn serve(mut server: Server, bind: SocketAddr) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .with_context(|| format!("binding {bind}"))?;
-    eprintln!("pgokf-mcp: serving MCP over HTTP on http://{bind}/mcp ({tokens} token(s))");
+    eprintln!(
+        "pgokf-mcp: serving MCP over HTTP on http://{bind}/mcp; tokens are minted on the \
+         catalog's Admin page (pgokf-web)"
+    );
     if !is_loopback(bind) {
         eprintln!(
             "pgokf-mcp: {bind} is reachable beyond this host and this server speaks plain HTTP; \
@@ -221,7 +400,7 @@ pub async fn serve(mut server: Server, bind: SocketAddr) -> Result<()> {
                     eprintln!("pgokf-mcp: shutdown signal error: {error}");
                 }
             }
-            () = catalog_lost(driver) => {
+            () = catalog_lost(driver, lookups_driver) => {
                 noticed.store(true, Ordering::Relaxed);
             }
         }
@@ -234,9 +413,16 @@ pub async fn serve(mut server: Server, bind: SocketAddr) -> Result<()> {
     Ok(())
 }
 
-/// Resolve when the catalog's connection driver ends, or never when there
-/// is none to wait on.
-async fn catalog_lost(driver: Option<JoinHandle<()>>) {
+/// Resolve when either catalog connection's driver ends, or never when
+/// there is none to wait on.
+async fn catalog_lost(work: Option<JoinHandle<()>>, lookups: Option<JoinHandle<()>>) {
+    tokio::select! {
+        () = driver_ended(work) => {}
+        () = driver_ended(lookups) => {}
+    }
+}
+
+async fn driver_ended(driver: Option<JoinHandle<()>>) {
     match driver {
         Some(driver) => {
             let _ = driver.await;
@@ -318,7 +504,8 @@ async fn timeout(request: HttpRequest, next: Next) -> HttpResponse {
 /// Who may go further: the origin rule, then the token.
 ///
 /// This runs before the body is read and before a slot is taken, so an
-/// anonymous caller costs this server a header parse and nothing else. The
+/// anonymous caller costs this server a header parse, and a caller with a
+/// well-shaped wrong token one bounded catalog lookup, and nothing else. The
 /// bearer it finds travels on the request for the handler.
 async fn guard(State(server): State<Shared>, mut request: HttpRequest, next: Next) -> HttpResponse {
     if let Some(refusal) = origin_refusal(&server.allowed_origins, request.headers()) {
@@ -331,33 +518,22 @@ async fn guard(State(server): State<Shared>, mut request: HttpRequest, next: Nex
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ConnectInfo(peer)| *peer);
-    let Some(bearer) = presented_token(request.headers()).and_then(|token| {
-        // The tokens file is re-read here, at most once a second, so a
-        // revoked token stops working without a restart.
-        server.tokens.bearer(&token)
-    }) else {
-        server.note_refusal(peer);
-        return unauthorized();
-    };
-    request.extensions_mut().insert(bearer);
-    next.run(request).await
+    match server.admission.admit(request.headers(), peer).await {
+        Ok(bearer) => {
+            request.extensions_mut().insert(bearer);
+            next.run(request).await
+        }
+        Err(refusal) => refusal,
+    }
 }
 
-/// Liveness: this process, its tokens file, and its one catalog connection.
-/// The body says only whether it is well — what is wrong goes to the log,
-/// not to whoever found the port.
+/// Liveness: this process and its one catalog connection, which is also
+/// where its tokens live. The body says only whether it is well — what is
+/// wrong goes to the log, not to whoever found the port.
 async fn health(State(server): State<Shared>) -> HttpResponse {
-    let mut wrong = Vec::new();
-    if let Some(why) = server.tokens.stale() {
-        wrong.push(format!("the tokens file is not being believed: {why}"));
-    }
-    if let Some(why) = server.catalog_failure().await {
-        wrong.push(why);
-    }
-    if wrong.is_empty() {
+    if server.catalog_failure().await.is_none() {
         return Json(json!({ "status": "ok" })).into_response();
     }
-    eprintln!("pgokf-mcp: unhealthy: {}", wrong.join("; "));
     (
         StatusCode::SERVICE_UNAVAILABLE,
         Json(json!({ "status": "degraded" })),
@@ -427,9 +603,33 @@ fn unauthorized() -> HttpResponse {
             r#"Bearer realm="pgokf-mcp", error="invalid_token""#,
         )],
         Json(json!({
-            "error": "this endpoint needs a bearer token from its tokens file, \
-                      sent as an Authorization header"
+            "error": "this endpoint needs a bearer token minted on the catalog's Admin page \
+                      (pgokf-web), sent as an Authorization header"
         })),
+    )
+        .into_response()
+}
+
+/// A 503 for a request whose token could not be looked up because the
+/// catalog did not answer. Not a 401: the token may well be good, and the
+/// client should try again rather than give up on it.
+fn catalog_unavailable() -> HttpResponse {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::RETRY_AFTER, "1")],
+        Json(json!({ "error": "the catalog is not answering; try again shortly" })),
+    )
+        .into_response()
+}
+
+/// A 503 for a request that waited [`LOOKUP_WAIT`] for a token lookup and
+/// got none: shed, so a flood of wrong tokens costs the catalog nothing past
+/// [`MAX_LOOKUPS`] lookups in flight.
+fn overloaded() -> HttpResponse {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::RETRY_AFTER, "1")],
+        Json(json!({ "error": "too many requests are waiting to be authenticated; try again shortly" })),
     )
         .into_response()
 }
@@ -482,7 +682,218 @@ pub fn parse_origins(list: &str) -> Result<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
+
+    use pgokf_companion::mcp_token::new_token;
+
     use super::*;
+    use crate::tokens::{BoxFuture, Role};
+
+    /// A token source that answers what the test is about, and counts how
+    /// often it was asked.
+    struct FakeLookups {
+        answer: Option<Lookup>,
+        asked: Arc<AtomicUsize>,
+    }
+
+    impl TokenLookups for FakeLookups {
+        fn lookup<'a>(&'a self, _digest: &'a str) -> BoxFuture<'a, Result<Lookup>> {
+            self.asked.fetch_add(1, Ordering::Relaxed);
+            let answer = self.answer.clone();
+            Box::pin(async move { answer.ok_or_else(|| anyhow::anyhow!("the catalog is away")) })
+        }
+
+        fn check(&self) -> BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn take_driver(&mut self) -> Option<JoinHandle<()>> {
+            None
+        }
+    }
+
+    fn admission(answer: Option<Lookup>, tenant: Option<&str>) -> (Admission, Arc<AtomicUsize>) {
+        let asked = Arc::new(AtomicUsize::new(0));
+        let tokens = FakeLookups {
+            answer,
+            asked: Arc::clone(&asked),
+        };
+        (
+            Admission::new(Box::new(tokens), tenant.map(str::to_owned)),
+            asked,
+        )
+    }
+
+    fn bearer(tenant: Option<&str>) -> Bearer {
+        Bearer {
+            name: "fleet".to_owned(),
+            role: Role::Reader,
+            tenant: tenant.map(str::to_owned),
+        }
+    }
+
+    fn with_token(token: &str) -> HeaderMap {
+        headers(&[(header::AUTHORIZATION, &format!("Bearer {token}"))])
+    }
+
+    #[tokio::test]
+    async fn a_token_minted_for_this_tenant_is_admitted() {
+        // Arrange
+        let (admission, asked) =
+            admission(Some(Lookup::Bearer(bearer(Some("acme")))), Some("acme"));
+        let token = new_token().expect("random");
+
+        // Act
+        let admitted = admission.admit(&with_token(&token), None).await;
+
+        // Assert
+        assert_eq!(admitted.ok(), Some(bearer(Some("acme"))));
+        assert_eq!(
+            asked.load(Ordering::Relaxed),
+            1,
+            "one lookup, asked every time"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_string_that_cannot_be_a_token_is_refused_without_a_lookup() {
+        // Arrange
+        let (admission, asked) = admission(Some(Lookup::Bearer(bearer(None))), None);
+
+        // Act
+        let refused = admission.admit(&with_token("hunter2"), None).await;
+
+        // Assert
+        assert_eq!(
+            refused.err().map(|r| r.status()),
+            Some(StatusCode::UNAUTHORIZED)
+        );
+        assert_eq!(
+            asked.load(Ordering::Relaxed),
+            0,
+            "never hashed, never asked"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_or_revoked_token_is_refused() {
+        // Arrange
+        let (admission, _) = admission(Some(Lookup::Unknown), None);
+        let token = new_token().expect("random");
+
+        // Act
+        let refused = admission.admit(&with_token(&token), None).await;
+
+        // Assert
+        assert_eq!(
+            refused.err().map(|r| r.status()),
+            Some(StatusCode::UNAUTHORIZED)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_token_minted_for_another_tenant_is_refused() {
+        // Arrange: a catalog-wide token at a tenant's endpoint, and a
+        // tenant's token at the catalog-wide endpoint.
+        let (pinned, _) = admission(Some(Lookup::Bearer(bearer(None))), Some("acme"));
+        let (open, _) = admission(Some(Lookup::Bearer(bearer(Some("acme")))), None);
+        let token = new_token().expect("random");
+
+        // Act
+        let at_pinned = pinned.admit(&with_token(&token), None).await;
+        let at_open = open.admit(&with_token(&token), None).await;
+
+        // Assert
+        assert_eq!(
+            at_pinned.err().map(|r| r.status()),
+            Some(StatusCode::UNAUTHORIZED)
+        );
+        assert_eq!(
+            at_open.err().map(|r| r.status()),
+            Some(StatusCode::UNAUTHORIZED)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_role_this_build_does_not_know_is_refused() {
+        // Arrange
+        let (admission, _) = admission(
+            Some(Lookup::ForeignRole {
+                name: "fleet".to_owned(),
+                role: "admin".to_owned(),
+            }),
+            None,
+        );
+        let token = new_token().expect("random");
+
+        // Act
+        let refused = admission.admit(&with_token(&token), None).await;
+
+        // Assert
+        assert_eq!(
+            refused.err().map(|r| r.status()),
+            Some(StatusCode::UNAUTHORIZED)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_catalog_that_cannot_be_asked_is_a_503_and_not_a_refusal() {
+        // Arrange
+        let (admission, _) = admission(None, None);
+        let token = new_token().expect("random");
+
+        // Act
+        let response = admission
+            .admit(&with_token(&token), None)
+            .await
+            .expect_err("not admitted");
+
+        // Assert
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            response.headers().contains_key(header::RETRY_AFTER),
+            "try again, keep the token"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lookup_permit_is_given_back_after_the_decision() {
+        // Arrange: one permit in all.
+        let (admission, asked) = admission(Some(Lookup::Bearer(bearer(None))), None);
+        let admission = admission.bounded(1, Duration::from_millis(10));
+        let token = new_token().expect("random");
+
+        // Act
+        let first = admission.admit(&with_token(&token), None).await;
+        let second = admission.admit(&with_token(&token), None).await;
+
+        // Assert
+        assert!(first.is_ok());
+        assert!(second.is_ok(), "the first decision gave its permit back");
+        assert_eq!(asked.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn a_request_that_cannot_get_a_lookup_in_time_is_shed() {
+        // Arrange: no lookup will ever be free.
+        let (admission, asked) = admission(Some(Lookup::Bearer(bearer(None))), None);
+        let admission = admission.bounded(0, Duration::from_millis(10));
+        let token = new_token().expect("random");
+
+        // Act
+        let response = admission
+            .admit(&with_token(&token), None)
+            .await
+            .expect_err("not admitted");
+
+        // Assert
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            asked.load(Ordering::Relaxed),
+            0,
+            "shed before the catalog is touched"
+        );
+    }
 
     fn headers(pairs: &[(header::HeaderName, &str)]) -> HeaderMap {
         let mut map = HeaderMap::new();

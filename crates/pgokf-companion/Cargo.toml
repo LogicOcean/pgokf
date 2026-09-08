@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Shared runtime for the pgokf companion binaries: CLI conventions, an error-tolerant fixed-interval watch loop, and a SIGINT/SIGTERM shutdown signal."
+description = "Shared runtime for the pgokf companion binaries: CLI conventions, an error-tolerant fixed-interval watch loop, a SIGINT/SIGTERM shutdown signal, and the MCP bearer tokens the web UI mints and the MCP server checks."
 homepage.workspace = true
 documentation.workspace = true
 readme.workspace = true
@@ -22,14 +22,20 @@ path = "src/lib.rs"
 # The OpenAI-compatible embeddings client (pgokf-embed, pgokf-web); off by
 # default so companions that never embed do not link an HTTP client.
 embeddings = ["dep:reqwest", "dep:serde"]
+# The MCP bearer tokens two companions must agree on: pgokf-web mints and
+# stores them, pgokf-mcp recognizes and hashes them.
+mcp-token = ["dep:base64", "dep:getrandom", "dep:sha2"]
 
 [dependencies]
 anyhow = "1.0"
+base64 = { version = "0.23", optional = true }
+getrandom = { version = "0.4", optional = true }
 reqwest = { version = "0.13", default-features = false, features = [
     "json",
     "rustls",
 ], optional = true }
 serde = { workspace = true, optional = true }
+sha2 = { version = "0.11", optional = true }
 tokio = { version = "1.40", features = ["macros", "signal", "time"] }
 
 [dev-dependencies]

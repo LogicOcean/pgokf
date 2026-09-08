@@ -395,7 +395,7 @@ CREATE SCHEMA pgokf_web;
 REVOKE ALL ON SCHEMA pgokf_web FROM PUBLIC;
 GRANT USAGE ON SCHEMA pgokf_web TO pgokf_writer;
 COMMENT ON SCHEMA pgokf_web IS
-    'The web UI''s identity state: the people a local sign-in knows and the sessions the UI has issued. Owned by the extension so it is transactional, shared by every UI instance, and dumped with the catalog; read and written by pgokf_writer only, and never by the extension itself.';
+    'The web UI''s identity state: the people a local sign-in knows, the sessions the UI has issued, and the bearer tokens the MCP server accepts over HTTP. Owned by the extension so it is transactional, shared by every UI instance, and dumped with the catalog; read and written by pgokf_writer only, and never by the extension itself.';
 
 CREATE TABLE pgokf_web.users (
     name          text        NOT NULL,
@@ -443,6 +443,50 @@ COMMENT ON COLUMN pgokf_web.sessions.mode IS 'The identity mode that opened it (
 COMMENT ON COLUMN pgokf_web.sessions.expires_at IS 'When the session ends by itself; expired rows are pruned as new sessions are opened.';
 COMMENT ON COLUMN pgokf_web.sessions.created_at IS 'When the person signed in.';
 
--- Last, so the five new relations are registered for pg_dump (the rule for
+CREATE TABLE pgokf_web.mcp_tokens (
+    name       text        NOT NULL,
+    role       text        NOT NULL
+        CONSTRAINT mcp_tokens_role_check CHECK (role IN ('reader', 'builder')),
+    tenant     text
+        CONSTRAINT mcp_tokens_tenant_check CHECK (tenant ~ '^[^[:cntrl:]]{1,128}$'),
+    digest     text        NOT NULL
+        CONSTRAINT mcp_tokens_digest_check CHECK (digest ~ '^[0-9a-f]{64}$'),
+    created_by text        NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT mcp_tokens_pkey PRIMARY KEY (digest),
+    CONSTRAINT mcp_tokens_name_key UNIQUE NULLS NOT DISTINCT (tenant, name),
+    CONSTRAINT mcp_tokens_name_check CHECK (name ~ '^[A-Za-z0-9._@+-]{1,128}$')
+);
+REVOKE ALL ON TABLE pgokf_web.mcp_tokens FROM PUBLIC;
+GRANT SELECT, INSERT, DELETE ON TABLE pgokf_web.mcp_tokens TO pgokf_writer;
+
+COMMENT ON TABLE pgokf_web.mcp_tokens IS
+    'The bearer tokens that may call pgokf-mcp over HTTP: one row per token with what to call it in the log, its role (reader searches and reads; builder may also build workspace plugins), the tenant it was minted for, and the SHA-256 digest of the token - never the token, which is shown once when it is minted. The digest is the token''s identity; a name is unique within its tenant. Minted and revoked by pgokf-web (the Admin page, or its mcp-token command), each UI seeing its own tenant''s tokens; pgokf_writer only. A reader learns the bearer of one digest through pgokf.mcp_token_bearer(), and nothing else.';
+COMMENT ON COLUMN pgokf_web.mcp_tokens.name IS
+    'What the token is called in the log beside every call it makes: one plain token of letters, digits, and . _ @ + - (at most 128), unique within its tenant.';
+COMMENT ON COLUMN pgokf_web.mcp_tokens.role IS
+    'What the token may do: reader (search and read the catalog) or builder (also build workspace plugins). The MCP server decides per tool from this.';
+COMMENT ON COLUMN pgokf_web.mcp_tokens.tenant IS
+    'The tenant the token was minted for - the pgokf.tenant scope of the UI or command that minted it - or NULL for a catalog served without one; one to 128 printable characters. An MCP endpoint accepts only tokens minted for its own tenant, so one process serves one tenant with tokens of its own; this is a label the server checks, not a policy the database enforces.';
+COMMENT ON COLUMN pgokf_web.mcp_tokens.digest IS
+    'The SHA-256 of the token, as 64 lower-case hex characters, and the row''s identity. A token is 256 random bits, so a fast hash is the right way to store it; the token itself is never kept.';
+COMMENT ON COLUMN pgokf_web.mcp_tokens.created_by IS 'Who minted it: the admin''s sign-in name or subject, or cli.';
+COMMENT ON COLUMN pgokf_web.mcp_tokens.created_at IS 'When it was minted.';
+
+CREATE FUNCTION pgokf.mcp_token_bearer(digest text)
+RETURNS TABLE (name text, role text, tenant text)
+LANGUAGE sql STABLE STRICT
+SECURITY DEFINER SET search_path = pg_catalog, pg_temp
+AS $mcp_token_bearer$
+    SELECT t.name, t.role, t.tenant
+    FROM pgokf_web.mcp_tokens AS t
+    WHERE t.digest = mcp_token_bearer.digest
+$mcp_token_bearer$;
+REVOKE ALL ON FUNCTION pgokf.mcp_token_bearer(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pgokf.mcp_token_bearer(text) TO pgokf_reader;
+COMMENT ON FUNCTION pgokf.mcp_token_bearer(text) IS
+    'The name, role, and tenant of the MCP token whose SHA-256 digest this is, or no row; the server accepts only a token minted for its own tenant. How pgokf-mcp, which connects as a reader, authenticates a request over HTTP: it hashes the presented token itself and asks for that digest, so the token never travels to the database and a reader learns the bearer of a digest it holds and nothing about any other. SECURITY DEFINER over pgokf_web.mcp_tokens, which no reader may see; STABLE, STRICT, executable by pgokf_reader. A revoked token is refused with the very next request: nothing is cached.';
+
+-- Last, so the six new relations are registered for pg_dump (the rule for
 -- every upgrade script since 0.1.14).
 SELECT pgokf_private.register_dump_relations();

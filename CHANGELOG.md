@@ -196,18 +196,24 @@ leaving a plain document.
   (`2024-11-05`, `2025-03-26`, `2025-06-18`) and batches are refused.
   Over stdio the client already holds the connection string and there is
   nothing to authenticate; this endpoint is reachable, so it is never open.
-  Every request carries a bearer token from `--tokens-file`
-  (`name:role:sha256`, minted by `pgokf-mcp hash-token --tokens-file`, which
-  appends the line itself and shows the token once), read only from the
-  `Authorization` header, checked for the shape a minted token has before it
-  is hashed, and matched in constant time; the check runs before the body is
-  read and before a request takes a working slot, so an anonymous caller can
-  neither queue nor buffer anything. The file is re-read when it changes (at
-  most once a second), so removing a line revokes a token without a restart
-  and an emptied file revokes everyone; a file that stops reading keeps the
-  last good set for one minute and then refuses everything, so a revocation
-  cannot fail silently, and `GET /healthz` answers 503 while it — or the
-  catalog connection, which is never re-established — is unwell. The token's
+  Every request carries a bearer token minted on the web UI's Admin page
+  (or with `pgokf-web mcp-token mint`) and kept in the catalog as a SHA-256
+  digest (`pgokf_web.mcp_tokens`, `pgokf_writer` only): the server, a
+  reader, hashes the token a request presents - read only from the
+  `Authorization` header, and only if it has the shape a minted token has -
+  and asks `pgokf.mcp_token_bearer(digest)`, a `SECURITY DEFINER` lookup
+  that answers for one digest and lists nothing, so the token never travels
+  to the database and a reader learns nothing about tokens it does not hold,
+  and a token minted for another tenant is refused. The check runs before
+  the body is read and before a request takes a working slot, on a
+  connection of its own so it never waits behind a tool call, bounded in
+  number and in wait, so an anonymous caller can neither queue nor buffer
+  anything and a flood of wrong tokens costs the catalog a fixed amount;
+  revoking a token takes effect with the next request, since nothing is
+  cached; the server proves the lookup exists before it opens a socket;
+  refusals and outages are summarized into the log once a second rather
+  than written per request; and `GET /healthz` answers 503 while either
+  catalog connection, neither of which is re-established, is unwell. The token's
   role is the single decision point for what it may reach — `reader`
   searches and reads, `builder` may also build workspace plugins — and
   `tools/list` filters by the same answer `tools/call` enforces, showing
@@ -222,8 +228,7 @@ leaving a plain document.
   their arrival, request concurrency, request time, and catalog statements
   are all bounded; TLS belongs in front of it, and the server says so if it
   binds an address reachable from elsewhere. New compose profile `mcp-http`
-  with `PGOKF_MCP_BIND`, `PGOKF_MCP_PORT`, `OKF_MCP_TOKENS_DIR`, and
-  `OKF_MCP_ALLOWED_ORIGINS`.
+  with `PGOKF_MCP_BIND`, `PGOKF_MCP_PORT`, and `OKF_MCP_ALLOWED_ORIGINS`.
 - **Built plugins can point at that endpoint.** The workspace injector's
   `mcp` component takes an `mcp_url` (the MCP tool's `build_workspace_plugin`
   argument, and a field on the web **Plugins** page beside the MCP command,
@@ -360,12 +365,19 @@ leaving a plain document.
   mode, and a changed password or a removed person ends theirs. A session
   is a lever, not a detector: a copied cookie works until its session is
   ended or expires.
-- **The web UI's people and sessions live in the catalog.** Two
-  extension-owned tables, `pgokf_web.users` and `pgokf_web.sessions`, hold
-  the `users` mode's people and every live session of the `users` and
-  `oidc` modes; they are granted to `pgokf_writer` only (a reader never sees
-  a hash or a session identifier), transactional, shared by every UI
-  instance, and carried by `pg_dump`. The UI reaches them through a pool of
+- **The web UI's people, sessions, and MCP tokens live in the catalog.**
+  Three extension-owned tables, `pgokf_web.users`, `pgokf_web.sessions`, and
+  `pgokf_web.mcp_tokens`, hold the `users` mode's people, every live session
+  of the `users` and `oidc` modes, and the digests of the bearer tokens
+  `pgokf-mcp` accepts over HTTP; they are granted to `pgokf_writer` only (a
+  reader never sees a hash, a session identifier, or which tokens exist),
+  transactional, shared by every UI instance, and carried by `pg_dump`. The
+  Admin page mints a token - shown once, on the page that minted it, with
+  `Cache-Control: no-store` and never in a URL - and revokes one;
+  `pgokf-web mcp-token mint|list|revoke` does the same from a shell for a
+  stack without the UI. A token is minted for the tenant the UI serves, and
+  an MCP endpoint admits only tokens minted for its own. The UI reaches all
+  three through a pool of
   its own on the writer URL - never shared with the human workflow's long
   resyncs, with a short statement budget, and probed at startup - so the
   `users` and `oidc` modes require `OKF_PG_WRITER_URL`. A catalog that

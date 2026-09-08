@@ -293,9 +293,9 @@ outside the database and talks to the catalog through the public SQL surface.
   AI agents over stdio, connecting as a `pgokf_reader`-capable role and
   optionally pinning `pgokf.tenant` with `--tenant`. `--http <addr>` serves the
   same tools over HTTP for clients that cannot launch a subprocess; that
-  endpoint is reachable, so every request carries a bearer token from
-  `--tokens-file` and the token's role (`reader` or `builder`) decides which
-  tools it may call.
+  endpoint is reachable, so every request carries a bearer token - minted on
+  `pgokf-web`'s Admin page and kept in the catalog as a digest - and the
+  token's role (`reader` or `builder`) decides which tools it may call.
 
 - **[`pgokf-web`](https://github.com/LogicOcean/pgokf/tree/main/crates/pgokf-web)** is the web UI and JSON API over the
   same catalog: search, browsing, concept pages, the link graph, and the agent

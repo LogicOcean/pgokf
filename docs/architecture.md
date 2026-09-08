@@ -86,7 +86,7 @@ OKF bundle directory                     object store (S3-compatible)
     + sync audit log, change manifest, NOTIFY    (pgokf_private.sync_log[_change])
           |
           v
-SQL API under schema pgokf (43 functions; exact signatures in sql-api.md):
+SQL API under schema pgokf (44 functions; exact signatures in sql-api.md):
   ingestion   register_bundle / register_bundle_content / refresh_bundle /
               unregister_bundle / set_bundle_enabled / retire_bundle /
               unretire_bundle / set_concept_embedding      (writer tier)
@@ -115,8 +115,8 @@ table. A `bootstrap` SQL block creates the `pgokf` and `pgokf_private` schemas
 and the `pgokf_reader` < `pgokf_writer` < `pgokf_admin` role tier, and hardens
 schema access, before the feature SQL blocks run. Public entry points are
 schema-qualified everywhere in documentation and examples. See
-[sql-api.md](sql-api.md) for exact signatures: 43 public functions, 14 public
-and 4 private tables, and 17 composite types, locked by the stable-API
+[sql-api.md](sql-api.md) for exact signatures: 44 public functions, 14 public,
+4 private, and 3 `pgokf_web` tables, and 17 composite types, locked by the stable-API
 guardrail tests in `crates/extension/tests/api_stability.rs` (see
 [api-stability.md](api-stability.md)).
 

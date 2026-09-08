@@ -16,6 +16,7 @@ mod documents;
 mod graph;
 mod links;
 mod markdown;
+mod mcp_tokens;
 mod oidc;
 mod routes;
 mod session_store;
@@ -30,10 +31,12 @@ use anyhow::{Context, Result, bail};
 use axum::http::HeaderName;
 use clap::Parser;
 use pgokf_companion::embeddings::EmbeddingsClient;
+use pgokf_companion::mcp_token::Role as McpRole;
 
 use crate::auth::{Authenticator, Cidr, HeaderAuth, Role, RoleMapping, Sessions, UsersAuth};
-use crate::config::{Cli, Command, UserCommand};
+use crate::config::{Cli, Command, McpTokenCommand, UserCommand};
 use crate::db::{Db, DbConfig};
+use crate::mcp_tokens::{McpTokenStore, McpTokens, Minted};
 use crate::routes::App;
 use crate::session_store::SessionStore;
 use crate::user_store::UserStore;
@@ -86,9 +89,15 @@ async fn main() -> Result<()> {
     let trusted_proxies = auth::TrustedProxies::parse(&cli.auth_trusted_proxy)
         .context("parsing --auth-trusted-proxy")?;
 
+    // MCP tokens are an admin's to mint, over the identity pool: small, and
+    // never behind the workflow's minute-long resyncs.
+    let mcp_tokens = identity
+        .clone()
+        .map(|identity| McpTokens::new(McpTokenStore::Pg(identity), cli.tenant.clone()));
     let app = Arc::new(App {
         db,
         writer,
+        mcp_tokens,
         auth: authenticator,
         trusted_proxies,
         rebuilds: tokio::sync::Mutex::new(()),
@@ -164,21 +173,29 @@ async fn connect_writer(cli: &Cli) -> Result<Option<Db>> {
 const IDENTITY_POOL: usize = 4;
 const IDENTITY_STATEMENT_MS: u64 = 5_000;
 
-/// The identity pool, for the modes that keep people or sessions in the
-/// catalog. Probed at startup, so a writer URL that cannot see `pgokf_web`
-/// (a reader role, a catalog older than 0.2.0) fails here, with the reason,
-/// rather than at the first person's sign-in.
+/// The `pgokf_web` tables the identity modes keep people and sessions in,
+/// and the one every writer-backed deployment keeps its MCP tokens in.
+const IDENTITY_TABLES: &[&str] = &["pgokf_web.users", "pgokf_web.sessions"];
+const MCP_TOKEN_TABLES: &[&str] = &["pgokf_web.mcp_tokens"];
+
+/// The identity pool, whenever there is a writer URL: the `users` and
+/// `oidc` modes keep people and sessions in it, every mode with a writer
+/// keeps the MCP tokens the Admin page mints in it, and the maintenance
+/// commands need nothing bigger. Probed at startup, so a writer URL that
+/// cannot see `pgokf_web` (a reader role, a catalog older than 0.2.0) fails
+/// here, with the reason, rather than at the first person's sign-in or on
+/// the Admin page.
 async fn connect_identity(cli: &Cli) -> Result<Option<Db>> {
+    let Some(url) = cli.writer_url.as_deref() else {
+        return Ok(None);
+    };
+    let identity = identity_pool(cli, url)?;
+    probe_tables(&identity, MCP_TOKEN_TABLES).await?;
     let mode = cli.auth.trim();
     if !matches!(mode, "users" | "oidc") {
-        return Ok(None);
+        return Ok(Some(identity));
     }
-    let url = cli
-        .writer_url
-        .as_deref()
-        .with_context(|| format!("--auth {mode} needs --writer-url"))?;
-    let identity = identity_pool(cli, url)?;
-    probe_identity_tables(&identity).await?;
+    probe_tables(&identity, IDENTITY_TABLES).await?;
     if mode == "users" {
         let people = identity
             .query_one("SELECT count(*) FROM pgokf_web.users", &[])
@@ -204,15 +221,14 @@ fn identity_pool(cli: &Cli, url: &str) -> Result<Db> {
     })
 }
 
-/// Fail fast when the identity tables cannot be reached as configured.
-async fn probe_identity_tables(identity: &Db) -> Result<()> {
-    for table in ["pgokf_web.users", "pgokf_web.sessions"] {
-        identity
-            .query(&format!("SELECT 1 FROM {table} LIMIT 0"), &[])
+/// Fail fast when `tables` cannot be read as configured.
+async fn probe_tables(db: &Db, tables: &[&str]) -> Result<()> {
+    for table in tables {
+        db.query(&format!("SELECT 1 FROM {table} LIMIT 0"), &[])
             .await
             .with_context(|| {
                 format!(
-                    "the identity connection cannot read {table}: --writer-url must be the \
+                    "the writer connection cannot read {table}: --writer-url must be the \
                      pgokf_writer role and the catalog must be at 0.2.0 or later"
                 )
             })?;
@@ -354,13 +370,23 @@ fn build_authenticator(cli: &Cli, identity: Option<&Db>) -> Result<Authenticator
 /// same [`UsersAuth`] the site uses (its validation, hashing, and the
 /// ending of sessions on a password change). No server is started.
 async fn run_command(cli: &Cli, command: &Command) -> Result<()> {
-    let Command::User(command) = command;
-    let url = cli
-        .writer_url
-        .as_deref()
-        .context("a user command needs --writer-url (OKF_PG_WRITER_URL)")?;
-    let identity = identity_pool(cli, url)?;
-    probe_identity_tables(&identity).await?;
+    let url = cli.writer_url.as_deref().context(
+        "a maintenance command needs --writer-url (OKF_PG_WRITER_URL): people, sessions, and MCP \
+         tokens live in the catalog",
+    )?;
+    let writer = identity_pool(cli, url)?;
+    match command {
+        Command::User(command) => run_user_command(cli, writer, command).await,
+        Command::McpToken(command) => {
+            probe_tables(&writer, MCP_TOKEN_TABLES).await?;
+            let tokens = McpTokens::new(McpTokenStore::Pg(writer), cli.tenant.clone());
+            run_mcp_token_command(tokens, command).await
+        }
+    }
+}
+
+async fn run_user_command(cli: &Cli, identity: Db, command: &UserCommand) -> Result<()> {
+    probe_tables(&identity, IDENTITY_TABLES).await?;
     let sessions = build_sessions(cli, identity.clone(), false)?;
     let users = UsersAuth::new(UserStore::Pg(identity), sessions);
     let password = read_password()?;
@@ -373,6 +399,62 @@ async fn run_command(cli: &Cli, command: &Command) -> Result<()> {
         UserCommand::SetPassword { name } => {
             users.set_password(name, &password).await?;
             eprintln!("pgokf-web: changed the password of {name} and ended their sessions");
+        }
+    }
+    Ok(())
+}
+
+/// The Admin page's token actions from a shell, for a stack that runs the
+/// MCP endpoint without the UI. A minted token goes to standard output
+/// alone, once; everything else to standard error, so a redirect captures
+/// exactly the secret and nothing beside it.
+async fn run_mcp_token_command(tokens: McpTokens, command: &McpTokenCommand) -> Result<()> {
+    match command {
+        McpTokenCommand::Mint { name, role } => {
+            let name = name.trim();
+            let role = McpRole::parse(role)
+                .with_context(|| format!("unknown role {role:?}; use reader or builder"))?;
+            match tokens.mint(name, role, "cli").await? {
+                Minted::Token { token, record } => {
+                    println!("{token}");
+                    eprintln!(
+                        "pgokf-web: minted MCP token {name} ({role}{}); the token above is shown \
+                         once and cannot be recovered",
+                        record
+                            .tenant
+                            .as_deref()
+                            .map(|tenant| format!(", tenant {tenant}"))
+                            .unwrap_or_default()
+                    );
+                }
+                Minted::NameTaken => {
+                    bail!(
+                        "a token named {name} already exists; revoke it first, or choose another name"
+                    )
+                }
+                Minted::InvalidName(why) => bail!("{why}"),
+            }
+        }
+        McpTokenCommand::List => {
+            for token in tokens.list().await? {
+                println!(
+                    "{}\t{}\t{}\t{}\t{}",
+                    token.name,
+                    token.role,
+                    token.tenant.as_deref().unwrap_or("-"),
+                    token.created_by,
+                    token.created_at
+                );
+            }
+        }
+        McpTokenCommand::Revoke { name } => {
+            let name = name.trim();
+            if !tokens.revoke(name).await? {
+                bail!("no token is named {name}");
+            }
+            eprintln!(
+                "pgokf-web: revoked MCP token {name}; it is refused from the next request on"
+            );
         }
     }
     Ok(())

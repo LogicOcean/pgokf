@@ -38,7 +38,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The 43 stable public functions, as `(name, argument-type list)`. The pair
+/// The 44 stable public functions, as `(name, argument-type list)`. The pair
 /// renders to the exact `COMMENT ON FUNCTION pgokf.<name>(<args>)` prefix that
 /// the hardening blocks emit.
 const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
@@ -91,6 +91,7 @@ const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
     ("rebuild_search_index", ""),
     ("version", ""),
     ("tenant_required", ""),
+    ("mcp_token_bearer", "text"),
 ];
 
 /// The 17 stable public composite types.
@@ -114,11 +115,11 @@ const PUBLIC_TYPES: &[&str] = &[
     "reference_result",
 ];
 
-/// The 20 catalog tables, as fully-qualified `schema.table` identifiers.
+/// The 21 catalog tables, as fully-qualified `schema.table` identifiers.
 /// Fourteen are public (`pgokf`); the singleton policy row and the three
 /// admin-only history/audit logs live in the `pgokf_private` schema; the
-/// web UI's people and sessions live in `pgokf_web` (writer-only). All are
-/// documented all the same.
+/// web UI's people, sessions, and MCP tokens live in `pgokf_web`
+/// (writer-only). All are documented all the same.
 const CATALOG_TABLES: &[&str] = &[
     "pgokf.bundles",
     "pgokf.concepts",
@@ -140,19 +141,21 @@ const CATALOG_TABLES: &[&str] = &[
     "pgokf_private.access_log",
     "pgokf_web.users",
     "pgokf_web.sessions",
+    "pgokf_web.mcp_tokens",
 ];
 
 /// The three public API roles created by `sql/bootstrap.sql`
 /// (`pgokf_reader` < `pgokf_writer` < `pgokf_admin`).
 const API_ROLES: &[&str] = &["pgokf_reader", "pgokf_writer", "pgokf_admin"];
 
-/// The number of `#[pg_extern]` functions defined under `src/catalog/`. Two
+/// The number of `#[pg_extern]` functions defined under `src/catalog/`. Three
 /// public functions are not `#[pg_extern]`s there: `pgokf.version()` is
-/// declared in `src/lib.rs`, and `pgokf.tenant_required()` is plain SQL in
+/// declared in `src/lib.rs`, `pgokf.tenant_required()` is plain SQL in
 /// `sql/bootstrap.sql` (every row-level-security policy references it, so it
-/// must exist before any table), so the catalog count is two less than
-/// [`PUBLIC_FUNCTIONS`].
-const CATALOG_PG_EXTERN_COUNT: usize = PUBLIC_FUNCTIONS.len() - 2;
+/// must exist before any table), and `pgokf.mcp_token_bearer(text)` is plain
+/// SQL beside the table it reads (`src/catalog/web_identity.rs`), so the
+/// catalog count is three less than [`PUBLIC_FUNCTIONS`].
+const CATALOG_PG_EXTERN_COUNT: usize = PUBLIC_FUNCTIONS.len() - 3;
 
 /// SQL keywords that must never appear in an executable upgrade statement,
 /// because they would break the no-data-loss guarantee.

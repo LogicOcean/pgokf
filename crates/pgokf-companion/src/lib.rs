@@ -17,12 +17,17 @@
 //!   loop cleanly even when they arrive during the very first pass.
 //! - [`cli::non_empty`], the one rule for optional command-line values that
 //!   also come from the environment: an empty value means "not set".
+//! - [`mcp_token`] (feature `mcp-token`), the bearer tokens `pgokf-web` mints
+//!   and `pgokf-mcp` checks: their shape, their stored form, and their roles.
 //!
 //! The loop is generic over the pass and the shutdown future, which is what
 //! makes it unit-testable with paused time and a hand-triggered shutdown.
 
 #[cfg(feature = "embeddings")]
 pub mod embeddings;
+
+#[cfg(feature = "mcp-token")]
+pub mod mcp_token;
 
 pub mod cli {
     //! Command-line conventions shared by the companions.
