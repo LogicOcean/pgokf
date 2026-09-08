@@ -274,7 +274,7 @@ retention window.
 
 ### Functions
 
-The 40 SQL functions in the `pgokf` schema, grouped by tier (`reader` <
+The 43 SQL functions in the `pgokf` schema, grouped by tier (`reader` <
 `writer` < `admin`, each inheriting the tier below):
 
 | Function | Role | Purpose |

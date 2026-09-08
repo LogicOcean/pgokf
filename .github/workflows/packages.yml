@@ -128,7 +128,7 @@ jobs:
         run: |
           # Placeholder secrets: the example leaves them empty on purpose.
           sed -E 's/^(POSTGRES_PASSWORD|PGOKF_[A-Z]+_PASSWORD)=$/\1=placeholder/' .env.example > .env
-          docker compose --profile ops --profile ingest --profile tools config --quiet
+          docker compose --profile ops --profile ingest --profile tools --profile ui --profile mcp-http config --quiet
           echo "compose stack renders."
 
   # ---------------------------------------------------------------------------

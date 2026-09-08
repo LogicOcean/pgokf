@@ -338,11 +338,6 @@ pub(crate) struct ResourceInfo {
     /// Whether the catalog holds the bytes as text (a script, or a textual
     /// reference); a binary asset has no readable body.
     pub textual: bool,
-    /// The exact stored text of a textual reference (`text_body`), so the
-    /// page can render the document rather than its search text. `None` for
-    /// a script (its body text is already exact) or a binary.
-    #[serde(skip)]
-    pub text: Option<String>,
 }
 
 impl ResourceInfo {
@@ -1961,18 +1956,22 @@ fn facet_row(r: &Row) -> Result<Facet> {
 
 /// The union of both resource tables in one column shape (the nine columns
 /// [`resource`] reads, then `bundle_id` for grouping).
+// Metadata only: whether a reference has text, never the text itself.
+// Reading content goes through the audited readers, so the access log has a
+// row for it - selecting `text_body` here would have rendered a whole
+// reference with no trace.
 const RESOURCE_ROWS: &str = "SELECT r.concept_id, r.class, r.path, r.byte_size, r.sha256, r.detail,
-                                    r.package_concept_id, r.textual, r.text, r.bundle_id
+                                    r.package_concept_id, r.textual, r.bundle_id
                              FROM (
                                  SELECT bundle_id, concept_id, 'script' AS class, source_path AS path,
                                         byte_size, executable_sha256 AS sha256, language AS detail,
-                                        package_concept_id, true AS textual, NULL::text AS text
+                                        package_concept_id, true AS textual
                                  FROM pgokf.scripts
                                  UNION ALL
                                  SELECT bundle_id, concept_id,
                                         CASE WHEN source_path LIKE 'assets/%' THEN 'asset' ELSE 'reference' END,
                                         source_path, byte_size, content_sha256, media_type,
-                                        package_concept_id, text_body IS NOT NULL, text_body
+                                        package_concept_id, text_body IS NOT NULL
                                  FROM pgokf.reference_documents
                              ) AS r";
 
@@ -1986,7 +1985,6 @@ fn resource(r: &Row) -> Result<ResourceInfo> {
         detail: col::<Option<String>>(r, 5)?.unwrap_or_default(),
         package_concept_id: col::<Option<String>>(r, 6)?.unwrap_or_default(),
         textual: col::<Option<bool>>(r, 7)?.unwrap_or(false),
-        text: col(r, 8)?,
     })
 }
 

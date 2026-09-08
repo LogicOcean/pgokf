@@ -74,7 +74,9 @@ cannot mount the files at all.
 
 **AGPL-3.0-only, dual-licensed with a commercial option.** Every crate in the
 repository (the extension, its `okf-parser` / `okf-sync` libraries, and the
-companion tools `pgokf-ingest`, `pgokf-embed`, `pgokf-mcp`, and `pgokf-pgconn`)
+companion tools `pgokf-ingest`, `pgokf-embed`, `pgokf-mcp` and `pgokf-web`,
+and the shared `pgokf-pgconn`, `pgokf-companion` and `pgokf-workspace`
+libraries)
 is licensed under the GNU Affero General Public License, version 3.0 only. A
 separate **commercial license** is available for use the AGPL does not permit,
 such as embedding pgokf in a proprietary product or offering it as a hosted
@@ -382,7 +384,7 @@ by pruning closed versions older than the window. See
 
 ### What are the companion binaries, and do they run inside PostgreSQL?
 
-Four standalone crates ship alongside the extension. All of them run
+Several standalone crates ship alongside the extension. All of them run
 **out of process**, keep network and object-store credentials outside
 PostgreSQL, and reach the catalog only through its public SQL functions:
 
@@ -399,7 +401,11 @@ PostgreSQL, and reach the catalog only through its public SQL functions:
   agents over stdio JSON-RPC (tools backed by `concept_search`, `find_similar`,
   `concept_neighbors`, and a concept getter), or over HTTP (`--http`) with a
   bearer token per request and a role deciding which tools it may call.
-- **`pgokf-pgconn`**: the shared connect helper the other three use; it adds
+- **`pgokf-web`**: the web UI and JSON API over the catalog - search,
+  browsing, concept pages, link graphs, an agent plugin builder, and, once a
+  writer connection and an identity mode are configured, the human workflow
+  of upload, edit and review.
+- **`pgokf-pgconn`**: the shared connect helper the companions use; it adds
   optional TLS to PostgreSQL (`--tls`, env `OKF_PG_TLS`, or
   `sslmode=require`).
 

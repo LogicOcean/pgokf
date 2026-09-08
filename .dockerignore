@@ -18,6 +18,10 @@ target/
 # Generated documentation site and its sources are not build inputs.
 site/
 docs/
+
+# The specification, its JSON schemas and its golden fixtures: 1.3 MB that
+# no build reads.
+spec/
 mkdocs.yml
 
 # Packaging formats that do not feed the container builds.

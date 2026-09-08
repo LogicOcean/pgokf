@@ -1991,8 +1991,17 @@ async fn concept_page(
         Some(r) if r.textual && !r.is_markdown() => verbatim_body(&c.body_text),
         Some(r) if !r.textual => String::new(),
         // A Markdown reference is stored exactly; render the document, not
-        // its search text.
-        Some(r) => render_source(&c, &outgoing, r.text.as_deref()),
+        // its search text. The exact bytes come through the audited reader,
+        // so rendering a reference leaves the same trail downloading it
+        // does - reading `text_body` off the table left none.
+        Some(_) => {
+            let exact = app
+                .db
+                .exact_bytes(bundle_id, &concept_id)
+                .await?
+                .and_then(|exact| String::from_utf8(exact.bytes).ok());
+            render_source(&c, &outgoing, exact.as_deref())
+        }
         None => render_body(&c, &outgoing),
     };
     let outgoing = group_links(&outgoing, LinkDirection::Outgoing, &concept_id);

@@ -78,6 +78,7 @@ Standalone binaries (in [`crates/`](crates)) that pair with the extension - cred
 | [`pgokf-ingest`](crates/pgokf-ingest) | Mountless ingestion: reads an S3/MinIO/SeaweedFS bucket and streams it into the catalog. `--watch` re-syncs on change. |
 | [`pgokf-embed`](crates/pgokf-embed) | Reference embedder: computes vectors via any OpenAI-compatible `/v1/embeddings` endpoint and stores them. `--watch` keeps up with new content. |
 | [`pgokf-mcp`](crates/pgokf-mcp) | A Model Context Protocol server exposing `concept_search` / `find_similar` / `concept_neighbors` as agent tools, over stdio or over HTTP with bearer tokens and roles. |
+| [`pgokf-web`](crates/pgokf-web) | The web UI and JSON API: search, browsing, concept pages, link graphs, the agent plugin builder, and operations - read-only until a writer connection and an identity mode turn on upload, edit and review. |
 
 ## Documentation
 
@@ -120,7 +121,7 @@ RUST_TEST_THREADS=1 cargo pgrx test pg18 --no-default-features --features pg18 #
 
 ## Project status
 
-Pre-1.0 (`0.1.x`). The enumerated SQL surface is treated as stable and every change ships an upgrade script verified `upgrade == fresh`, but per SemVer a `0.MINOR` bump may still carry a breaking change (called out in [CHANGELOG.md](CHANGELOG.md)). Reaching `1.0.0` is a deliberate decision, not an automatic bump.
+Pre-1.0 (`0.2.x`). The enumerated SQL surface is treated as stable and every change ships an upgrade script verified `upgrade == fresh`, but per SemVer a `0.MINOR` bump may still carry a breaking change (called out in [CHANGELOG.md](CHANGELOG.md)). Reaching `1.0.0` is a deliberate decision, not an automatic bump.
 
 ## License
 

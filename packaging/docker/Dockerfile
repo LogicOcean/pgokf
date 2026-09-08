@@ -150,6 +150,10 @@ COPY --chmod=0755 packaging/docker/initdb/ /docker-entrypoint-initdb.d/
 # binaries it depends on, and the init-failure guard the image starts through.
 COPY --chmod=0755 packaging/docker/bin/ /usr/local/bin/
 
+# The licence and the third-party notices travel with the extension, as they
+# do in the .deb.
+COPY LICENSE THIRD-PARTY-NOTICES.txt /usr/share/doc/pgokf/
+
 # Same command surface as the postgres image (`docker run <image> postgres -c
 # ...` still works); the guard only refuses to start a half-initialized
 # cluster, then hands over to the official entrypoint.

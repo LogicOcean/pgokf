@@ -1669,13 +1669,13 @@ The web companion carries the human workflow the trust model presumes. It is off
 ## 22. References
 
 - Open Knowledge Format v0.2, `SPEC.md`: <https://github.com/GoogleCloudPlatform/open-knowledge-format/blob/main/SPEC.md>
-- pgokf parser model: `/datapool/projects/okf-pg-catalog/crates/okf-parser/src/model.rs`
-- pgokf catalogue schema: `/datapool/projects/okf-pg-catalog/crates/extension/src/catalog/schema.rs`
-- pgokf search implementation: `/datapool/projects/okf-pg-catalog/crates/extension/src/catalog/search.rs`
-- pgokf synchronization engine: `/datapool/projects/okf-pg-catalog/crates/extension/src/catalog/sync.rs`
-- pgokf exact-source projection: `/datapool/projects/okf-pg-catalog/crates/extension/src/catalog/source.rs`
-- pgokf SQL API: `/datapool/projects/okf-pg-catalog/docs/sql-api.md`
-- Standalone Code Catalogue and CTL1 specification: `/datapool/projects/code-catalogue/SPEC.md`
+- pgokf parser model: `crates/okf-parser/src/model.rs`
+- pgokf catalogue schema: `crates/extension/src/catalog/schema.rs`
+- pgokf search implementation: `crates/extension/src/catalog/search.rs`
+- pgokf synchronization engine: `crates/extension/src/catalog/sync.rs`
+- pgokf exact-source projection: `crates/extension/src/catalog/source.rs`
+- pgokf SQL API: `docs/sql-api.md`
+- Standalone Code Catalogue and CTL1 specification: `spec/archive/code-catalogue-service-SPEC.md`
 - Agent Skills specification: <https://agentskills.io/>
 
 ---

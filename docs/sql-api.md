@@ -113,7 +113,7 @@ to confirm the installed SQL and the loaded module agree after an upgrade.
 SELECT pgokf.version();
 --  version
 -- ---------
---  0.1.16
+--  0.2.0
 ```
 
 ### `pgokf.register_bundle(path text, name text DEFAULT NULL, options jsonb DEFAULT '{}') → pgokf.bundle_sync_result`
@@ -590,7 +590,7 @@ Run it after enabling pgvector, after bulk-loading embeddings, or after changing
 Register a recurring `refresh_bundle` on the external
 [`pg_cron`](https://github.com/citusdata/pg_cron) scheduler. The job command
 pins the bundle's tenant (`set_config('pgokf.tenant', ...)` before the call)
-since 0.1.16, so the cron worker's own session satisfies the tenant rules;
+since 0.2.0, so the cron worker's own session satisfies the tenant rules;
 jobs scheduled by earlier releases run the bare call and must be
 re-scheduled once `require_tenant` is on. Like the pgvector and
 BM25-provider surfaces, the coupling is **runtime-only**: `CREATE EXTENSION pgokf`
@@ -982,7 +982,7 @@ that has not set `pgokf.tenant`).
 
 ### `pgokf.tenant_required() → boolean`
 
-Whether the durable `require_tenant` policy is on (since 0.1.16). `STABLE`,
+Whether the durable `require_tenant` policy is on (since 0.2.0). `STABLE`,
 `SECURITY DEFINER` (reads the admin-only config), executable by **any role
 with `USAGE` on schema `pgokf`** because every row-level-security policy
 depends on it.
@@ -1736,7 +1736,7 @@ Cluster-persistent policy: a single row, managed only through `set_config` /
 | `store_source` | `boolean` | `false` |
 | `search_backend` | `text` | `'native'` (`CHECK IN ('native','bm25')`) |
 | `bm25_provider` | `text` | `'auto'` (`CHECK IN ('auto','pg_search','pg_textsearch')`; since 0.1.15) |
-| `require_tenant` | `boolean` | `false` (since 0.1.16; `true` denies an unscoped session) |
+| `require_tenant` | `boolean` | `false` (since 0.2.0; `true` denies an unscoped session) |
 | `notify_channel` | `text` | `''` (empty disables) |
 | `okf_version_policy` | `text` | `'warn'` (`CHECK IN ('warn','reject')`) |
 | `embedding_dim` | `integer` | `1536` (`CHECK BETWEEN 1 AND 16000`) |

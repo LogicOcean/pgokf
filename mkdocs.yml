@@ -64,4 +64,4 @@ nav:
   # The changelog lives at the repo root (CHANGELOG.md). MkDocs cannot pull in
   # files above docs_dir, so the docs CI workflow copies it to docs/changelog.md
   # before `mkdocs build`. See .github/workflows/docs.yml.
-  - Changelog: https://github.com/LogicOcean/pgokf/blob/main/CHANGELOG.md
+  - Changelog: changelog.md

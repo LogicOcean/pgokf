@@ -10,6 +10,17 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-08
+
+**Skill packages are catalog content, and a web UI to work with them.** A
+bundle may now carry [Agent Skills](https://agentskills.io/) packages whose
+exact bytes the catalog stores and serves back; `pgokf-web` puts a UI and a
+JSON API over the whole catalog, with an optional human workflow (upload,
+edit, review) once an identity mode and a writer connection are configured;
+`pgokf-workspace` turns a catalog selection into an agent-harness tree; and
+`pgokf-mcp` speaks HTTP as well as stdio, with bearer tokens and roles.
+`ALTER EXTENSION pgokf UPDATE TO '0.2.0'` is additive.
+
 ### Added
 
 - **Skill packages are catalog content, and plugins are built from them
@@ -257,6 +268,69 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
   `pgokf-companion` (feature `embeddings`), shared with `pgokf-web`;
   `pgokf-pgconn` exposes `parse_config` and `rustls_connector` for pool
   builders.
+
+### Changed
+
+- **Package bytes are stored whatever `store_source` says.** The setting
+  governs whether a *document's* source is kept; a package's `SKILL.md`,
+  scripts, references and assets are the content, so they are kept
+  regardless and `get_skill` / `get_script` / `get_reference` always return
+  them.
+- **A session cookie names the mode that issued it**, so a server
+  reconfigured from one identity mode to another does not honour sessions
+  opened under the old one. Everyone signs in again after such a change.
+- **Everything under a package's `scripts/`, `references/` or `assets/`
+  belongs to that package**, whatever it is called. A reserved name
+  (`index.md`, `log.md`) there is an ordinary resource, and a `SKILL.md`
+  there is a resource too rather than a second package - which used to take
+  every file beside it out of the enclosing package, silently. A bundle
+  with such a file gains members on its next refresh.
+- **Two registry layouts were corrected**, which changes the trees built for
+  them: Hermes Agent documents `${VAR}` references in a server entry, so its
+  snippet references `${OKF_PG_URL}` instead of carrying a placeholder
+  connection string; and Kimi reads only `~/.kimi/mcp.json`, so its entry is
+  written as `okf-mcp.json` to merge rather than as a `.kimi/mcp.json` it
+  would never have read.
+- **New ceiling `pgokf.max_bundle_bytes`** (1 GiB, `SIGHUP`) bounds a
+  bundle's *total* discovered size. The per-file and file-count ceilings
+  multiply out to far more than one sync can hold, and a package resource is
+  now kept whole whatever its type. A bundle over the total is refused where
+  it previously registered; raise the setting or narrow the includes.
+- The web UI is read-only until a writer connection **and** an identity
+  mode are configured; with both, the human workflow and the admin page are
+  on. It was read-only in every configuration before this release.
+
+### Security
+
+- The `okf.sh` helper a plugin build generates put the web URL inside a
+  `${VAR:-...}` default branch, which a shell expands - so a `$(...)` in
+  that URL ran as a command on whoever ran the helper, and the URL is a
+  free-text build argument reachable from the builder. The value is now a
+  single-quoted assignment, and the validator refuses shell metacharacters.
+- A bundle file was re-read by path after discovery with no size ceiling
+  and no link check, so a file could grow past `max_file_bytes` or be
+  replaced by a symbolic link between the scan and the read - and a package
+  resource is stored verbatim and served back byte for byte. The read is
+  judged through the descriptor it opens and is capped.
+- Uploading into an existing bundle name through the "new bundle" path
+  called a full-snapshot resync with only the files in hand, deleting
+  everything else in that bundle. It is refused. Replacing an existing
+  document now needs the editor role, as the ladder always said.
+- A disabled bundle stayed readable by direct URL: two read queries omitted
+  the `enabled` flag that search and browsing applied.
+- Sign-in ran unbounded Argon2id verifications and threw its throttle on the
+  user name alone, so an unauthenticated flood could exhaust memory and CPU
+  and a stranger could hold any named account shut. Verifications are
+  bounded and the throttle keys on the source address too.
+- The users file, which holds every password hash, was rewritten `0644` by
+  the Admin page whatever the operator had set. It is created `0600` and
+  synced before it takes the name.
+- Security headers, the Content-Security-Policy included, now reach the
+  responses the authentication and same-site layers produce themselves.
+- A built tree is written in full or not at all, cannot hold two paths that
+  are one file on a case-insensitive filesystem, and cannot carry a segment
+  that Windows would normalize into `..`. The lockfile hashes every file of
+  the tree, the generated ones included.
 
 ## [0.1.16] - 2026-09-05
 
@@ -1234,7 +1308,8 @@ queries, native full-text search, and link-graph traversal.
 - The `pgokf_private` schema and its `config` table are readable and writable
   only by the extension owner and `pgokf_admin`; readers cannot see policy.
 
-[Unreleased]: https://github.com/LogicOcean/pgokf/compare/v0.1.16...HEAD
+[Unreleased]: https://github.com/LogicOcean/pgokf/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/LogicOcean/pgokf/compare/v0.1.16...v0.2.0
 [0.1.16]: https://github.com/LogicOcean/pgokf/compare/v0.1.15...v0.1.16
 [0.1.15]: https://github.com/LogicOcean/pgokf/compare/v0.1.14...v0.1.15
 [0.1.14]: https://github.com/LogicOcean/pgokf/compare/v0.1.13...v0.1.14

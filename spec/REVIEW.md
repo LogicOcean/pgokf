@@ -5,13 +5,12 @@ begin. Sources, all recovered and compared:
 
 | File | Where it lives | Last changed | Note |
 | --- | --- | --- | --- |
-| `OKF-EXTENSION-SPEC.md` (1,586 lines) | `/datapool/projects/code-catalogue/` only | 2026-08-30 22:16 | The pgokf-facing spec. Never uploaded to Tasker. |
-| `archive/code-catalogue-service-SPEC.md` (1,920 lines) | Tasker filer + disk (byte-identical) | 2026-08-30 16:25 | The standalone "Code Catalogue System" service spec (Axum/REST). Archived on 2026-09-05 (see `archive/README.md`); its Appendices B and C remain the source of the CTL1, search, and security clauses the extension spec cites. |
-| `ctl1/grammar/ctl1.ebnf`, `ctl1/schemas/`, `ctl1/fixtures/` | Tasker filer + disk (byte-identical) | 2026-08-30 | Normative CTL1 grammar, JSON schemas, and golden fixtures, kept live. The service's OpenAPI document is archived. |
+| `OKF-EXTENSION-SPEC.md` (1,586 lines) | this repository only | 2026-08-30 22:16 | The pgokf-facing spec. Never published separately. |
+| `archive/code-catalogue-service-SPEC.md` (1,920 lines) | the working copy and its archive (byte-identical) | 2026-08-30 16:25 | The standalone "Code Catalogue System" service spec (Axum/REST). Archived on 2026-09-05 (see `archive/README.md`); its Appendices B and C remain the source of the CTL1, search, and security clauses the extension spec cites. |
+| `ctl1/grammar/ctl1.ebnf`, `ctl1/schemas/`, `ctl1/fixtures/` | the working copy and its archive (byte-identical) | 2026-08-30 | Normative CTL1 grammar, JSON schemas, and golden fixtures, kept live. The service's OpenAPI document is archived. |
 
-The Tasker project ("Code Catalogue System", five completed tasks) holds no
-comments or task-level notes beyond the original task descriptions, so this
-directory now carries the complete record. Nothing here is committed yet.
+The tracker for that work holds no notes beyond the original task
+descriptions, so this directory carries the complete record.
 
 ## 1. Verdict
 
@@ -169,7 +168,7 @@ know that a second BM25 backend is coming.
 §7.4 requires "effective tenant is mandatory for application roles; unset
 tenant MUST deny rather than retain legacy see-all behavior". That reverses a
 documented pgokf contract: tenancy is opt-in, an unset `pgokf.tenant` sees
-everything, and the deployment on green-one, the compose stack, and the MCP
+everything, and the reference deployment, the compose stack, and the MCP
 reader all rely on it. Two ways to reconcile:
 
 - **A. Policy key.** Add `require_tenant` (default `false`) to the durable

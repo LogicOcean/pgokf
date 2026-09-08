@@ -39,7 +39,8 @@ needs no external file store.
   companion, with no filesystem or network I/O inside the backend
 - **Companions:** `pgokf-ingest` (mountless S3 ingestion, one-shot or
   `--watch`), `pgokf-embed` (embedding sidecar for semantic search),
-  `pgokf-mcp` (an MCP server exposing the catalog to AI agents)
+  `pgokf-mcp` (an MCP server exposing the catalog to AI agents, over stdio
+  or HTTP), `pgokf-web` (the web UI, JSON API and agent plugin builder)
 - **License:** AGPL-3.0-only, with a commercial license available (see
   [`LICENSING.md`](https://github.com/LogicOcean/pgokf/blob/main/LICENSING.md))
 

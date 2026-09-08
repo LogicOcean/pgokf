@@ -1,12 +1,13 @@
 # syntax=docker/dockerfile:1
 #
-# pgokf companions image: the three standalone network companions of the
-# extension in one small, non-root runtime image.
+# pgokf companions image: the standalone network companions of the extension
+# in one small, non-root runtime image.
 #
 #   pgokf-ingest   mountless ingestion from an S3-compatible object store
 #   pgokf-embed    reference embedder (any OpenAI-compatible /v1/embeddings)
 #   pgokf-mcp      Model Context Protocol server, over stdio or over HTTP
 #                  (--http, with bearer tokens and roles)
+#   pgokf-web      the web UI and JSON API, and the agent plugin builder
 #
 # The extension performs no network I/O; these do, and talk to the catalog only
 # through its public SQL surface (see docs/deployment-topologies.md). The image
@@ -15,7 +16,7 @@
 #   docker run --rm ghcr.io/logicocean/pgokf-companions:<version> pgokf-embed --help
 #
 # Build from the repository root (.dockerignore keeps target/ and .git out):
-#   docker build -f packaging/docker/Dockerfile.companions -t pgokf-companions:0.1.16 .
+#   docker build -f packaging/docker/Dockerfile.companions -t pgokf-companions:0.2.0 .
 #
 # CI builds it natively on amd64 and arm64 and publishes a multi-architecture
 # manifest to ghcr.io/logicocean/pgokf-companions:<version> on version tags.
@@ -78,6 +79,11 @@ RUN set -eux; \
         --home-dir /nonexistent --shell /usr/sbin/nologin pgokf
 
 COPY --from=builder /out/ /usr/local/bin/
+
+# The licence and the third-party notices travel with the binaries, as they
+# do in the .deb: COMM-LICENSE.md section 5 promises licensees a notices
+# file with every release.
+COPY LICENSE THIRD-PARTY-NOTICES.txt /usr/share/doc/pgokf/
 
 # Numeric so runtime policies (runAsNonRoot) can verify it without /etc/passwd.
 USER 10001:10001
