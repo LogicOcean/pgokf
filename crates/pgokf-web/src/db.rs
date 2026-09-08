@@ -518,6 +518,15 @@ pub(crate) fn classify(error: &anyhow::Error) -> Failure {
     Failure::Other
 }
 
+/// The `SQLSTATE` of the first `PostgreSQL` error in the chain, if any.
+pub(crate) fn sql_state(error: &anyhow::Error) -> Option<tokio_postgres::error::SqlState> {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<tokio_postgres::Error>())
+        .find_map(tokio_postgres::Error::code)
+        .cloned()
+}
+
 /// The database's own message for an invalid-input failure, when there is
 /// one; these are written for callers (`limit_count must be ...`).
 pub(crate) fn db_message(error: &anyhow::Error) -> Option<String> {
@@ -613,7 +622,32 @@ impl Db {
         })
     }
 
-    async fn query(&self, sql: &str, params: &[&(dyn ToSql + Sync)]) -> Result<Vec<Row>> {
+    /// Run one statement and return the rows it affected. Like every helper
+    /// here, the connection goes back to the pool whether the statement
+    /// succeeded or failed - a failed statement is not a broken connection.
+    pub(crate) async fn execute(&self, sql: &str, params: &[&(dyn ToSql + Sync)]) -> Result<u64> {
+        let mut client = self.client().await?;
+        let affected = client
+            .get()
+            .execute(sql, params)
+            .await
+            .context("catalog statement failed");
+        client.finish();
+        affected
+    }
+
+    /// Run a query that must return exactly one row.
+    pub(crate) async fn query_one(&self, sql: &str, params: &[&(dyn ToSql + Sync)]) -> Result<Row> {
+        self.query_opt(sql, params)
+            .await?
+            .context("the catalog returned no row where one was expected")
+    }
+
+    pub(crate) async fn query(
+        &self,
+        sql: &str,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<Vec<Row>> {
         let mut client = self.client().await?;
         let rows = client
             .get()
@@ -624,7 +658,11 @@ impl Db {
         rows
     }
 
-    async fn query_opt(&self, sql: &str, params: &[&(dyn ToSql + Sync)]) -> Result<Option<Row>> {
+    pub(crate) async fn query_opt(
+        &self,
+        sql: &str,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<Option<Row>> {
         let mut client = self.client().await?;
         let row = client
             .get()

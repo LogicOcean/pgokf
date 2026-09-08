@@ -106,5 +106,6 @@ pub(crate) mod spi_read;
 pub mod stats;
 pub mod sync;
 pub mod types;
+pub mod web_identity;
 
 pub use types::StagedConcept;

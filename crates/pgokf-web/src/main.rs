@@ -20,6 +20,7 @@ mod oidc;
 mod routes;
 mod session_store;
 mod store;
+mod user_store;
 
 use std::io::Read;
 use std::net::SocketAddr;
@@ -31,16 +32,17 @@ use clap::Parser;
 use pgokf_companion::embeddings::EmbeddingsClient;
 
 use crate::auth::{Authenticator, Cidr, HeaderAuth, Role, RoleMapping, Sessions, UsersAuth};
-use crate::config::{Cli, Command};
+use crate::config::{Cli, Command, UserCommand};
 use crate::db::{Db, DbConfig};
 use crate::routes::App;
 use crate::session_store::SessionStore;
+use crate::user_store::UserStore;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse().normalized();
     if let Some(command) = &cli.command {
-        return run_command(command);
+        return run_command(&cli, command).await;
     }
     cli.validate()?;
     let database_url = cli
@@ -56,7 +58,8 @@ async fn main() -> Result<()> {
         statement_timeout_ms: cli.statement_timeout_ms,
     })?;
     let writer = connect_writer(&cli).await?;
-    let authenticator = build_authenticator(&cli)?;
+    let identity = connect_identity(&cli).await?;
+    let authenticator = build_authenticator(&cli, identity.as_ref())?;
     let stores = configured_stores(&cli)?;
     // Fail fast on a bad connection string or role: the first page would
     // otherwise be the first error.
@@ -153,6 +156,70 @@ async fn connect_writer(cli: &Cli) -> Result<Option<Db>> {
     Ok(Some(writer))
 }
 
+/// Connections for identity lookups (`pgokf_web.users` / `pgokf_web.sessions`):
+/// the writer URL, but a pool of its own, never shared with the human
+/// workflow's minute-long resyncs, so a session check can never queue behind
+/// an upload - and with a short statement budget, since a lookup that takes
+/// longer than this is a fault, not work.
+const IDENTITY_POOL: usize = 4;
+const IDENTITY_STATEMENT_MS: u64 = 5_000;
+
+/// The identity pool, for the modes that keep people or sessions in the
+/// catalog. Probed at startup, so a writer URL that cannot see `pgokf_web`
+/// (a reader role, a catalog older than 0.2.0) fails here, with the reason,
+/// rather than at the first person's sign-in.
+async fn connect_identity(cli: &Cli) -> Result<Option<Db>> {
+    let mode = cli.auth.trim();
+    if !matches!(mode, "users" | "oidc") {
+        return Ok(None);
+    }
+    let url = cli
+        .writer_url
+        .as_deref()
+        .with_context(|| format!("--auth {mode} needs --writer-url"))?;
+    let identity = identity_pool(cli, url)?;
+    probe_identity_tables(&identity).await?;
+    if mode == "users" {
+        let people = identity
+            .query_one("SELECT count(*) FROM pgokf_web.users", &[])
+            .await
+            .and_then(|row| row.try_get::<_, i64>(0).context("reading the count"))?;
+        if people == 0 {
+            eprintln!(
+                "pgokf-web: warning: nobody can sign in yet - add the first admin with \
+                 `pgokf-web user add --name NAME --role admin < password.txt`"
+            );
+        }
+    }
+    Ok(Some(identity))
+}
+
+fn identity_pool(cli: &Cli, url: &str) -> Result<Db> {
+    Db::connect(&DbConfig {
+        database_url: url,
+        force_tls: cli.tls,
+        pool_size: IDENTITY_POOL,
+        tenant: cli.tenant.as_deref(),
+        statement_timeout_ms: IDENTITY_STATEMENT_MS,
+    })
+}
+
+/// Fail fast when the identity tables cannot be reached as configured.
+async fn probe_identity_tables(identity: &Db) -> Result<()> {
+    for table in ["pgokf_web.users", "pgokf_web.sessions"] {
+        identity
+            .query(&format!("SELECT 1 FROM {table} LIMIT 0"), &[])
+            .await
+            .with_context(|| {
+                format!(
+                    "the identity connection cannot read {table}: --writer-url must be the \
+                     pgokf_writer role and the catalog must be at 0.2.0 or later"
+                )
+            })?;
+    }
+    Ok(())
+}
+
 /// Where directory bundles are reachable, from the flags.
 fn configured_stores(cli: &Cli) -> Result<store::Stores> {
     let Some(dir) = &cli.bundles_dir else {
@@ -171,17 +238,22 @@ fn configured_stores(cli: &Cli) -> Result<store::Stores> {
     })
 }
 
-/// The signer of the session this site holds, for the modes that hold
-/// one. Without a configured secret a random one is used, which means the
-/// sessions end when the process does.
-fn build_sessions(cli: &Cli) -> Result<Arc<Sessions>> {
+/// The session signer for the modes that hold a session, remembering every
+/// session it issues in the catalog (`pgokf_web.sessions`) through
+/// `identity`, so a session can be ended rather than merely left to expire.
+/// Without a configured secret a random one is used, which means the
+/// sessions end when the process does. `serving` says whether to say so:
+/// a maintenance command mints no cookie and need not warn.
+fn build_sessions(cli: &Cli, identity: Db, serving: bool) -> Result<Arc<Sessions>> {
     let secret = if let Some(secret) = &cli.session_secret {
         secret.as_bytes().to_vec()
     } else {
-        eprintln!(
-            "pgokf-web: warning: no OKF_WEB_SESSION_SECRET; sessions end when the \
-             process does"
-        );
+        if serving {
+            eprintln!(
+                "pgokf-web: warning: no OKF_WEB_SESSION_SECRET; sessions end when the \
+                 process does"
+            );
+        }
         auth::random_bytes(32)?
     };
     let sessions = Sessions::new(
@@ -189,29 +261,24 @@ fn build_sessions(cli: &Cli) -> Result<Arc<Sessions>> {
         cli.session_hours.saturating_mul(3_600),
         cli.cookie_secure,
     )?;
-    // The store is what makes a session endable rather than merely
-    // expiring: `users` mode keeps it beside the users file, `oidc` mode
-    // names it (the config check insists). Its absence is a hard error, never
-    // a silent fall-back to sessions that cannot be revoked.
-    let store_path = cli.session_store.clone().or_else(|| {
-        cli.auth_users_file
-            .as_ref()
-            .map(|users| users.with_file_name("sessions"))
-    });
-    let Some(path) = store_path else {
-        bail!("a mode that issues sessions needs --session-store");
-    };
-    let store = SessionStore::open(&path)
-        .with_context(|| format!("opening the session store {}", path.display()))?;
-    eprintln!(
-        "pgokf-web: live sessions are recorded in {}, so signing out ends a session everywhere",
-        path.display()
-    );
-    Ok(Arc::new(sessions.with_store(store)))
+    if serving {
+        eprintln!(
+            "pgokf-web: live sessions are recorded in the catalog (pgokf_web.sessions), so \
+             signing out ends a session everywhere"
+        );
+    }
+    Ok(Arc::new(sessions.with_store(SessionStore::Pg(identity))))
 }
 
-/// The way people are identified, from the flags.
-fn build_authenticator(cli: &Cli) -> Result<Authenticator> {
+/// The identity mode, from the flags. The two that keep state - `users`
+/// (people) and `oidc` (sessions) - keep it in the catalog through the
+/// identity pool, which [`connect_identity`] has already opened and probed.
+fn build_authenticator(cli: &Cli, identity: Option<&Db>) -> Result<Authenticator> {
+    let identity_for = |mode: &str| {
+        identity.cloned().with_context(|| {
+            format!("--auth {mode} needs --writer-url: its people and sessions live in the catalog")
+        })
+    };
     match cli.auth.trim() {
         "oidc" => {
             let required = |value: &Option<String>, flag: &str| -> Result<String> {
@@ -241,7 +308,7 @@ fn build_authenticator(cli: &Cli) -> Result<Authenticator> {
             };
             Ok(Authenticator::Oidc(Box::new(oidc::OidcAuth::new(
                 config,
-                build_sessions(cli)?,
+                build_sessions(cli, identity_for("oidc")?, true)?,
             )?)))
         }
         "header" => {
@@ -272,39 +339,56 @@ fn build_authenticator(cli: &Cli) -> Result<Authenticator> {
             }))
         }
         "users" => {
-            let path = cli
-                .auth_users_file
-                .as_deref()
-                .context("--auth users needs --auth-users-file")?;
-            Ok(Authenticator::Users(UsersAuth::load(
-                path,
-                build_sessions(cli)?,
-            )?))
+            let identity = identity_for("users")?;
+            Ok(Authenticator::Users(UsersAuth::new(
+                UserStore::Pg(identity.clone()),
+                build_sessions(cli, identity, true)?,
+            )))
         }
         _ => Ok(Authenticator::Anonymous),
     }
 }
 
-/// A maintenance command: no catalog, no server.
-fn run_command(command: &Command) -> Result<()> {
+/// The `user` commands: the people of the `users` mode live in the catalog,
+/// so these open the identity pool with the writer URL and go through the
+/// same [`UsersAuth`] the site uses (its validation, hashing, and the
+/// ending of sessions on a password change). No server is started.
+async fn run_command(cli: &Cli, command: &Command) -> Result<()> {
+    let Command::User(command) = command;
+    let url = cli
+        .writer_url
+        .as_deref()
+        .context("a user command needs --writer-url (OKF_PG_WRITER_URL)")?;
+    let identity = identity_pool(cli, url)?;
+    probe_identity_tables(&identity).await?;
+    let sessions = build_sessions(cli, identity.clone(), false)?;
+    let users = UsersAuth::new(UserStore::Pg(identity), sessions);
+    let password = read_password()?;
     match command {
-        Command::HashPassword { user, role } => {
-            if !auth::valid_subject(user) {
-                bail!("{user:?} is not a valid user name (letters, digits, . _ - @ +)");
-            }
+        UserCommand::Add { name, role } => {
             let role = Role::parse(role).with_context(|| format!("unknown role {role:?}"))?;
-            let mut password = String::new();
-            std::io::stdin()
-                .read_to_string(&mut password)
-                .context("reading the password from standard input")?;
-            let password = password.trim_end_matches(['\r', '\n']);
-            if password.is_empty() {
-                bail!("the password (read from standard input) is empty");
-            }
-            println!("{user}:{}:{}", role.id(), auth::hash_password(password)?);
-            Ok(())
+            users.add_user(name, role, &password).await?;
+            eprintln!("pgokf-web: added {name} as {}", role.id());
+        }
+        UserCommand::SetPassword { name } => {
+            users.set_password(name, &password).await?;
+            eprintln!("pgokf-web: changed the password of {name} and ended their sessions");
         }
     }
+    Ok(())
+}
+
+/// A password from standard input, so it never sits in a command line.
+fn read_password() -> Result<String> {
+    let mut password = String::new();
+    std::io::stdin()
+        .read_to_string(&mut password)
+        .context("reading the password from standard input")?;
+    let password = password.trim_end_matches(['\r', '\n']);
+    if password.is_empty() {
+        bail!("the password (read from standard input) is empty");
+    }
+    Ok(password.to_owned())
 }
 
 /// Probe the embeddings endpoint once and compare the vector width with the

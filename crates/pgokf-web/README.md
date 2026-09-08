@@ -36,10 +36,10 @@ connections so an edge can be reached by a tap.
 | `--database-url` | `OKF_PG_URL` | Connection string for a `pgokf_reader` role (required): everything the UI shows comes through it. |
 | `--writer-url` | `OKF_PG_WRITER_URL` | Connection string for a `pgokf_writer` role, used only by the human workflow (upload, edit, review) and only for signed-in people whose role allows it. Without it those pages are off and the UI is read-only. |
 | `--bundles-dir`, `--bundles-db-dir` | `OKF_WEB_BUNDLES_DIR`, `OKF_WEB_BUNDLES_DB_DIR` | The directory under which directory bundles are reachable from this process (mounted read-write), and the path the database server uses for the same directory when it differs. With it set, editors change documents of directory bundles in place: the file is written atomically, confined to the bundle (no `..`, no symbolic links), and the bundle is refreshed, so the directory stays the source of truth. Unset, such bundles are read-only in the UI. |
-| `--auth` | `OKF_WEB_AUTH` | How people are identified: `none` (everyone is a viewer; the default), `oidc` (this site signs people in against an OpenID Connect provider), `header` (a trusted reverse proxy forwards the identity), or `users` (a local users file with a login form). |
+| `--auth` | `OKF_WEB_AUTH` | How people are identified: `none` (everyone is a viewer; the default), `oidc` (this site signs people in against an OpenID Connect provider), `header` (a trusted reverse proxy forwards the identity), or `users` (people kept in the catalog, with a login form). |
 | `--oidc-issuer`, `--oidc-client-id`, `--oidc-client-secret`, `--oidc-redirect-url` | `OKF_WEB_OIDC_ISSUER`, `OKF_WEB_OIDC_CLIENT_ID`, `OKF_WEB_OIDC_CLIENT_SECRET`, `OKF_WEB_OIDC_REDIRECT_URL` | `oidc` mode: the provider's issuer URL exactly as it declares it, the client this site is registered as, its secret (omit it for a public client, which PKCE alone protects), and this site's callback URL, which is its public address plus `/auth/callback` and must be registered with the provider. |
 | `--oidc-scopes`, `--oidc-subject-claims`, `--oidc-groups-claim`, `--oidc-provider-name` | `OKF_WEB_OIDC_SCOPES`, `OKF_WEB_OIDC_SUBJECT_CLAIMS`, `OKF_WEB_OIDC_GROUPS_CLAIM`, `OKF_WEB_OIDC_PROVIDER_NAME` | The scopes to ask for (default `openid profile email`; `openid` is always added), the claims tried in order for the person's identity (default `preferred_username,email,sub`), the claim carrying their groups (default `groups`), and what the sign-in button calls the provider. Roles come from `--auth-role-map` and `--auth-default-role`, and the session from `--session-secret` / `--session-hours` / `--cookie-secure`, exactly as in `users` mode. |
-| `--auth-users-file`, `--session-secret`, `--session-hours`, `--cookie-secure`, `--session-store` | `OKF_WEB_AUTH_USERS_FILE`, `OKF_WEB_SESSION_SECRET`, `OKF_WEB_SESSION_HOURS`, `OKF_WEB_COOKIE_SECURE`, `OKF_WEB_SESSION_STORE` | `users` mode: the file (`name:role:$argon2id$...` per line, made with `pgokf-web hash-password --user NAME --role ROLE < password.txt`), the key that signs session cookies (at least 32 characters; unset, a random one is used and sessions end with the process), the session length (default 12 h), whether cookies are marked `Secure` (set it once the UI is served over HTTPS), and the file that records live sessions so they can be ended (default: `sessions` beside the users file; `oidc` mode must name it). |
+| `--session-secret`, `--session-hours`, `--cookie-secure` | `OKF_WEB_SESSION_SECRET`, `OKF_WEB_SESSION_HOURS`, `OKF_WEB_COOKIE_SECURE` | `users` and `oidc` modes: the key that signs session cookies (at least 32 characters; unset, a random one is used and sessions end with the process), the session length (default 12 h), and whether cookies are marked `Secure` (set it once the UI is served over HTTPS). Both modes keep their state in the catalog - people in `pgokf_web.users`, live sessions in `pgokf_web.sessions` - through `--writer-url`, which they therefore require. The first person is made with `pgokf-web user add --name NAME --role ROLE < password.txt` (the same writer URL in the environment); `pgokf-web user set-password --name NAME` is the way back in for a locked-out admin. |
 | `--auth-trusted-proxy`, `--auth-user-header`, `--auth-groups-header`, `--auth-name-header`, `--auth-role-map`, `--auth-default-role` | `OKF_WEB_AUTH_TRUSTED_PROXY`, `OKF_WEB_AUTH_USER_HEADER`, `OKF_WEB_AUTH_GROUPS_HEADER`, `OKF_WEB_AUTH_NAME_HEADER`, `OKF_WEB_AUTH_ROLE_MAP`, `OKF_WEB_AUTH_DEFAULT_ROLE` | `header` mode: the proxy's addresses or CIDR ranges (required; identity headers from any other peer are ignored; the word `any` believes every peer, for a server only the proxy can reach), the headers carrying the user (default `X-Forwarded-User`), the comma-separated groups (default `X-Forwarded-Groups`), and an optional display name, `group=role,...` (the highest matching role wins), and the role of a person in no mapped group (default `viewer`). |
 | `--bind` | `OKF_WEB_BIND` | Listen address (default `127.0.0.1:8080`). |
 | `--tenant` | `OKF_TENANT` | `pgokf.tenant` scope applied to every pooled connection; required once the catalog's `require_tenant` policy is on. |
@@ -71,23 +71,25 @@ every variable unconditionally.
   action; anonymous requests never reach the writer. Identities come through
   one seam (`auth.rs`): an OpenID Connect provider this site signs people in
   against, a trusted reverse proxy's headers, believed only from the proxy's
-  own addresses, or a local users file (Argon2id hashes) with a login form.
+  own addresses, or people kept in the catalog (`pgokf_web.users`, Argon2id hashes) with a
+  login form.
   The two that end here issue the same HMAC-signed, `HttpOnly`,
   `SameSite=Lax` session cookie, which names the mode that opened it so one
   mode never honours another's, and carries no role: the role is derived on
   every request, so removing a user or changing the role map takes effect at
   once, and in `users` mode a changed password ends every session opened
-  before it. Every issued session is also recorded in a store
-  (`--session-store`; `users` mode keeps it beside the users file, `oidc`
-  mode names it), and a cookie the store no longer lists is refused - so
-  signing out ends that session on every device holding a copy of its
-  cookie, the profile page offers **sign out everywhere**, an admin can end
-  anyone's sessions in either mode, and a removed person's end with them.
-  The store is rewritten at startup (so an unwritable directory fails then,
-  not at the first sign-in); a store that does not parse stops the server
-  rather than half-read an allowlist, and deleting the file starts it with
-  no live sessions - everyone signs in again, which is also the operator's
-  "end every session" lever.
+  before it. Every issued session is also recorded in the catalog
+  (`pgokf_web.sessions`, through a pool of its own on the writer URL - four
+  connections with a five-second statement budget, never shared with the
+  workflow's long resyncs, so a `users`/`oidc` deployment opens up to the
+  reader pool plus six server connections), and a cookie the catalog no
+  longer lists is refused - so signing out ends that session on
+  every device holding a copy of its cookie, the profile page offers **sign
+  out everywhere**, an admin sees who holds live sessions and can end
+  anyone's in either mode, and a removed person's end with them. A session
+  is a lever, not a detector: a copied cookie works until its session is
+  ended or expires. `DELETE FROM pgokf_web.sessions` as the writer is the
+  operator's "end every session" lever.
   Sign-ins are throttled per name *and* client address (after five failures
   each attempt waits out a doubling cooldown; behind a trusted proxy the
   address comes from `X-Forwarded-For`), and an unknown name costs the same
@@ -223,11 +225,13 @@ OKF_WEB_AUTH_ROLE_MAP=okf-editors=editor,okf-approvers=approver \
 pgokf-web
 ```
 
-Or with a local users file:
+Or with people kept in the catalog (the `users` mode needs the writer
+connection, since that is where people and sessions live):
 
 ```sh
-printf '%s' 'a long password' | pgokf-web hash-password --user alice --role approver >> users
-OKF_WEB_AUTH=users OKF_WEB_AUTH_USERS_FILE=users OKF_WEB_SESSION_SECRET=... pgokf-web
+export OKF_PG_WRITER_URL=postgresql://okf_writer:...@localhost/okf
+printf '%s' 'a long password' | pgokf-web user add --name alice --role approver
+OKF_WEB_AUTH=users OKF_WEB_SESSION_SECRET=... pgokf-web
 ```
 
 In the compose stack it is the `ui` profile:

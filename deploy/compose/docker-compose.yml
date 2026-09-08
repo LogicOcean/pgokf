@@ -210,11 +210,10 @@ services:
       # way of knowing who is asking. Off until both are set; see .env.example.
       OKF_PG_WRITER_URL: ${OKF_UI_WRITER_URL:-}
       OKF_WEB_AUTH: ${OKF_UI_AUTH:-none}
-      OKF_WEB_AUTH_USERS_FILE: ${OKF_UI_USERS_FILE:-}
+      # People (users mode) and live sessions (users and oidc modes) live in
+      # the catalog - pgokf_web.users / pgokf_web.sessions - reached through
+      # OKF_PG_WRITER_URL above, which those modes therefore require.
       OKF_WEB_SESSION_SECRET: ${OKF_UI_SESSION_SECRET:-}
-      # Live sessions are recorded here so signing out (or an admin) ends a
-      # session everywhere; the directory is the writable auth mount below.
-      OKF_WEB_SESSION_STORE: ${OKF_UI_SESSION_STORE:-/etc/pgokf/ui/sessions}
       OKF_WEB_COOKIE_SECURE: ${OKF_UI_COOKIE_SECURE:-false}
       OKF_WEB_AUTH_TRUSTED_PROXY: ${OKF_UI_TRUSTED_PROXY:-}
       OKF_WEB_AUTH_ROLE_MAP: ${OKF_UI_ROLE_MAP:-}
@@ -234,11 +233,6 @@ services:
       # mount the bundles read-write (OKF_UI_BUNDLES_MODE=rw).
       OKF_WEB_BUNDLES_DIR: ${OKF_UI_BUNDLES_DIR:-}
     volumes:
-      # Home of the users file (OKF_UI_USERS_FILE names a file inside it,
-      # for example /etc/pgokf/ui/users). Writable, so the Admin page can
-      # add, change, and remove people; the directory must belong to the
-      # user the UI runs as (OKF_UI_UID).
-      - ${OKF_UI_AUTH_DIR:-./ui-auth}:/etc/pgokf/ui
       # The same bundles the database reads, at the same path; read-only
       # unless editors are to change them from the UI.
       - ${PGOKF_BUNDLES_DIR:?PGOKF_BUNDLES_DIR is required}:/bundles:${OKF_UI_BUNDLES_MODE:-ro}

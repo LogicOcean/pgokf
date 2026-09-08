@@ -23,9 +23,11 @@ pub(crate) struct Cli {
     #[arg(long, env = "OKF_PG_URL", hide_env_values = true)]
     pub database_url: Option<String>,
 
-    /// `PostgreSQL` connection string for a `pgokf_writer` role, used only by
-    /// the human workflow (upload, edit, review) and only for people whose
-    /// role allows it. Without it those pages are off.
+    /// `PostgreSQL` connection string for a `pgokf_writer` role, used by the
+    /// human workflow (upload, edit, review) for people whose role allows
+    /// it, and - through a pool of its own - by the `users` and `oidc`
+    /// modes for the people and sessions they keep in the catalog. Without
+    /// it those pages and modes are off.
     #[arg(long, env = "OKF_PG_WRITER_URL", hide_env_values = true)]
     pub writer_url: Option<String>,
 
@@ -45,7 +47,7 @@ pub(crate) struct Cli {
     /// How people are identified: `none` (everyone is a viewer), `oidc`
     /// (this site signs people in against an `OpenID` Connect provider),
     /// `header` (a trusted reverse proxy forwards the identity in headers),
-    /// or `users` (a local users file with a login form).
+    /// or `users` (people kept in the catalog, with a login form).
     #[arg(long = "auth", env = "OKF_WEB_AUTH", default_value = "none")]
     pub auth: String,
 
@@ -138,11 +140,6 @@ pub(crate) struct Cli {
     #[arg(long, env = "OKF_WEB_AUTH_TRUSTED_PROXY", default_value = "")]
     pub auth_trusted_proxy: String,
 
-    /// `users` mode: the users file (`name:role:$argon2id$...` per line;
-    /// `pgokf-web hash-password` produces a line).
-    #[arg(long, env = "OKF_WEB_AUTH_USERS_FILE")]
-    pub auth_users_file: Option<PathBuf>,
-
     /// `users` mode: the key that signs session cookies (at least 32
     /// characters). Unset, a random key is used and sessions end with the
     /// process.
@@ -157,14 +154,6 @@ pub(crate) struct Cli {
     /// over HTTPS).
     #[arg(long, env = "OKF_WEB_COOKIE_SECURE", default_value_t = false)]
     pub cookie_secure: bool,
-
-    /// `users` / `oidc` mode: the file that records live sessions, so a
-    /// session can be ended (signing out, "sign out everywhere", or an
-    /// admin ending someone's) rather than left to expire. Defaults to
-    /// `sessions` beside the users file in `users` mode; `oidc` mode must
-    /// name it.
-    #[arg(long, env = "OKF_WEB_SESSION_STORE")]
-    pub session_store: Option<PathBuf>,
 
     /// Socket address to listen on.
     #[arg(long, env = "OKF_WEB_BIND", default_value = "127.0.0.1:8080")]
@@ -212,15 +201,31 @@ pub(crate) struct Cli {
 /// Maintenance commands that run without a catalog.
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
-    /// Hash a password read from standard input and print a users-file line
-    /// (`name:role:$argon2id$...`) for it.
-    HashPassword {
-        /// The user name the line is for.
+    /// Manage the people the `users` identity mode signs in. They live in
+    /// the catalog (`pgokf_web.users`), so these need `--writer-url`.
+    #[command(subcommand)]
+    User(UserCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum UserCommand {
+    /// Add a person, with the password read from standard input. This is
+    /// how the first admin is made; the Admin page does the rest.
+    Add {
+        /// The sign-in name (letters, digits, . _ - @ +).
         #[arg(long)]
-        user: String,
-        /// The user's role: viewer, uploader, editor, approver, or admin.
+        name: String,
+        /// The role: viewer, uploader, editor, approver, or admin.
         #[arg(long, default_value = "viewer")]
         role: String,
+    },
+    /// Replace a person's password with one read from standard input, and
+    /// end every session they hold - the way back in when an admin is
+    /// locked out.
+    SetPassword {
+        /// The sign-in name.
+        #[arg(long)]
+        name: String,
     },
 }
 
@@ -232,8 +237,6 @@ impl Cli {
         self.auth_name_header = pgokf_companion::cli::non_empty(self.auth_name_header);
         self.auth_groups_header = pgokf_companion::cli::non_empty(self.auth_groups_header);
         self.session_secret = pgokf_companion::cli::non_empty(self.session_secret);
-        self.auth_users_file = self.auth_users_file.filter(|p| !p.as_os_str().is_empty());
-        self.session_store = self.session_store.filter(|p| !p.as_os_str().is_empty());
         self.oidc_issuer = pgokf_companion::cli::non_empty(self.oidc_issuer);
         self.oidc_client_id = pgokf_companion::cli::non_empty(self.oidc_client_id);
         self.oidc_client_secret = pgokf_companion::cli::non_empty(self.oidc_client_secret);
@@ -270,8 +273,12 @@ impl Cli {
                 }
             }
             "users" => {
-                if self.auth_users_file.is_none() {
-                    bail!("--auth users needs --auth-users-file");
+                if self.writer_url.is_none() {
+                    bail!(
+                        "--auth users needs --writer-url: the people and the sessions live in \
+                         the catalog (pgokf_web.users / pgokf_web.sessions), reached through \
+                         the writer connection"
+                    );
                 }
                 if self.session_hours == 0 {
                     bail!("--session-hours must be at least 1");
@@ -290,11 +297,11 @@ impl Cli {
                 if self.session_hours == 0 {
                     bail!("--session-hours must be at least 1");
                 }
-                if self.session_store.is_none() {
+                if self.writer_url.is_none() {
                     bail!(
-                        "--auth oidc needs --session-store (the file that records live \
-                         sessions, so signing out ends a session and an admin can end \
-                         someone's)"
+                        "--auth oidc needs --writer-url: sessions live in the catalog \
+                         (pgokf_web.sessions), reached through the writer connection, so \
+                         signing out ends a session and an admin can end someone's"
                     );
                 }
             }
@@ -327,9 +334,12 @@ mod tests {
                 .validate()
                 .is_ok()
         );
+        // People and sessions live in the catalog, so the modes that keep
+        // them need the writer connection.
         assert!(parse(&["--auth", "users"]).validate().is_err());
+        let writer = "postgresql://okf_writer@localhost/okf";
         assert!(
-            parse(&["--auth", "users", "--auth-users-file", "/tmp/users"])
+            parse(&["--auth", "users", "--writer-url", writer])
                 .validate()
                 .is_ok()
         );
@@ -344,27 +354,29 @@ mod tests {
             "--oidc-redirect-url",
             "https://catalog.example.test/auth/callback",
         ];
-        // oidc has no users file to keep the session store beside, so it
-        // must name one: without it sessions could not be ended.
         assert!(
             parse(&oidc).validate().is_err(),
-            "oidc needs a session store"
+            "oidc keeps its sessions in the catalog, so it needs the writer too"
         );
-        let mut with_store = oidc.to_vec();
-        with_store.extend(["--session-store", "/tmp/sessions"]);
-        assert!(parse(&with_store).validate().is_ok());
+        let mut with_writer = oidc.to_vec();
+        with_writer.extend(["--writer-url", writer]);
+        assert!(parse(&with_writer).validate().is_ok());
         let sub = Cli::parse_from([
             "pgokf-web",
-            "hash-password",
-            "--user",
+            "user",
+            "add",
+            "--name",
             "alice",
             "--role",
             "editor",
         ]);
-        assert!(matches!(sub.command, Some(Command::HashPassword { .. })));
+        assert!(matches!(
+            sub.command,
+            Some(Command::User(UserCommand::Add { .. }))
+        ));
         assert!(
             sub.database_url.is_none(),
-            "a maintenance command needs no catalog"
+            "a user command parses without the reader URL (it uses the writer at run time)"
         );
     }
 

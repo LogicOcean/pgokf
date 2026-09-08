@@ -211,7 +211,26 @@ async fn security_headers(request: Request, next: Next) -> Response {
 /// health probe: signing out ends access to the site.
 async fn authenticate(State(app): State<Shared>, mut request: Request, next: Next) -> Response {
     let peer = Session::peer_of(request.extensions());
-    let principal = app.auth.identify(request.headers(), peer);
+    // Static assets need no identity, so they never touch the identity
+    // store; everything else is resolved, and a store that cannot answer is
+    // an honest 503 - not a request quietly treated as anonymous.
+    let path = request.uri().path().to_owned();
+    let principal = if path.starts_with("/static/") {
+        None
+    } else {
+        match app.auth.identify(request.headers(), peer).await {
+            Ok(principal) => principal,
+            // The paths open to anyone grant nothing, so they proceed as
+            // anonymous through an outage: that is what lets sign-out still
+            // clear the cookie (and fail loudly on the deletion), sign-in
+            // still render, and the health probe still answer.
+            Err(error) if open_to_anyone(&path) => {
+                eprintln!("pgokf-web: identity lookup failed on an open path: {error:#}");
+                None
+            }
+            Err(error) => return identity_unavailable(error, &path),
+        }
+    };
     let mode = app.auth.mode();
     if mode != Mode::None && principal.is_none() && !open_to_anyone(request.uri().path()) {
         let path = request.uri().path();
@@ -237,6 +256,22 @@ async fn authenticate(State(app): State<Shared>, mut request: Request, next: Nex
         peer,
     });
     next.run(request).await
+}
+
+/// The response when the identity store could not be consulted for a path
+/// that needs an identity: the failure classified as every other catalog
+/// failure is (a busy pool is a 503), and shaped for the caller - the JSON
+/// envelope under `/api`, since this middleware sits outside the layer that
+/// would otherwise shape it.
+fn identity_unavailable(error: anyhow::Error, path: &str) -> Response {
+    let failure = AppError::from(error);
+    if path == "/api" || path.starts_with("/api/") {
+        let body = serde_json::json!({
+            "error": { "status": failure.status.as_u16(), "message": failure.message }
+        });
+        return (failure.status, Json(body)).into_response();
+    }
+    failure.into_response()
 }
 
 /// The paths a person who is not signed in may still reach.
@@ -550,7 +585,7 @@ pub(crate) struct Shell {
     pub can_upload: bool,
     pub can_review: bool,
     pub can_admin: bool,
-    /// Whether this server can end the session (a local users file).
+    /// Whether this server holds the session itself (`users` or `oidc`).
     pub can_sign_out: bool,
 }
 
@@ -1287,13 +1322,14 @@ pub(crate) struct PermissionView {
 struct AdminPage {
     shell: Shell,
     users: Vec<AdminUserView>,
-    /// Whether the users file is managed here (`users` mode).
+    /// Whether people are managed here (`users` mode: the catalog's
+    /// `pgokf_web.users`).
     users_managed_here: bool,
     /// Whether sessions can be ended here (a session store is attached),
     /// in any mode that issues them.
     sessions_revocable: bool,
     /// Everyone currently holding a live session, with how many - so an
-    /// admin can see whom there is to sign out where no users file lists
+    /// admin can see whom there is to sign out where no users table lists
     /// people (`oidc` mode).
     live_sessions: Vec<LiveSubject>,
     roles: Vec<String>,
@@ -2686,13 +2722,16 @@ async fn auth_callback(
     }
     match oidc.complete(&headers, &params.code, &params.state).await {
         Ok((person, groups, next)) => {
-            let cookie = oidc.sessions().open_session_with(
-                &person.subject,
-                Mode::Oidc,
-                String::new(),
-                Some(person.display.clone()),
-                groups,
-            )?;
+            let cookie = oidc
+                .sessions()
+                .open_session_with(
+                    &person.subject,
+                    Mode::Oidc,
+                    String::new(),
+                    Some(person.display.clone()),
+                    groups,
+                )
+                .await?;
             eprintln!(
                 "pgokf-web: {} signed in through {}",
                 person.actor(),
@@ -2742,10 +2781,12 @@ async fn login_submit(
     // Held across the verification only: Argon2id is expensive by design,
     // and this page is open to anyone.
     let permit = users.permit().await;
-    let verified = users.verify(&form.username, &form.password, client);
+    let verified = users.verify(&form.username, &form.password, client).await;
     drop(permit);
+    // A store that could not answer is a 503 here, not a failed sign-in.
+    let verified = verified?;
     if let Some(person) = verified {
-        let cookie = users.issue_cookie(&person)?;
+        let cookie = users.issue_cookie(&person).await?;
         let mut response = redirect(&safe_next(&form.next));
         if let Some(value) = cookie_header(&cookie) {
             response.headers_mut().insert(header::SET_COOKIE, value);
@@ -2782,7 +2823,7 @@ async fn logout(State(app): State<Shared>, headers: axum::http::HeaderMap) -> Pa
     // a copy taken elsewhere stops working now too. If that fails, say so -
     // this browser's cookie is still cleared, but a copy would keep working,
     // and a sign-out that quietly did not happen is worse than an error.
-    let ended = sessions.end_session_from(&headers, app.auth.mode());
+    let ended = sessions.end_session_from(&headers, app.auth.mode()).await;
     let mut response = match ended {
         Ok(()) => {
             let onward = app
@@ -3300,7 +3341,7 @@ async fn render_profile(
         role: person.role.id().to_owned(),
         actor: actor.clone(),
         how: match session.mode {
-            Mode::Users => "this site's own users file".to_owned(),
+            Mode::Users => "this site's own sign-in (people kept in the catalog)".to_owned(),
             Mode::Header => "the identity provider in front of this site".to_owned(),
             Mode::Oidc => app
                 .auth
@@ -3314,10 +3355,10 @@ async fn render_profile(
             .auth
             .sessions()
             .is_some_and(crate::auth::Sessions::revocable),
-        session_count: app
-            .auth
-            .sessions()
-            .and_then(|s| s.session_count_for(&person.subject)),
+        session_count: match app.auth.sessions() {
+            Some(sessions) => sessions.session_count_for(&person.subject).await?,
+            None => None,
+        },
         produced: app.db.produced_by(&actor, PROFILE_ROWS).await?,
         verified: app.db.verified_by(&actor, PROFILE_ROWS).await?,
         notice,
@@ -3348,7 +3389,7 @@ async fn profile_sessions_end(State(app): State<Shared>, session: Session) -> Pa
         .auth
         .sessions()
         .ok_or_else(|| AppError::not_found("This page"))?;
-    sessions.end_all_sessions_of(&person.subject)?;
+    sessions.end_all_sessions_of(&person.subject).await?;
     eprintln!(
         "pgokf-web: {} ended every session they held",
         person.actor()
@@ -3384,6 +3425,7 @@ async fn profile_password(
         .ok_or_else(|| AppError::not_found("This page"))?;
     let problem = if users
         .verify(&person.subject, &form.current, session.peer)
+        .await?
         .is_none()
     {
         Some("The current password is wrong.".to_owned())
@@ -3392,6 +3434,7 @@ async fn profile_password(
     } else {
         users
             .set_password(&person.subject, &form.new)
+            .await
             .err()
             .map(|e| e.to_string())
     };
@@ -3405,11 +3448,10 @@ async fn profile_password(
                 "/profile?notice={}",
                 filters::percent_encode("Password changed.")
             ));
-            if let Some(value) = users
-                .issue_cookie(&person)
-                .ok()
-                .and_then(|c| cookie_header(&c))
-            {
+            // The change itself succeeded; a cookie that cannot be issued is
+            // an honest error, not a silent bounce to the sign-in page.
+            let cookie = users.issue_cookie(&person).await?;
+            if let Some(value) = cookie_header(&cookie) {
                 response.headers_mut().insert(header::SET_COOKIE, value);
             }
             Ok(response)
@@ -3439,20 +3481,19 @@ async fn render_admin(
     notice: Option<String>,
     error: Option<String>,
 ) -> PageResult {
-    let users = app
-        .auth
-        .users()
-        .map(|u| {
-            u.list()
-                .into_iter()
-                .map(|(name, role)| AdminUserView {
-                    is_me: name == person.subject,
-                    name,
-                    role: role.id().to_owned(),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let users = match app.auth.users() {
+        Some(u) => u
+            .list()
+            .await?
+            .into_iter()
+            .map(|(name, role)| AdminUserView {
+                is_me: name == person.subject,
+                name,
+                role: role.id().to_owned(),
+            })
+            .collect(),
+        None => Vec::new(),
+    };
     html(&AdminPage {
         shell: Shell::new(app, session, "Administration", "admin"),
         users,
@@ -3461,18 +3502,19 @@ async fn render_admin(
             .auth
             .sessions()
             .is_some_and(crate::auth::Sessions::revocable),
-        live_sessions: app
-            .auth
-            .sessions()
-            .map(crate::auth::Sessions::live_subjects)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(subject, count)| LiveSubject {
-                is_me: subject == person.subject,
-                subject,
-                count,
-            })
-            .collect(),
+        live_sessions: match app.auth.sessions() {
+            Some(sessions) => sessions
+                .live_subjects()
+                .await?
+                .into_iter()
+                .map(|(subject, count)| LiveSubject {
+                    is_me: subject == person.subject,
+                    subject,
+                    count,
+                })
+                .collect(),
+            None => Vec::new(),
+        },
         roles: Role::all().iter().map(|r| r.id().to_owned()).collect(),
         bundles: app.db.admin_bundles().await?,
         config_json: serde_json::to_string_pretty(&app.db.config().await?).unwrap_or_default(),
@@ -3502,8 +3544,8 @@ struct AdminUserForm {
     password: String,
 }
 
-/// One change to the users file, as the admin form asks for it.
-fn change_user(
+/// One change to the people in the catalog, as the admin form asks for it.
+async fn change_user(
     users: &crate::auth::UsersAuth,
     person: &Principal,
     form: &AdminUserForm,
@@ -3512,7 +3554,7 @@ fn change_user(
     match form.action.as_str() {
         "add" => {
             let role = Role::parse(&form.role).ok_or_else(|| anyhow::anyhow!("choose a role"))?;
-            users.add_user(name, role, &form.password)?;
+            users.add_user(name, role, &form.password).await?;
             Ok(format!("Added {name}."))
         }
         "role" => {
@@ -3520,18 +3562,18 @@ fn change_user(
             if name == person.subject && !role.allows(Role::Admin) {
                 anyhow::bail!("you cannot take the admin role from yourself");
             }
-            users.set_role(name, role)?;
+            users.set_role(name, role).await?;
             Ok(format!("{name} is now {}.", role.id()))
         }
         "password" => {
-            users.set_password(name, &form.password)?;
+            users.set_password(name, &form.password).await?;
             Ok(format!("Password reset for {name}."))
         }
         "remove" => {
             if name == person.subject {
                 anyhow::bail!("you cannot remove yourself");
             }
-            users.remove_user(name)?;
+            users.remove_user(name).await?;
             Ok(format!("Removed {name}."))
         }
         other => anyhow::bail!("unknown action {other:?}"),
@@ -3563,7 +3605,7 @@ async fn admin_sessions_end(
             "Name the person to sign out, as their subject (one plain token).",
         ));
     }
-    sessions.end_all_sessions_of(name)?;
+    sessions.end_all_sessions_of(name).await?;
     eprintln!(
         "pgokf-web: {} ended every session of {name}",
         person.actor()
@@ -3583,7 +3625,7 @@ async fn admin_users(
     let users = app.auth.users().ok_or_else(|| {
         AppError::bad_request("People are managed by the identity provider, not here.")
     })?;
-    match change_user(users, &person, &form) {
+    match change_user(users, &person, &form).await {
         Ok(notice) => {
             eprintln!(
                 "pgokf-web: {} {} user {}",

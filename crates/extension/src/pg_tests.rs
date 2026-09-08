@@ -5782,6 +5782,77 @@ Steps for deploying widgets with the marmoset rollout strategy.\n";
         })
     }
 
+    #[pg_test]
+    fn web_identity_tables_are_the_writers_and_invisible_to_a_reader() {
+        // Arrange: one role granted only pgokf_writer, one granted only
+        // pgokf_reader, and a probe that reports the SQLSTATE a statement
+        // raises rather than aborting the test.
+        for (role, api_role) in [
+            ("pgokf_web_probe_writer", "pgokf_writer"),
+            ("pgokf_web_probe_reader", "pgokf_reader"),
+        ] {
+            Spi::run(&format!("CREATE ROLE {role}")).expect("probe role is creatable");
+            Spi::run(&format!("GRANT {api_role} TO {role}")).expect("api role is grantable");
+        }
+        Spi::run(
+            "CREATE FUNCTION pgokf_test_web_probe(statement text) RETURNS text
+             LANGUAGE plpgsql AS $probe$
+             BEGIN
+                 EXECUTE statement;
+                 RETURN 'ok';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("probe is creatable");
+        let probe = |statement: &str| -> String {
+            Spi::get_one_with_args::<String>("SELECT pgokf_test_web_probe($1)", &[statement.into()])
+                .expect("probe executes")
+                .expect("probe answers")
+        };
+
+        // Act: the writer adds a person and opens a session; the reader
+        // tries to look at either.
+        Spi::run("SET ROLE pgokf_web_probe_writer").expect("writer role is assumable");
+        let writer_adds_person = probe(
+            "INSERT INTO pgokf_web.users (name, role, password_hash)
+             VALUES ('probe', 'editor', '$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAAAAAAAA$x')",
+        );
+        let duplicate = probe(
+            "INSERT INTO pgokf_web.users (name, role, password_hash)
+             VALUES ('probe', 'viewer', 'h')",
+        );
+        let writer_opens_session = probe(
+            "INSERT INTO pgokf_web.sessions (nonce, subject, mode, expires_at)
+             VALUES ('n1', 'probe', 'users', now() + interval '1 hour')",
+        );
+        let writer_reads = probe("SELECT count(*) FROM pgokf_web.sessions");
+        let bad_role = probe(
+            "INSERT INTO pgokf_web.users (name, role, password_hash) VALUES ('x', 'owner', 'h')",
+        );
+        let bad_name = probe(
+            "INSERT INTO pgokf_web.users (name, role, password_hash) VALUES ('a b', 'viewer', 'h')",
+        );
+        Spi::run("RESET ROLE").expect("role resets");
+        Spi::run("SET ROLE pgokf_web_probe_reader").expect("reader role is assumable");
+        let reader_reads_users = probe("SELECT count(*) FROM pgokf_web.users");
+        let reader_reads_sessions = probe("SELECT count(*) FROM pgokf_web.sessions");
+        let reader_writes = probe("DELETE FROM pgokf_web.sessions");
+        Spi::run("RESET ROLE").expect("role resets");
+
+        // Assert
+        assert_eq!(writer_adds_person, "ok");
+        assert_eq!(duplicate, "23505", "a name is taken once");
+        assert_eq!(writer_opens_session, "ok");
+        assert_eq!(writer_reads, "ok");
+        assert_eq!(bad_role, "23514", "the role ladder is a CHECK constraint");
+        assert_eq!(bad_name, "23514", "a name is one plain token");
+        assert_eq!(reader_reads_users, "42501", "a reader never sees a hash");
+        assert_eq!(reader_reads_sessions, "42501", "nor a session identifier");
+        assert_eq!(reader_writes, "42501");
+    }
+
     /// Whether a skill row exists for one concept.
     fn skill_row_exists(bundle_id: i64, concept_id: &str) -> bool {
         Spi::get_one_with_args::<bool>(

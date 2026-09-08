@@ -11,8 +11,9 @@
 //! - `header`: an authenticating reverse proxy (oauth2-proxy, Authelia,
 //!   Pomerium, Caddy `forward_auth`) forwards the identity in request
 //!   headers; the headers are believed only from the proxy's own addresses.
-//! - `users`: a local users file (name, role, Argon2id hash) with a login
-//!   form and a signed session cookie, for a deployment without a proxy.
+//! - `users`: people kept in the catalog (`pgokf_web.users`: name, role,
+//!   Argon2id hash) with a login form and a signed session cookie, for a
+//!   deployment without a proxy.
 //!
 //! The `oidc` and `users` modes both end in a session this site signs, so
 //! [`Sessions`] owns that cookie and both hold one.
@@ -24,13 +25,13 @@
 //! documents it touches.
 
 use std::collections::HashMap;
-use std::fmt::{self, Write as _};
+use std::fmt;
 use std::net::{IpAddr, SocketAddr};
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::session_store::SessionStore;
+use crate::user_store::UserStore;
 
 use anyhow::{Context, Result, anyhow, bail};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
@@ -117,7 +118,7 @@ impl Principal {
     }
 }
 
-/// The longest subject accepted from a header or a users file.
+/// The longest subject accepted from a header, a provider, or a sign-in.
 const SUBJECT_MAX: usize = 128;
 
 /// A subject is one token of plain characters: letters, digits, and the
@@ -139,7 +140,7 @@ pub(crate) enum Mode {
     None,
     /// A trusted reverse proxy forwards the identity in headers.
     Header,
-    /// A local users file with a login form and a session cookie.
+    /// People kept in the catalog, with a login form and a session cookie.
     Users,
     /// An `OpenID` Connect provider this site signs people in against.
     Oidc,
@@ -396,20 +397,19 @@ fn header_text(headers: &HeaderMap, name: &HeaderName) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-/// One line of the users file.
+/// One person as the store holds them: their role and password hash.
 #[derive(Debug, Clone)]
 pub(crate) struct UserRecord {
-    role: Role,
-    hash: String,
+    pub(crate) role: Role,
+    pub(crate) hash: String,
 }
 
-/// The `users` mode: a users file, a session key, and the cookie rules.
-/// The file is re-read when it changes on disk, so adding, removing, or
-/// demoting a person takes effect on their next request.
+/// The `users` mode: the people in the catalog's `pgokf_web.users`, a
+/// session key, and the cookie rules. Every request looks a person up
+/// afresh, so adding, removing, or demoting someone takes effect at once.
 #[derive(Debug)]
 pub(crate) struct UsersAuth {
-    path: Option<PathBuf>,
-    loaded: RwLock<LoadedUsers>,
+    store: UserStore,
     sessions: Arc<Sessions>,
     /// Failed sign-ins per (user name, client address), for the throttle.
     /// Keyed on both, because keyed on the name alone anyone who knew a
@@ -443,7 +443,7 @@ const FREE_FAILURES: u32 = 5;
 const MAX_COOLDOWN: Duration = Duration::from_mins(15);
 /// Failures are forgotten after this long without one.
 const FAILURE_MEMORY: Duration = Duration::from_hours(1);
-/// The longest a name may be before it is refused unheard. A users-file
+/// The longest a name may be before it is refused unheard. A person's
 /// name is a short handle; a longer one is never valid, and counting it
 /// would let an unauthenticated flood grow the throttle map without bound.
 const MAX_NAME_LEN: usize = 256;
@@ -454,13 +454,6 @@ const MAX_TRACKED_FAILURES: usize = 10_000;
 /// A hash that is verified when the name is unknown, so an unknown name
 /// costs the same time as a wrong password (no name enumeration by timing).
 const DECOY_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAAAAAAAA$Y6DPgaHqK98VOJvF2yIP2m1TPVK0Nk2K7jBCqZqTdxU";
-
-/// The users file as last read, with the modification time it had.
-#[derive(Debug, Clone)]
-struct LoadedUsers {
-    modified: Option<SystemTime>,
-    users: HashMap<String, UserRecord>,
-}
 
 /// The session cookie's name.
 pub(crate) const SESSION_COOKIE: &str = "pgokf_session";
@@ -572,63 +565,89 @@ impl Sessions {
 
     /// Open the session cookie of a request, when it is this site's, was
     /// opened by `mode`, and has not expired.
-    pub(crate) fn read_session(&self, headers: &HeaderMap, mode: Mode) -> Option<SessionClaims> {
-        let claims: SessionClaims = self.open(&cookie_value(headers, SESSION_COOKIE)?)?;
-        let now = now_unix();
-        if claims.expires <= now || claims.mode != mode.id() {
-            return None;
-        }
+    pub(crate) async fn read_session(
+        &self,
+        headers: &HeaderMap,
+        mode: Mode,
+    ) -> Result<Option<SessionClaims>> {
+        let Some(claims) = self.open_claims(headers, mode) else {
+            return Ok(None);
+        };
         // A cookie that verifies but whose session has been ended - signed
         // out, revoked, or opened before a password change - is refused,
-        // whichever browser presents it.
+        // whichever browser presents it. A store that cannot answer is an
+        // error, not a refusal: the caller surfaces it rather than guess.
         if let Some(store) = &self.store
-            && !store.is_live(&claims.nonce, &claims.subject, now)
+            && !store
+                .is_live(&claims.nonce, &claims.subject, mode.id())
+                .await?
         {
-            return None;
+            return Ok(None);
         }
-        Some(claims)
+        Ok(Some(claims))
+    }
+
+    /// The claims of a request's session cookie when it is this site's, was
+    /// opened by `mode`, and has not expired - by the cookie alone, before
+    /// the store is asked whether the session is still live.
+    fn open_claims(&self, headers: &HeaderMap, mode: Mode) -> Option<SessionClaims> {
+        let claims: SessionClaims = self.open(&cookie_value(headers, SESSION_COOKIE)?)?;
+        (claims.expires > now_unix() && claims.mode == mode.id()).then_some(claims)
     }
 
     /// End the session a request presents, so no copy of its cookie works
-    /// again. A request with no live session of `mode` ends nothing.
+    /// again. The session is ended by the cookie's own claims, without first
+    /// asking whether it is live: a store that cannot be consulted must make
+    /// this fail loudly, never report a sign-out that did not happen.
     ///
     /// # Errors
     ///
-    /// The session store cannot be rewritten.
-    pub(crate) fn end_session_from(&self, headers: &HeaderMap, mode: Mode) -> Result<()> {
+    /// The catalog cannot be written.
+    pub(crate) async fn end_session_from(&self, headers: &HeaderMap, mode: Mode) -> Result<()> {
         let Some(store) = &self.store else {
             return Ok(());
         };
-        if let Some(claims) = self.read_session(headers, mode) {
-            store.remove(&claims.nonce, now_unix())?;
+        match self.open_claims(headers, mode) {
+            Some(claims) => store.remove(&claims.nonce).await,
+            None => Ok(()),
         }
-        Ok(())
     }
 
     /// End every session of `subject`, on every device.
     ///
     /// # Errors
     ///
-    /// The session store cannot be rewritten.
-    pub(crate) fn end_all_sessions_of(&self, subject: &str) -> Result<()> {
+    /// The catalog cannot be written.
+    pub(crate) async fn end_all_sessions_of(&self, subject: &str) -> Result<()> {
         match &self.store {
-            Some(store) => store.remove_all_for(subject, now_unix()),
+            Some(store) => store.remove_all_for(subject).await,
             None => Ok(()),
         }
     }
 
-    /// How many live sessions `subject` holds, when that is known.
-    pub(crate) fn session_count_for(&self, subject: &str) -> Option<usize> {
-        self.store
-            .as_ref()
-            .map(|store| store.count_for(subject, now_unix()))
+    /// How many live sessions `subject` holds; `None` when no store is
+    /// attached.
+    ///
+    /// # Errors
+    ///
+    /// The catalog cannot be read.
+    pub(crate) async fn session_count_for(&self, subject: &str) -> Result<Option<usize>> {
+        match self.store.as_ref() {
+            Some(store) => Ok(Some(store.count_for(subject).await?)),
+            None => Ok(None),
+        }
     }
 
     /// Everyone holding a live session, with how many, for the admin page.
-    pub(crate) fn live_subjects(&self) -> Vec<(String, usize)> {
-        self.store
-            .as_ref()
-            .map_or_else(Vec::new, |store| store.subjects(now_unix()))
+    ///
+    /// # Errors
+    ///
+    /// The catalog cannot be read.
+    pub(crate) async fn live_subjects(&self) -> Result<Vec<(String, usize)>> {
+        match self.store.as_ref() {
+            Some(store) => store.subjects().await,
+            None => Ok(Vec::new()),
+        }
     }
 
     /// A session cookie for `subject`, bound to `binding` (what the mode
@@ -636,14 +655,16 @@ impl Sessions {
     ///
     /// # Errors
     ///
-    /// The system random source failing.
-    pub(crate) fn open_session(
+    /// The catalog refusing to record the session, or the system random
+    /// source failing.
+    pub(crate) async fn open_session(
         &self,
         subject: &str,
         mode: Mode,
         binding: String,
     ) -> Result<String> {
         self.open_session_with(subject, mode, binding, None, Vec::new())
+            .await
     }
 
     /// A session cookie carrying what a provider told this site about the
@@ -651,8 +672,9 @@ impl Sessions {
     ///
     /// # Errors
     ///
-    /// The system random source failing.
-    pub(crate) fn open_session_with(
+    /// The catalog refusing to record the session, or the system random
+    /// source failing.
+    pub(crate) async fn open_session_with(
         &self,
         subject: &str,
         mode: Mode,
@@ -673,7 +695,9 @@ impl Sessions {
         // Recorded before the cookie is handed out: a session the store
         // does not know is refused, so an unrecorded one must never exist.
         if let Some(store) = &self.store {
-            store.add(&claims.nonce, subject, claims.expires, now)?;
+            store
+                .add(&claims.nonce, subject, mode.id(), claims.expires)
+                .await?;
         }
         Ok(self.cookie(SESSION_COOKIE, &self.seal(&claims)?, self.seconds))
     }
@@ -733,267 +757,76 @@ fn fingerprint(hash: &str) -> String {
     URL_SAFE_NO_PAD.encode(&digest[..12])
 }
 
-/// Write a private file whole: to a temporary beside it, mode `0600`,
-/// synced, then renamed into place, so a reader sees the old file or the
-/// new one and never a half-written one. The users file and the session
-/// store are both written this way.
-///
-/// # Errors
-///
-/// The temporary cannot be written or renamed.
-pub(crate) fn write_private(path: &Path, text: &str) -> Result<()> {
-    use std::io::Write as _;
-
-    // The temporary is `<name>.tmp` beside the target - appended, so `a.db`
-    // and `a` never share one - and created fresh: a link planted at that
-    // name is refused rather than written through, and a temporary left by
-    // a crash is cleared first so it cannot block every later write.
-    let mut temp_name = path
-        .file_name()
-        .context("a private file needs a file name")?
-        .to_os_string();
-    temp_name.push(".tmp");
-    let temp = path.with_file_name(temp_name);
-    let _ = std::fs::remove_file(&temp);
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let mut file = options
-        .open(&temp)
-        .with_context(|| format!("writing {}", temp.display()))?;
-    file.write_all(text.as_bytes())
-        .and_then(|()| file.sync_all())
-        .with_context(|| format!("writing {}", temp.display()))?;
-    drop(file);
-    std::fs::rename(&temp, path).with_context(|| format!("replacing {}", path.display()))?;
-    Ok(())
-}
-
 impl UsersAuth {
-    /// Load a users file: one `name:role:$argon2id$...` per line, `#`
-    /// comments and blank lines ignored.
-    pub(crate) fn load(path: &Path, sessions: Arc<Sessions>) -> Result<Self> {
-        let (modified, users) = Self::read_file(path)?;
-        if users.is_empty() {
-            bail!("the users file {} names no user", path.display());
-        }
-        Ok(Self {
-            path: Some(path.to_path_buf()),
-            loaded: RwLock::new(LoadedUsers { modified, users }),
+    /// The mode over `store`, signing sessions with `sessions`.
+    pub(crate) fn new(store: UserStore, sessions: Arc<Sessions>) -> Self {
+        Self {
+            store,
             sessions,
             failures: Mutex::new(HashMap::new()),
             verifying: tokio::sync::Semaphore::new(VERIFY_AT_ONCE),
-        })
-    }
-
-    /// The file's contents and the modification time they belong to. The
-    /// stamp is taken *before* the read, so a text older than its stamp is
-    /// impossible and a reload can never install a stale set under a fresh
-    /// stamp (and then stop noticing changes).
-    fn read_file(path: &Path) -> Result<(Option<SystemTime>, HashMap<String, UserRecord>)> {
-        let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading the users file {}", path.display()))?;
-        Ok((modified, Self::parse_users(&text)?))
-    }
-
-    /// Re-read the users file when its modification time moved. The reload
-    /// is installed only if nothing else moved the set meanwhile
-    /// (compare-and-install), so it never puts an older file back over a
-    /// change made in this process. A file that no longer parses is
-    /// reported and the last good one kept.
-    fn refresh(&self) {
-        let Some(path) = &self.path else {
-            return;
-        };
-        let on_disk = std::fs::metadata(path).and_then(|m| m.modified()).ok();
-        let Ok(seen) = self.loaded.read().map(|loaded| loaded.modified) else {
-            return;
-        };
-        if seen == on_disk {
-            return;
-        }
-        match Self::read_file(path) {
-            Ok((modified, users)) if !users.is_empty() => {
-                if let Ok(mut loaded) = self.loaded.write()
-                    && loaded.modified == seen
-                {
-                    *loaded = LoadedUsers { modified, users };
-                }
-            }
-            Ok(_) => eprintln!("pgokf-web: the users file names no user; keeping the last one"),
-            Err(error) => eprintln!("pgokf-web: the users file did not reload: {error:#}"),
         }
     }
 
-    /// One user's record, from the file as last read.
-    fn record(&self, name: &str) -> Option<UserRecord> {
-        self.refresh();
-        self.loaded.read().ok()?.users.get(name).cloned()
+    /// One person's record, looked up now. A catalog that cannot answer is
+    /// an error the caller surfaces (a 503), never a wrong password: an
+    /// outage must not admit anyone, and must not count against anyone.
+    async fn record(&self, name: &str) -> Result<Option<UserRecord>> {
+        self.store.record(name).await
     }
 
-    /// Every user with their role, sorted by name (for the admin page).
-    pub(crate) fn list(&self) -> Vec<(String, Role)> {
-        self.refresh();
-        let mut users: Vec<(String, Role)> = self
-            .loaded
-            .read()
-            .map(|loaded| {
-                loaded
-                    .users
-                    .iter()
-                    .map(|(n, r)| (n.clone(), r.role))
-                    .collect()
-            })
-            .unwrap_or_default();
-        users.sort();
-        users
-    }
-
-    /// Change the users file through `edit` and write it back atomically
-    /// (a temporary file in the same directory, then a rename), so a
-    /// half-written file is never read. The loaded state follows.
+    /// Everyone with their role, sorted by name (for the admin page).
     ///
     /// # Errors
     ///
-    /// No file path (a test instance), `edit` refusing, or the write failing.
-    pub(crate) fn mutate(
-        &self,
-        edit: impl FnOnce(&mut HashMap<String, UserRecord>) -> Result<()>,
-    ) -> Result<()> {
-        let path = self
-            .path
-            .as_ref()
-            .context("this users store is not backed by a file")?;
-        let mut guard = self
-            .loaded
-            .write()
-            .map_err(|_| anyhow!("the users file lock is poisoned"))?;
-        let mut users = guard.users.clone();
-        edit(&mut users)?;
-        let mut names: Vec<&String> = users.keys().collect();
-        names.sort();
-        let mut text = String::from("# pgokf-web users: name:role:argon2id-hash, one per line\n");
-        for name in names {
-            let record = &users[name];
-            let _ = writeln!(text, "{name}:{}:{}", record.role.id(), record.hash);
-        }
-        write_private(path, &text)?;
-        let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
-        *guard = LoadedUsers { modified, users };
-        Ok(())
+    /// The catalog cannot be read.
+    pub(crate) async fn list(&self) -> Result<Vec<(String, Role)>> {
+        self.store.list().await
     }
 
-    /// Replace the users file, atomically and privately.
-    ///
-    /// The file holds every Argon2id hash, so the replacement is created
-    /// readable only by its owner - `fs::write` would create it `0644` and
-    /// the rename would then hand the operator's `chmod 600` away on the
-    /// first edit through the Admin page - and is flushed to disk before it
-    /// takes the name, so a crash leaves either the old file or the new one.
     /// Add a person (a new name) with a hashed password.
-    pub(crate) fn add_user(&self, name: &str, role: Role, password: &str) -> Result<()> {
+    pub(crate) async fn add_user(&self, name: &str, role: Role, password: &str) -> Result<()> {
         let name = name.trim();
         if !valid_subject(name) {
             bail!("{name:?} is not a valid user name (letters, digits, . _ - @ +)");
         }
         let hash = validated_password(password).and_then(hash_password)?;
-        self.mutate(|users| {
-            if users.contains_key(name) {
-                bail!("{name} already exists");
-            }
-            users.insert(name.to_owned(), UserRecord { role, hash });
-            Ok(())
-        })
+        self.store.insert(name, role, &hash).await
     }
 
-    pub(crate) fn set_role(&self, name: &str, role: Role) -> Result<()> {
-        self.mutate(|users| {
-            let record = users
-                .get_mut(name)
-                .with_context(|| format!("{name} is not a user"))?;
-            record.role = role;
-            Ok(())
-        })
+    pub(crate) async fn set_role(&self, name: &str, role: Role) -> Result<()> {
+        self.store.set_role(name, role).await
     }
 
     /// Change a password. Every session the person holds is ended: the
     /// binding already stops them verifying, and the store forgets them too,
     /// so nothing lingers on disk. The caller re-issues the changer's own
     /// cookie so they stay signed in.
-    pub(crate) fn set_password(&self, name: &str, password: &str) -> Result<()> {
+    pub(crate) async fn set_password(&self, name: &str, password: &str) -> Result<()> {
         let hash = validated_password(password).and_then(hash_password)?;
-        self.mutate(|users| {
-            let record = users
-                .get_mut(name)
-                .with_context(|| format!("{name} is not a user"))?;
-            record.hash = hash;
-            Ok(())
-        })?;
-        // The new hash is already on disk, and the changed binding alone
-        // stops every earlier session verifying; this only tidies the store.
-        self.sessions.end_all_sessions_of(name).with_context(|| {
-            format!("the password of {name} was changed, but its earlier sessions could not be cleared from the session store")
-        })
+        self.store.set_hash(name, &hash).await?;
+        // The new hash is stored, and the changed binding alone stops every
+        // earlier session verifying; this also ends them in the catalog.
+        self.sessions
+            .end_all_sessions_of(name)
+            .await
+            .with_context(|| {
+                format!(
+                    "the password of {name} was changed, but their earlier sessions could \
+                     not be ended"
+                )
+            })
     }
 
     /// Remove a person, and end every session they hold.
-    pub(crate) fn remove_user(&self, name: &str) -> Result<()> {
-        self.mutate(|users| {
-            if users.remove(name).is_none() {
-                bail!("{name} is not a user");
-            }
-            if users.is_empty() {
-                bail!("the last user cannot be removed");
-            }
-            Ok(())
-        })?;
-        // The person is already gone from the file, which alone refuses
-        // their sessions; this only tidies the store.
-        self.sessions.end_all_sessions_of(name).with_context(|| {
-            format!(
-                "{name} was removed, but their sessions could not be cleared from the session store"
-            )
-        })
-    }
-
-    fn parse_users(text: &str) -> Result<HashMap<String, UserRecord>> {
-        let mut users = HashMap::new();
-        for (index, line) in text.lines().enumerate() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let mut parts = line.splitn(3, ':');
-            let (name, role, hash) = match (parts.next(), parts.next(), parts.next()) {
-                (Some(n), Some(r), Some(h)) => (n.trim(), r.trim(), h.trim()),
-                _ => bail!("users file line {}: expected name:role:hash", index + 1),
-            };
-            if !valid_subject(name) {
-                bail!(
-                    "users file line {}: {name:?} is not a valid user name",
-                    index + 1
-                );
-            }
-            let role = Role::parse(role)
-                .with_context(|| format!("users file line {}: unknown role {role:?}", index + 1))?;
-            PasswordHash::new(hash)
-                .map_err(|e| anyhow!("users file line {}: bad password hash ({e})", index + 1))?;
-            if users
-                .insert(
-                    name.to_owned(),
-                    UserRecord {
-                        role,
-                        hash: hash.to_owned(),
-                    },
-                )
-                .is_some()
-            {
-                bail!("users file line {}: {name:?} appears twice", index + 1);
-            }
-        }
-        Ok(users)
+    pub(crate) async fn remove_user(&self, name: &str) -> Result<()> {
+        self.store.remove(name).await?;
+        // The person is already gone, which alone refuses their sessions;
+        // this also ends them in the catalog.
+        self.sessions
+            .end_all_sessions_of(name)
+            .await
+            .with_context(|| format!("{name} was removed, but their sessions could not be ended"))
     }
 
     /// The person a sign-in names, when the password verifies.
@@ -1007,22 +840,24 @@ impl UsersAuth {
     /// many run at once: without it, one unauthenticated client opening
     /// enough connections turned "expensive to guess" into "expensive to
     /// serve", allocating gigabytes and stalling every other request.
-    pub(crate) fn verify(
+    pub(crate) async fn verify(
         &self,
         name: &str,
         password: &str,
         peer: Option<IpAddr>,
-    ) -> Option<Principal> {
+    ) -> Result<Option<Principal>> {
         let name = name.trim();
         if name.len() > MAX_NAME_LEN {
             // Never a valid user name; refuse without touching the throttle
             // map, so a flood of long names cannot grow it.
-            return None;
+            return Ok(None);
         }
         if self.throttled(name, peer) {
-            return None;
+            return Ok(None);
         }
-        let record = self.record(name);
+        // A catalog that cannot answer is surfaced, not counted: a failure
+        // here is neither a wrong password nor grounds for a cooldown.
+        let record = self.record(name).await?;
         let hash = record.as_ref().map_or(DECOY_HASH, |r| r.hash.as_str());
         let verified = PasswordHash::new(hash).is_ok_and(|parsed| {
             Argon2::default()
@@ -1032,15 +867,15 @@ impl UsersAuth {
         match record {
             Some(record) if verified => {
                 self.forget_failures(name, peer);
-                Some(Principal {
+                Ok(Some(Principal {
                     subject: name.to_owned(),
                     display: name.to_owned(),
                     role: record.role,
-                })
+                }))
             }
             _ => {
                 self.count_failure(name, peer);
-                None
+                Ok(None)
             }
         }
     }
@@ -1099,30 +934,40 @@ impl UsersAuth {
     }
 
     /// A `Set-Cookie` value that signs the person in.
-    pub(crate) fn issue_cookie(&self, principal: &Principal) -> Result<String> {
-        let binding = self
+    pub(crate) async fn issue_cookie(&self, principal: &Principal) -> Result<String> {
+        // The binding is the fingerprint of the password hash as stored
+        // *now* (a password change re-issues the cookie against the new
+        // one). A lookup that fails, or a person removed meanwhile, is an
+        // error - never a session bound to nothing.
+        let record = self
             .record(&principal.subject)
-            .map(|r| fingerprint(&r.hash))
-            .unwrap_or_default();
+            .await
+            .context("looking the person up to open their session")?
+            .with_context(|| format!("{} is no longer a user", principal.subject))?;
         self.sessions
-            .open_session(&principal.subject, Mode::Users, binding)
+            .open_session(&principal.subject, Mode::Users, fingerprint(&record.hash))
+            .await
     }
 
     /// The person a request's cookie names: a session this site signed,
-    /// not expired, still in the users file (whose role applies), and
-    /// opened under the password the file holds now.
-    fn identify(&self, headers: &HeaderMap) -> Option<Principal> {
-        let claims = self.sessions.read_session(headers, Mode::Users)?;
-        let record = self.record(&claims.subject)?;
+    /// not expired, still a person in the store (whose role applies), and
+    /// opened under the password the store holds now.
+    async fn identify(&self, headers: &HeaderMap) -> Result<Option<Principal>> {
+        let Some(claims) = self.sessions.read_session(headers, Mode::Users).await? else {
+            return Ok(None);
+        };
+        let Some(record) = self.record(&claims.subject).await? else {
+            return Ok(None);
+        };
         if claims.binding != fingerprint(&record.hash) {
             // The password changed since this session was opened.
-            return None;
+            return Ok(None);
         }
-        Some(Principal {
+        Ok(Some(Principal {
             subject: claims.subject.clone(),
             display: claims.subject,
             role: record.role,
-        })
+        }))
     }
 }
 
@@ -1137,7 +982,7 @@ fn validated_password(password: &str) -> Result<&str> {
     Ok(password)
 }
 
-/// Hash a password for the users file (Argon2id, default parameters, a
+/// Hash a password for storing (Argon2id, default parameters, a
 /// fresh 16-byte salt).
 pub(crate) fn hash_password(password: &str) -> Result<String> {
     let salt = random_bytes(16)?;
@@ -1194,13 +1039,23 @@ impl Authenticator {
         }
     }
 
-    /// The person a request comes from, if any.
-    pub(crate) fn identify(&self, headers: &HeaderMap, peer: Option<IpAddr>) -> Option<Principal> {
+    /// The person a request comes from, if any. An identity store that
+    /// cannot answer is an error - the request gets a 503, not an
+    /// anonymous principal.
+    ///
+    /// # Errors
+    ///
+    /// The catalog cannot be consulted.
+    pub(crate) async fn identify(
+        &self,
+        headers: &HeaderMap,
+        peer: Option<IpAddr>,
+    ) -> Result<Option<Principal>> {
         match self {
-            Authenticator::Anonymous => None,
-            Authenticator::Header(h) => h.identify(headers, peer),
-            Authenticator::Users(u) => u.identify(headers),
-            Authenticator::Oidc(o) => o.identify(headers),
+            Authenticator::Anonymous => Ok(None),
+            Authenticator::Header(h) => Ok(h.identify(headers, peer)),
+            Authenticator::Users(u) => u.identify(headers).await,
+            Authenticator::Oidc(o) => o.identify(headers).await,
         }
     }
 
@@ -1275,8 +1130,38 @@ pub(crate) fn cookie_header(value: &str) -> Option<HeaderValue> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn the_sign_in_throttle_cannot_be_used_to_lock_someone_out() {
+    /// Test conveniences over stores that cannot fail: the in-memory backends
+    /// never error, so a test reads better without the `Result` the production
+    /// seam carries for the catalog.
+    impl UsersAuth {
+        async fn verify_ok(
+            &self,
+            name: &str,
+            password: &str,
+            peer: Option<IpAddr>,
+        ) -> Option<Principal> {
+            self.verify(name, password, peer)
+                .await
+                .expect("the test store answers")
+        }
+
+        async fn identify_ok(&self, headers: &HeaderMap) -> Option<Principal> {
+            self.identify(headers)
+                .await
+                .expect("the test store answers")
+        }
+    }
+
+    impl Sessions {
+        async fn read_session_ok(&self, headers: &HeaderMap, mode: Mode) -> Option<SessionClaims> {
+            self.read_session(headers, mode)
+                .await
+                .expect("the test store answers")
+        }
+    }
+
+    #[tokio::test]
+    async fn the_sign_in_throttle_cannot_be_used_to_lock_someone_out() {
         // Arrange: a stranger hammers a name they know, from their own
         // address. Keyed on the name alone, that used to hold the account
         // shut for everyone, its owner included - and the owner shares the
@@ -1285,17 +1170,21 @@ mod tests {
         let stranger = Some("198.51.100.7".parse::<IpAddr>().expect("address"));
         let owner = Some("203.0.113.9".parse::<IpAddr>().expect("address"));
         for _ in 0..20 {
-            assert!(auth.verify("alice", "guess", stranger).is_none());
+            assert!(auth.verify_ok("alice", "guess", stranger).await.is_none());
         }
 
         // Act / Assert: the stranger is throttled, the owner is not.
         assert!(auth.cooldown("alice", stranger).is_some());
         assert!(auth.cooldown("alice", owner).is_none());
-        assert!(auth.verify("alice", "correct horse", owner).is_some());
+        assert!(
+            auth.verify_ok("alice", "correct horse", owner)
+                .await
+                .is_some()
+        );
     }
 
-    #[test]
-    fn an_over_long_name_is_refused_without_growing_the_throttle_map() {
+    #[tokio::test]
+    async fn an_over_long_name_is_refused_without_growing_the_throttle_map() {
         // Arrange: a flood of distinct megabyte-long names, the shape of an
         // unauthenticated memory-exhaustion attempt on the sign-in page.
         let auth = users_auth();
@@ -1304,7 +1193,7 @@ mod tests {
         // Act
         for i in 0..64 {
             let name = format!("{i}{}", "x".repeat(2 * 1024 * 1024));
-            assert!(auth.verify(&name, "guess", peer).is_none());
+            assert!(auth.verify_ok(&name, "guess", peer).await.is_none());
         }
 
         // Assert: nothing over the length limit was ever tracked.
@@ -1338,17 +1227,13 @@ mod tests {
         assert!(!valid_subject(&"x".repeat(129)));
     }
 
-    #[test]
-    fn an_ended_session_is_refused_in_every_browser_that_holds_its_cookie() {
+    #[tokio::test]
+    async fn an_ended_session_is_refused_in_every_browser_that_holds_its_cookie() {
         // Arrange: sessions recorded in a store; alice signed in on two
         // devices, bob on one.
-        let dir = std::env::temp_dir().join(format!("pgokf-sess-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("dir");
-        let store = SessionStore::open(&dir.join("sessions")).expect("store");
         let sessions = Sessions::new(vec![7_u8; 32], 3600, false)
             .expect("valid")
-            .with_store(store);
+            .with_store(SessionStore::memory());
         let present = |set_cookie: &str| -> HeaderMap {
             let pair = set_cookie.split(';').next().unwrap_or_default();
             let mut headers = HeaderMap::new();
@@ -1358,20 +1243,23 @@ mod tests {
         let a1 = present(
             &sessions
                 .open_session("alice", Mode::Users, String::new())
+                .await
                 .expect("a1"),
         );
         let a2 = present(
             &sessions
                 .open_session("alice", Mode::Users, String::new())
+                .await
                 .expect("a2"),
         );
         let b1 = present(
             &sessions
                 .open_session("bob", Mode::Users, String::new())
+                .await
                 .expect("b1"),
         );
         assert!(
-            sessions.read_session(&a1, Mode::Users).is_some(),
+            sessions.read_session_ok(&a1, Mode::Users).await.is_some(),
             "issued sessions verify"
         );
 
@@ -1379,12 +1267,16 @@ mod tests {
         // must die with it; then she signs out everywhere.
         sessions
             .end_session_from(&a1, Mode::Users)
+            .await
             .expect("ends one");
-        let a1_after_logout = sessions.read_session(&a1, Mode::Users).is_some();
-        let a2_after_logout = sessions.read_session(&a2, Mode::Users).is_some();
-        sessions.end_all_sessions_of("alice").expect("ends all");
-        let a2_after_all = sessions.read_session(&a2, Mode::Users).is_some();
-        let b1_after_all = sessions.read_session(&b1, Mode::Users).is_some();
+        let a1_after_logout = sessions.read_session_ok(&a1, Mode::Users).await.is_some();
+        let a2_after_logout = sessions.read_session_ok(&a2, Mode::Users).await.is_some();
+        sessions
+            .end_all_sessions_of("alice")
+            .await
+            .expect("ends all");
+        let a2_after_all = sessions.read_session_ok(&a2, Mode::Users).await.is_some();
+        let b1_after_all = sessions.read_session_ok(&b1, Mode::Users).await.is_some();
 
         // Assert
         assert!(
@@ -1394,24 +1286,33 @@ mod tests {
         assert!(a2_after_logout, "the other device stays signed in");
         assert!(!a2_after_all, "sign out everywhere ends the rest");
         assert!(b1_after_all, "another person is untouched");
-        assert_eq!(sessions.session_count_for("alice"), Some(0));
-        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            sessions
+                .session_count_for("alice")
+                .await
+                .expect("the test store answers"),
+            Some(0)
+        );
+        assert_eq!(
+            sessions
+                .live_subjects()
+                .await
+                .expect("the test store answers"),
+            vec![("bob".to_owned(), 1)],
+            "the admin page sees who is left"
+        );
     }
 
-    #[test]
-    fn a_validly_signed_cookie_the_store_never_recorded_is_refused() {
+    #[tokio::test]
+    async fn a_validly_signed_cookie_the_store_never_recorded_is_refused() {
         // Arrange: two signers sharing one secret - one without a store
         // (which mints without recording, as a leaked secret would let an
         // attacker do) and one with.
-        let dir = std::env::temp_dir().join(format!("pgokf-unrec-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("dir");
         let secret = vec![9_u8; 32];
         let storeless = Sessions::new(secret.clone(), 3600, false).expect("valid");
-        let store = SessionStore::open(&dir.join("sessions")).expect("store");
         let with_store = Sessions::new(secret, 3600, false)
             .expect("valid")
-            .with_store(store);
+            .with_store(SessionStore::memory());
         let present = |set_cookie: &str| -> HeaderMap {
             let pair = set_cookie.split(';').next().unwrap_or_default();
             let mut headers = HeaderMap::new();
@@ -1423,26 +1324,37 @@ mod tests {
         let unrecorded = present(
             &storeless
                 .open_session("alice", Mode::Users, String::new())
+                .await
                 .expect("mints"),
         );
-        let by_signature = storeless.read_session(&unrecorded, Mode::Users).is_some();
-        let by_store = with_store.read_session(&unrecorded, Mode::Users).is_some();
+        let by_signature = storeless
+            .read_session_ok(&unrecorded, Mode::Users)
+            .await
+            .is_some();
+        let by_store = with_store
+            .read_session_ok(&unrecorded, Mode::Users)
+            .await
+            .is_some();
         // Ending a session under the wrong mode ends nothing and is not an error.
         let recorded = present(
             &with_store
                 .open_session("bob", Mode::Users, String::new())
+                .await
                 .expect("mints"),
         );
         with_store
             .end_session_from(&recorded, Mode::Oidc)
+            .await
             .expect("wrong mode is a no-op");
-        let still_live = with_store.read_session(&recorded, Mode::Users).is_some();
+        let still_live = with_store
+            .read_session_ok(&recorded, Mode::Users)
+            .await
+            .is_some();
 
         // Assert
         assert!(by_signature, "the signature alone verifies it");
         assert!(!by_store, "but a session the store never issued is refused");
         assert!(still_live, "a wrong-mode end touches nothing");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1564,44 +1476,68 @@ mod tests {
         assert!(RoleMapping::parse("g=owner", Role::Viewer).is_err());
     }
 
+    /// A `users` mode over in-memory stores holding `people` (name, role,
+    /// password), signing with `secret`. Production keeps both in the
+    /// catalog; the seam under test is the same.
+    fn users_auth_over(people: &[(&str, Role, &str)], secret: Vec<u8>) -> UsersAuth {
+        let store = UserStore::memory(people.iter().map(|(name, role, password)| {
+            (
+                (*name).to_owned(),
+                UserRecord {
+                    role: *role,
+                    hash: hash_password(password).expect("hashes"),
+                },
+            )
+        }));
+        let sessions = Sessions::new(secret, 3600, false)
+            .expect("valid")
+            .with_store(SessionStore::memory());
+        UsersAuth::new(store, Arc::new(sessions))
+    }
+
     fn users_auth_with(secret: Vec<u8>) -> UsersAuth {
-        let hash = hash_password("correct horse").expect("hashes");
-        let text = format!("# people\nalice:editor:{hash}\n\nbob:viewer:{hash}\n");
-        UsersAuth {
-            path: None,
-            loaded: RwLock::new(LoadedUsers {
-                modified: None,
-                users: UsersAuth::parse_users(&text).expect("parses"),
-            }),
-            sessions: Arc::new(Sessions::new(secret, 3600, false).expect("valid")),
-            failures: Mutex::new(HashMap::new()),
-            verifying: tokio::sync::Semaphore::new(VERIFY_AT_ONCE),
-        }
+        users_auth_over(
+            &[
+                ("alice", Role::Editor, "correct horse"),
+                ("bob", Role::Viewer, "correct horse"),
+            ],
+            secret,
+        )
     }
 
     fn users_auth() -> UsersAuth {
         users_auth_with(vec![7_u8; 32])
     }
 
-    #[test]
-    fn users_file_passwords_verify_and_sessions_round_trip_through_the_cookie() {
+    fn cookie_headers(set_cookie: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(set_cookie.split(';').next().unwrap()).unwrap(),
+        );
+        headers
+    }
+
+    #[tokio::test]
+    async fn passwords_verify_and_sessions_round_trip_through_the_cookie() {
         // Arrange
         let auth = users_auth();
 
         // Act
         let alice = auth
-            .verify("alice", "correct horse", None)
+            .verify_ok("alice", "correct horse", None)
+            .await
             .expect("verifies");
-        let wrong = auth.verify("alice", "wrong", None);
-        let nobody = auth.verify("carol", "correct horse", None);
-        let cookie = auth.issue_cookie(&alice).expect("issues");
+        let wrong = auth.verify_ok("alice", "wrong", None).await;
+        let nobody = auth.verify_ok("carol", "correct horse", None).await;
+        let cookie = auth.issue_cookie(&alice).await.expect("issues");
         let mut headers = HeaderMap::new();
         let value = cookie.split(';').next().unwrap();
         headers.insert(
             header::COOKIE,
             HeaderValue::from_str(&format!("theme=dark; {value}")).unwrap(),
         );
-        let back = auth.identify(&headers).expect("identified");
+        let back = auth.identify_ok(&headers).await.expect("identified");
 
         // Assert
         assert_eq!(alice.role, Role::Editor);
@@ -1612,18 +1548,19 @@ mod tests {
         assert_eq!(
             back.role,
             Role::Editor,
-            "the role comes from the file, not the cookie"
+            "the role comes from the store, not the cookie"
         );
     }
 
-    #[test]
-    fn tampered_or_foreign_session_cookies_identify_nobody() {
+    #[tokio::test]
+    async fn tampered_or_foreign_session_cookies_identify_nobody() {
         // Arrange
         let auth = users_auth();
         let alice = auth
-            .verify("alice", "correct horse", None)
+            .verify_ok("alice", "correct horse", None)
+            .await
             .expect("verifies");
-        let cookie = auth.issue_cookie(&alice).expect("issues");
+        let cookie = auth.issue_cookie(&alice).await.expect("issues");
         let value = cookie.split(';').next().unwrap().to_owned();
         let (payload, tag) = value
             .trim_start_matches("pgokf_session=")
@@ -1640,121 +1577,93 @@ mod tests {
         real.insert(header::COOKIE, HeaderValue::from_str(&value).unwrap());
 
         // Act / Assert
-        assert!(auth.identify(&headers).is_none(), "a bad signature");
-        assert!(other.identify(&real).is_none(), "another server's secret");
-        assert!(auth.identify(&HeaderMap::new()).is_none());
-    }
-
-    #[test]
-    fn users_files_are_validated_line_by_line() {
-        // Arrange
-        let hash = hash_password("pw").expect("hashes");
-
-        // Act / Assert
         assert!(
-            UsersAuth::parse_users(&format!("alice:editor:{hash}\nalice:viewer:{hash}\n")).is_err()
+            auth.identify_ok(&headers).await.is_none(),
+            "a bad signature"
         );
-        assert!(UsersAuth::parse_users("alice:editor\n").is_err());
-        assert!(UsersAuth::parse_users(&format!("alice:owner:{hash}\n")).is_err());
-        assert!(UsersAuth::parse_users("alice:editor:not-a-hash\n").is_err());
-        assert!(UsersAuth::parse_users(&format!("al ice:editor:{hash}\n")).is_err());
-        assert_eq!(
-            UsersAuth::parse_users("# nobody\n\n")
-                .expect("parses")
-                .len(),
-            0
+        assert!(
+            other.identify_ok(&real).await.is_none(),
+            "another server's secret"
         );
+        assert!(auth.identify_ok(&HeaderMap::new()).await.is_none());
     }
 
-    #[test]
-    fn a_changed_users_file_is_reloaded_on_the_next_lookup() {
-        // Arrange: a file with alice, loaded; then rewritten without her.
-        let dir = std::env::temp_dir().join(format!("pgokf-users-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let path = dir.join("users");
-        let hash = hash_password("pw").expect("hashes");
-        std::fs::write(&path, format!("alice:approver:{hash}\n")).expect("write");
-        let auth = UsersAuth::load(
-            &path,
-            Arc::new(Sessions::new(vec![7_u8; 32], 3600, false).expect("valid")),
-        )
-        .expect("loads");
-        assert_eq!(
-            auth.verify("alice", "pw", None).map(|p| p.role),
-            Some(Role::Approver)
-        );
+    #[tokio::test]
+    async fn a_role_change_takes_effect_on_the_next_lookup() {
+        // Arrange: alice is an approver, and holds a session.
+        let auth = users_auth_over(&[("alice", Role::Approver, "pw")], vec![7_u8; 32]);
+        let alice = auth.verify_ok("alice", "pw", None).await.expect("verifies");
+        let headers = cookie_headers(&auth.issue_cookie(&alice).await.expect("issues"));
+        let before = auth.identify_ok(&headers).await.map(|p| p.role);
 
-        // Act: demote alice; make sure the mtime moves.
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        std::fs::write(&path, format!("alice:viewer:{hash}\n")).expect("rewrite");
-        let later = SystemTime::now() + std::time::Duration::from_secs(5);
-        std::fs::File::options()
-            .write(true)
-            .open(&path)
-            .and_then(|f| f.set_modified(later))
-            .expect("touch");
+        // Act: demote her - the cookie is untouched.
+        auth.set_role("alice", Role::Viewer).await.expect("demotes");
 
-        // Assert
+        // Assert: the role is looked up on every request, never carried.
+        assert_eq!(before, Some(Role::Approver));
         assert_eq!(
-            auth.verify("alice", "pw", None).map(|p| p.role),
+            auth.identify_ok(&headers).await.map(|p| p.role),
             Some(Role::Viewer)
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn the_users_file_is_managed_in_place() {
+    #[tokio::test]
+    async fn people_are_managed_in_the_store() {
         // Arrange
-        let dir = std::env::temp_dir().join(format!("pgokf-users-admin-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let path = dir.join("users");
-        let hash = hash_password("pw").expect("hashes");
-        std::fs::write(&path, format!("alice:admin:{hash}\n")).expect("write");
-        let auth = UsersAuth::load(
-            &path,
-            Arc::new(Sessions::new(vec![7_u8; 32], 3600, false).expect("valid")),
-        )
-        .expect("loads");
+        let auth = users_auth_over(&[("alice", Role::Admin, "pw")], vec![7_u8; 32]);
 
         // Act
         auth.add_user("bob", Role::Uploader, "a long enough password")
+            .await
             .expect("adds");
-        let short = auth.add_user("carol", Role::Viewer, "short");
-        let duplicate = auth.add_user("bob", Role::Viewer, "another long password");
-        auth.set_role("bob", Role::Editor).expect("promotes");
+        let short = auth.add_user("carol", Role::Viewer, "short").await;
+        let duplicate = auth
+            .add_user("bob", Role::Viewer, "another long password")
+            .await;
+        let bad_name = auth
+            .add_user("al ice", Role::Viewer, "a long enough password")
+            .await;
+        auth.set_role("bob", Role::Editor).await.expect("promotes");
         auth.set_password("bob", "a different long password")
+            .await
             .expect("resets");
-        auth.remove_user("alice").expect("removes");
-        let last = auth.remove_user("bob");
+        auth.remove_user("alice").await.expect("removes");
+        let last = auth.remove_user("bob").await;
+        let nobody = auth.remove_user("carol").await;
 
         // Assert
-        assert!(short.is_err() && duplicate.is_err());
-        assert_eq!(auth.list(), vec![("bob".to_owned(), Role::Editor)]);
+        assert!(short.is_err() && duplicate.is_err() && bad_name.is_err());
+        assert_eq!(
+            auth.list().await.expect("lists"),
+            vec![("bob".to_owned(), Role::Editor)]
+        );
         assert!(
-            auth.verify("bob", "a different long password", None)
+            auth.verify_ok("bob", "a different long password", None)
+                .await
                 .is_some()
         );
-        assert!(auth.verify("bob", "a long enough password", None).is_none());
+        assert!(
+            auth.verify_ok("bob", "a long enough password", None)
+                .await
+                .is_none()
+        );
         assert!(last.is_err(), "the last user stays");
-        let text = std::fs::read_to_string(&path).expect("reads");
-        assert!(text.contains("bob:editor:$argon2id$"), "{text}");
-        assert!(!text.contains("alice"));
-        let _ = std::fs::remove_dir_all(&dir);
+        assert!(nobody.is_err(), "removing nobody is an error");
     }
 
-    #[test]
-    fn repeated_failures_earn_a_cooldown_and_a_success_clears_it() {
+    #[tokio::test]
+    async fn repeated_failures_earn_a_cooldown_and_a_success_clears_it() {
         // Arrange
         let auth = users_auth();
 
         // Act: five free failures, then the sixth starts the cooldown.
         for _ in 0..FREE_FAILURES {
-            assert!(auth.verify("alice", "wrong", None).is_none());
+            assert!(auth.verify_ok("alice", "wrong", None).await.is_none());
         }
         assert!(auth.cooldown("alice", None).is_none(), "still free");
-        assert!(auth.verify("alice", "wrong", None).is_none());
+        assert!(auth.verify_ok("alice", "wrong", None).await.is_none());
         let waiting = auth.cooldown("alice", None);
-        let refused_even_when_right = auth.verify("alice", "correct horse", None);
+        let refused_even_when_right = auth.verify_ok("alice", "correct horse", None).await;
 
         // Assert
         assert!(waiting.is_some(), "a cooldown started");
@@ -1763,68 +1672,160 @@ mod tests {
             "not checked during the cooldown"
         );
         assert!(
-            auth.verify("bob", "correct horse", None).is_some(),
+            auth.verify_ok("bob", "correct horse", None).await.is_some(),
             "other names are unaffected"
         );
         auth.forget_failures("alice", None);
-        assert!(auth.verify("alice", "correct horse", None).is_some());
+        assert!(
+            auth.verify_ok("alice", "correct horse", None)
+                .await
+                .is_some()
+        );
         assert!(
             auth.cooldown("alice", None).is_none(),
             "a success clears the record"
         );
         assert!(
-            auth.verify("nobody", "x", None).is_none(),
+            auth.verify_ok("nobody", "x", None).await.is_none(),
             "an unknown name costs a verification too"
         );
     }
 
-    #[test]
-    fn a_changed_password_ends_the_sessions_opened_before_it() {
+    #[tokio::test]
+    async fn a_changed_password_ends_the_sessions_opened_before_it() {
         // Arrange
-        let dir = std::env::temp_dir().join(format!("pgokf-users-fp-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let path = dir.join("users");
-        std::fs::write(
-            &path,
-            format!(
-                "alice:editor:{}\n",
-                hash_password("first password").unwrap()
-            ),
-        )
-        .expect("write");
-        let auth = UsersAuth::load(
-            &path,
-            Arc::new(Sessions::new(vec![7_u8; 32], 3600, false).expect("valid")),
-        )
-        .expect("loads");
+        let auth = users_auth_over(&[("alice", Role::Editor, "first password")], vec![7_u8; 32]);
         let alice = auth
-            .verify("alice", "first password", None)
+            .verify_ok("alice", "first password", None)
+            .await
             .expect("verifies");
-        let cookie = auth.issue_cookie(&alice).expect("issues");
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::COOKIE,
-            HeaderValue::from_str(cookie.split(';').next().unwrap()).unwrap(),
-        );
-        assert!(auth.identify(&headers).is_some());
+        let headers = cookie_headers(&auth.issue_cookie(&alice).await.expect("issues"));
+        assert!(auth.identify_ok(&headers).await.is_some());
 
         // Act
         auth.set_password("alice", "second password!")
+            .await
             .expect("changes");
 
         // Assert
-        assert!(auth.identify(&headers).is_none(), "the old session is over");
-        let again = auth
-            .verify("alice", "second password!", None)
-            .expect("verifies");
-        let fresh = auth.issue_cookie(&again).expect("issues");
-        let mut fresh_headers = HeaderMap::new();
-        fresh_headers.insert(
-            header::COOKIE,
-            HeaderValue::from_str(fresh.split(';').next().unwrap()).unwrap(),
+        assert!(
+            auth.identify_ok(&headers).await.is_none(),
+            "the old session is over"
         );
-        assert!(auth.identify(&fresh_headers).is_some());
-        let _ = std::fs::remove_dir_all(&dir);
+        let again = auth
+            .verify_ok("alice", "second password!", None)
+            .await
+            .expect("verifies");
+        let fresh = cookie_headers(&auth.issue_cookie(&again).await.expect("issues"));
+        assert!(auth.identify_ok(&fresh).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_stored_hash_refuses_without_panicking() {
+        // Arrange: a person whose stored hash is not a PHC string at all.
+        let store = UserStore::memory([(
+            "alice".to_owned(),
+            UserRecord {
+                role: Role::Viewer,
+                hash: "not-a-hash".to_owned(),
+            },
+        )]);
+        let sessions = Sessions::new(vec![7_u8; 32], 3600, false)
+            .expect("valid")
+            .with_store(SessionStore::memory());
+        let auth = UsersAuth::new(store, Arc::new(sessions));
+
+        // Act / Assert: refused, and nothing panics.
+        assert!(auth.verify_ok("alice", "anything", None).await.is_none());
+    }
+
+    /// A pool that no server answers: connecting is lazy, so it builds, and
+    /// the first statement fails at once. What every `Pg` store does then is
+    /// the seam under test.
+    fn dead_db() -> crate::db::Db {
+        crate::db::Db::connect(&crate::db::DbConfig {
+            database_url: "postgresql://nobody:nothing@127.0.0.1:9/okf",
+            force_tls: false,
+            pool_size: 1,
+            tenant: None,
+            statement_timeout_ms: 1_000,
+        })
+        .expect("a pool builds without a server")
+    }
+
+    #[tokio::test]
+    async fn sign_out_is_loud_when_the_catalog_cannot_be_consulted() {
+        // Arrange: a cookie minted by a signer sharing the secret, presented
+        // to a signer whose store is unreachable.
+        let secret = vec![3_u8; 32];
+        let minter = Sessions::new(secret.clone(), 3600, false).expect("valid");
+        let dead = Sessions::new(secret, 3600, false)
+            .expect("valid")
+            .with_store(SessionStore::Pg(dead_db()));
+        let headers = cookie_headers(
+            &minter
+                .open_session("alice", Mode::Users, String::new())
+                .await
+                .expect("mints"),
+        );
+
+        // Act
+        let ended = dead.end_session_from(&headers, Mode::Users).await;
+        let read = dead.read_session(&headers, Mode::Users).await;
+
+        // Assert: neither a silent success nor a silent refusal - errors,
+        // which the handlers turn into a 500 (cookie still cleared) or a 503.
+        assert!(
+            ended.is_err(),
+            "sign-out must not report a deletion it could not make"
+        );
+        assert!(
+            read.is_err(),
+            "a session the store cannot confirm is neither admitted nor refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_catalog_outage_is_an_error_and_earns_no_cooldown() {
+        // Arrange
+        let sessions = Sessions::new(vec![3_u8; 32], 3600, false)
+            .expect("valid")
+            .with_store(SessionStore::Pg(dead_db()));
+        let auth = UsersAuth::new(UserStore::Pg(dead_db()), Arc::new(sessions));
+
+        // Act: more attempts than the free allowance, all against an outage.
+        let mut outcomes = Vec::new();
+        for _ in 0..=FREE_FAILURES {
+            outcomes.push(auth.verify("alice", "pw", None).await);
+        }
+
+        // Assert: every attempt is an error (a 503 upstream), none a wrong
+        // password, and nothing was counted against the name.
+        assert!(outcomes.iter().all(Result::is_err));
+        assert!(
+            auth.cooldown("alice", None).is_none(),
+            "an outage earns no cooldown"
+        );
+        assert!(auth.failures.lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn issue_cookie_never_mints_a_session_bound_to_nothing() {
+        // Arrange: one store unreachable, one that has never heard of alice.
+        let alice = Principal {
+            subject: "alice".to_owned(),
+            display: "alice".to_owned(),
+            role: Role::Viewer,
+        };
+        let unreachable = UsersAuth::new(
+            UserStore::Pg(dead_db()),
+            Arc::new(Sessions::new(vec![3_u8; 32], 3600, false).expect("valid")),
+        );
+        let without_alice = users_auth_over(&[("bob", Role::Viewer, "pw")], vec![3_u8; 32]);
+
+        // Act / Assert: an error both times, never a cookie with an empty binding.
+        assert!(unreachable.issue_cookie(&alice).await.is_err());
+        assert!(without_alice.issue_cookie(&alice).await.is_err());
     }
 
     #[test]

@@ -1403,7 +1403,38 @@ Readers hold `SELECT` on all eleven public projection tables: `pgokf.bundles`,
 writes go through the `SECURITY DEFINER` sync/admin functions; no role has
 direct DML. The four administrator-only `pgokf_private` state tables (`config`,
 `sync_log`, `sync_log_change`, `access_log`) are reachable only through the
-config and `list_*` functions.
+config and `list_*` functions. The two `pgokf_web` tables (`users`, `sessions`)
+hold the web UI's identity state - the people its `users` mode signs in and
+the sessions it has issued - and are the one exception to "no direct DML":
+`pgokf_writer` holds `SELECT`, `INSERT`, `UPDATE`, and `DELETE` on both, so
+`pgokf-web` reads and writes them through its writer connection, while
+`pgokf_reader` has no access at all (a reader must never see a password hash
+or a session identifier). The extension owns them but never reads them; they
+are not tenant-scoped.
+
+### `pgokf_web.users`
+
+One person the web UI's `users` identity mode can sign in.
+
+| Column | Type | Notes |
+| ------ | ---- | ----- |
+| `name` | `text` | Primary key: the sign-in name, one plain token (`^[A-Za-z0-9._@+-]{1,128}$`), also the person's OKF actor `human:<name>`. |
+| `role` | `text` | `viewer`, `uploader`, `editor`, `approver`, or `admin` (a `CHECK`); read on every request, so a change takes effect at once. |
+| `password_hash` | `text` | An Argon2id PHC string; a fingerprint of it is bound into each session, so a changed password ends earlier sessions. |
+| `created_at` | `timestamptz` | When the person was added. |
+| `updated_at` | `timestamptz` | When the role or password last changed. |
+
+### `pgokf_web.sessions`
+
+One session the web UI has issued and not yet ended (`users` or `oidc` mode).
+
+| Column | Type | Notes |
+| ------ | ---- | ----- |
+| `nonce` | `text` | Primary key: the random identifier the signed cookie carries. A cookie whose nonce is not here is refused. |
+| `subject` | `text` | Whose session: the `users`-mode name, or the provider's subject claim. Indexed. |
+| `mode` | `text` | `users` or `oidc` (a `CHECK`); a mode never honours the other's sessions. |
+| `expires_at` | `timestamptz` | When the session ends by itself; expired rows are pruned as sessions are opened. Indexed. |
+| `created_at` | `timestamptz` | When the person signed in. |
 
 ### `pgokf.bundles`
 

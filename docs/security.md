@@ -365,6 +365,20 @@ caller first. Readers can observe the effective policy through `get_config()`
 and the sync history through `list_sync_log` / `list_sync_changes`, but cannot
 read or write the tables directly; `list_access_log` stays admin-only.
 
+`pgokf_web` holds the web UI's identity state - `users` (the people a local
+sign-in knows, with Argon2id password hashes) and `sessions` (the sessions
+the UI has issued and not yet ended). The extension owns the tables so they
+are transactional, shared by every UI instance, and dumped with the catalog,
+but never reads them; `USAGE` and DML are granted to `pgokf_writer` only
+(so to `pgokf_admin`), and `pgokf_reader` has no access at all - a reader
+must not learn a password hash or a session identifier. The UI reaches them
+through a pool of its own on the writer URL, which the `users` and `oidc`
+modes therefore require. Both tables are carried by `pg_dump`: a backup
+holds password hashes (as any credential store does) and live session
+identifiers, which are useless without the site's session secret and end at
+their expiry regardless - so treat a backup as you would the catalog's
+credentials.
+
 ## Error handling and SQLSTATEs
 
 Failures surface as stable SQLSTATEs so clients can react programmatically rather
@@ -407,10 +421,10 @@ connections) against slow-client floods.
   mode are configured (see [compose-deployment.md](compose-deployment.md)).
   Roles are server-derived and checked in each handler; sessions are signed,
   `HttpOnly` cookies that name the mode that issued them, and every issued
-  session is also recorded server-side (`--session-store`), so a cookie the
-  server no longer lists is refused - signing out ends that session on every
-  device that holds a copy, "sign out everywhere" and an admin's "sign out"
-  end all of a person's, and a password change or removal ends them too.
+  session is also recorded in the catalog (`pgokf_web.sessions`), so a cookie
+  the catalog no longer lists is refused - signing out ends that session on
+  every device that holds a copy, "sign out everywhere" and an admin's "sign
+  out" end all of a person's, and a password change or removal ends them too.
   That is a lever, not a detector: a copied cookie keeps working until its
   session is ended or expires, which is why the cookie is `HttpOnly`,
   `SameSite=Lax`, and `Secure` behind TLS, and why the lifetime is bounded.

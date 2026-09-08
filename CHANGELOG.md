@@ -146,8 +146,8 @@ leaving a plain document.
   writer connection (`OKF_PG_WRITER_URL`) and an authentication mode
   (`OKF_WEB_AUTH`: `header` for an authenticating reverse proxy whose
   identity headers are believed only from its own addresses, or `users` for
-  a local Argon2id users file with a login form and a signed session
-  cookie), people work on content bundles by role: uploaders add Markdown
+  people kept in the catalog (Argon2id hashes) with a login form and a
+  signed session cookie), people work on content bundles by role: uploaders add Markdown
   documents (stamped with `generated`/`author` as `human:<name>` when
   absent), editors change or delete them with a validating preview (an edit
   sets aside earlier verifications and names the editor in `generated`),
@@ -157,8 +157,8 @@ leaving a plain document.
   typed into an upload or edit is set aside rather than believed, roles are
   a ladder (viewer, uploader, editor, approver, admin), state-changing
   requests are refused across sites, and the catalog must keep sources
-  (`store_source`). `pgokf-web hash-password` makes users-file lines; the
-  compose stack gained the matching `OKF_UI_*` settings.
+  (`store_source`). `pgokf-web user add` makes the first admin; the compose
+  stack gained the matching `OKF_UI_*` settings.
 - **`OKF_WEB_AUTH=oidc`: the UI as its own OAuth client.** A fourth
   implementation of the identity seam signs people in against any OpenID
   Connect provider (Entra ID, Okta, Keycloak, Auth0, Google, GitLab) with
@@ -177,8 +177,8 @@ leaving a plain document.
   (login page, static assets, and health probe excepted). Everyone signed in
   has a profile page (identity, what the role allows, documents produced and
   verified, a password change in `users` mode). The admin role has an admin
-  page: people (add, change role, reset password, remove; the users file is
-  rewritten in place and reloaded) and bundles (register a directory bundle,
+  page: people (add, change role, reset password, remove - each one
+  statement against `pgokf_web.users`, in effect at once) and bundles (register a directory bundle,
   refresh, enable or disable, retire or bring back, unregister). With
   `OKF_WEB_BUNDLES_DIR` pointing at the directory the database reads
   (mounted read-write), editors change documents of directory bundles in
@@ -353,15 +353,25 @@ leaving a plain document.
   was a signed value the server could verify but not forget, so a copy taken
   beforehand kept working until it expired, and nothing could end a session
   early - not even for a person disabled at the identity provider. Every
-  issued session is now recorded in a store beside the users file
-  (`--session-store` / `OKF_WEB_SESSION_STORE`; `oidc` mode must name it, and
-  the compose stack does), and a cookie the store does not list is refused.
-  Signing out ends that session everywhere, the profile page offers **sign
-  out everywhere**, the admin page can end anyone's sessions in either mode,
-  and a changed password or a removed person ends theirs.
-- The users file, which holds every password hash, was rewritten `0644` by
-  the Admin page whatever the operator had set. It is created `0600` and
-  synced before it takes the name.
+  issued session is now recorded in the catalog (`pgokf_web.sessions`), and
+  a cookie the catalog does not list is refused. Signing out ends that
+  session everywhere, the profile page offers **sign out everywhere**, the
+  admin page lists who holds live sessions and can end anyone's in either
+  mode, and a changed password or a removed person ends theirs. A session
+  is a lever, not a detector: a copied cookie works until its session is
+  ended or expires.
+- **The web UI's people and sessions live in the catalog.** Two
+  extension-owned tables, `pgokf_web.users` and `pgokf_web.sessions`, hold
+  the `users` mode's people and every live session of the `users` and
+  `oidc` modes; they are granted to `pgokf_writer` only (a reader never sees
+  a hash or a session identifier), transactional, shared by every UI
+  instance, and carried by `pg_dump`. The UI reaches them through a pool of
+  its own on the writer URL - never shared with the human workflow's long
+  resyncs, with a short statement budget, and probed at startup - so the
+  `users` and `oidc` modes require `OKF_PG_WRITER_URL`. A catalog that
+  cannot answer an identity lookup is a 503, never a wrong password or a
+  sign-out. `pgokf-web user add` / `user set-password` (the password read
+  from standard input) make and rescue people; the Admin page does the rest.
 - Security headers, the Content-Security-Policy included, now reach the
   responses the authentication and same-site layers produce themselves.
 - A built tree is written in full or not at all, cannot hold two paths that

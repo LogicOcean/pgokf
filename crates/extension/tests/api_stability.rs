@@ -114,9 +114,10 @@ const PUBLIC_TYPES: &[&str] = &[
     "reference_result",
 ];
 
-/// The 18 catalog tables, as fully-qualified `schema.table` identifiers.
+/// The 20 catalog tables, as fully-qualified `schema.table` identifiers.
 /// Fourteen are public (`pgokf`); the singleton policy row and the three
-/// admin-only history/audit logs live in the `pgokf_private` schema and are
+/// admin-only history/audit logs live in the `pgokf_private` schema; the
+/// web UI's people and sessions live in `pgokf_web` (writer-only). All are
 /// documented all the same.
 const CATALOG_TABLES: &[&str] = &[
     "pgokf.bundles",
@@ -137,6 +138,8 @@ const CATALOG_TABLES: &[&str] = &[
     "pgokf_private.sync_log",
     "pgokf_private.sync_log_change",
     "pgokf_private.access_log",
+    "pgokf_web.users",
+    "pgokf_web.sessions",
 ];
 
 /// The three public API roles created by `sql/bootstrap.sql`

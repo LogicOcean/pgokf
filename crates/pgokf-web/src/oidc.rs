@@ -319,19 +319,21 @@ impl OidcAuth {
     /// from the groups the session carries, so a change to the role map
     /// takes effect at once; a change to the person's groups at the
     /// provider takes effect when they sign in again.
-    pub(crate) fn identify(&self, headers: &HeaderMap) -> Option<Principal> {
-        let claims = self.sessions.read_session(headers, Mode::Oidc)?;
+    pub(crate) async fn identify(&self, headers: &HeaderMap) -> Result<Option<Principal>> {
+        let Some(claims) = self.sessions.read_session(headers, Mode::Oidc).await? else {
+            return Ok(None);
+        };
         if !valid_subject(&claims.subject) {
-            return None;
+            return Ok(None);
         }
-        Some(Principal {
+        Ok(Some(Principal {
             role: self.config.roles.role_for(&claims.groups),
             display: claims
                 .display
                 .clone()
                 .unwrap_or_else(|| claims.subject.clone()),
             subject: claims.subject,
-        })
+        }))
     }
 
     /// Where to send someone after this site's own session ends, when the
@@ -1061,13 +1063,14 @@ mod tests {
         assert!(constant_time_eq("", ""));
     }
 
-    #[test]
-    fn a_session_opened_in_one_mode_is_not_honoured_in_another() {
+    #[tokio::test]
+    async fn a_session_opened_in_one_mode_is_not_honoured_in_another() {
         // Arrange: one signing key, a server reconfigured between modes.
         let sessions = Sessions::new(vec![4_u8; 32], 3600, false).expect("valid");
         let mut headers = HeaderMap::new();
         let cookie = sessions
             .open_session("alice", Mode::Users, String::new())
+            .await
             .expect("opens");
         headers.insert(
             axum::http::header::COOKIE,
@@ -1076,9 +1079,19 @@ mod tests {
         );
 
         // Act / Assert
-        assert!(sessions.read_session(&headers, Mode::Users).is_some());
         assert!(
-            sessions.read_session(&headers, Mode::Oidc).is_none(),
+            sessions
+                .read_session(&headers, Mode::Users)
+                .await
+                .expect("no store is attached, so this cannot fail")
+                .is_some()
+        );
+        assert!(
+            sessions
+                .read_session(&headers, Mode::Oidc)
+                .await
+                .expect("no store is attached, so this cannot fail")
+                .is_none(),
             "the provider mode does not honour a users-mode session"
         );
     }

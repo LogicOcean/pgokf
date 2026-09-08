@@ -241,8 +241,8 @@ as JSON under `/api/` (`/api/health`, `/api/search?q=...`, `/api/bundles`,
 The UI is read-only until two things are set in `.env`: a writer connection
 (`OKF_UI_WRITER_URL`, the stack's writer role) and a way of knowing who is
 asking (`OKF_UI_AUTH=oidc` against your identity provider,
-`OKF_UI_AUTH=users` with a users file, or `OKF_UI_AUTH=header` behind a
-proxy that forwards the identity). The catalog must also keep
+`OKF_UI_AUTH=users` with people kept in the catalog, or `OKF_UI_AUTH=header`
+behind a proxy that forwards the identity). The catalog must also keep
 document sources:
 
 ```sh
@@ -250,21 +250,22 @@ docker compose exec -T db psql -U postgres -d okf -c "SELECT pgokf.set_config('s
 ```
 
 People then work on *content bundles* (bundles the catalog holds itself);
-a bundle mounted from `/bundles` stays read-only in the UI. Make a users
-file line per person (roles: `viewer`, `uploader`, `editor`, `approver`,
+a bundle mounted from `/bundles` stays read-only in the UI. People live in
+the catalog (`pgokf_web.users`, reached through `OKF_UI_WRITER_URL`, which
+the `users` and `oidc` modes therefore require). Make the first admin once
+the stack is up (roles: `viewer`, `uploader`, `editor`, `approver`,
 `admin`), never putting the password on a command line:
 
 ```sh
-mkdir -p ui-auth
-printf '%s' 'a long password' | docker compose run --rm -T ui pgokf-web hash-password --user alice --role admin >> ui-auth/users
-chown -R "${OKF_UI_UID:-10001}" ui-auth && chmod 700 ui-auth   # the UI writes it: the Admin page manages people
+printf '%s' 'a long password' | docker compose run --rm -T ui pgokf-web user add --name alice --role admin
 docker compose --profile ui up -d ui
 ```
 
-One admin is enough to start: the Admin page adds everyone else. Keep the
-passwords themselves elsewhere (a password manager, or a file outside
-`ui-auth/` with mode 600): the directory holds only the Argon2id hashes,
-and the file is re-read whenever it changes.
+One admin is enough to start: the Admin page adds everyone else, and
+`pgokf-web user set-password --name alice` is the way back in for a
+locked-out admin. Keep the passwords themselves elsewhere (a password
+manager): the catalog holds only the Argon2id hashes, which `pgokf_reader`
+cannot see.
 
 Uploaders add documents, editors change them (which sends them back to
 review), approvers record the human verification the trust tier derives
@@ -281,17 +282,18 @@ OKF_UI_UID=1000    # id -u of the directory's owner
 OKF_UI_GID=1000
 ```
 
-With `OKF_UI_AUTH=oidc` there is no users file: people sign in with your
-provider, and their groups become roles through `OKF_UI_ROLE_MAP`. Register
-`https://<this site>/auth/callback` with the provider, set
+With `OKF_UI_AUTH=oidc` there are no local people: everyone signs in with
+your provider, and their groups become roles through `OKF_UI_ROLE_MAP`.
+Register `https://<this site>/auth/callback` with the provider, set
 `OKF_UI_OIDC_ISSUER`, `OKF_UI_OIDC_CLIENT_ID`, `OKF_UI_OIDC_CLIENT_SECRET`,
 and `OKF_UI_OIDC_REDIRECT_URL`, and give the stack a
-`OKF_UI_SESSION_SECRET` as usual. Live sessions are recorded in
-`OKF_UI_SESSION_STORE` (default `/etc/pgokf/ui/sessions`, inside the same
-writable `ui-auth` mount the users file uses, so the directory must be owned
-by `OKF_UI_UID`); that is what lets signing out end a session on every
-device, and lets an admin end the sessions of someone you have disabled at
-the provider, instead of waiting for the cookie to expire.
+`OKF_UI_SESSION_SECRET` as usual. Live sessions are recorded in the catalog
+(`pgokf_web.sessions`, so this mode too needs `OKF_UI_WRITER_URL`; the UI then
+holds a small identity pool of its own - four connections - beside its reader
+pool and the two writer connections, which `max_connections` must allow); that is
+what lets signing out end a session on every device, and lets an admin end
+the sessions of someone you have disabled at the provider - the Admin page
+lists who holds one - instead of waiting for the cookie to expire.
 
 See the crate README for the roles and the security model.
 
