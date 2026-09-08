@@ -122,10 +122,16 @@ pub fn write_to_dir(plugin: &Plugin, dir: &Path, overwrite: bool) -> Result<Vec<
     Ok(written)
 }
 
+/// The prefix a file wears while it is staged beside its destination. A
+/// plugin file may not itself use it: its staging temp would otherwise land
+/// on the destination of the plugin's own `.okf-tmp-…` file, and the two
+/// would clobber each other in the rename pass. [`safe_relative`] refuses it.
+const STAGING_PREFIX: &str = ".okf-tmp-";
+
 /// Where a file is written before it takes its name: beside the
 /// destination, so the rename is on one filesystem.
 fn staging_path(target: &Path) -> PathBuf {
-    let mut name = std::ffi::OsString::from(".okf-tmp-");
+    let mut name = std::ffi::OsString::from(STAGING_PREFIX);
     name.push(target.file_name().unwrap_or_default());
     target.with_file_name(name)
 }
@@ -198,6 +204,7 @@ fn safe_relative(path: &str) -> Result<PathBuf> {
             || segment == "."
             || squared == ".."
             || segment.contains(':')
+            || segment.starts_with(STAGING_PREFIX)
         {
             return Err(anyhow!("refusing to write outside the workspace: {path:?}"));
         }
@@ -261,9 +268,37 @@ mod tests {
             "a\\..\\x.md",
             "C:/x.md",
             "a/x\u{0}.md",
+            // The reserved staging prefix: its temp would clobber a sibling.
+            "okf-knowledge/.okf-tmp-a.md",
+            ".okf-tmp-INDEX.md",
         ] {
             assert!(safe_relative(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_file_using_the_staging_prefix_is_refused_before_it_can_clobber_a_sibling() {
+        // Arrange: a plugin holding both `a.md` and `.okf-tmp-a.md` - the
+        // latter's destination is the former's staging temp, so writing them
+        // naively lost one file. It must be refused, whole, up front.
+        let dir = std::env::temp_dir().join(format!("pgokf-staging-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut clash = plugin();
+        clash.files[0].path = "okf-knowledge/a.md".to_owned();
+        clash.files.push(PluginFile {
+            path: "okf-knowledge/.okf-tmp-a.md".to_owned(),
+            bytes: b"DOTFILE".to_vec(),
+            sha256: String::new(),
+            executable: false,
+        });
+
+        // Act
+        let outcome = write_to_dir(&clash, &dir, true);
+
+        // Assert: refused, and nothing of the tree written.
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert!(walk(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

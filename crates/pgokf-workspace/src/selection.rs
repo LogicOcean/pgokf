@@ -554,83 +554,20 @@ pub async fn load_sources<C: GenericClient>(
 ) -> Result<()> {
     drop_packaged_resources(records);
     let mut vanished: Vec<bool> = vec![false; records.len()];
+    // A running total, checked as each record is loaded, so the ceiling
+    // bounds the work and the memory - not just the finished output. Without
+    // it a huge selection was read whole (and audit-logged, one row per
+    // member) before being refused.
+    let mut loaded: u64 = 0;
     for (index, record) in records.iter_mut().enumerate() {
-        if record.package.is_some() {
-            vanished[index] = !load_package(client, record).await?;
-            continue;
+        vanished[index] = !load_one(client, record).await?;
+        loaded = loaded.saturating_add(record_bytes(record));
+        if loaded > MAX_CONTENT_BYTES {
+            return Err(anyhow!(
+                "the selection loads more than {MAX_CONTENT_BYTES} bytes; a build takes at \
+                 most that. Narrow the selection."
+            ));
         }
-        if let Some(resource) = record.resource.clone() {
-            match resource_bytes(
-                client,
-                record.bundle_id,
-                &record.concept_id,
-                &resource.class,
-            )
-            .await?
-            {
-                Some(bytes) => {
-                    verify_sha256(&bytes, &resource.sha256, &record.concept_id)?;
-                    record.bytes = bytes;
-                    record.exact = true;
-                }
-                None => vanished[index] = true,
-            }
-            continue;
-        }
-        let source = client
-            .query_opt(
-                "SELECT pgokf.get_concept_source($1, $2)",
-                &[&record.bundle_id, &record.concept_id],
-            )
-            .await;
-        match source {
-            Ok(Some(row)) => {
-                record.bytes = row.try_get::<_, Option<Vec<u8>>>(0)?.unwrap_or_default();
-                record.exact = !record.bytes.is_empty();
-            }
-            // invalid_parameter_value: no source stored for this concept.
-            Err(error)
-                if error
-                    .as_db_error()
-                    .is_some_and(|e| e.code().code() == "22023") =>
-            {
-                record.exact = false;
-            }
-            Ok(None) => record.exact = false,
-            Err(error) => return Err(error).context("reading a concept's stored source"),
-        }
-        if !record.exact {
-            let body: Option<String> = client
-                .query_opt(
-                    "SELECT body_text FROM pgokf.concepts WHERE bundle_id = $1 AND id = $2",
-                    &[&record.bundle_id, &record.concept_id],
-                )
-                .await
-                .context("reading a concept's indexed text")?
-                .map(|row| row.try_get(0))
-                .transpose()?;
-            record.bytes = body
-                .map(|b| reconstruct(record, &b).into_bytes())
-                .unwrap_or_default();
-        }
-    }
-    let total: u64 = records
-        .iter()
-        .map(|r| {
-            let members: u64 = r.package.as_ref().map_or(0, |p| {
-                p.resources
-                    .iter()
-                    .map(|f| u64::try_from(f.bytes.len()).unwrap_or(u64::MAX))
-                    .sum()
-            });
-            u64::try_from(r.bytes.len()).unwrap_or(u64::MAX) + members
-        })
-        .sum();
-    if total > MAX_CONTENT_BYTES {
-        return Err(anyhow!(
-            "the selection loads {total} bytes; a build takes at most {MAX_CONTENT_BYTES}. \
-             Narrow the selection."
-        ));
     }
     let mut index = 0;
     records.retain(|r| {
@@ -684,6 +621,86 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
             let _ = write!(out, "{b:02x}");
             out
         })
+}
+
+/// Load one record's bytes: a skill package, a resource selected on its own,
+/// or any other concept from its stored source (or reconstructed from the
+/// indexed fields when the catalog keeps none). Returns `false` when the
+/// concept or resource vanished between resolving and loading, so the caller
+/// drops it.
+async fn load_one<C: GenericClient>(client: &C, record: &mut ConceptRecord) -> Result<bool> {
+    if record.package.is_some() {
+        return load_package(client, record).await;
+    }
+    if let Some(resource) = record.resource.clone() {
+        return match resource_bytes(
+            client,
+            record.bundle_id,
+            &record.concept_id,
+            &resource.class,
+        )
+        .await?
+        {
+            Some(bytes) => {
+                verify_sha256(&bytes, &resource.sha256, &record.concept_id)?;
+                record.bytes = bytes;
+                record.exact = true;
+                Ok(true)
+            }
+            None => Ok(false),
+        };
+    }
+    let source = client
+        .query_opt(
+            "SELECT pgokf.get_concept_source($1, $2)",
+            &[&record.bundle_id, &record.concept_id],
+        )
+        .await;
+    match source {
+        Ok(Some(row)) => {
+            record.bytes = row.try_get::<_, Option<Vec<u8>>>(0)?.unwrap_or_default();
+            record.exact = !record.bytes.is_empty();
+        }
+        // invalid_parameter_value: no source stored for this concept.
+        Err(error)
+            if error
+                .as_db_error()
+                .is_some_and(|e| e.code().code() == "22023") =>
+        {
+            record.exact = false;
+        }
+        Ok(None) => record.exact = false,
+        Err(error) => return Err(error).context("reading a concept's stored source"),
+    }
+    if !record.exact {
+        let body: Option<String> = client
+            .query_opt(
+                "SELECT body_text FROM pgokf.concepts WHERE bundle_id = $1 AND id = $2",
+                &[&record.bundle_id, &record.concept_id],
+            )
+            .await
+            .context("reading a concept's indexed text")?
+            .map(|row| row.try_get(0))
+            .transpose()?;
+        record.bytes = body
+            .map(|b| reconstruct(record, &b).into_bytes())
+            .unwrap_or_default();
+    }
+    Ok(true)
+}
+
+/// The bytes one loaded record contributes to the build: its own content
+/// plus, for a package, every resource it carries.
+fn record_bytes(record: &ConceptRecord) -> u64 {
+    let members: u64 = record.package.as_ref().map_or(0, |p| {
+        p.resources
+            .iter()
+            .map(|f| u64::try_from(f.bytes.len()).unwrap_or(u64::MAX))
+            .fold(0_u64, u64::saturating_add)
+    });
+    u64::try_from(record.bytes.len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(members)
 }
 
 /// Fill a skill record with its exact manifest and every resource's bytes.
