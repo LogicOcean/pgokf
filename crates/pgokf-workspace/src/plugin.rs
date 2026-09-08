@@ -9,6 +9,7 @@ use std::fmt::Write as _;
 use anyhow::{Result, anyhow};
 use serde::Serialize;
 use serde_json::{Value, json};
+use unicode_normalization::UnicodeNormalization as _;
 
 use crate::profile::{
     AGENT_PLUGIN_MCP_SCHEMA, AGENT_PLUGIN_SCHEMA, CustomHarness, EnvRef, McpFormat, McpSpec,
@@ -281,6 +282,29 @@ fn layout(profile: &Profile, name: &str) -> Layout {
     }
 }
 
+/// Add the lockfile, last of all, so its `files` can hash every other file
+/// of the tree - the index, the MCP entry, the guide, and `okf.sh`, which is
+/// the only executable one and was the only one nothing covered.
+fn append_lockfile(
+    files: &mut Vec<PluginFile>,
+    layout: &Layout,
+    name: &str,
+    options: &BuildOptions,
+    snapshot: &Snapshot,
+    entries: &[serde_json::Value],
+) {
+    let lock = lockfile(
+        name,
+        options.target,
+        options.harness.as_ref(),
+        &layout.root,
+        snapshot,
+        entries,
+        files,
+    );
+    files.push(file(layout.meta_path(LOCK_FILE), lock.into_bytes()));
+}
+
 /// The records a build was handed: there must be some, and each must carry
 /// the content it stands for.
 ///
@@ -436,6 +460,7 @@ pub fn assemble(
             ),
         );
     }
+    append_lockfile(&mut files, &layout, &name, options, snapshot, &entries);
     ensure_unique_paths(&files)?;
 
     Ok(Plugin {
@@ -750,28 +775,94 @@ fn tree_path(path: &str) -> Result<String> {
         })
         .collect();
     let segments: Vec<&str> = cleaned.split('/').collect();
-    if segments
-        .iter()
-        .any(|seg| seg.is_empty() || *seg == "." || *seg == "..")
-    {
+    if segments.iter().any(|seg| !safe_segment(seg)) {
         return Err(anyhow!("concept path {path:?} cannot be written as a file"));
     }
     Ok(cleaned)
 }
 
+/// Whether one path segment is safe to write on every platform.
+///
+/// Windows strips trailing spaces and dots from each component, so a
+/// segment of `".. "` becomes `..` there and climbs a directory - on the
+/// extractor's machine, not ours. Format characters are excluded too: they
+/// are not `char::is_control`, and a right-to-left override in the name of
+/// a file the tree marks executable is a plain deception.
+fn safe_segment(segment: &str) -> bool {
+    let squared = segment.trim_end_matches([' ', '.']);
+    !segment.is_empty()
+        && !squared.is_empty()
+        && squared != ".."
+        && segment != "."
+        && !segment
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '\u{200e}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
+}
+
 /// Two files at one path would make the archive invalid or silently drop
 /// one of them; refuse the build instead.
+///
+/// "One path" is judged the way a filesystem judges it, not the way a byte
+/// comparison does: `A.md` and `a.md` are one file on macOS and Windows,
+/// and `café.md` written two Unicode ways is one file on macOS. Comparing
+/// exact strings let such a pair through, and the tree then either lost a
+/// file on extraction or half-wrote itself. A path that is a directory
+/// prefix of another is a collision too - one cannot be both.
 fn ensure_unique_paths(files: &[PluginFile]) -> Result<()> {
-    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut seen: BTreeMap<String, &str> = BTreeMap::new();
     for f in files {
-        if !seen.insert(f.path.as_str()) {
+        if let Some(first) = seen.insert(collision_key(&f.path), f.path.as_str()) {
+            return Err(if first == f.path {
+                anyhow!(
+                    "two files would be written at {}; rename the package or narrow the selection",
+                    f.path
+                )
+            } else {
+                anyhow!(
+                    "{first} and {} are one file on a case-insensitive or Unicode-normalizing \
+                     filesystem; rename the package or narrow the selection",
+                    f.path
+                )
+            });
+        }
+    }
+    // Every directory a file implies is a directory, so nothing else may be
+    // a file at that path.
+    let directories: BTreeSet<String> = files
+        .iter()
+        .flat_map(|f| directories_of(&f.path))
+        .map(|d| collision_key(&d))
+        .collect();
+    for f in files {
+        if directories.contains(&collision_key(&f.path)) {
             return Err(anyhow!(
-                "two files would be written at {}; rename the package or narrow the selection",
+                "{} is both a file and a directory in this tree; narrow the selection",
                 f.path
             ));
         }
     }
     Ok(())
+}
+
+/// Every directory a path implies, outermost first.
+fn directories_of(path: &str) -> Vec<String> {
+    let segments: Vec<&str> = path.split('/').collect();
+    let mut out = Vec::with_capacity(segments.len().saturating_sub(1));
+    let mut prefix = String::new();
+    for segment in &segments[..segments.len().saturating_sub(1)] {
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(segment);
+        out.push(prefix.clone());
+    }
+    out
+}
+
+/// The key two paths collide on: case folded, and Unicode-composed, because
+/// that is what a case-insensitive or normalizing filesystem compares.
+fn collision_key(path: &str) -> String {
+    path.nfc().collect::<String>().to_lowercase()
 }
 
 /// The package name as an Agent Skills `name`, refusing names that slug to
@@ -1508,35 +1599,21 @@ fn meta_files(
     // no endpoint, whatever was asked for.
     wrote_an_entry: bool,
 ) -> Vec<PluginFile> {
-    vec![
-        file(
-            layout.meta_path(MANIFEST_FILE),
-            manifest_yaml(
-                name,
-                options.target,
-                options.harness.as_ref(),
-                selection,
-                &options.components,
-                // Only an endpoint an entry was actually written for
-                // reaches the catalog block; otherwise the tree calls
-                // nothing.
-                options.remote_endpoint().filter(|_| wrote_an_entry),
-            )
-            .into_bytes(),
-        ),
-        file(
-            layout.meta_path(LOCK_FILE),
-            lockfile(
-                name,
-                options.target,
-                options.harness.as_ref(),
-                &layout.root,
-                snapshot,
-                entries,
-            )
-            .into_bytes(),
-        ),
-    ]
+    let _ = (snapshot, entries);
+    vec![file(
+        layout.meta_path(MANIFEST_FILE),
+        manifest_yaml(
+            name,
+            options.target,
+            options.harness.as_ref(),
+            selection,
+            &options.components,
+            // Only an endpoint an entry was actually written for reaches
+            // the catalog block; otherwise the tree calls nothing.
+            options.remote_endpoint().filter(|_| wrote_an_entry),
+        )
+        .into_bytes(),
+    )]
 }
 
 fn lockfile(
@@ -1546,6 +1623,7 @@ fn lockfile(
     root: &str,
     snapshot: &Snapshot,
     entries: &[serde_json::Value],
+    files: &[PluginFile],
 ) -> String {
     let mut lock = json!({
         "version": 1,
@@ -1557,6 +1635,19 @@ fn lockfile(
             "sql_version": snapshot.sql_version,
             "bundles": snapshot.bundles,
         },
+        // Every file of the tree, so what was received can be checked
+        // against what was built. `entries` below is the catalog identity
+        // of the content files; this is the tree itself, generated files
+        // included. The lockfile cannot hash itself and is not listed.
+        "files": files
+            .iter()
+            .map(|f| json!({
+                "path": f.path,
+                "sha256": f.sha256,
+                "bytes": f.bytes.len(),
+                "executable": f.executable,
+            }))
+            .collect::<Vec<_>>(),
         "entries": entries,
     });
     if let Some(harness) = harness.filter(|_| target == Target::Custom) {
@@ -2907,6 +2998,67 @@ mod tests {
         assert!(
             guide.contains("`.github/mcp.json`"),
             "the guide names the file to merge into: {guide}"
+        );
+    }
+
+    #[test]
+    fn the_lockfile_hashes_every_file_of_the_tree() {
+        // Arrange: a build with the generated extras, including okf.sh -
+        // the only executable file, and the one nothing used to cover.
+        let records = vec![record(1, "a", "Alpha", "human-reviewed", "Do A.")];
+        let built = assemble(
+            &BuildOptions {
+                components: vec![Component::Mcp, Component::Guide, Component::Tools],
+                web_url: Some("https://okf.example.test".to_owned()),
+                ..options(Target::ClaudeCode)
+            },
+            &selection(),
+            &snapshot(),
+            &records,
+        )
+        .expect("builds");
+
+        // Act
+        let lock: serde_json::Value = serde_json::from_slice(
+            &built
+                .files
+                .iter()
+                .find(|f| f.path.ends_with(LOCK_FILE))
+                .expect("lockfile")
+                .bytes,
+        )
+        .expect("json");
+        let listed: Vec<&str> = lock["files"]
+            .as_array()
+            .expect("files")
+            .iter()
+            .filter_map(|f| f["path"].as_str())
+            .collect();
+
+        // Assert: every file but the lockfile itself, with its hash.
+        for f in &built.files {
+            if f.path.ends_with(LOCK_FILE) {
+                continue;
+            }
+            assert!(listed.contains(&f.path.as_str()), "{} is unlisted", f.path);
+        }
+        assert!(!listed.iter().any(|p| p.ends_with(LOCK_FILE)));
+        let helper = lock["files"]
+            .as_array()
+            .expect("files")
+            .iter()
+            .find(|f| f["path"].as_str().is_some_and(|p| p.ends_with("okf.sh")))
+            .expect("the helper is covered");
+        assert_eq!(helper["executable"], true);
+        assert_eq!(
+            helper["sha256"],
+            built
+                .files
+                .iter()
+                .find(|f| f.path.ends_with("okf.sh"))
+                .expect("helper")
+                .sha256
+                .as_str()
         );
     }
 

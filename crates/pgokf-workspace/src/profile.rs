@@ -423,7 +423,12 @@ const SKILLS_DIR_MAX: usize = 200;
 /// scans for Agent Skills packages. Its layout is that of the shape's base
 /// profile with the directory swapped in; nothing about the harness is
 /// guessed beyond what the user said.
+/// Deserializing goes through [`CustomHarness::new`] as well, so a harness
+/// read from a manifest carries the same containment rules as one typed
+/// into the builder: the skills directory ends up in every tree path, and
+/// a description is caller input whichever door it comes through.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "DescribedHarness")]
 pub struct CustomHarness {
     pub label: String,
     /// The kind of tree (serialized as `kind`, the word the manifest and
@@ -434,6 +439,29 @@ pub struct CustomHarness {
     /// (`Shape::Skills` only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skills_dir: Option<String>,
+}
+
+/// The wire shape of a described harness, before it is validated.
+#[derive(Deserialize)]
+struct DescribedHarness {
+    label: String,
+    #[serde(rename = "kind")]
+    shape: Shape,
+    #[serde(default)]
+    skills_dir: Option<String>,
+}
+
+impl TryFrom<DescribedHarness> for CustomHarness {
+    type Error = String;
+
+    fn try_from(described: DescribedHarness) -> Result<Self, Self::Error> {
+        Self::new(
+            &described.label,
+            described.shape,
+            described.skills_dir.as_deref(),
+        )
+        .map_err(|error| error.to_string())
+    }
 }
 
 impl CustomHarness {
@@ -945,6 +973,26 @@ mod tests {
         assert_eq!(plugin.skills_dir, None);
         assert_eq!(plugin_profile.root, "");
         assert_eq!(plugin_profile.shape, Shape::AgentPlugin);
+    }
+
+    #[test]
+    fn a_described_harness_is_validated_however_it_arrives() {
+        // Arrange: the containment rules live in `new`, and a harness read
+        // from a manifest reaches every tree path just as one typed into
+        // the builder does.
+        let escaping = r#"{"label":"Acme","kind":"skills","skills_dir":"../../etc"}"#;
+        let good = r#"{"label":"Acme","kind":"skills","skills_dir":".acme/skills"}"#;
+
+        // Act
+        let refused = serde_json::from_str::<CustomHarness>(escaping);
+        let accepted = serde_json::from_str::<CustomHarness>(good);
+
+        // Assert
+        assert!(refused.is_err(), "{refused:?}");
+        assert_eq!(
+            accepted.expect("valid").skills_dir.as_deref(),
+            Some(".acme/skills")
+        );
     }
 
     #[test]

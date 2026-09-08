@@ -40,11 +40,19 @@ pub fn zip(plugin: &Plugin) -> Result<Vec<u8>> {
     Ok(cursor.into_inner())
 }
 
-/// Write the tree under `dir`, creating directories as needed. Every path
-/// is validated before anything is written: it must stay inside `dir`, no
-/// existing ancestor or target may be a symbolic link, and an existing file
-/// is refused unless `overwrite` is set. A failure while writing reports
-/// how many files were already written.
+/// Write the tree under `dir`, creating directories as needed.
+///
+/// Three passes, so a failure leaves the destination as it was: every path
+/// is validated first (it must stay inside `dir`, no existing ancestor or
+/// target may be a symbolic link, and an existing file is refused unless
+/// `overwrite` is set), then every file is written beside its destination
+/// under a temporary name, and only then is each renamed into place. If
+/// anything fails while writing, the temporary files are removed and
+/// nothing of the tree is left behind - where writing in place used to
+/// leave the first ten files of eleven.
+///
+/// Each temporary is created with `create_new`, so a symbolic link planted
+/// between the passes is refused rather than written through.
 ///
 /// # Errors
 ///
@@ -78,35 +86,63 @@ pub fn write_to_dir(plugin: &Plugin, dir: &Path, overwrite: bool) -> Result<Vec<
         }
         targets.push(target);
     }
-    // Pass two: write.
-    let mut written = Vec::with_capacity(targets.len());
+    // Pass two: write every file beside its destination, so a failure here
+    // leaves nothing of the tree behind. Validating first and then writing
+    // in place still half-wrote a tree when the eleventh file failed.
+    let mut staged: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(targets.len());
+    let cleanup = |staged: &[(PathBuf, PathBuf)]| {
+        for (temp, _) in staged {
+            let _ = std::fs::remove_file(temp);
+        }
+    };
     for (file, target) in plugin.files.iter().zip(targets) {
-        if let Err(error) = write_one(&target, &file.bytes, overwrite, file.executable) {
-            return Err(error.context(format!(
-                "after writing {} of {} files",
+        let temp = staging_path(&target);
+        if let Err(error) = write_one(&temp, &file.bytes, file.executable) {
+            cleanup(&staged);
+            return Err(error.context("no file of the tree was written"));
+        }
+        staged.push((temp, target));
+    }
+    // Pass three: put each in place. A rename cannot fail for want of space
+    // or permission at this point, so the window in which the tree is part
+    // old and part new is as small as the filesystem allows.
+    let mut written = Vec::with_capacity(staged.len());
+    for (temp, target) in &staged {
+        if let Err(error) = std::fs::rename(temp, target) {
+            cleanup(&staged[written.len()..]);
+            return Err(anyhow!(
+                "renaming {} into place: {error} (after {} of {} files)",
+                target.display(),
                 written.len(),
                 plugin.files.len()
-            )));
+            ));
         }
-        written.push(target);
+        written.push(target.clone());
     }
     Ok(written)
 }
 
-fn write_one(target: &Path, bytes: &[u8], overwrite: bool, executable: bool) -> Result<()> {
+/// Where a file is written before it takes its name: beside the
+/// destination, so the rename is on one filesystem.
+fn staging_path(target: &Path) -> PathBuf {
+    let mut name = std::ffi::OsString::from(".okf-tmp-");
+    name.push(target.file_name().unwrap_or_default());
+    target.with_file_name(name)
+}
+
+/// Write one staged file. `create_new` throughout: the staging name is
+/// this process's to make, so anything already there - including a symbolic
+/// link an attacker planted between the passes - is refused rather than
+/// written through. That is what closes the window the old `overwrite`
+/// path left open, where the open followed a link to anywhere the process
+/// could reach.
+fn write_one(target: &Path, bytes: &[u8], executable: bool) -> Result<()> {
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
     let mut options = std::fs::OpenOptions::new();
-    options.write(true);
-    if overwrite {
-        options.create(true).truncate(true);
-    } else {
-        // Atomic with the earlier check: a file that appeared meanwhile is
-        // refused rather than replaced.
-        options.create_new(true);
-    }
+    options.write(true).create_new(true);
     let mut handle = options
         .open(target)
         .with_context(|| format!("opening {}", target.display()))?;
@@ -153,7 +189,16 @@ fn safe_relative(path: &str) -> Result<PathBuf> {
     }
     let mut out = PathBuf::new();
     for segment in path.split('/') {
-        if segment.is_empty() || segment == "." || segment == ".." || segment.contains(':') {
+        // Trailing spaces and dots are stripped by Windows path handling,
+        // so a segment of `".. "` climbs a directory there; judge the
+        // segment as that platform would see it.
+        let squared = segment.trim_end_matches([' ', '.']);
+        if segment.is_empty()
+            || squared.is_empty()
+            || segment == "."
+            || squared == ".."
+            || segment.contains(':')
+        {
             return Err(anyhow!("refusing to write outside the workspace: {path:?}"));
         }
         out.push(segment);
@@ -294,5 +339,50 @@ mod tests {
         assert!(overwritten.is_ok());
         assert!(escape.is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_refused_write_leaves_the_destination_untouched() {
+        // Arrange: two files, the second at a path the first has made a
+        // directory, so the write fails partway.
+        let dir = std::env::temp_dir().join(format!("pgokf-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut broken = plugin();
+        broken.files.push(PluginFile {
+            path: "okf-knowledge/INDEX.md/nested.md".to_owned(),
+            bytes: b"x".to_vec(),
+            sha256: String::new(),
+            executable: false,
+        });
+
+        // Act
+        let outcome = write_to_dir(&broken, &dir, false);
+
+        // Assert: refused, and nothing of the tree - not even the file that
+        // wrote cleanly - is on disk.
+        assert!(outcome.is_err(), "{outcome:?}");
+        let left: Vec<_> = walk(&dir);
+        assert!(left.is_empty(), "{left:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every file under `dir`, for asserting that none was left behind.
+    fn walk(dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(next) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&next) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    out.push(path);
+                }
+            }
+        }
+        out
     }
 }

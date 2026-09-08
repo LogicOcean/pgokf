@@ -89,8 +89,10 @@ Three optional components make the package more than a skills directory:
 | `tools` | `okf.sh`, a POSIX helper over the JSON API (`search`, `get`, `graph`, `bundles`, `health`) for harnesses without MCP; marked executable | `scripts/` in a skill, `tools/` elsewhere |
 
 Every tree also carries `okf-workspace.yaml`, the manifest that reproduces
-the selection, and `okf-workspace.lock`, which records the catalog snapshot
-and a content hash per file. A build against an unchanged catalog is
+the selection, and `okf-workspace.lock`, which records the catalog snapshot,
+a content hash per catalog file, and a hash of every file the tree holds -
+the generated ones included, so what you received can be checked against
+what was built. A build against an unchanged catalog is
 byte-identical.
 
 Selectors (`bundle_ids`, `types`, `tags`, `concept_ids`, `query`,

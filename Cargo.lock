@@ -2522,6 +2522,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio-postgres",
+ "unicode-normalization",
  "zip",
 ]
 
