@@ -52,6 +52,10 @@ pub(crate) struct App {
     /// read-only.
     pub writer: Option<Db>,
     pub auth: Authenticator,
+    /// Reverse proxies whose `X-Forwarded-For` is believed, so the sign-in
+    /// throttle keys on the real client behind them and not on the one proxy
+    /// every request arrives from.
+    pub trusted_proxies: crate::auth::TrustedProxies,
     /// Bundle rebuilds run one at a time: a content resync is a full
     /// snapshot, so two interleaved ones could lose each other's change.
     pub rebuilds: tokio::sync::Mutex<()>,
@@ -2703,16 +2707,21 @@ struct LoginForm {
 async fn login_submit(
     State(app): State<Shared>,
     session: Session,
+    headers: axum::http::HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> PageResult {
     let users = app
         .auth
         .users()
         .ok_or_else(|| AppError::not_found("This page"))?;
+    // The address the throttle keys on: behind a trusted proxy that is the
+    // real client, not the one proxy every request arrives from, so one
+    // attacker cannot hold an account under cooldown for everyone.
+    let client = app.trusted_proxies.client_ip(&headers, session.peer);
     // Held across the verification only: Argon2id is expensive by design,
     // and this page is open to anyone.
     let permit = users.permit().await;
-    let verified = users.verify(&form.username, &form.password, session.peer);
+    let verified = users.verify(&form.username, &form.password, client);
     drop(permit);
     if let Some(person) = verified {
         let cookie = users.issue_cookie(&person)?;
@@ -2725,7 +2734,7 @@ async fn login_submit(
     // A pause between attempts, so guessing costs time; after a few
     // failures the name waits out a cooldown.
     tokio::time::sleep(Duration::from_millis(400)).await;
-    let error = match users.cooldown(&form.username, session.peer) {
+    let error = match users.cooldown(&form.username, client) {
         Some(wait) => format!(
             "Too many failed attempts for this name; try again in {} second{}.",
             wait.as_secs().max(1),
@@ -4576,10 +4585,14 @@ async fn plugins_zip(State(app): State<Shared>, Query(params): Query<PluginParam
             "give a query, a bundle, a type, a tag, or concept ids to build a plugin",
         ));
     }
-    let _building = app.builds.acquire().await.map_err(|_| {
+    // Shed rather than queue: a build holds a pooled reader and up to a few
+    // hundred audited reads for its whole run, so waiting ones would pile onto
+    // the in-flight limit and the connection pool. When the few slots are
+    // taken, the caller is told to come back rather than made to wait.
+    let _building = app.builds.try_acquire().map_err(|_| {
         AppError::with(
             StatusCode::SERVICE_UNAVAILABLE,
-            "The catalog is busy; try again.",
+            "The catalog is busy building plugins; try again in a moment.",
         )
     })?;
     let mut client = app.db.checkout().await?;

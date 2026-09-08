@@ -1087,12 +1087,17 @@ impl Db {
         after_path: Option<&str>,
         limit: i64,
     ) -> Result<Vec<ConceptSummary>> {
+        // The same bundle guard every other concept read carries, so a
+        // disabled or retired bundle's listing matches what opening one does
+        // (404): no dead rows, and no metadata leak from a hidden bundle.
         let sql = format!(
-            "SELECT bundle_id, id, path, type, title, description, coalesce(tags, '{{}}'), {}
-             FROM pgokf.concepts
-             WHERE bundle_id = $1 AND ($2::text IS NULL OR path > $2)
-             ORDER BY path LIMIT $3",
-            iso("modified_at")
+            "SELECT c.bundle_id, c.id, c.path, c.type, c.title, c.description,
+                    coalesce(c.tags, '{{}}'), {}
+             FROM pgokf.concepts c
+             JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled AND b.retired_at IS NULL
+             WHERE c.bundle_id = $1 AND ($2::text IS NULL OR c.path > $2)
+             ORDER BY c.path LIMIT $3",
+            iso("c.modified_at")
         );
         self.query_map(&sql, &[&bundle_id, &after_path, &limit], concept_summary)
             .await

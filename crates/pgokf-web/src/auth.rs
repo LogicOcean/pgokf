@@ -268,6 +268,70 @@ impl Cidr {
     }
 }
 
+/// The reverse proxies whose `X-Forwarded-For` this server believes, so the
+/// sign-in throttle can key on the real client rather than the proxy. Empty
+/// (the default) trusts no proxy: the throttle keys on the TCP peer, which is
+/// right for a direct connection and fails safe behind an unconfigured proxy.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TrustedProxies {
+    cidrs: Vec<Cidr>,
+    any: bool,
+}
+
+impl TrustedProxies {
+    /// Parse a comma-separated CIDR list, or the word `any` to trust every
+    /// peer (only for a server reachable from the proxy alone).
+    pub(crate) fn parse(text: &str) -> Result<Self> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Ok(Self::default());
+        }
+        if text.eq_ignore_ascii_case("any") {
+            return Ok(Self {
+                cidrs: Vec::new(),
+                any: true,
+            });
+        }
+        let cidrs = text
+            .split(',')
+            .filter(|c| !c.trim().is_empty())
+            .map(Cidr::parse)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self { cidrs, any: false })
+    }
+
+    fn trusts(&self, ip: IpAddr) -> bool {
+        self.any || self.cidrs.iter().any(|c| c.contains(ip))
+    }
+
+    /// The client address to throttle on. When no proxy is trusted, or the
+    /// TCP `peer` is not one of them, that is the peer itself. When the peer
+    /// is a trusted proxy, it is the rightmost `X-Forwarded-For` address that
+    /// is not itself trusted - the real client as the outermost trusted proxy
+    /// saw it. A prefix an attacker spoofs sits to the left of the address the
+    /// proxy appended, so it is never chosen.
+    pub(crate) fn client_ip(&self, headers: &HeaderMap, peer: Option<IpAddr>) -> Option<IpAddr> {
+        let peer = peer?;
+        if !self.trusts(peer) {
+            return Some(peer);
+        }
+        let forwarded: Vec<IpAddr> = headers
+            .get_all("x-forwarded-for")
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(','))
+            .filter_map(|hop| hop.trim().parse::<IpAddr>().ok())
+            .collect();
+        forwarded
+            .iter()
+            .rev()
+            .find(|ip| !self.trusts(**ip))
+            .or_else(|| forwarded.first())
+            .copied()
+            .or(Some(peer))
+    }
+}
+
 /// The `header` mode: which headers to read and whom to believe.
 #[derive(Debug, Clone)]
 pub(crate) struct HeaderAuth {
@@ -345,11 +409,14 @@ pub(crate) struct UsersAuth {
     path: Option<PathBuf>,
     loaded: RwLock<LoadedUsers>,
     sessions: Arc<Sessions>,
-    /// Failed sign-ins per (user name, source address), for the throttle.
+    /// Failed sign-ins per (user name, client address), for the throttle.
     /// Keyed on both, because keyed on the name alone anyone who knew a
     /// name could hold that account under cooldown indefinitely - and lock
     /// its owner out of changing their own password, which shares the
-    /// counter.
+    /// counter. The address is the *client* address: behind a reverse proxy
+    /// the caller resolves it from a trusted `X-Forwarded-For` hop, so the
+    /// key is the real client and not the one proxy every request arrives
+    /// from (see [`TrustedProxies::client_ip`]).
     failures: Mutex<HashMap<(String, Option<IpAddr>), Failures>>,
     /// How many password verifications may run at once. Argon2id is meant
     /// to be expensive, which cuts both ways on a public sign-in page.
@@ -374,6 +441,13 @@ const FREE_FAILURES: u32 = 5;
 const MAX_COOLDOWN: Duration = Duration::from_mins(15);
 /// Failures are forgotten after this long without one.
 const FAILURE_MEMORY: Duration = Duration::from_hours(1);
+/// The longest a name may be before it is refused unheard. A users-file
+/// name is a short handle; a longer one is never valid, and counting it
+/// would let an unauthenticated flood grow the throttle map without bound.
+const MAX_NAME_LEN: usize = 256;
+/// A ceiling on distinct throttle entries, so even a flood of differently
+/// named attempts cannot grow the map past a bounded size.
+const MAX_TRACKED_FAILURES: usize = 10_000;
 
 /// A hash that is verified when the name is unknown, so an unknown name
 /// costs the same time as a wrong password (no name enumeration by timing).
@@ -816,6 +890,11 @@ impl UsersAuth {
         peer: Option<IpAddr>,
     ) -> Option<Principal> {
         let name = name.trim();
+        if name.len() > MAX_NAME_LEN {
+            // Never a valid user name; refuse without touching the throttle
+            // map, so a flood of long names cannot grow it.
+            return None;
+        }
         if self.throttled(name, peer) {
             return None;
         }
@@ -866,9 +945,18 @@ impl UsersAuth {
         let Ok(mut failures) = self.failures.lock() else {
             return;
         };
+        if name.len() > MAX_NAME_LEN {
+            return;
+        }
         let now = Instant::now();
         failures.retain(|_, f| now.duration_since(f.until) < FAILURE_MEMORY);
-        let entry = failures.entry((name.to_owned(), peer)).or_insert(Failures {
+        let key = (name.to_owned(), peer);
+        if !failures.contains_key(&key) && failures.len() >= MAX_TRACKED_FAILURES {
+            // The map is full of live entries; do not let a new name grow it
+            // further. The flood is already being cooled by those it displaced.
+            return;
+        }
+        let entry = failures.entry(key).or_insert(Failures {
             count: 0,
             until: now,
         });
@@ -1083,6 +1171,25 @@ mod tests {
     }
 
     #[test]
+    fn an_over_long_name_is_refused_without_growing_the_throttle_map() {
+        // Arrange: a flood of distinct megabyte-long names, the shape of an
+        // unauthenticated memory-exhaustion attempt on the sign-in page.
+        let auth = users_auth();
+        let peer = Some("198.51.100.7".parse::<IpAddr>().expect("address"));
+
+        // Act
+        for i in 0..64 {
+            let name = format!("{i}{}", "x".repeat(2 * 1024 * 1024));
+            assert!(auth.verify(&name, "guess", peer).is_none());
+        }
+
+        // Assert: nothing over the length limit was ever tracked.
+        let tracked = auth.failures.lock().expect("lock").len();
+        assert_eq!(tracked, 0, "over-long names must never enter the map");
+        assert!(auth.cooldown(&"x".repeat(MAX_NAME_LEN + 1), peer).is_none());
+    }
+
+    #[test]
     fn roles_form_a_ladder_and_round_trip_their_ids() {
         // Arrange / Act / Assert
         assert!(Role::Admin.allows(Role::Viewer));
@@ -1110,13 +1217,13 @@ mod tests {
     #[test]
     fn cidr_ranges_contain_their_addresses_and_nothing_else() {
         // Arrange
-        let lan = Cidr::parse("10.100.0.0/16").expect("valid");
+        let lan = Cidr::parse("10.0.0.0/16").expect("valid");
         let host = Cidr::parse("127.0.0.1").expect("valid");
         let six = Cidr::parse("fd00::/8").expect("valid");
 
         // Act / Assert
-        assert!(lan.contains("10.100.0.14".parse().unwrap()));
-        assert!(!lan.contains("10.101.0.14".parse().unwrap()));
+        assert!(lan.contains("10.0.0.14".parse().unwrap()));
+        assert!(!lan.contains("10.1.0.14".parse().unwrap()));
         assert!(host.contains("127.0.0.1".parse().unwrap()));
         assert!(!host.contains("127.0.0.2".parse().unwrap()));
         assert!(host.contains("::ffff:127.0.0.1".parse().unwrap()));
@@ -1124,6 +1231,40 @@ mod tests {
         assert!(!six.contains("fe80::1".parse().unwrap()));
         assert!(Cidr::parse("10.0.0.0/33").is_err());
         assert!(Cidr::parse("nope").is_err());
+    }
+
+    #[test]
+    fn the_throttle_client_is_the_real_one_behind_a_trusted_proxy() {
+        // Arrange: a proxy on 10.0.0.0/8 fronts the site.
+        let proxies = TrustedProxies::parse("10.0.0.0/8").expect("valid");
+        let proxy: IpAddr = "10.0.0.2".parse().unwrap();
+        let direct: IpAddr = "198.51.100.9".parse().unwrap();
+        let client: IpAddr = "203.0.113.7".parse().unwrap();
+        let mut xff = HeaderMap::new();
+        // The proxy appended the client it saw; an attacker's spoofed prefix
+        // sits to the left of it.
+        xff.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("evil, 203.0.113.7"),
+        );
+
+        // Act / Assert
+        // From the trusted proxy, the rightmost non-proxy hop is the client.
+        assert_eq!(
+            proxies.client_ip(&xff, Some(proxy)),
+            Some(client),
+            "the address the proxy appended, not the spoofed prefix"
+        );
+        // A direct (untrusted) peer is used as-is; its forwarded header is not
+        // believed.
+        assert_eq!(
+            proxies.client_ip(&xff, Some(direct)),
+            Some(direct),
+            "an untrusted peer's forwarded-for is ignored"
+        );
+        // With no proxy configured, the peer is always used.
+        let none = TrustedProxies::default();
+        assert_eq!(none.client_ip(&xff, Some(proxy)), Some(proxy));
     }
 
     fn header_auth(trusted: &[&str]) -> HeaderAuth {
@@ -1158,7 +1299,7 @@ mod tests {
 
         // Act
         let trusted = auth.identify(&headers, Some("10.1.2.3".parse().unwrap()));
-        let untrusted = auth.identify(&headers, Some("192.168.1.9".parse().unwrap()));
+        let untrusted = auth.identify(&headers, Some("198.51.100.9".parse().unwrap()));
         let unknown_peer = auth.identify(&headers, None);
 
         // Assert: the highest mapped role wins; strangers stay anonymous.

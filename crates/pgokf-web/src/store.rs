@@ -179,10 +179,45 @@ pub(crate) fn write_confined(root: &Path, path: &str, bytes: &[u8]) -> Result<()
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| anyhow!("{path:?} has no file name"))?;
-    let temp = parent.join(format!(".{name}.pgokf-tmp"));
-    std::fs::write(&temp, bytes).with_context(|| format!("writing {}", temp.display()))?;
-    std::fs::rename(&temp, &file).with_context(|| format!("replacing {}", file.display()))?;
+    // Stage beside the target under a random name opened with `create_new`,
+    // so a symbolic link planted at the temporary path is refused rather than
+    // followed - the same guarantee `archive.rs` gives its own staging, which
+    // a plain `fs::write` here did not. The random suffix keeps two concurrent
+    // writers, or a stale temporary left by an earlier crash, from colliding.
+    let temp = parent.join(format!(".{name}.{}.pgokf-tmp", random_suffix()?));
+    if let Err(error) = write_new(&temp, bytes) {
+        return Err(error).with_context(|| format!("writing {}", temp.display()));
+    }
+    if let Err(error) = std::fs::rename(&temp, &file) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error).with_context(|| format!("replacing {}", file.display()));
+    }
     Ok(())
+}
+
+/// Create a fresh file and write `bytes` to it. `create_new` fails rather
+/// than open an existing path, so a symbolic link planted at `path` is
+/// refused instead of written through; the bytes are flushed before the
+/// caller renames the file into place.
+fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+/// A short random hex string, for a staging file name that cannot collide.
+fn random_suffix() -> Result<String> {
+    let mut bytes = [0u8; 8];
+    getrandom::fill(&mut bytes).map_err(|e| anyhow!("reading random bytes: {e}"))?;
+    Ok(bytes.iter().fold(String::with_capacity(16), |mut acc, b| {
+        use std::fmt::Write as _;
+        let _ = write!(acc, "{b:02x}");
+        acc
+    }))
 }
 
 /// Remove a file inside the bundle; a file already gone is not an error.
@@ -279,10 +314,54 @@ mod tests {
         // Assert
         assert!(!root.join("runbooks/new.md").exists());
         assert!(
-            !root.join("runbooks/.new.md.pgokf-tmp").exists(),
-            "no temp file left"
+            !pgokf_tmp_files_remain(&root.join("runbooks")),
+            "no staging temp file left behind"
         );
         assert!(write_confined(&root, "../escape.md", b"x").is_err());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_temp_symlink_cannot_redirect_a_write_outside_the_bundle() {
+        // Arrange: an attacker plants, at the staging path an editor's save
+        // would use, a symbolic link pointing at a file outside the bundle.
+        let root = temp_root("tmp-symlink");
+        std::fs::create_dir_all(root.join("runbooks")).expect("dir");
+        let outside = temp_root("tmp-symlink-victim");
+        let victim = outside.join("secret.conf");
+        std::fs::write(&victim, b"original").expect("victim");
+        // The old code used the fixed name `.failover.md.pgokf-tmp`; plant it.
+        std::os::unix::fs::symlink(&victim, root.join("runbooks/.failover.md.pgokf-tmp"))
+            .expect("plant symlink");
+
+        // Act: write the document whose staging path the link impersonates.
+        let wrote = write_confined(&root, "runbooks/failover.md", b"attacker markdown");
+
+        // Assert: the victim file is untouched, whether the write succeeded
+        // under a fresh random name or was refused outright.
+        assert_eq!(
+            std::fs::read(&victim).expect("victim still readable"),
+            b"original",
+            "a planted temp symlink must never redirect the write"
+        );
+        if wrote.is_ok() {
+            assert_eq!(
+                std::fs::read(root.join("runbooks/failover.md")).expect("doc"),
+                b"attacker markdown"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    fn pgokf_tmp_files_remain(dir: &Path) -> bool {
+        std::fs::read_dir(dir).is_ok_and(|entries| {
+            entries.flatten().any(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|n| n.ends_with(".pgokf-tmp"))
+            })
+        })
     }
 }

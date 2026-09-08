@@ -78,10 +78,14 @@ async fn main() -> Result<()> {
             .unwrap_or_else(|| "pgokf".to_owned())
     });
 
+    let trusted_proxies = auth::TrustedProxies::parse(&cli.auth_trusted_proxy)
+        .context("parsing --auth-trusted-proxy")?;
+
     let app = Arc::new(App {
         db,
         writer,
         auth: authenticator,
+        trusted_proxies,
         rebuilds: tokio::sync::Mutex::new(()),
         builds: tokio::sync::Semaphore::new(routes::MAX_PLUGIN_BUILDS),
         stores,

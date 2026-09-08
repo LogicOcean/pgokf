@@ -598,14 +598,19 @@ impl OidcAuth {
             .iter()
             .filter_map(|name| {
                 if name == "sub" {
-                    Some(claims.sub.clone())
-                } else {
-                    claims
-                        .other
-                        .get(name)
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
+                    return Some(claims.sub.clone());
                 }
+                // An email address only names a person if the provider says
+                // it is verified: an account carrying someone else's
+                // unverified email must not be able to assume their actor.
+                if name == "email" && !email_verified(claims) {
+                    return None;
+                }
+                claims
+                    .other
+                    .get(name)
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
             })
             .map(|value| value.trim().to_owned())
             .find(|value| valid_subject(value))
@@ -771,6 +776,17 @@ fn string_list(value: Option<&Value>) -> Vec<String> {
     }
 }
 
+/// Whether the provider asserts the token's `email` is verified. Providers
+/// send this as a boolean or, less correctly, the string `"true"`; anything
+/// else (including an absent claim) is treated as unverified.
+fn email_verified(claims: &IdClaims) -> bool {
+    match claims.other.get("email_verified") {
+        Some(Value::Bool(verified)) => *verified,
+        Some(Value::String(text)) => text.eq_ignore_ascii_case("true"),
+        _ => false,
+    }
+}
+
 /// Compare two secrets without giving away where they first differ.
 fn constant_time_eq(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
@@ -801,7 +817,11 @@ mod tests {
             client_secret: Some("s3cret".to_owned()),
             redirect_uri: "https://catalog.example.test/auth/callback".to_owned(),
             scopes: "openid profile email groups".to_owned(),
-            subject_claims: vec!["preferred_username".to_owned(), "email".to_owned()],
+            subject_claims: vec![
+                "preferred_username".to_owned(),
+                "email".to_owned(),
+                "sub".to_owned(),
+            ],
             groups_claim: "groups".to_owned(),
             roles: RoleMapping::parse("okf-editors=editor,okf-admins=admin", Role::Viewer)
                 .expect("valid"),
@@ -902,7 +922,7 @@ mod tests {
         }));
         let spaced = claims(serde_json::json!({
             "sub": "8f3a-1", "preferred_username": "alice smith",
-            "email": "alice@example.test", "groups": "okf-editors"
+            "email": "alice@example.test", "email_verified": true, "groups": "okf-editors"
         }));
         let nothing = claims(serde_json::json!({ "sub": "not a subject", "email": "no one" }));
 
@@ -923,6 +943,33 @@ mod tests {
         assert_eq!(fallback.display, "alice@example.test");
         assert_eq!(one, vec!["okf-editors".to_owned()]);
         assert!(refused.is_err(), "no claim names a usable subject");
+    }
+
+    #[test]
+    fn an_unverified_email_is_not_believed_and_falls_through_to_sub() {
+        // Arrange: preferred_username is unusable and the email is present but
+        // not verified, so an account carrying someone else's address must not
+        // become that actor - the stable `sub` is used instead.
+        let auth = auth();
+        let claims = |value: serde_json::Value| -> IdClaims {
+            serde_json::from_value(value).expect("claims")
+        };
+        let unverified = claims(serde_json::json!({
+            "sub": "8f3a-1", "preferred_username": "alice smith",
+            "email": "victim@example.test", "email_verified": false, "groups": "okf-editors"
+        }));
+        let absent = claims(serde_json::json!({
+            "sub": "8f3a-2", "preferred_username": "bob jones",
+            "email": "someone@example.test", "groups": "okf-editors"
+        }));
+
+        // Act
+        let (a, _) = auth.principal_from(&unverified).expect("named by sub");
+        let (b, _) = auth.principal_from(&absent).expect("named by sub");
+
+        // Assert
+        assert_eq!(a.subject, "8f3a-1", "unverified email skipped for sub");
+        assert_eq!(b.subject, "8f3a-2", "absent email_verified skipped for sub");
     }
 
     #[test]
