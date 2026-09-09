@@ -654,24 +654,31 @@ mod tests {
 
     #[test]
     fn resources_count_toward_the_file_and_size_limits() {
-        // Arrange
+        // Arrange: the manifest is comfortably under the ceiling and the
+        // resource is over it, so the resource is the only file that can
+        // trip it - whichever order the walk reaches them in.
         let root = TempDir::new().unwrap();
-        write_file(&root, "pkg/SKILL.md", "---\nname: pkg\n---\n");
-        write_file(&root, "pkg/assets/big.bin", "0123456789");
-        let config = SyncConfig::new(root.path()).with_max_file_bytes(8);
+        let manifest = "---\nname: pkg\n---\n";
+        assert!(manifest.len() < 20, "the manifest must not trip the limit");
+        write_file(&root, "pkg/SKILL.md", manifest);
+        write_file(&root, "pkg/assets/big.bin", &"0".repeat(30));
+        let config = SyncConfig::new(root.path()).with_max_file_bytes(20);
 
         // Act
         let result = discover(&config);
 
         // Assert
-        assert!(matches!(
-            result,
-            Err(SyncError::FileTooLarge {
-                size_bytes: 10,
-                limit_bytes: 8,
-                ..
-            })
-        ));
+        assert!(
+            matches!(
+                &result,
+                Err(SyncError::FileTooLarge {
+                    size_bytes: 30,
+                    limit_bytes: 20,
+                    path,
+                }) if path.ends_with("big.bin")
+            ),
+            "{result:?}"
+        );
     }
 
     #[cfg(unix)]
