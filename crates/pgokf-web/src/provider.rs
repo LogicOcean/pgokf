@@ -17,13 +17,14 @@ use anyhow::{Context, Result, bail};
 
 use crate::auth::{Role, Sessions};
 use crate::oidc::OidcAuth;
-use crate::oidc_settings::{OidcSettings, OidcSettingsStore};
+use crate::provider_settings::{ProviderKind, ProviderSettings, ProviderSettingsStore};
 use crate::seal::Sealer;
 
 /// What the Admin page's form says.
 #[derive(Clone)]
 pub(crate) struct ProviderDraft {
     pub enabled: bool,
+    pub kind: ProviderKind,
     pub issuer: String,
     pub client_id: String,
     pub client_secret: SecretChange,
@@ -82,7 +83,7 @@ enum State {
 
 /// The slot the `users` mode keeps its provider in.
 pub(crate) struct ProviderSlot {
-    store: OidcSettingsStore,
+    store: ProviderSettingsStore,
     /// Present when the operator set a session secret: the only key a
     /// client secret can be sealed under.
     sealer: Option<Sealer>,
@@ -101,7 +102,7 @@ impl std::fmt::Debug for ProviderSlot {
 
 impl ProviderSlot {
     pub(crate) fn new(
-        store: OidcSettingsStore,
+        store: ProviderSettingsStore,
         sealer: Option<Sealer>,
         sessions: Arc<Sessions>,
     ) -> Self {
@@ -200,7 +201,7 @@ impl ProviderSlot {
     /// # Errors
     ///
     /// The catalog cannot be read.
-    pub(crate) async fn settings(&self) -> Result<Option<OidcSettings>> {
+    pub(crate) async fn settings(&self) -> Result<Option<ProviderSettings>> {
         self.store.load().await
     }
 
@@ -216,21 +217,37 @@ impl ProviderSlot {
     pub(crate) fn prepare(
         &self,
         draft: &ProviderDraft,
-        stored: Option<&OidcSettings>,
+        stored: Option<&ProviderSettings>,
         by: &str,
-    ) -> Result<(OidcSettings, OidcAuth)> {
+    ) -> Result<(ProviderSettings, OidcAuth)> {
         // The catalog's own constraints, checked here first so a slip is a
         // message on the form rather than a refused row.
-        plain("the issuer URL", &draft.issuer, 1, 2048)?;
+        let issuer = match (draft.kind, draft.issuer.trim()) {
+            // GitHub's own host, unless a GitHub Enterprise Server is named.
+            (ProviderKind::GitHub, "") => "https://github.com".to_owned(),
+            (_, issuer) => issuer.to_owned(),
+        };
+        plain("the issuer URL", &issuer, 1, 2048)?;
         plain("the client id", &draft.client_id, 1, 512)?;
         plain("the callback URL", &draft.redirect_url, 1, 2048)?;
         for (what, url) in [
-            ("the issuer URL", &draft.issuer),
+            ("the issuer URL", &issuer),
             ("the callback URL", &draft.redirect_url),
         ] {
             if url.trim().chars().any(char::is_whitespace) {
                 bail!("{what} holds a space");
             }
+        }
+        if draft.kind == ProviderKind::GitHub
+            && draft
+                .scopes
+                .split_whitespace()
+                .any(|scope| scope == "openid" || scope == "profile")
+        {
+            bail!(
+                "openid and profile are not GitHub scopes: ask for read:user user:email read:org \
+                 (read:org only if the role map names organizations or teams)"
+            );
         }
         plain("the scopes", &draft.scopes, 0, 512)?;
         plain("the identity claims", &draft.subject_claims, 1, 512)?;
@@ -257,9 +274,21 @@ impl ProviderSlot {
                     .seal(secret)?,
             ),
         };
-        let settings = OidcSettings {
+        if draft.kind == ProviderKind::GitHub && client_secret.is_none() {
+            bail!(
+                "a GitHub OAuth App cannot complete a sign-in without its client secret: enter \
+                 it{}",
+                if self.sealer.is_some() {
+                    ""
+                } else {
+                    " once this site has an OKF_WEB_SESSION_SECRET to keep it under"
+                }
+            );
+        }
+        let settings = ProviderSettings {
             enabled: draft.enabled,
-            issuer: draft.issuer.trim().to_owned(),
+            kind: draft.kind,
+            issuer,
             client_id: draft.client_id.trim().to_owned(),
             client_secret,
             redirect_url: draft.redirect_url.trim().to_owned(),
@@ -286,9 +315,9 @@ impl ProviderSlot {
     /// The catalog refuses the row or cannot be written.
     pub(crate) async fn store(
         &self,
-        settings: &OidcSettings,
+        settings: &ProviderSettings,
         provider: OidcAuth,
-    ) -> Result<OidcSettings> {
+    ) -> Result<ProviderSettings> {
         let saved = self.store.save(settings).await?;
         if saved.enabled {
             self.remember(
@@ -312,7 +341,7 @@ impl ProviderSlot {
         Ok(removed)
     }
 
-    fn build(&self, settings: &OidcSettings) -> Result<OidcAuth> {
+    fn build(&self, settings: &ProviderSettings) -> Result<OidcAuth> {
         OidcAuth::new(
             settings.config(self.sealer.as_ref())?,
             Arc::clone(&self.sessions),
@@ -397,7 +426,7 @@ mod tests {
 
     fn slot(sealer: bool) -> ProviderSlot {
         ProviderSlot::new(
-            OidcSettingsStore::memory(),
+            ProviderSettingsStore::memory(),
             sealer.then(|| Sealer::from_secret(SECRET.as_bytes()).expect("sealer")),
             sessions(),
         )
@@ -406,6 +435,7 @@ mod tests {
     fn draft(name: &str) -> ProviderDraft {
         ProviderDraft {
             enabled: true,
+            kind: ProviderKind::Oidc,
             issuer: "https://id.example".to_owned(),
             client_id: "catalog".to_owned(),
             client_secret: SecretChange::Clear,
@@ -565,6 +595,48 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_github_provider_defaults_to_github_dot_com_and_takes_github_scopes_only() {
+        // Arrange
+        let slot = slot(true);
+        let mut github = draft("GitHub");
+        github.kind = ProviderKind::GitHub;
+        github.issuer = String::new();
+        github.scopes = "read:user user:email read:org".to_owned();
+        github.client_secret = SecretChange::Set("s3cret".to_owned());
+        let mut oidc_scopes = github.clone();
+        oidc_scopes.scopes = "openid profile email".to_owned();
+        let mut enterprise = github.clone();
+        enterprise.issuer = "https://github.example.com".to_owned();
+
+        let mut public = github.clone();
+        public.client_secret = SecretChange::Clear;
+
+        // Act
+        let (settings, provider) = slot.prepare(&github, None, "root").expect("prepares");
+        let refused = slot.prepare(&oidc_scopes, None, "root");
+        let (ghes, _) = slot.prepare(&enterprise, None, "root").expect("prepares");
+        let secretless = slot.prepare(&public, None, "root");
+
+        // Assert
+        assert_eq!(settings.kind, ProviderKind::GitHub);
+        assert_eq!(settings.issuer, "https://github.com");
+        assert_eq!(provider.issuer(), "https://github.com");
+        assert!(
+            refused
+                .expect_err("openid is no GitHub scope")
+                .to_string()
+                .contains("read:user")
+        );
+        assert_eq!(ghes.issuer, "https://github.example.com");
+        assert!(
+            secretless
+                .expect_err("GitHub needs the secret")
+                .to_string()
+                .contains("client secret")
+        );
+    }
+
     #[tokio::test]
     async fn settings_this_instance_cannot_build_stop_the_provider_and_nothing_else() {
         // Arrange: a client secret sealed under one session secret, read by
@@ -577,7 +649,7 @@ mod tests {
             .expect("prepares");
         let saved = writer.store(&settings, provider).await.expect("stores");
         let other = ProviderSlot::new(
-            OidcSettingsStore::memory(),
+            ProviderSettingsStore::memory(),
             Some(
                 Sealer::from_secret(b"a different session secret, also long enough")
                     .expect("sealer"),

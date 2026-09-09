@@ -1423,10 +1423,10 @@ writes go through the `SECURITY DEFINER` sync/admin functions; no role has
 direct DML. The four administrator-only `pgokf_private` state tables (`config`,
 `sync_log`, `sync_log_change`, `access_log`) are reachable only through the
 config and `list_*` functions. The four `pgokf_web` tables (`users`,
-`sessions`, `mcp_tokens`, `oidc`) hold the web UI's identity state - the
-people its `users` mode signs in, the sessions it has issued, the bearer
-tokens `pgokf-mcp` accepts over HTTP, and the identity provider an admin set
-up - and are the one exception to "no direct DML": `pgokf_writer` holds
+`sessions`, `mcp_tokens`, `identity_provider`) hold the web UI's identity
+state - the people its `users` mode signs in, the sessions it has issued,
+the bearer tokens `pgokf-mcp` accepts over HTTP, and the identity provider
+an admin set up - and are the one exception to "no direct DML": `pgokf_writer` holds
 `SELECT`, `INSERT`, `UPDATE`, and `DELETE` on all but `mcp_tokens`, which it
 may not `UPDATE`, so `pgokf-web` reads and writes them through its writer
 connection, while `pgokf_reader` has no access at all (a reader must never
@@ -1443,7 +1443,7 @@ One person the web UI's `users` identity mode can sign in.
 | ------ | ---- | ----- |
 | `name` | `text` | Primary key: the sign-in name, one plain token (`^[A-Za-z0-9._@+-]{1,128}$`), also the person's OKF actor `human:<name>`. |
 | `role` | `text` | `viewer`, `uploader`, `editor`, `approver`, or `admin` (a `CHECK`); read on every request, so a change takes effect at once. |
-| `password_hash` | `text` | An Argon2id PHC string; a fingerprint of it is bound into each session, so a changed password ends earlier sessions. |
+| `password_hash` | `text` | An Argon2id PHC string, or `NULL` for a person the identity provider signed in (their row appears at their first sign-in, so an admin can set their role; a password sign-in under their name is refused). A fingerprint of the hash is bound into each password session, so a changed password ends earlier sessions. |
 | `created_at` | `timestamptz` | When the person was added. |
 | `updated_at` | `timestamptz` | When the role or password last changed. |
 
@@ -1473,22 +1473,24 @@ token.
 | `created_by` | `text` | Who minted it: the admin's subject, or `cli`. |
 | `created_at` | `timestamptz` | When it was minted. |
 
-### `pgokf_web.oidc`
+### `pgokf_web.identity_provider`
 
 The identity provider the web UI's `users` mode offers beside its own
-sign-in, as set up on the Admin page: one row at most.
+sign-in, as set up on the Admin page - an OpenID Connect provider, or
+GitHub: one row at most.
 
 | Column | Type | Notes |
 | ------ | ---- | ----- |
 | `singleton` | `boolean` | Primary key, always `true` (a `CHECK`): the key of the one row. |
 | `enabled` | `boolean` | Whether the provider is offered on the sign-in page; off keeps the settings. |
-| `issuer` | `text` | The issuer URL as the provider declares it (`https?://…`, a `CHECK`). |
+| `kind` | `text` | `oidc` (discovery and an ID token verified against the provider's keys) or `github` (GitHub's OAuth web flow; the person from `/user`, groups from organizations and `org/team` slugs) - a `CHECK`. |
+| `issuer` | `text` | The issuer URL as the provider declares it (`https?://…`, a `CHECK`); for GitHub, the GitHub host (`https://github.com` or an Enterprise Server). |
 | `client_id` | `text` | The client id this site is registered with. |
 | `client_secret` | `text` | `NULL` for a public client; otherwise the secret sealed by `pgokf-web` (`v1:<nonce>:<ciphertext>`, AES-256-GCM under a key derived from `OKF_WEB_SESSION_SECRET`). A `CHECK` refuses anything but the sealed form, so a plaintext secret can never be stored. |
 | `redirect_url` | `text` | This site's callback URL, as registered with the provider. |
-| `scopes` | `text` | Space-separated; `openid` is always included. |
-| `subject_claims` | `text` | Comma-separated claims tried in order for the person's identity. |
-| `groups_claim` | `text` | The claim carrying the person's groups. |
+| `scopes` | `text` | Space-separated; `openid` is always included for OpenID Connect, and GitHub takes its own (`read:user user:email read:org`). |
+| `subject_claims` | `text` | Comma-separated claims tried in order for the person's identity; for GitHub `sub` is the numeric account id, then `login`, `name`, `email`. |
+| `groups_claim` | `text` | The claim carrying the person's groups; for GitHub, the organizations and `org/team` slugs under this name. |
 | `provider_name` | `text` | What the sign-in button calls the provider. |
 | `role_map` | `text` | `group=role` entries, comma-separated; the highest matching role wins. |
 | `default_role` | `text` | The role of a person in no mapped group (a `CHECK` on the ladder). |

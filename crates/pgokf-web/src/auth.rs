@@ -410,7 +410,19 @@ fn header_text(headers: &HeaderMap, name: &HeaderName) -> Option<String> {
 #[derive(Debug, Clone)]
 pub(crate) struct UserRecord {
     pub(crate) role: Role,
-    pub(crate) hash: String,
+    /// The Argon2id hash, or `None` for a person the identity provider
+    /// signed in, who has no password here.
+    pub(crate) hash: Option<String>,
+}
+
+/// One person as the Admin page lists them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UserSummary {
+    pub(crate) name: String,
+    pub(crate) role: Role,
+    /// Whether they sign in with a password here; otherwise the identity
+    /// provider brought them, and their row is for their role.
+    pub(crate) has_password: bool,
 }
 
 /// The `users` mode: the people in the catalog's `pgokf_web.users`, a
@@ -839,8 +851,32 @@ impl UsersAuth {
     /// # Errors
     ///
     /// The catalog cannot be read.
-    pub(crate) async fn list(&self) -> Result<Vec<(String, Role)>> {
+    pub(crate) async fn list(&self) -> Result<Vec<UserSummary>> {
         self.store.list().await
+    }
+
+    /// Give a person the identity provider signed in their row, so the
+    /// Admin page shows them and an admin can set their role there. The row
+    /// starts at the bottom of the ladder: it carries only what an admin
+    /// grants there, never a snapshot of what their groups mapped to, so a
+    /// group taken away at the provider takes its role away here too. A row
+    /// already there is left as it is.
+    ///
+    /// # Errors
+    ///
+    /// The catalog cannot be written.
+    pub(crate) async fn provision(&self, principal: &Principal) -> Result<bool> {
+        self.store.provision(&principal.subject, Role::Viewer).await
+    }
+
+    /// Whether `name` signs in with a password here (a person the
+    /// provider brought does not).
+    ///
+    /// # Errors
+    ///
+    /// The catalog cannot be read.
+    pub(crate) async fn has_password(&self, name: &str) -> Result<bool> {
+        Ok(self.record(name).await?.is_some_and(|r| r.hash.is_some()))
     }
 
     /// Add a person (a new name) with a hashed password.
@@ -863,6 +899,9 @@ impl UsersAuth {
     /// cookie so they stay signed in.
     pub(crate) async fn set_password(&self, name: &str, password: &str) -> Result<()> {
         let hash = validated_password(password).and_then(hash_password)?;
+        // A person the identity provider brought stays one (the store
+        // refuses to give them a password): two people under one name would
+        // be the alternative.
         self.store.set_hash(name, &hash).await?;
         // The new hash is stored, and the changed binding alone stops every
         // earlier session verifying; this also ends them in the catalog.
@@ -917,14 +956,19 @@ impl UsersAuth {
         // A catalog that cannot answer is surfaced, not counted: a failure
         // here is neither a wrong password nor grounds for a cooldown.
         let record = self.record(name).await?;
-        let hash = record.as_ref().map_or(DECOY_HASH, |r| r.hash.as_str());
+        // A person the provider brought has no password here: their name
+        // is verified against the decoy like a name nobody has.
+        let hash = record
+            .as_ref()
+            .and_then(|r| r.hash.as_deref())
+            .unwrap_or(DECOY_HASH);
         let verified = PasswordHash::new(hash).is_ok_and(|parsed| {
             Argon2::default()
                 .verify_password(password.as_bytes(), &parsed)
                 .is_ok()
         });
         match record {
-            Some(record) if verified => {
+            Some(record) if verified && record.hash.is_some() => {
                 self.forget_failures(name, peer);
                 Ok(Some(Principal {
                     subject: name.to_owned(),
@@ -1004,7 +1048,16 @@ impl UsersAuth {
             .context("looking the person up to open their session")?
             .with_context(|| format!("{} is no longer a user", principal.subject))?;
         self.sessions
-            .open_session(&principal.subject, Mode::Users, fingerprint(&record.hash))
+            .open_session(
+                &principal.subject,
+                Mode::Users,
+                fingerprint(record.hash.as_deref().with_context(|| {
+                    format!(
+                        "{} has no password here: they sign in through the identity provider",
+                        principal.subject
+                    )
+                })?),
+            )
             .await
     }
 
@@ -1021,8 +1074,13 @@ impl UsersAuth {
         let Some(record) = self.record(&claims.subject).await? else {
             return Ok(None);
         };
-        if claims.binding != fingerprint(&record.hash) {
-            // The password changed since this session was opened.
+        if record
+            .hash
+            .as_deref()
+            .is_none_or(|hash| claims.binding != fingerprint(hash))
+        {
+            // The password changed since this session was opened - or the
+            // person never had one here.
             return Ok(None);
         }
         Ok(Some(Principal {
@@ -1045,7 +1103,21 @@ impl UsersAuth {
         let Some(provider) = slot.recent().await? else {
             return Ok(None);
         };
-        provider.identify(headers).await
+        let Some(mut principal) = provider.identify(headers).await? else {
+            return Ok(None);
+        };
+        // Their row on the People table, if they have one: the higher of
+        // the role an admin set there and the role their groups map to. A
+        // row with a password belongs to someone else who happens to share
+        // the name, and lends nothing: the provider's account is nobody here.
+        match self.record(&principal.subject).await? {
+            Some(record) if record.hash.is_none() => {
+                principal.role = principal.role.max(record.role);
+            }
+            Some(_) => return Ok(None),
+            None => {}
+        }
+        Ok(Some(principal))
     }
 }
 
@@ -1576,7 +1648,7 @@ mod tests {
                 (*name).to_owned(),
                 UserRecord {
                     role: *role,
-                    hash: hash_password(password).expect("hashes"),
+                    hash: Some(hash_password(password).expect("hashes")),
                 },
             )
         }));
@@ -1589,17 +1661,18 @@ mod tests {
     /// A users mode with an identity provider set up in its (memory)
     /// catalog, mapping `okf-approvers` to approver.
     async fn users_auth_with_provider(secret: Vec<u8>) -> UsersAuth {
-        use crate::oidc_settings::OidcSettingsStore;
         use crate::provider::{ProviderDraft, ProviderSlot, SecretChange};
+        use crate::provider_settings::ProviderSettingsStore;
 
         let users = users_auth_with(secret);
         let slot = ProviderSlot::new(
-            OidcSettingsStore::memory(),
+            ProviderSettingsStore::memory(),
             None,
             Arc::clone(&users.sessions),
         );
         let draft = ProviderDraft {
             enabled: true,
+            kind: crate::provider_settings::ProviderKind::Oidc,
             issuer: "https://id.example".to_owned(),
             client_id: "catalog".to_owned(),
             client_secret: SecretChange::Clear,
@@ -1674,6 +1747,128 @@ mod tests {
         assert_eq!(
             users.sessions.presented_mode(&cookie_headers(&by_provider)),
             Some(Mode::Oidc)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_person_the_provider_brought_gets_a_row_and_the_higher_role() {
+        // Arrange: carol arrives through the provider as an approver (a
+        // mapped group).
+        let users = users_auth_with_provider(b"0123456789abcdef0123456789abcdef".to_vec()).await;
+        let carol = Principal {
+            subject: "carol@example.com".to_owned(),
+            display: "Carol".to_owned(),
+            role: Role::Approver,
+        };
+        let binding = users
+            .provider()
+            .await
+            .expect("reads")
+            .expect("a provider")
+            .binding();
+        let cookie = users
+            .sessions
+            .open_session_with(
+                "carol@example.com",
+                Mode::Oidc,
+                binding,
+                None,
+                vec!["okf-approvers".to_owned()],
+            )
+            .await
+            .expect("a cookie");
+
+        // Act
+        let first = users.provision(&carol).await.expect("records");
+        let again = users.provision(&carol).await.expect("answers");
+        let as_listed = users.list().await.expect("lists");
+        let before = users.identify_ok(&cookie_headers(&cookie)).await;
+        users
+            .set_role("carol@example.com", Role::Admin)
+            .await
+            .expect("sets");
+        let after = users.identify_ok(&cookie_headers(&cookie)).await;
+        let by_password = users
+            .verify_ok("carol@example.com", "anything at all", None)
+            .await;
+        let password_flag = users
+            .has_password("carol@example.com")
+            .await
+            .expect("reads");
+
+        // Assert
+        assert!(first && !again, "one row, kept as it is");
+        assert!(
+            as_listed.iter().any(|u| u.name == "carol@example.com"
+                && !u.has_password
+                && u.role == Role::Viewer),
+            "the row starts at the bottom of the ladder, not at the mapped role"
+        );
+        assert_eq!(
+            before.map(|p| p.role),
+            Some(Role::Approver),
+            "the group-mapped role, higher than the row's, applies"
+        );
+        assert_eq!(
+            after.map(|p| p.role),
+            Some(Role::Admin),
+            "the admin's role applies once it is the higher"
+        );
+        assert!(
+            by_password.is_none(),
+            "no password sign-in for a provider person"
+        );
+        assert!(!password_flag);
+    }
+
+    #[tokio::test]
+    async fn a_provider_account_carrying_a_password_persons_name_is_nobody() {
+        // Arrange: alice signs in here with a password; the provider opens a
+        // session for a subject of the same name, and carol is a person the
+        // provider brought.
+        let users = users_auth_with_provider(b"0123456789abcdef0123456789abcdef".to_vec()).await;
+        let binding = users
+            .provider()
+            .await
+            .expect("reads")
+            .expect("a provider")
+            .binding();
+        let as_alice = users
+            .sessions
+            .open_session_with("alice", Mode::Oidc, binding, None, Vec::new())
+            .await
+            .expect("a cookie");
+        let carol = Principal {
+            subject: "carol@example.com".to_owned(),
+            display: "Carol".to_owned(),
+            role: Role::Viewer,
+        };
+        users.provision(&carol).await.expect("records");
+
+        // Act
+        let identified = users.identify_ok(&cookie_headers(&as_alice)).await;
+        let given_a_password = users
+            .set_password("carol@example.com", "a long enough password")
+            .await;
+
+        // Assert
+        assert!(
+            identified.is_none(),
+            "a password person's name lends the provider's account nothing"
+        );
+        let refused = given_a_password.expect_err("refused");
+        assert!(
+            refused
+                .to_string()
+                .contains("signs in through the identity provider"),
+            "{refused}"
+        );
+        assert!(
+            !users
+                .has_password("carol@example.com")
+                .await
+                .expect("reads"),
+            "no password was stored"
         );
     }
 
@@ -1892,7 +2087,11 @@ mod tests {
         assert!(short.is_err() && duplicate.is_err() && bad_name.is_err());
         assert_eq!(
             auth.list().await.expect("lists"),
-            vec![("bob".to_owned(), Role::Editor)]
+            vec![UserSummary {
+                name: "bob".to_owned(),
+                role: Role::Editor,
+                has_password: true,
+            }]
         );
         assert!(
             auth.verify_ok("bob", "a different long password", None)
@@ -1984,7 +2183,7 @@ mod tests {
             "alice".to_owned(),
             UserRecord {
                 role: Role::Viewer,
-                hash: "not-a-hash".to_owned(),
+                hash: Some("not-a-hash".to_owned()),
             },
         )]);
         let sessions = Sessions::new(vec![7_u8; 32], 3600, false)

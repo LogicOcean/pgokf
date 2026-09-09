@@ -142,7 +142,7 @@ const CATALOG_TABLES: &[&str] = &[
     "pgokf_web.users",
     "pgokf_web.sessions",
     "pgokf_web.mcp_tokens",
-    "pgokf_web.oidc",
+    "pgokf_web.identity_provider",
 ];
 
 /// The three public API roles created by `sql/bootstrap.sql`

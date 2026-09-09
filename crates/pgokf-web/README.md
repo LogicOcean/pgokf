@@ -132,13 +132,34 @@ Google, a GitLab instance.
 
 There are two ways to set one up. **From the Admin page**, in `users` mode:
 an admin enters the issuer, client id and secret, the callback URL, the
-claims and the group-to-role map, and *Save and test* reads the provider's
-discovery document before anything is stored; the sign-in page then offers
-"Sign in with …" beside the password form, people who sign in that way get
-the role their groups map to, switching the provider off or removing it ends
-the sessions it opened, and every instance of the UI picks a change up on
-its next sign-in. The settings live in the catalog (`pgokf_web.oidc`,
-writer-only), and the client secret only sealed under a key derived from
+claims and the group-to-role map, and *Save and test* reaches the provider
+before anything is stored; the sign-in page then offers "Sign in with …"
+beside the password form, people who sign in that way get the role their
+groups map to, switching the provider off or removing it ends the sessions
+it opened, and every instance of the UI picks a change up on its next
+sign-in. A person the provider signs in appears under **People** at their
+first sign-in, without a password and at the bottom of the ladder: an
+admin sees them there and can set their role, and the higher of that role
+and the one their groups map to applies on every request, so a group taken
+away at the provider takes its role away here. Removing them ends their
+sessions but is not a ban (they get a fresh row at their next sign-in), a
+password cannot be set for them, and a name that signs in here with a
+password is never signed in through the provider. The provider may also be **GitHub** (github.com or a GitHub
+Enterprise Server), which speaks OAuth but not OpenID Connect: register an
+*OAuth App* with the callback URL, ask for the scopes `read:user user:email
+read:org` (what GitHub actually granted decides what is read), and the
+person comes from GitHub's API - `sub` is the account's numeric id, `login`
+the user name (which GitHub lets people change and later hands to someone
+else, so keep `sub` unless you accept that), `email` the primary verified
+address - with the organizations and `org/team` slugs they belong to as
+their groups (up to five hundred; an organization that restricts third-party
+access appears once it has approved the app), so a role map reads
+`my-org=editor,my-org/maintainers=approver`. GitHub needs the client secret:
+a secretless (public) GitHub app is refused at *Save and test*. The
+callback URL may be plain `http://` only on the loopback interface or a
+private address, where the site is already served that way. The settings
+live in the catalog (`pgokf_web.identity_provider`, writer-only), and the
+client secret only sealed under a key derived from
 `OKF_WEB_SESSION_SECRET` - so set that first; without it the UI keeps no
 client secret, and only a public client (PKCE alone) can be used, which
 some providers (Google, Entra ID's web registrations) refuse. Rotating the

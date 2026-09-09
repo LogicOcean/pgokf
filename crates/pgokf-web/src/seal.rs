@@ -2,7 +2,8 @@
 //! A secret at rest in the catalog, sealed under the site's own key.
 //!
 //! The one secret the web UI keeps that is not a one-way hash is an identity
-//! provider's client secret (`pgokf_web.oidc.client_secret`): the site must
+//! provider's client secret (`pgokf_web.identity_provider.client_secret`): the
+//! site must
 //! present it to the provider, so it must be able to read it back. It is
 //! stored sealed - AES-256-GCM under a key derived (HKDF-SHA256) from the
 //! session secret the operator set - so the catalog, and every writer
@@ -26,7 +27,7 @@ const VERSION: &str = "v1";
 /// associated data - a sealed value moved to another column, or sealed for
 /// another purpose, does not open.
 const SALT: &[u8] = b"pgokf-web seal";
-const INFO: &[u8] = b"pgokf_web.oidc.client_secret";
+const INFO: &[u8] = b"pgokf_web.identity_provider.client_secret";
 
 /// Seals and opens secrets under one derived key.
 pub(crate) struct Sealer {

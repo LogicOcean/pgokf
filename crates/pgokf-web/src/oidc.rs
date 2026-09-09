@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! `OpenID` Connect: this site as its own `OAuth` client.
+//! `OpenID` Connect: this site as its own `OAuth` client - and GitHub, which
+//! speaks `OAuth` but not `OpenID` Connect, by its own web flow.
 //!
 //! The fourth implementation of the seam in [`crate::auth`], for a
 //! deployment that wants people to sign in with the identity provider they
 //! already have (Entra ID, Okta, Keycloak, Auth0, Google, a `GitLab`
-//! instance) without putting an authenticating proxy in front.
+//! instance, GitHub) without putting an authenticating proxy in front.
 //!
 //! The flow is the authorization code flow with PKCE, which is what the
 //! `OAuth` 2.1 draft and the `OpenID` Connect security guidance ask of a
@@ -24,6 +25,13 @@
 //! 4. The verified claims become a [`Principal`], and this site opens its
 //!    own session exactly as the `users` mode does.
 //!
+//! GitHub ([`ProviderKind::GitHub`]) has no discovery document, issues no ID
+//! token and publishes no keys: its endpoints are known, the same code flow
+//! (state, PKCE) yields an access token, and the person is read from its
+//! API instead - `/user` for the account, `/user/emails` for the primary
+//! verified address, `/user/orgs` and `/user/teams` for the groups - and
+//! shaped into the same claims, so everything after that is shared.
+//!
 //! What the verification insists on: an asymmetric signature by a key the
 //! provider publishes (never `none`, never an HMAC algorithm, which would
 //! let a public key be used as a shared secret), the configured issuer,
@@ -32,6 +40,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
+use std::net::IpAddr;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -49,6 +58,7 @@ use sha2::{Digest, Sha256};
 use crate::auth::{
     FLOW_COOKIE, Mode, Principal, RoleMapping, Sessions, cookie_value, random_bytes, valid_subject,
 };
+use crate::provider_settings::ProviderKind;
 use crate::routes::filters::percent_encode;
 
 /// The signature algorithms an ID token may carry. Asymmetric only: an
@@ -79,11 +89,18 @@ const FLOW_SECONDS: u64 = 10 * 60;
 const MAX_METADATA_BYTES: usize = 512 * 1024;
 /// How long any single request to the provider may take.
 const PROVIDER_TIMEOUT: Duration = Duration::from_secs(10);
+/// The GitHub REST API version this site speaks.
+const GITHUB_API_VERSION: &str = "2022-11-28";
+/// How many pages (of 100) of a person's organizations or teams are read.
+const GITHUB_PAGES: usize = 5;
 
 /// What the operator configured.
 #[derive(Clone)]
 pub(crate) struct OidcConfig {
-    /// The issuer URL, exactly as the provider declares it.
+    /// What the provider speaks.
+    pub kind: ProviderKind,
+    /// The issuer URL, exactly as the provider declares it - or, for
+    /// GitHub, the GitHub host.
     pub issuer: String,
     pub client_id: String,
     /// `None` for a public client, which PKCE alone protects.
@@ -107,6 +124,7 @@ pub(crate) struct OidcConfig {
 impl fmt::Debug for OidcConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OidcConfig")
+            .field("kind", &self.kind)
             .field("issuer", &self.issuer)
             .field("client_id", &self.client_id)
             .field(
@@ -177,10 +195,17 @@ struct IdClaims {
     other: Map<String, Value>,
 }
 
-/// What the token endpoint returns.
+/// What the token endpoint returns: an ID token from an `OpenID` Connect
+/// provider, an access token from GitHub.
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
-    id_token: String,
+    #[serde(default)]
+    id_token: Option<String>,
+    #[serde(default)]
+    access_token: Option<String>,
+    /// What was granted, as GitHub reports it (comma- or space-separated).
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 /// The `OpenID` Connect mode.
@@ -207,7 +232,7 @@ impl OidcAuth {
             bail!("the OIDC client id is empty");
         }
         check_url(&config.issuer, "the OIDC issuer")?;
-        check_url(&config.redirect_uri, "the OIDC redirect URL")?;
+        check_site_url(&config.redirect_uri, "the callback URL")?;
         if config.subject_claims.is_empty() {
             bail!("no OIDC subject claim is configured");
         }
@@ -222,6 +247,8 @@ impl OidcAuth {
         let http = Client::builder()
             .timeout(PROVIDER_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
+            // GitHub's API refuses a request without one.
+            .user_agent(concat!("pgokf-web/", env!("CARGO_PKG_VERSION")))
             .build()
             .context("building the HTTP client for the identity provider")?;
         Ok(Self {
@@ -252,7 +279,8 @@ impl OidcAuth {
     pub(crate) fn binding(&self) -> String {
         let digest = Sha256::digest(
             format!(
-                "{}\n{}",
+                "{}\n{}\n{}",
+                self.config.kind.id(),
                 self.config.issuer.trim_end_matches('/'),
                 self.config.client_id
             )
@@ -261,14 +289,40 @@ impl OidcAuth {
         URL_SAFE_NO_PAD.encode(&digest[..16])
     }
 
-    /// Reach the provider's discovery document, so settings an admin is
-    /// about to save are known to name a provider that answers.
+    /// Reach the provider - its discovery document, or GitHub's API - so
+    /// settings an admin is about to save are known to name a provider
+    /// that answers.
     ///
     /// # Errors
     ///
-    /// The document cannot be read, or declares another issuer.
+    /// The document cannot be read or declares another issuer; GitHub's
+    /// API does not answer.
     pub(crate) async fn probe(&self) -> Result<()> {
-        self.metadata().await.map(|_| ())
+        match self.config.kind {
+            ProviderKind::Oidc => self.metadata().await.map(|_| ()),
+            ProviderKind::GitHub => {
+                // The API root answers anonymously on github.com and with
+                // 401 on a GitHub Enterprise Server in private mode: either
+                // proves the host is GitHub's API and reachable.
+                let api = github_api_base(&self.config.issuer);
+                let url = format!("{api}/");
+                let response = self
+                    .http
+                    .get(&url)
+                    .send()
+                    .await
+                    .with_context(|| format!("GitHub's API at {url} could not be reached"))?;
+                let status = response.status();
+                if status.is_success()
+                    || status == reqwest::StatusCode::UNAUTHORIZED
+                    || status == reqwest::StatusCode::FORBIDDEN
+                {
+                    Ok(())
+                } else {
+                    bail!("GitHub's API at {url} answered HTTP {status}")
+                }
+            }
+        }
     }
 
     /// Where to send someone to sign in, with the cookie that remembers
@@ -302,7 +356,7 @@ impl OidcAuth {
                 ("response_type", "code"),
                 ("client_id", &self.config.client_id),
                 ("redirect_uri", &self.config.redirect_uri),
-                ("scope", &scopes(&self.config.scopes)),
+                ("scope", &scopes(self.config.kind, &self.config.scopes)),
                 ("state", &state),
                 ("nonce", &nonce),
                 ("code_challenge", &challenge),
@@ -339,8 +393,27 @@ impl OidcAuth {
         if !constant_time_eq(&flow.state, state) {
             bail!("this sign-in does not match the one that started here");
         }
-        let id_token = self.exchange(code, &flow.verifier).await?;
-        let claims = self.verify_id_token(&id_token, &flow.nonce).await?;
+        let tokens = self.exchange(code, &flow.verifier).await?;
+        let claims = match self.config.kind {
+            ProviderKind::Oidc => {
+                let id_token = tokens
+                    .id_token
+                    .context("the provider's token response carried no ID token")?;
+                self.verify_id_token(&id_token, &flow.nonce).await?
+            }
+            ProviderKind::GitHub => {
+                let access_token = tokens
+                    .access_token
+                    .context("GitHub's token response carried no access token")?;
+                // What GitHub granted decides what is read; the configured
+                // scopes stand in when the answer names none.
+                let granted = tokens
+                    .scope
+                    .clone()
+                    .unwrap_or_else(|| scopes(self.config.kind, &self.config.scopes));
+                self.github_claims(&access_token, &granted).await?
+            }
+        };
         let (principal, groups) = self.principal_from(&claims)?;
         Ok((principal, groups, flow.next))
     }
@@ -408,8 +481,39 @@ impl OidcAuth {
         }
     }
 
-    /// Read the provider's configuration and keys, and keep them.
+    /// Read the provider's configuration and keys, and keep them. GitHub
+    /// publishes neither: its endpoints follow from its host, and there are
+    /// no keys to read because there is no ID token to verify.
     async fn refresh(&self) -> Result<Metadata> {
+        if self.config.kind == ProviderKind::GitHub {
+            let host = self.config.issuer.trim_end_matches('/');
+            let discovery = Discovery {
+                issuer: host.to_owned(),
+                authorization_endpoint: format!("{host}/login/oauth/authorize"),
+                token_endpoint: format!("{host}/login/oauth/access_token"),
+                jwks_uri: String::new(),
+                end_session_endpoint: None,
+                id_token_signing_alg_values_supported: None,
+                token_endpoint_auth_methods_supported: Some(vec!["client_secret_post".to_owned()]),
+                code_challenge_methods_supported: Some(vec!["S256".to_owned()]),
+            };
+            let now = Instant::now();
+            let metadata = Metadata {
+                discovery: discovery.clone(),
+                keys: JwkSet { keys: Vec::new() },
+                read_at: now,
+                keys_read_at: now,
+            };
+            if let Ok(mut guard) = self.metadata.write() {
+                *guard = Some(Metadata {
+                    discovery,
+                    keys: JwkSet { keys: Vec::new() },
+                    read_at: now,
+                    keys_read_at: now,
+                });
+            }
+            return Ok(metadata);
+        }
         let url = format!(
             "{}/.well-known/openid-configuration",
             self.config.issuer.trim_end_matches('/')
@@ -485,7 +589,7 @@ impl OidcAuth {
     /// Trade the code for tokens at the provider's token endpoint. This is
     /// a direct TLS-verified request from this site, so the code and the
     /// client secret never travel through the browser.
-    async fn exchange(&self, code: &str, verifier: &str) -> Result<String> {
+    async fn exchange(&self, code: &str, verifier: &str) -> Result<TokenResponse> {
         let discovery = self.metadata().await?;
         let mut form = vec![
             ("grant_type", "authorization_code"),
@@ -500,7 +604,13 @@ impl OidcAuth {
         {
             form.push(("client_secret", secret.as_str()));
         }
-        let mut request = self.http.post(&discovery.token_endpoint).form(&form);
+        // JSON asked for explicitly: GitHub answers in form encoding
+        // otherwise, and an OpenID Connect provider answers JSON anyway.
+        let mut request = self
+            .http
+            .post(&discovery.token_endpoint)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .form(&form);
         if let Some(secret) = &self.config.client_secret
             && basic
         {
@@ -520,9 +630,144 @@ impl OidcAuth {
                 oauth_error(&body).map_or(String::new(), |e| format!(", {e}"))
             );
         }
-        let tokens: TokenResponse =
-            serde_json::from_str(&body).context("the provider's token response was not usable")?;
-        Ok(tokens.id_token)
+        // GitHub answers a bad code with 200 and an error body; that is a
+        // refusal too, and the code says why.
+        if let Some(error) = oauth_error(&body) {
+            bail!("the provider refused the sign-in ({error})");
+        }
+        serde_json::from_str(&body).context("the provider's token response was not usable")
+    }
+
+    /// The person GitHub's API describes, as the claims an ID token would
+    /// carry: `sub` is the account's numeric id, `login` and `name` its
+    /// own, `email` the primary verified address when the `user:email`
+    /// scope allowed reading it, and the groups the organizations and
+    /// `org/team` slugs when `read:org` did.
+    async fn github_claims(&self, access_token: &str, granted: &str) -> Result<IdClaims> {
+        let api = github_api_base(&self.config.issuer);
+        let (user, _) = self
+            .github_json(&format!("{api}/user"), access_token)
+            .await?;
+        let emails = if scope_granted(granted, "user:email") {
+            self.github_list(&format!("{api}/user/emails?per_page=100"), access_token)
+                .await?
+        } else {
+            Vec::new()
+        };
+        let (orgs, teams) = if scope_granted(granted, "read:org") {
+            (
+                self.github_list(&format!("{api}/user/orgs?per_page=100"), access_token)
+                    .await?,
+                self.github_list(&format!("{api}/user/teams?per_page=100"), access_token)
+                    .await?,
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let claims = claims_from_github(
+            &user,
+            &Value::Array(emails),
+            &Value::Array(orgs),
+            &Value::Array(teams),
+            &self.config.groups_claim,
+        );
+        // The token has served: GitHub keeps it valid otherwise, and this
+        // site has no use for it after the claims. Best effort - a token
+        // that outlives this is only a token this site never uses again.
+        self.github_forget_token(&api, access_token).await;
+        claims
+    }
+
+    /// Every page of a list GitHub's API paginates, up to
+    /// [`GITHUB_PAGES`]: past that the person belongs to more groups than
+    /// this site will read, and the sign-in says so rather than deciding a
+    /// role on part of them.
+    async fn github_list(&self, url: &str, access_token: &str) -> Result<Vec<Value>> {
+        let mut items = Vec::new();
+        let mut next = Some(url.to_owned());
+        let mut pages = 0;
+        while let Some(url) = next {
+            if pages == GITHUB_PAGES {
+                bail!(
+                    "GitHub lists more than {} entries for this person; this site reads no \
+                     further, so a role cannot be decided",
+                    GITHUB_PAGES * 100
+                );
+            }
+            pages += 1;
+            let (page, link) = self.github_json(&url, access_token).await?;
+            items.extend(page.as_array().into_iter().flatten().cloned());
+            // Only a page of the same API is followed: a Link header
+            // naming another host would send the person's token there. And
+            // a page that cannot be followed is not quietly left out, which
+            // would decide a role on part of the groups.
+            next = match link.as_deref().and_then(next_link) {
+                Some(page) if page.starts_with(&format!("{}/", api_origin(&url))) => Some(page),
+                Some(page) => bail!(
+                    "GitHub's next page of this list is not on {}: {}",
+                    api_origin(&url),
+                    api_origin(&page)
+                ),
+                None => None,
+            };
+        }
+        Ok(items)
+    }
+
+    /// One document from GitHub's API, as the API asks to be called, with
+    /// its `Link` header for the page after it.
+    async fn github_json(&self, url: &str, access_token: &str) -> Result<(Value, Option<String>)> {
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(access_token)
+            .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
+            .send()
+            .await
+            .with_context(|| format!("{url} could not be reached"))?;
+        let status = response.status();
+        if !status.is_success() {
+            bail!("{url} answered HTTP {status}");
+        }
+        let link = response
+            .headers()
+            .get(reqwest::header::LINK)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let body = bounded_text(response).await?;
+        let value = serde_json::from_str(&body)
+            .with_context(|| format!("{url} did not answer with JSON"))?;
+        Ok((value, link))
+    }
+
+    /// Revoke an access token this site is done with, as GitHub's API
+    /// offers (`DELETE /applications/{client_id}/token`, authenticated as
+    /// the app). Nothing depends on it, so a failure is only logged.
+    async fn github_forget_token(&self, api: &str, access_token: &str) {
+        let Some(secret) = &self.config.client_secret else {
+            return;
+        };
+        let url = format!("{api}/applications/{}/token", self.config.client_id);
+        let outcome = self
+            .http
+            .delete(&url)
+            .basic_auth(&self.config.client_id, Some(secret))
+            .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
+            .json(&serde_json::json!({ "access_token": access_token }))
+            .send()
+            .await;
+        match outcome {
+            Ok(response) if response.status().is_success() => {}
+            Ok(response) => eprintln!(
+                "pgokf-web: GitHub did not revoke a used access token (HTTP {})",
+                response.status()
+            ),
+            Err(error) => {
+                eprintln!("pgokf-web: GitHub did not revoke a used access token: {error}");
+            }
+        }
     }
 
     /// Whether to authenticate at the token endpoint with HTTP Basic (the
@@ -743,7 +988,11 @@ fn authorization_url(endpoint: &str, params: &[(&str, &str)]) -> String {
 
 /// The scopes to ask for: what the operator configured, with `openid`
 /// always present because the flow is `OpenID` Connect.
-fn scopes(configured: &str) -> String {
+fn scopes(kind: ProviderKind, configured: &str) -> String {
+    if kind == ProviderKind::GitHub {
+        // GitHub has scopes of its own and no `openid`.
+        return configured.split_whitespace().collect::<Vec<_>>().join(" ");
+    }
     let mut scopes: Vec<&str> = configured.split_whitespace().collect();
     if !scopes.contains(&"openid") {
         scopes.insert(0, "openid");
@@ -770,6 +1019,44 @@ fn check_url(url: &str, what: &str) -> Result<()> {
         Ok(())
     } else {
         bail!("{what} must be an https:// URL (http:// only on localhost, for a test provider)")
+    }
+}
+
+/// This site's own address, as the provider will send the browser back to
+/// it: `https://` anywhere, or plain `http://` where the site is served
+/// that way already - on the loopback interface, or on a private or
+/// link-local address that never leaves the operator's network. Anything
+/// else in plain HTTP would carry the authorization code across the open
+/// internet unprotected.
+fn check_site_url(url: &str, what: &str) -> Result<()> {
+    if check_url(url, what).is_ok() {
+        return Ok(());
+    }
+    let Some(rest) = url.trim().strip_prefix("http://") else {
+        bail!("{what} must be an https:// or http:// URL");
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host_port = authority.rsplit('@').next().unwrap_or_default();
+    let host = host_port
+        .strip_prefix('[')
+        .and_then(|h| h.split(']').next())
+        .unwrap_or_else(|| host_port.split(':').next().unwrap_or_default());
+    let private = match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => ip.is_private() || ip.is_link_local() || ip.is_loopback(),
+        Ok(IpAddr::V6(ip)) => {
+            ip.is_loopback()
+                || (ip.segments()[0] & 0xfe00) == 0xfc00
+                || (ip.segments()[0] & 0xffc0) == 0xfe80
+        }
+        Err(_) => false,
+    };
+    if private {
+        Ok(())
+    } else {
+        bail!(
+            "{what} must be an https:// URL, or http:// on the loopback interface or a private \
+             address, where the site is already served in plain HTTP"
+        )
     }
 }
 
@@ -815,6 +1102,139 @@ fn string_list(value: Option<&Value>) -> Vec<String> {
     }
 }
 
+/// Where GitHub's REST API lives for a GitHub host: `api.github.com` for
+/// github.com, `/api/v3` under the host for a GitHub Enterprise Server.
+fn github_api_base(issuer: &str) -> String {
+    let host = issuer.trim_end_matches('/');
+    let authority = host
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or_default();
+    if authority.eq_ignore_ascii_case("github.com")
+        || authority.eq_ignore_ascii_case("www.github.com")
+    {
+        "https://api.github.com".to_owned()
+    } else {
+        format!("{host}/api/v3")
+    }
+}
+
+/// Whether `granted` (GitHub's comma- or space-separated scope list)
+/// covers `wanted`, counting the umbrella scopes that include it: `user`
+/// covers `read:user` and `user:email`; `admin:org` and `write:org` cover
+/// `read:org`.
+fn scope_granted(granted: &str, wanted: &str) -> bool {
+    granted
+        .split([',', ' '])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .any(|scope| {
+            scope == wanted
+                || match wanted {
+                    "read:user" | "user:email" => scope == "user",
+                    "read:org" => scope == "admin:org" || scope == "write:org",
+                    _ => false,
+                }
+        })
+}
+
+/// The origin of a URL (`scheme://authority`), what a page of the same API
+/// must start with.
+fn api_origin(url: &str) -> String {
+    match url.find("://").map(|at| at + 3) {
+        Some(after_scheme) => {
+            let end = url[after_scheme..]
+                .find('/')
+                .map_or(url.len(), |slash| after_scheme + slash);
+            url[..end].to_owned()
+        }
+        None => url.to_owned(),
+    }
+}
+
+/// The `rel="next"` URL of a `Link` header, if there is a page after this one.
+fn next_link(header: &str) -> Option<String> {
+    header.split(',').find_map(|part| {
+        let (url, rel) = part.split_once(';')?;
+        rel.contains("rel=\"next\"").then(|| {
+            url.trim()
+                .trim_start_matches('<')
+                .trim_end_matches('>')
+                .to_owned()
+        })
+    })
+}
+
+/// GitHub's answers shaped into the claims an ID token would carry, so one
+/// mapping to a person serves both kinds of provider.
+///
+/// # Errors
+///
+/// `/user` names no account id.
+fn claims_from_github(
+    user: &Value,
+    emails: &Value,
+    orgs: &Value,
+    teams: &Value,
+    groups_claim: &str,
+) -> Result<IdClaims> {
+    let id = user
+        .get("id")
+        .and_then(Value::as_u64)
+        .context("GitHub's /user answer names no account id")?;
+    let mut other = Map::new();
+    for key in ["login", "name"] {
+        if let Some(value) = user
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            other.insert(key.to_owned(), Value::String(value.to_owned()));
+        }
+    }
+    // A person with no display name is shown by their login, not their id.
+    if !other.contains_key("name")
+        && let Some(login) = other.get("login").cloned()
+    {
+        other.insert("name".to_owned(), login);
+    }
+    // Only the primary address GitHub has verified, from /user/emails:
+    // /user's own `email` is whatever the person chose to show, unverified.
+    let verified_primary = emails.as_array().into_iter().flatten().find(|e| {
+        e.get("primary").and_then(Value::as_bool) == Some(true)
+            && e.get("verified").and_then(Value::as_bool) == Some(true)
+    });
+    if let Some(email) = verified_primary
+        .and_then(|e| e.get("email"))
+        .and_then(Value::as_str)
+    {
+        other.insert("email".to_owned(), Value::String(email.to_owned()));
+        other.insert("email_verified".to_owned(), Value::Bool(true));
+    }
+    let mut groups: Vec<Value> = orgs
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|org| org.get("login").and_then(Value::as_str))
+        .map(|login| Value::String(login.to_owned()))
+        .collect();
+    groups.extend(teams.as_array().into_iter().flatten().filter_map(|team| {
+        let org = team.get("organization")?.get("login")?.as_str()?;
+        let slug = team.get("slug")?.as_str()?;
+        Some(Value::String(format!("{org}/{slug}")))
+    }));
+    other.insert(groups_claim.to_owned(), Value::Array(groups));
+    Ok(IdClaims {
+        sub: id.to_string(),
+        nonce: None,
+        azp: None,
+        other,
+    })
+}
+
 /// Whether the provider asserts the token's `email` is verified. Providers
 /// send this as a boolean or, less correctly, the string `"true"`; anything
 /// else (including an absent claim) is treated as unverified.
@@ -851,6 +1271,7 @@ mod tests {
 
     fn config() -> OidcConfig {
         OidcConfig {
+            kind: ProviderKind::Oidc,
             issuer: "https://id.example.test/realms/okf".to_owned(),
             client_id: "pgokf".to_owned(),
             client_secret: Some("s3cret".to_owned()),
@@ -874,6 +1295,183 @@ mod tests {
             Arc::new(Sessions::new(vec![3_u8; 32], 3600, false).expect("valid")),
         )
         .expect("valid")
+    }
+
+    #[test]
+    fn a_callback_may_be_plain_http_on_a_private_address_only() {
+        // Arrange / Act / Assert
+        assert!(
+            check_site_url("https://catalog.example/auth/callback", "the callback URL").is_ok()
+        );
+        assert!(check_site_url("http://127.0.0.1:8090/auth/callback", "the callback URL").is_ok());
+        assert!(
+            check_site_url(
+                "http://192.168.1.132:8080/auth/callback",
+                "the callback URL"
+            )
+            .is_ok()
+        );
+        assert!(check_site_url("http://10.100.0.14/auth/callback", "the callback URL").is_ok());
+        assert!(check_site_url("http://[fd00::1]:8080/auth/callback", "the callback URL").is_ok());
+        assert!(
+            check_site_url("http://203.0.113.5/auth/callback", "the callback URL").is_err(),
+            "a public address"
+        );
+        assert!(
+            check_site_url("http://catalog.example/auth/callback", "the callback URL").is_err(),
+            "a name, whatever it resolves to"
+        );
+        assert!(
+            check_site_url("http://user@192.168.1.1@203.0.113.5/x", "the callback URL").is_err(),
+            "the last @ decides the host"
+        );
+        assert!(check_site_url("ftp://192.168.1.1/x", "the callback URL").is_err());
+    }
+
+    #[test]
+    fn github_api_lives_beside_the_host_it_serves() {
+        // Arrange / Act / Assert
+        assert_eq!(
+            github_api_base("https://github.com"),
+            "https://api.github.com"
+        );
+        assert_eq!(
+            github_api_base("https://github.com/"),
+            "https://api.github.com"
+        );
+        assert_eq!(
+            github_api_base("https://github.example.com/"),
+            "https://github.example.com/api/v3"
+        );
+        assert_eq!(
+            github_api_base("http://127.0.0.1:9797"),
+            "http://127.0.0.1:9797/api/v3"
+        );
+    }
+
+    #[test]
+    fn github_answers_become_the_claims_an_id_token_would_carry() {
+        // Arrange: a person with a public but unverified email on /user, a
+        // verified primary on /user/emails, one organization, one team.
+        let user = serde_json::json!({"id": 583_231, "login": "octocat", "name": " The Octocat ", "email": "shown@example.test"});
+        let emails = serde_json::json!([
+            {"email": "shown@example.test", "primary": false, "verified": false},
+            {"email": "octocat@example.test", "primary": true, "verified": true}
+        ]);
+        let orgs = serde_json::json!([{"login": "octo-org", "id": 1}]);
+        let teams =
+            serde_json::json!([{"slug": "maintainers", "organization": {"login": "octo-org"}}]);
+
+        // Act
+        let claims = claims_from_github(&user, &emails, &orgs, &teams, "groups").expect("claims");
+        let nobody = claims_from_github(
+            &serde_json::json!({"login": "x"}),
+            &emails,
+            &orgs,
+            &teams,
+            "groups",
+        );
+        let no_scopes =
+            claims_from_github(&user, &Value::Null, &Value::Null, &Value::Null, "groups")
+                .expect("claims");
+
+        // Assert
+        assert_eq!(claims.sub, "583231");
+        assert_eq!(claims.other["login"], "octocat");
+        assert_eq!(claims.other["name"], "The Octocat");
+        assert_eq!(
+            claims.other["email"], "octocat@example.test",
+            "the verified primary, not the shown one"
+        );
+        assert_eq!(claims.other["email_verified"], true);
+        assert_eq!(
+            claims.other["groups"],
+            serde_json::json!(["octo-org", "octo-org/maintainers"])
+        );
+        assert!(nobody.is_err(), "no id, no person");
+        assert!(
+            no_scopes.other.get("email").is_none(),
+            "no verified address without the scope"
+        );
+        assert_eq!(no_scopes.other["groups"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn what_github_granted_decides_what_is_read_umbrellas_included() {
+        // Arrange / Act / Assert
+        assert!(scope_granted("read:user,user:email,read:org", "user:email"));
+        assert!(
+            scope_granted("user", "user:email"),
+            "user covers user:email"
+        );
+        assert!(scope_granted("user", "read:user"));
+        assert!(scope_granted("admin:org", "read:org"));
+        assert!(scope_granted("write:org read:user", "read:org"));
+        assert!(!scope_granted("read:user", "read:org"));
+        assert!(!scope_granted("", "read:user"));
+    }
+
+    #[test]
+    fn a_link_header_names_the_next_page_or_nothing() {
+        // Arrange
+        let header = "<https://api.github.com/user/teams?per_page=100&page=2>; rel=\"next\", \
+                      <https://api.github.com/user/teams?per_page=100&page=3>; rel=\"last\"";
+        let last = "<https://api.github.com/user/teams?per_page=100&page=1>; rel=\"prev\"";
+
+        // Act / Assert
+        assert_eq!(
+            next_link(header).as_deref(),
+            Some("https://api.github.com/user/teams?per_page=100&page=2")
+        );
+        assert_eq!(next_link(last), None);
+        assert_eq!(next_link(""), None);
+    }
+
+    #[test]
+    fn a_page_is_followed_only_on_the_api_it_came_from() {
+        // Arrange
+        let page = "https://api.github.com/user/orgs?per_page=100";
+        let same = "https://api.github.com/user/orgs?page=2";
+        let other = "https://api.github.com.evil.example/user/orgs?page=2";
+        let another_scheme = "http://api.github.com/user/orgs?page=2";
+
+        // Act
+        let origin = api_origin(page);
+        let followed = |next: &str| next.starts_with(&format!("{origin}/"));
+
+        // Assert
+        assert_eq!(origin, "https://api.github.com");
+        assert!(followed(same));
+        assert!(!followed(other));
+        assert!(!followed(another_scheme));
+        assert_eq!(api_origin("https://ghe.example"), "https://ghe.example");
+    }
+
+    #[test]
+    fn a_person_without_a_display_name_is_shown_by_their_login() {
+        // Arrange
+        let user = serde_json::json!({"id": 7, "login": "octocat", "name": null});
+
+        // Act
+        let claims = claims_from_github(&user, &Value::Null, &Value::Null, &Value::Null, "groups")
+            .expect("claims");
+
+        // Assert
+        assert_eq!(claims.other["name"], "octocat");
+    }
+
+    #[test]
+    fn github_scopes_are_its_own_and_carry_no_openid() {
+        // Arrange / Act / Assert
+        assert_eq!(
+            scopes(ProviderKind::GitHub, "read:user  user:email"),
+            "read:user user:email"
+        );
+        assert!(
+            scopes(ProviderKind::Oidc, "profile")
+                .split_whitespace()
+                .any(|s| s == "openid")
+        );
     }
 
     #[test]
@@ -927,10 +1525,19 @@ mod tests {
     #[test]
     fn openid_is_always_among_the_scopes_and_never_twice() {
         // Arrange / Act / Assert
-        assert_eq!(scopes("profile email"), "openid profile email");
-        assert_eq!(scopes("openid profile"), "openid profile");
-        assert_eq!(scopes(""), "openid");
-        assert_eq!(scopes("openid openid profile"), "openid profile");
+        assert_eq!(
+            scopes(ProviderKind::Oidc, "profile email"),
+            "openid profile email"
+        );
+        assert_eq!(
+            scopes(ProviderKind::Oidc, "openid profile"),
+            "openid profile"
+        );
+        assert_eq!(scopes(ProviderKind::Oidc, ""), "openid");
+        assert_eq!(
+            scopes(ProviderKind::Oidc, "openid openid profile"),
+            "openid profile"
+        );
     }
 
     #[test]

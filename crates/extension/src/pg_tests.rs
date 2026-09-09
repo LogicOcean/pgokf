@@ -5829,6 +5829,10 @@ Steps for deploying widgets with the marmoset rollout strategy.\n";
             "INSERT INTO pgokf_web.users (name, role, password_hash)
              VALUES ('probe', 'viewer', 'h')",
         );
+        let provider_person = probe(
+            "INSERT INTO pgokf_web.users (name, role, password_hash)
+             VALUES ('carol-at-idp', 'viewer', NULL)",
+        );
         let writer_opens_session = probe(
             "INSERT INTO pgokf_web.sessions (nonce, subject, mode, expires_at)
              VALUES ('n1', 'probe', 'users', now() + interval '1 hour')",
@@ -5850,6 +5854,10 @@ Steps for deploying widgets with the marmoset rollout strategy.\n";
         // Assert
         assert_eq!(writer_adds_person, "ok");
         assert_eq!(duplicate, "23505", "a name is taken once");
+        assert_eq!(
+            provider_person, "ok",
+            "a person the provider signed in has no password"
+        );
         assert_eq!(writer_opens_session, "ok");
         assert_eq!(writer_reads, "ok");
         assert_eq!(bad_role, "23514", "the role ladder is a CHECK constraint");
@@ -5994,43 +6002,53 @@ Steps for deploying widgets with the marmoset rollout strategy.\n";
     }
 
     #[pg_test]
-    fn oidc_settings_are_one_writer_only_row_that_never_holds_a_plain_secret() {
+    fn the_identity_provider_is_one_writer_only_row_that_never_holds_a_plain_secret() {
         // Arrange
         let probe = install_web_probe();
         let row = |values: &str| {
             probe(&format!(
-                "INSERT INTO pgokf_web.oidc (issuer, client_id, client_secret, redirect_url, updated_by)
+                "INSERT INTO pgokf_web.identity_provider
+                     (kind, issuer, client_id, client_secret, redirect_url, updated_by)
                  VALUES ({values})"
             ))
         };
         let sealed = format!("'v1:{}:{}'", "a".repeat(16), "b".repeat(40));
+        let callback = "'https://catalog.example/auth/callback'";
         Spi::run("SET ROLE pgokf_web_probe_writer").expect("writer role is assumable");
 
         // Act
         let saved = row(&format!(
-            "'https://id.example', 'catalog', {sealed}, 'https://catalog.example/auth/callback', 'root'"
+            "'oidc', 'https://id.example', 'catalog', {sealed}, {callback}, 'root'"
         ));
         let second_row = row(&format!(
-            "'https://other.example', 'x', NULL, 'https://catalog.example/auth/callback', 'root'"
+            "'oidc', 'https://other.example', 'x', NULL, {callback}, 'root'"
         ));
-        let changed = probe("UPDATE pgokf_web.oidc SET enabled = false, updated_at = now()");
-        let removed = probe("DELETE FROM pgokf_web.oidc");
-        let plain_secret = row(
-            "'https://id.example', 'catalog', 'hunter2-not-sealed', 'https://catalog.example/auth/callback', 'root'",
-        );
+        let changed =
+            probe("UPDATE pgokf_web.identity_provider SET enabled = false, updated_at = now()");
+        let removed = probe("DELETE FROM pgokf_web.identity_provider");
+        let github = row(&format!(
+            "'github', 'https://github.com', 'Iv1.abc', {sealed}, {callback}, 'root'"
+        ));
+        let cleared = probe("DELETE FROM pgokf_web.identity_provider");
+        let bad_kind = row(&format!(
+            "'saml', 'https://id.example', 'catalog', NULL, {callback}, 'root'"
+        ));
+        let plain_secret = row(&format!(
+            "'oidc', 'https://id.example', 'catalog', 'hunter2-not-sealed', {callback}, 'root'"
+        ));
         let plain_issuer = row(&format!(
-            "'id.example', 'catalog', {sealed}, 'https://catalog.example/auth/callback', 'root'"
+            "'oidc', 'id.example', 'catalog', {sealed}, {callback}, 'root'"
         ));
         let bad_role = probe(
-            "INSERT INTO pgokf_web.oidc (issuer, client_id, redirect_url, default_role, updated_by)
+            "INSERT INTO pgokf_web.identity_provider (issuer, client_id, redirect_url, default_role, updated_by)
              VALUES ('https://id.example', 'catalog', 'https://catalog.example/auth/callback', 'owner', 'root')",
         );
-        let public_client = row(
-            "'https://id.example', 'catalog', NULL, 'https://catalog.example/auth/callback', 'root'",
-        );
+        let public_client = row(&format!(
+            "'oidc', 'https://id.example', 'catalog', NULL, {callback}, 'root'"
+        ));
         Spi::run("RESET ROLE").expect("role resets");
         Spi::run("SET ROLE pgokf_web_probe_reader").expect("reader role is assumable");
-        let reader_reads = probe("SELECT client_id FROM pgokf_web.oidc");
+        let reader_reads = probe("SELECT client_id FROM pgokf_web.identity_provider");
         Spi::run("RESET ROLE").expect("role resets");
 
         // Assert
@@ -6038,6 +6056,9 @@ Steps for deploying widgets with the marmoset rollout strategy.\n";
         assert_eq!(second_row, "23505", "one provider at most");
         assert_eq!(changed, "ok");
         assert_eq!(removed, "ok");
+        assert_eq!(github, "ok", "GitHub is a kind of its own");
+        assert_eq!(cleared, "ok");
+        assert_eq!(bad_kind, "23514", "only the kinds this build speaks");
         assert_eq!(plain_secret, "23514", "only a sealed secret can be stored");
         assert_eq!(plain_issuer, "23514", "an issuer is a URL");
         assert_eq!(bad_role, "23514", "the default role is on the ladder");

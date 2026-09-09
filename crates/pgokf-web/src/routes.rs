@@ -45,6 +45,7 @@ use crate::links::Resolver;
 use crate::mcp_tokens::{McpToken, McpTokens, Minted};
 use crate::oidc::OidcAuth;
 use crate::provider::{ProviderDraft, SecretChange};
+use crate::provider_settings::ProviderKind;
 use crate::store::DocumentStore;
 use crate::{graph, markdown};
 use pgokf_workspace::drop_packaged_resources;
@@ -1348,10 +1349,6 @@ struct AdminPage {
     /// admin can see whom there is to sign out where no users table lists
     /// people (`oidc` mode).
     live_sessions: Vec<LiveSubject>,
-    /// In `users` mode, the people holding a session who are not in the
-    /// users table: those who signed in through the identity provider,
-    /// whom the People table cannot show.
-    provider_sessions: Vec<LiveSubject>,
     roles: Vec<String>,
     /// The MCP bearer tokens (everything but the tokens), newest first.
     mcp_tokens: Vec<McpToken>,
@@ -1382,6 +1379,9 @@ struct AdminPage {
 pub(crate) struct ProviderView {
     pub configured: bool,
     pub enabled: bool,
+    /// The kind's id, and every kind the form may choose from.
+    pub kind: String,
+    pub kinds: Vec<(String, String)>,
     pub issuer: String,
     pub client_id: String,
     pub has_secret: bool,
@@ -1397,11 +1397,20 @@ pub(crate) struct ProviderView {
 }
 
 impl ProviderView {
+    fn kinds() -> Vec<(String, String)> {
+        ProviderKind::all()
+            .iter()
+            .map(|kind| (kind.id().to_owned(), kind.label().to_owned()))
+            .collect()
+    }
+
     /// The form for a site with no provider yet.
     fn blank() -> Self {
         Self {
             configured: false,
             enabled: true,
+            kind: ProviderKind::Oidc.id().to_owned(),
+            kinds: Self::kinds(),
             issuer: String::new(),
             client_id: String::new(),
             has_secret: false,
@@ -1417,10 +1426,12 @@ impl ProviderView {
         }
     }
 
-    fn from_settings(s: &crate::oidc_settings::OidcSettings) -> Self {
+    fn from_settings(s: &crate::provider_settings::ProviderSettings) -> Self {
         Self {
             configured: true,
             enabled: s.enabled,
+            kind: s.kind.id().to_owned(),
+            kinds: Self::kinds(),
             issuer: s.issuer.clone(),
             client_id: s.client_id.clone(),
             has_secret: s.client_secret.is_some(),
@@ -1456,6 +1467,9 @@ pub(crate) struct AdminUserView {
     pub name: String,
     pub role: String,
     pub is_me: bool,
+    /// Whether they sign in with a password here; otherwise the identity
+    /// provider brought them, and only their role is managed here.
+    pub has_password: bool,
 }
 
 /// One person holding live sessions, for the admin page.
@@ -2877,6 +2891,29 @@ async fn auth_callback(
     }
     match oidc.complete(&headers, &params.code, &params.state).await {
         Ok((person, groups, next)) => {
+            if let Some(users) = app.auth.users() {
+                // A name that signs in here with a password is somebody
+                // else's: the provider's account does not get their row,
+                // their role, or a session under their name.
+                if users.has_password(&person.subject).await? {
+                    eprintln!(
+                        "pgokf-web: refused a provider sign-in as {}, who signs in here with \
+                         a password",
+                        person.actor()
+                    );
+                    return refused(
+                        "That account's name belongs to someone who signs in here with a \
+                         password."
+                            .to_owned(),
+                        StatusCode::FORBIDDEN,
+                    );
+                }
+                // Their row on the People table, so an admin sees them and
+                // can set their role; a row already there is left as it is.
+                if users.provision(&person).await? {
+                    eprintln!("pgokf-web: {} is a new person here", person.actor());
+                }
+            }
             let cookie = oidc
                 .sessions()
                 .open_session_with(
@@ -3526,7 +3563,10 @@ async fn render_profile(
             Mode::None => String::new(),
         },
         permissions: permission_views(person.role),
-        can_change_password: app.auth.users().is_some(),
+        can_change_password: match app.auth.users() {
+            Some(users) => users.has_password(&person.subject).await?,
+            None => false,
+        },
         sessions_revocable: app
             .auth
             .sessions()
@@ -3675,10 +3715,11 @@ async fn admin_page_data(
             .list()
             .await?
             .into_iter()
-            .map(|(name, role)| AdminUserView {
-                is_me: name == person.subject,
-                name,
-                role: role.id().to_owned(),
+            .map(|u| AdminUserView {
+                is_me: u.name == person.subject,
+                name: u.name,
+                role: u.role.id().to_owned(),
+                has_password: u.has_password,
             })
             .collect(),
         None => Vec::new(),
@@ -3696,11 +3737,6 @@ async fn admin_page_data(
             .collect(),
         None => Vec::new(),
     };
-    let provider_sessions: Vec<LiveSubject> = live_sessions
-        .iter()
-        .filter(|live| !users.iter().any(|u| u.name == live.subject))
-        .cloned()
-        .collect();
     Ok(AdminPage {
         shell: Shell::new(app, session, "Administration", "admin"),
         users,
@@ -3710,7 +3746,6 @@ async fn admin_page_data(
             .sessions()
             .is_some_and(crate::auth::Sessions::revocable),
         live_sessions,
-        provider_sessions,
         roles: Role::all().iter().map(|r| r.id().to_owned()).collect(),
         mcp_tokens: match &app.mcp_tokens {
             Some(tokens) => tokens.list().await?,
@@ -3914,6 +3949,8 @@ struct ProviderForm {
     #[serde(default)]
     enabled: String,
     #[serde(default)]
+    kind: String,
+    #[serde(default)]
     issuer: String,
     #[serde(default)]
     client_id: String,
@@ -3992,7 +4029,8 @@ async fn admin_provider(
             // Another provider, or this one re-registered, is not the one
             // that signed anyone in: those sessions end now, everywhere.
             let changed_provider = stored.as_ref().is_some_and(|before| {
-                before.issuer.trim_end_matches('/') != settings.issuer.trim_end_matches('/')
+                before.kind != settings.kind
+                    || before.issuer.trim_end_matches('/') != settings.issuer.trim_end_matches('/')
                     || before.client_id != settings.client_id
             });
             let saved = slot.store(&settings, provider).await?;
@@ -4046,6 +4084,7 @@ async fn admin_provider(
 fn provider_draft(form: &ProviderForm) -> Result<ProviderDraft, &'static str> {
     let default_role =
         Role::parse(&form.default_role).ok_or("Choose the role of everyone else.")?;
+    let kind = ProviderKind::parse(&form.kind).ok_or("Choose what the provider speaks.")?;
     let client_secret = if form.clear_secret == "1" {
         SecretChange::Clear
     } else if form.client_secret.is_empty() {
@@ -4055,6 +4094,7 @@ fn provider_draft(form: &ProviderForm) -> Result<ProviderDraft, &'static str> {
     };
     Ok(ProviderDraft {
         enabled: form.enabled == "1",
+        kind,
         issuer: form.issuer.clone(),
         client_id: form.client_id.clone(),
         client_secret,

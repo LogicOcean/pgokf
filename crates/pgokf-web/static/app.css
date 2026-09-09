@@ -370,8 +370,9 @@ html:not([data-js]) .tabs [role=tabpanel] { margin-bottom: 1.5rem; }
 .form-row.fields-2 { grid-template-columns: 1fr 1fr auto; }
 .form-row.fields-3 { grid-template-columns: 1fr 1fr 1fr auto; }
 .form-row .field { margin-bottom: 0; }
-/* Two ways in on one sign-in page. */
-.or { display: flex; align-items: center; gap: .6rem; color: var(--muted); font-size: .85em; margin: .9rem 0; }
+/* Two ways in on one sign-in page: the password first, the provider's button
+   below it, where a sign-in page keeps its single sign-on. */
+.or { display: flex; align-items: center; gap: .6rem; color: var(--muted); font-size: .85em; margin: 1rem 0 .8rem; }
 .or::before, .or::after { content: ""; flex: 1; border-top: 1px solid var(--border); }
 .check { display: flex; align-items: center; gap: .5rem; margin: .5rem 0; }
 .form-row > div:not(.field) { display: flex; }

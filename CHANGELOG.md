@@ -367,7 +367,8 @@ leaving a plain document.
   ended or expires.
 - **The web UI's people, sessions, MCP tokens, and identity provider live
   in the catalog.** Four extension-owned tables, `pgokf_web.users`,
-  `pgokf_web.sessions`, `pgokf_web.mcp_tokens`, and `pgokf_web.oidc`, hold
+  `pgokf_web.sessions`, `pgokf_web.mcp_tokens`, and
+  `pgokf_web.identity_provider`, hold
   the `users` mode's people, every live session of the `users` and `oidc`
   modes, the digests of the bearer tokens `pgokf-mcp` accepts over HTTP, and
   the identity provider an admin set up; they are granted to `pgokf_writer`
@@ -376,10 +377,24 @@ leaving a plain document.
   instance, and carried by `pg_dump`. **An admin sets the identity provider
   up on the Admin page** in `users` mode - issuer, client id and secret,
   callback URL, claims, and the group-to-role map - and the sign-in page then
-  offers "Sign in with …" beside the password form; saving reads the
-  provider's discovery document first, so a wrong issuer is refused before it
-  is stored, switching the provider off or removing it ends the sessions it
-  opened, and every UI instance picks a change up on its next sign-in. The
+  offers "Sign in with …" beside the password form; saving reaches the
+  provider first, so a wrong issuer is refused before it is stored, switching
+  the provider off, removing it, or changing its issuer or client ends the
+  sessions it opened, and every UI instance picks a change up on its next
+  sign-in. The provider may be any OpenID Connect provider, or **GitHub**
+  (github.com or an Enterprise Server), which speaks OAuth but not OpenID
+  Connect: the same code flow with PKCE yields an access token, and the
+  person comes from GitHub's API (`sub` the numeric account id, `login`,
+  `name`, the primary verified `email`) with their organizations and
+  `org/team` slugs as groups. A callback URL may be plain `http://` on the
+  loopback interface or a private address, where the site is already served
+  that way. A person the provider signs in appears under People at their
+  first sign-in, without a password and at the bottom of the ladder; an
+  admin can set their role there, and the higher of that role and the
+  group-mapped one applies on every request (`pgokf_web.users` gains a
+  `NULL` password hash for them, which refuses a password sign-in under
+  their name; a name that signs in with a password is never signed in
+  through the provider, and no password can be set for a provider person). The
   client secret is stored sealed (AES-256-GCM under a key derived from
   `OKF_WEB_SESSION_SECRET`), the table refuses anything but the sealed form,
   and without a session secret of its own the UI keeps no client secret (a

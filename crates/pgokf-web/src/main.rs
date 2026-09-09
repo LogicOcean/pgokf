@@ -18,8 +18,8 @@ mod links;
 mod markdown;
 mod mcp_tokens;
 mod oidc;
-mod oidc_settings;
 mod provider;
+mod provider_settings;
 mod routes;
 mod seal;
 mod session_store;
@@ -40,8 +40,8 @@ use crate::auth::{Authenticator, Cidr, HeaderAuth, Role, RoleMapping, Sessions, 
 use crate::config::{Cli, Command, McpTokenCommand, UserCommand};
 use crate::db::{Db, DbConfig};
 use crate::mcp_tokens::{McpTokenStore, McpTokens, Minted};
-use crate::oidc_settings::OidcSettingsStore;
 use crate::provider::ProviderSlot;
+use crate::provider_settings::{ProviderKind, ProviderSettingsStore};
 use crate::routes::App;
 use crate::seal::Sealer;
 use crate::session_store::SessionStore;
@@ -181,7 +181,11 @@ const IDENTITY_STATEMENT_MS: u64 = 5_000;
 
 /// The `pgokf_web` tables the identity modes keep people and sessions in,
 /// and the one every writer-backed deployment keeps its MCP tokens in.
-const IDENTITY_TABLES: &[&str] = &["pgokf_web.users", "pgokf_web.sessions", "pgokf_web.oidc"];
+const IDENTITY_TABLES: &[&str] = &[
+    "pgokf_web.users",
+    "pgokf_web.sessions",
+    "pgokf_web.identity_provider",
+];
 const MCP_TOKEN_TABLES: &[&str] = &["pgokf_web.mcp_tokens"];
 
 /// The identity pool, whenever there is a writer URL: the `users` and
@@ -318,6 +322,7 @@ fn build_authenticator(cli: &Cli, identity: Option<&Db>) -> Result<Authenticator
                 .map(str::to_owned)
                 .collect();
             let config = oidc::OidcConfig {
+                kind: ProviderKind::Oidc,
                 issuer: required(&cli.oidc_issuer, "--oidc-issuer")?,
                 client_id: required(&cli.oidc_client_id, "--oidc-client-id")?,
                 client_secret: cli.oidc_client_secret.clone(),
@@ -372,7 +377,7 @@ fn build_authenticator(cli: &Cli, identity: Option<&Db>) -> Result<Authenticator
                 .map(|secret| Sealer::from_secret(secret.as_bytes()))
                 .transpose()?;
             let provider = ProviderSlot::new(
-                OidcSettingsStore::Pg(identity.clone()),
+                ProviderSettingsStore::Pg(identity.clone()),
                 sealer,
                 Arc::clone(&sessions),
             );

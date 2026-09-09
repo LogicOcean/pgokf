@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use anyhow::{Context, Result, anyhow, bail};
 use tokio_postgres::error::SqlState;
 
-use crate::auth::{Role, UserRecord};
+use crate::auth::{Role, UserRecord, UserSummary};
 use crate::db::{Db, db_message, sql_state};
 
 /// Where people are kept (see the module doc).
@@ -56,7 +56,7 @@ impl UserStore {
                     .context("looking a person up")?;
                 row.map(|row| {
                     let role: String = row.try_get(0)?;
-                    let hash: String = row.try_get(1)?;
+                    let hash: Option<String> = row.try_get(1)?;
                     Ok(UserRecord {
                         role: Role::parse(&role)
                             .ok_or_else(|| anyhow!("the catalog holds an unknown role {role:?}"))?,
@@ -75,11 +75,15 @@ impl UserStore {
     /// # Errors
     ///
     /// The catalog cannot be read.
-    pub(crate) async fn list(&self) -> Result<Vec<(String, Role)>> {
+    pub(crate) async fn list(&self) -> Result<Vec<UserSummary>> {
         match self {
             Self::Pg(db) => {
                 let rows = db
-                    .query("SELECT name, role FROM pgokf_web.users ORDER BY name", &[])
+                    .query(
+                        "SELECT name, role, password_hash IS NOT NULL
+                         FROM pgokf_web.users ORDER BY name",
+                        &[],
+                    )
                     .await
                     .context("listing people")?;
                 rows.iter()
@@ -88,18 +92,61 @@ impl UserStore {
                         let role: String = row.try_get(1)?;
                         let role = Role::parse(&role)
                             .ok_or_else(|| anyhow!("the catalog holds an unknown role {role:?}"))?;
-                        Ok((name, role))
+                        Ok(UserSummary {
+                            name,
+                            role,
+                            has_password: row.try_get(2)?,
+                        })
                     })
                     .collect()
             }
             #[cfg(test)]
             Self::Memory(users) => {
-                let mut list: Vec<(String, Role)> = users
+                let mut list: Vec<UserSummary> = users
                     .lock()
-                    .map(|u| u.iter().map(|(n, r)| (n.clone(), r.role)).collect())
+                    .map(|u| {
+                        u.iter()
+                            .map(|(n, r)| UserSummary {
+                                name: n.clone(),
+                                role: r.role,
+                                has_password: r.hash.is_some(),
+                            })
+                            .collect()
+                    })
                     .unwrap_or_default();
-                list.sort();
+                list.sort_by(|a, b| a.name.cmp(&b.name));
                 Ok(list)
+            }
+        }
+    }
+
+    /// Give a person the identity provider signed in a row of their own, so
+    /// an admin sees them and can set their role: `false` when a row with
+    /// that name exists already (theirs from an earlier sign-in, or a
+    /// password person's of the same name), which is left as it is.
+    ///
+    /// # Errors
+    ///
+    /// The catalog cannot be written.
+    pub(crate) async fn provision(&self, name: &str, role: Role) -> Result<bool> {
+        match self {
+            Self::Pg(db) => Ok(db
+                .execute(
+                    "INSERT INTO pgokf_web.users (name, role, password_hash)
+                     VALUES ($1, $2, NULL) ON CONFLICT (name) DO NOTHING",
+                    &[&name, &role.id()],
+                )
+                .await
+                .context("recording a person the provider signed in")?
+                > 0),
+            #[cfg(test)]
+            Self::Memory(users) => {
+                let mut users = users.lock().expect("users lock");
+                if users.contains_key(name) {
+                    return Ok(false);
+                }
+                users.insert(name.to_owned(), UserRecord { role, hash: None });
+                Ok(true)
             }
         }
     }
@@ -137,7 +184,7 @@ impl UserStore {
                     name.to_owned(),
                     UserRecord {
                         role,
-                        hash: hash.to_owned(),
+                        hash: Some(hash.to_owned()),
                     },
                 );
                 Ok(())
@@ -177,23 +224,37 @@ impl UserStore {
         }
     }
 
-    /// Replace a person's password hash.
+    /// Replace a person's password hash. Only a password person's: one the
+    /// identity provider brought has none and gets none here, in the same
+    /// statement that would set it, so no sign-in can slip a row in between.
     ///
     /// # Errors
     ///
-    /// No such person, or the catalog cannot be written.
+    /// No such person, a person without a password, or the catalog cannot
+    /// be written.
     pub(crate) async fn set_hash(&self, name: &str, hash: &str) -> Result<()> {
         match self {
             Self::Pg(db) => {
                 let changed = db
                     .execute(
                         "UPDATE pgokf_web.users SET password_hash = $2, updated_at = now()
-                         WHERE name = $1",
+                         WHERE name = $1 AND password_hash IS NOT NULL",
                         &[&name, &hash],
                     )
                     .await
                     .map_err(|error| without_row_detail(error, "changing a password"))?;
                 if changed == 0 {
+                    let row = db
+                        .query_one(
+                            "SELECT EXISTS (SELECT 1 FROM pgokf_web.users WHERE name = $1)",
+                            &[&name],
+                        )
+                        .await
+                        .context("checking a person")?;
+                    let exists: bool = row.try_get(0)?;
+                    if exists {
+                        bail!("{}", no_password_here(name));
+                    }
                     bail!("{name} is not a user");
                 }
                 Ok(())
@@ -204,7 +265,10 @@ impl UserStore {
                 let record = users
                     .get_mut(name)
                     .with_context(|| format!("{name} is not a user"))?;
-                record.hash = hash.to_owned();
+                if record.hash.is_none() {
+                    bail!("{}", no_password_here(name));
+                }
+                record.hash = Some(hash.to_owned());
                 Ok(())
             }
         }
@@ -265,6 +329,14 @@ impl UserStore {
             }
         }
     }
+}
+
+/// Why a person the identity provider brought cannot be given a password.
+fn no_password_here(name: &str) -> String {
+    format!(
+        "{name} signs in through the identity provider and has no password here; to give them \
+         one, remove them and add them again"
+    )
 }
 
 /// A statement that carried a password hash failed. A `PostgreSQL` error's

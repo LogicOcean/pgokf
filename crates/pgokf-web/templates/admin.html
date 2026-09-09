@@ -24,9 +24,9 @@
           <form method="post" action="/admin/users"><input type="hidden" name="action" value="role"><input type="hidden" name="name" value="{{ u.name }}">
             <select name="role" aria-label="Role for {{ u.name }}">{% for r in roles %}<option value="{{ r }}" {% if r.as_str() == u.role.as_str() %}selected{% endif %}>{{ r }}</option>{% endfor %}</select>
             <button type="submit" class="btn">Set role</button></form>
-          <form method="post" action="/admin/users"><input type="hidden" name="action" value="password"><input type="hidden" name="name" value="{{ u.name }}">
+          {% if u.has_password %}<form method="post" action="/admin/users"><input type="hidden" name="action" value="password"><input type="hidden" name="name" value="{{ u.name }}">
             <input type="password" name="password" placeholder="New password" minlength="12" aria-label="New password for {{ u.name }}" autocomplete="new-password">
-            <button type="submit" class="btn">Reset password</button></form>
+            <button type="submit" class="btn">Reset password</button></form>{% else %}<span class="muted small">signs in through the identity provider; their groups may grant a higher role than the one set here</span>{% endif %}
           {% if sessions_revocable %}<form method="post" action="/admin/sessions"><input type="hidden" name="name" value="{{ u.name }}">
             <button type="submit" class="btn" data-confirm="Sign {{ u.name }} out everywhere? Every session they hold ends now.">Sign out</button></form>{% endif %}
           {% if !u.is_me %}<form method="post" action="/admin/users"><input type="hidden" name="action" value="remove"><input type="hidden" name="name" value="{{ u.name }}">
@@ -45,25 +45,6 @@
     <div class="field"><label for="au-pw">Password <span class="muted">(at least 12 characters)</span></label><input id="au-pw" type="password" name="password" minlength="12" required autocomplete="new-password"></div>
     <div><button type="submit" class="btn primary">Add</button></div>
   </form>
-  {% if !provider_sessions.is_empty() %}
-  <h3>Signed in through the identity provider <span class="muted">({{ provider_sessions.len() }})</span></h3>
-  <p class="hint">People the provider identified, with the role their groups map to; they are not in the table above. Signing one out ends every session they hold.</p>
-  <div class="table-wrap">
-  <table class="table" id="pgokf-provider-sessions">
-    <thead><tr><th>Subject</th><th>Sessions</th><th>Change</th></tr></thead>
-    <tbody>
-    {% for s in provider_sessions %}
-      <tr>
-        <td><code>{{ s.subject }}</code>{% if s.is_me %} <span class="muted small">(you)</span>{% endif %}</td>
-        <td>{{ s.count }}</td>
-        <td class="row-actions"><form method="post" action="/admin/sessions"><input type="hidden" name="name" value="{{ s.subject }}">
-          <button type="submit" class="btn danger" data-confirm="Sign {{ s.subject }} out everywhere? Every session they hold ends now.">Sign out</button></form></td>
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  </div>
-  {% endif %}
   {% else %}
   <p class="muted">People are identified by the identity provider in front of this site and their roles come from its groups (<code>OKF_WEB_AUTH_ROLE_MAP</code>); manage them there.</p>
   {% if sessions_revocable %}
@@ -100,13 +81,15 @@
 {% if provider_managed_here %}
 <section class="panel">
   <div class="panel-head"><h2>Identity provider{% if provider.configured %} <span class="muted">({% if provider.enabled %}on{% else %}off{% endif %})</span>{% endif %}</h2></div>
-  <p class="muted small">Let people sign in with the identity provider they already have (Entra ID, Okta, Keycloak, Auth0, Google…) beside this site's own passwords. Register this site with the provider as an OpenID Connect client using the callback URL below, then enter what it gave you. Saving reads the provider's discovery document first, so a wrong issuer is refused before anything is stored. People who sign in this way get the role their groups map to; those in no mapped group get the role of everyone else.</p>
+  <p class="muted small">Let people sign in with the identity provider they already have beside this site's own passwords: any OpenID Connect provider (Entra ID, Okta, Keycloak, Auth0, Google…), or GitHub. Register this site with the provider using the callback URL below, then enter what it gave you. Saving reaches the provider first - its discovery document, or GitHub's API - so a wrong issuer is refused before anything is stored. People who sign in this way appear under People at their first sign-in, without a password and at the bottom of the ladder: on every request they hold the higher of the role set there and the role their groups map to (those in no mapped group get the role of everyone else), so a group taken away at the provider takes its role away here. Removing one of them ends their sessions but is not a ban: they get a fresh row at their next sign-in. A name that signs in here with a password is never signed in through the provider.</p>
+  <p class="muted small"><strong>GitHub:</strong> create an <em>OAuth App</em> (Settings → Developer settings) with this callback URL and enter its client id <em>and secret</em> (GitHub cannot complete a sign-in without one); leave the issuer empty for github.com or name your GitHub Enterprise Server; scopes <code>read:user user:email read:org</code>; the identity claim <code>sub</code> is the account's numeric id (stable), <code>login</code> the user name (which GitHub lets people change and later hands to someone else - keep <code>sub</code> unless you accept that); groups are the organizations and <code>org/team</code> slugs the person belongs to, so a role map reads <code>my-org=editor,my-org/maintainers=approver</code>. An organization that restricts third-party access lists itself only once it has approved the app.</p>
   {% if provider.configured %}<p class="hint">Set up by <code>{{ provider.updated_by }}</code>, {{ provider.updated_at|datetime }}.{% if provider.has_secret %} A client secret is stored, sealed under this site's session secret.{% else %} No client secret: a public client, protected by PKCE.{% endif %}</p>{% endif %}
-  {% if !provider_can_seal %}<p class="notice">Without <code>OKF_WEB_SESSION_SECRET</code> this site cannot keep a client secret (and every session ends when it restarts). Set it to use a confidential client; a public client works without one, though some providers (Google, Entra ID's web registrations) insist on a secret.</p>{% endif %}
+  {% if !provider_can_seal %}<p class="notice">Without <code>OKF_WEB_SESSION_SECRET</code> this site cannot keep a client secret (and every session ends when it restarts). Set it to use a confidential client; a public client works without one, though some providers (GitHub, Google, Entra ID's web registrations) insist on a secret.</p>{% endif %}
   {% if let Some(why) = provider_trouble %}<p class="notice bad">The stored settings cannot be used by this instance, so the provider is not offered: {{ why }}. After a change of <code>OKF_WEB_SESSION_SECRET</code>, enter the client secret again and save.</p>{% endif %}
   <form method="post" action="/admin/provider" data-once>
     <div class="step-grid">
-      <div class="field"><label for="op-issuer">Issuer URL <span class="muted">(as the provider declares it)</span></label><input id="op-issuer" type="url" name="issuer" required placeholder="https://login.example.com/realms/main" value="{{ provider.issuer }}" spellcheck="false"></div>
+      <div class="field"><label for="op-kind">What it speaks</label><select id="op-kind" name="kind">{% for k in provider.kinds %}<option value="{{ k.0 }}"{% if k.0.as_str() == provider.kind.as_str() %} selected{% endif %}>{{ k.1 }}</option>{% endfor %}</select></div>
+      <div class="field"><label for="op-issuer">Issuer URL <span class="muted">(as the provider declares it; GitHub: empty, or your Enterprise Server)</span></label><input id="op-issuer" type="url" name="issuer" placeholder="https://login.example.com/realms/main" value="{{ provider.issuer }}" spellcheck="false"></div>
       <div class="field"><label for="op-client">Client id</label><input id="op-client" type="text" name="client_id" required value="{{ provider.client_id }}" spellcheck="false" autocomplete="off"></div>
       <div class="field"><label for="op-secret">Client secret <span class="muted">({% if provider.has_secret %}stored; leave blank to keep it{% else %}blank for a public client{% endif %})</span></label><input id="op-secret" type="password" name="client_secret" autocomplete="new-password"{% if !provider_can_seal %} disabled{% endif %}></div>
       <div class="field"><label for="op-redirect">Callback URL <span class="muted">(registered with the provider)</span></label><input id="op-redirect" type="url" name="redirect_url" required value="{{ provider.redirect_url }}" placeholder="https://this-site.example/auth/callback" spellcheck="false"></div>

@@ -366,10 +366,13 @@ and the sync history through `list_sync_log` / `list_sync_changes`, but cannot
 read or write the tables directly; `list_access_log` stays admin-only.
 
 `pgokf_web` holds the web UI's identity state - `users` (the people a local
-sign-in knows, with Argon2id password hashes), `sessions` (the sessions the
+sign-in knows, with Argon2id password hashes - or none, for a person the
+identity provider signed in, whose row carries only the role an admin gave
+them and refuses a password sign-in), `sessions` (the sessions the
 UI has issued and not yet ended), `mcp_tokens` (the SHA-256 digests of the
 bearer tokens `pgokf-mcp` accepts over HTTP, minted on the Admin page), and
-`oidc` (the identity provider an admin set up on the Admin page, one row).
+`identity_provider` (the OpenID Connect provider - or GitHub, by its OAuth
+web flow - an admin set up on the Admin page, one row).
 The one secret among them that is not a one-way hash is the provider's
 client secret, which the UI must present to the provider: it is stored
 sealed - AES-256-GCM under a key derived by HKDF-SHA256 from
