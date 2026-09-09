@@ -251,9 +251,13 @@ key removes the *accidental* unscoped session, not a hostile one that can
 run its own `SET`; combine it with a hard boundary for that.
 
 Companions take their scope from `--tenant` / `OKF_TENANT` (`pgokf-embed`,
-`pgokf-ingest`, `pgokf-mcp`); once the policy is on, run one embed daemon and
-one ingest service per tenant. The compose stack passes `OKF_EMBED_TENANT`,
-`OKF_INGEST_TENANT`, and `OKF_MCP_TENANT` through, and `PGOKF_POLICY` can
+`pgokf-ingest`, `pgokf-mcp`, `pgokf-web`); once the policy is on, run one embed
+daemon and one ingest service per tenant. A site or an MCP endpoint that writes
+needs its scope for a second reason: a content bundle is written by name, and
+the catalog resolves that name inside the session's own tenant, so an unscoped
+instance refuses to change a bundle belonging to another. The compose stack
+passes `OKF_EMBED_TENANT`, `OKF_INGEST_TENANT`, `OKF_MCP_TENANT`, and
+`OKF_UI_TENANT` through, and `PGOKF_POLICY` can
 carry `"require_tenant": true` so a new deployment starts hardened.
 
 ## Operational hardening (for the cooperating-client model)

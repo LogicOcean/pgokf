@@ -922,7 +922,9 @@ impl Db {
         })
     }
 
-    /// Whether a content bundle of this name already exists, in any state.
+    /// Whether a content bundle of this name already exists in this
+    /// instance's own tenant, in any state - which is the name a creation
+    /// here would take, and the only one it could collide with.
     ///
     /// The extension keys a content bundle on the synthetic path
     /// `content:<name>`, so a disabled or retired one still collides even
@@ -2031,13 +2033,10 @@ impl ContentLock {
                 &[&self.name],
             )
             .await;
-        // '0' is the server default: no bound. Restored so the next borrower
-        // of this connection does not inherit this one's.
-        let restored = self
-            .held
-            .client()
-            .execute("SELECT set_config('lock_timeout', '0', false)", &[])
-            .await;
+        // Back to whatever this server configures, which is not necessarily
+        // no bound at all, so the next borrower of this connection inherits
+        // neither this one's wait nor a wrong default.
+        let restored = self.held.client().batch_execute("RESET lock_timeout").await;
         if released.is_ok() && restored.is_ok() {
             self.held.finish();
         }
