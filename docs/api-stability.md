@@ -23,6 +23,11 @@ the database. Complete comment coverage is a release gate (see
 
 ### Functions (44)
 
+The installed extension defines one function more than this table: the
+internal `pgokf.bm25_hits` helper the optional BM25 backend calls. It is not
+part of the stable surface, carries no compatibility promise, and may change
+or disappear in any release.
+
 | Function | Role required | Purpose |
 | -------- | ------------- | ------- |
 | `pgokf.register_bundle(text, text, jsonb)` | `pgokf_writer` | Register and sync an OKF bundle root from a filesystem path |

@@ -68,6 +68,23 @@ impl DocumentStore {
         matches!(self, DocumentStore::Content(_))
     }
 
+    /// The name `register_bundle_content` keys this bundle on, when it is a
+    /// content bundle: what every writer of it locks on.
+    pub(crate) fn content_name(&self) -> Option<&str> {
+        match self {
+            DocumentStore::Content(bundle) => Some(&bundle.name),
+            DocumentStore::Directory { .. } => None,
+        }
+    }
+
+    /// The bundle this store writes into.
+    pub(crate) const fn bundle_id(&self) -> i64 {
+        match self {
+            DocumentStore::Content(bundle) => bundle.id,
+            DocumentStore::Directory { bundle_id, .. } => *bundle_id,
+        }
+    }
+
     /// The document's bytes as the store holds them, when it holds them
     /// itself (a directory); `None` for a content bundle, whose source the
     /// catalog returns with the concept.

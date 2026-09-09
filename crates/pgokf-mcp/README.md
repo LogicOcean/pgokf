@@ -214,12 +214,22 @@ whatever writes:
   verification is granted by an approver reviewing the document in the web UI;
   it is never something a contributor - a person or an agent - can type into
   one. This is the same code the web UI's own upload and edit paths run.
-- **A write is a full snapshot.** `put_document` and `delete_document` read the
-  content bundle, change the one entry, and write all of it back through
-  `pgokf.register_bundle_content`. That read-modify-write is serialized in this
-  process, and refused outright when the catalog does not keep document sources
-  (`store_source`), because the rest of the bundle could not be read back to
-  send.
+- **A write is a full snapshot, serialized across every writer.**
+  `put_document` and `delete_document` read the content bundle, change the one
+  entry, and write all of it back through `pgokf.register_bundle_content`. The
+  read and the write run in one transaction holding a PostgreSQL advisory lock
+  on the bundle's name, so a second instance of this server, or the web UI,
+  cannot interleave and drop what the other wrote.
+- **A write that could not put the bundle back as it found it is refused**, in
+  full, with nothing half-written. That covers a catalog that does not keep
+  document sources (`store_source` off); a bundle carrying an `index.md` or a
+  `log.md`, whose bytes the catalog does not keep and which a rewrite would
+  drop; a bundle larger than this server will hold in memory at once; a name
+  that does not resolve to the row that was read (which happens on a session
+  not scoped to a tenant, where a name may be taken in several - start the
+  server with `--tenant`); a path inside a skill package, which is served to
+  agents whole; and a document declaring that a person who is not the
+  contributor produced it.
 
 Two things are deliberately **not** exposed here, and stay with a person at the
 web UI or at `psql`: `unregister_bundle`, which deletes every concept of a

@@ -7,56 +7,105 @@
 //! discovers them and is told plainly that this endpoint does not write,
 //! rather than finding a tool that silently is not there.
 //!
-//! Two rules hold whatever writes:
+//! Four rules hold whatever writes:
 //!
 //! - **A contribution arrives unverified.** Whatever the incoming document
 //!   claims under `verified` is set aside, visibly, with who set it aside and
 //!   why ([`Document::contribute_new`] / [`Document::contribute_edit`], the
-//!   same code the web UI's upload and edit paths run). A verification is
-//!   granted by an approver reviewing the document; it is never something a
-//!   contributor - a person or an agent - can type into one. `generated`
-//!   names the token as `agent:<name>`, so the trust tier the extension
-//!   derives says an agent produced it.
+//!   same code the web UI's upload and edit paths run), and it may not put
+//!   another person's name to its origin. A verification is granted by an
+//!   approver reviewing the document; it is never something a contributor -
+//!   a person or an agent - can type into one. `generated` names the token
+//!   as `agent:<name>`, so the trust tier the extension derives says an
+//!   agent produced it.
 //! - **A write is a full snapshot.** `pgokf.register_bundle_content` replaces
 //!   a content bundle with exactly the files it is given, so one document is
 //!   written by reading the bundle, changing the one entry, and sending all
-//!   of it back. That read-modify-write is serialized here, and refused
-//!   outright when the catalog does not keep document sources, because the
-//!   files could not be read back to send.
+//!   of it back.
+//! - **That snapshot is serialized across every writer**, not merely within
+//!   this process: the read and the write run in one transaction holding a
+//!   PostgreSQL advisory lock on the bundle's name, so a second server, or
+//!   the web UI, cannot interleave and drop what the other wrote.
+//! - **A write that could not put the bundle back as it found it is
+//!   refused.** The snapshot is built from what the catalog stores, so a
+//!   bundle carrying anything the catalog does not store the bytes of - an
+//!   `index.md`, a `log.md` - is refused rather than written back without
+//!   them. So is one too large to hold in memory, and one whose name does
+//!   not resolve to the row that was read.
 
 use anyhow::{Context, Result, anyhow, bail};
 use pgokf_companion::documents::{Document, now_iso};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
-use tokio_postgres::Client;
+use tokio_postgres::{Client, Transaction};
 
-/// A `pgokf_writer` connection, and the lock that keeps two snapshot
-/// rewrites of the same bundle from interleaving and losing one of them.
+/// The largest bundle a single document write will rewrite. A write reads
+/// the whole bundle into memory and sends it back, so the ceiling is what
+/// this process is willing to hold at once - far below the catalog's own
+/// `max_bundle_files`.
+const MAX_SNAPSHOT_FILES: i32 = 5_000;
+/// The same ceiling in bytes.
+const MAX_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
+/// How much of a caller-supplied value an error message repeats back.
+const ECHO_MAX: usize = 96;
+
+/// A `pgokf_writer` connection. The client is behind a lock because a write
+/// runs in a transaction, which needs it exclusively - and because one
+/// connection serves every request.
 pub(crate) struct WriterConn {
-    client: Client,
-    one_at_a_time: Mutex<()>,
+    client: Mutex<Client>,
 }
 
 impl WriterConn {
     pub(crate) fn new(client: Client) -> Self {
         Self {
-            client,
-            one_at_a_time: Mutex::new(()),
+            client: Mutex::new(client),
         }
+    }
+
+    /// Bound every statement this connection runs, as the reader's are
+    /// bounded: cancelling a request does not cancel its query, and this
+    /// connection is serialized, so one unbounded statement would hold up
+    /// every other write.
+    ///
+    /// # Errors
+    ///
+    /// The `SET` failing.
+    pub(crate) async fn set_statement_timeout(&self, millis: i32) -> Result<()> {
+        self.client
+            .lock()
+            .await
+            .execute(
+                "SELECT set_config('statement_timeout', $1, false)",
+                &[&millis.to_string()],
+            )
+            .await
+            .context("setting the writer's statement timeout")?;
+        Ok(())
     }
 }
 
-/// Whether `tool` is one of the tools defined here.
+/// Whether `tool` is one of the tools that change the catalog. `list_bundles`
+/// is not among them: it only reads, so it is served by the reader and works
+/// on an endpoint with no writer connection at all.
 pub(crate) fn is_write_tool(tool: &str) -> bool {
     matches!(
         tool,
-        "list_bundles"
-            | "put_document"
+        "put_document"
             | "delete_document"
             | "create_content_bundle"
             | "refresh_bundle"
             | "set_bundle_state"
     )
+}
+
+/// As much of a caller-supplied value as an error message repeats.
+fn echo(value: &str) -> String {
+    let mut out: String = value.chars().take(ECHO_MAX).collect();
+    if out.chars().count() < value.chars().count() {
+        out.push('…');
+    }
+    out
 }
 
 /// The writing and administering tools, as `tools/list` declares them.
@@ -143,6 +192,7 @@ struct Bundle {
     id: i64,
     name: String,
     source_type: String,
+    file_count: i32,
 }
 
 impl Bundle {
@@ -156,32 +206,51 @@ impl Bundle {
              server reads, so they are changed there and picked up by refresh_bundle, not \
              written through this API",
             self.id,
-            self.name,
+            echo(&self.name),
             self.source_type
         )
     }
 }
 
-/// Dispatch one write tool. `actor` is the OKF actor recorded as the
-/// producer of anything written.
+/// Dispatch one tool that changes the catalog. `actor` is the OKF actor
+/// recorded as the producer of anything written.
 pub(crate) async fn call(
     writer: &WriterConn,
     tool: &str,
     args: &Value,
     actor: &str,
 ) -> Result<Value> {
-    match tool {
-        "list_bundles" => list_bundles(&writer.client, args).await,
-        "put_document" => put_document(writer, args, actor).await,
-        "delete_document" => delete_document(writer, args).await,
-        "create_content_bundle" => create_content_bundle(&writer.client, args).await,
-        "refresh_bundle" => refresh_bundle(&writer.client, args).await,
-        "set_bundle_state" => set_bundle_state(&writer.client, args).await,
-        other => bail!("unknown tool '{other}'"),
+    // One transaction per call, so the read a write is based on and the
+    // write itself cannot be separated by anyone else's.
+    let mut client = writer.client.lock().await;
+    let tx = client
+        .transaction()
+        .await
+        .context("starting the write transaction")?;
+    let outcome = match tool {
+        "put_document" => put_document(&tx, args, actor).await,
+        "delete_document" => delete_document(&tx, args).await,
+        "create_content_bundle" => create_content_bundle(&tx, args).await,
+        "refresh_bundle" => refresh_bundle(&tx, args).await,
+        "set_bundle_state" => set_bundle_state(&tx, args).await,
+        other => bail!("unknown tool '{}'", echo(other)),
+    };
+    match outcome {
+        Ok(value) => {
+            tx.commit().await.context("committing the write")?;
+            Ok(value)
+        }
+        // Nothing half-written survives a refusal.
+        Err(error) => {
+            let _ = tx.rollback().await;
+            Err(error)
+        }
     }
 }
 
-async fn list_bundles(client: &Client, args: &Value) -> Result<Value> {
+/// The bundles in the catalog. A read, so it is served by the reader
+/// connection and answers on an endpoint that holds no writer.
+pub(crate) async fn list_bundles(client: &Client, args: &Value) -> Result<Value> {
     let include_retired = args
         .get("include_retired")
         .and_then(Value::as_bool)
@@ -201,8 +270,23 @@ async fn list_bundles(client: &Client, args: &Value) -> Result<Value> {
     Ok(row.get(0))
 }
 
+/// Hold the lock every writer of this content bundle takes, for the rest of
+/// the transaction: the web UI, another instance of this server, and this
+/// one all serialize on it, so a read-modify-write cannot interleave with
+/// another and drop what it wrote. The key is the bundle's **name**, which
+/// is what `register_bundle_content` addresses.
+async fn lock_bundle_name(tx: &Transaction<'_>, name: &str) -> Result<()> {
+    tx.execute(
+        "SELECT pg_advisory_xact_lock(hashtext('pgokf.content_bundle'), hashtext($1))",
+        &[&name],
+    )
+    .await
+    .context("waiting for the bundle's other writers")?;
+    Ok(())
+}
+
 /// The bundle an argument names, by id or by name.
-async fn resolve(client: &Client, args: &Value) -> Result<Bundle> {
+async fn resolve(tx: &Transaction<'_>, args: &Value) -> Result<Bundle> {
     let by_id = match args.get("bundle_id") {
         None | Some(Value::Null) => None,
         Some(value) => Some(
@@ -212,36 +296,87 @@ async fn resolve(client: &Client, args: &Value) -> Result<Bundle> {
         ),
     };
     let by_name = args.get("bundle").and_then(Value::as_str);
-    if by_id.is_none() && by_name.is_none() {
-        bail!("name the bundle: pass 'bundle' (its name) or 'bundle_id'");
-    }
-    let row = client
-        .query_opt(
-            "SELECT b.id, coalesce(b.name, b.path), b.source_type
-             FROM pgokf.bundles b
-             WHERE ($1::bigint IS NOT NULL AND b.id = $1)
-                OR ($2::text IS NOT NULL AND b.name = $2)",
-            &[&by_id, &by_name],
-        )
-        .await
-        .context("looking the bundle up")?;
-    let row = row.ok_or_else(|| match (by_id, by_name) {
-        (Some(id), _) => anyhow!("no bundle has id {id}"),
-        (_, Some(name)) => anyhow!("no bundle is named '{name}'; list_bundles shows them"),
-        _ => anyhow!("no such bundle"),
-    })?;
+    let row = match (by_id, by_name) {
+        (None, None) => bail!("name the bundle: pass 'bundle' (its name) or 'bundle_id'"),
+        (Some(_), Some(_)) => bail!("pass 'bundle' or 'bundle_id', not both"),
+        (Some(id), None) => tx
+            .query_opt(
+                "SELECT b.id, coalesce(b.name, b.path), b.source_type, b.file_count
+                 FROM pgokf.bundles b WHERE b.id = $1",
+                &[&id],
+            )
+            .await
+            .context("looking the bundle up")?
+            .ok_or_else(|| anyhow!("no bundle has id {id}"))?,
+        (None, Some(name)) => tx
+            .query_opt(
+                "SELECT b.id, coalesce(b.name, b.path), b.source_type, b.file_count
+                 FROM pgokf.bundles b WHERE b.name = $1",
+                &[&name],
+            )
+            .await
+            .map_err(|error| {
+                // More than one row: a name that is not this session's alone.
+                anyhow!(
+                    "'{}' does not name one bundle in this session: {error}. A session that is \
+                     not scoped to a tenant sees every tenant's bundles, and a name may be \
+                     taken in more than one; start this server with --tenant, or pass \
+                     'bundle_id'",
+                    echo(name)
+                )
+            })?
+            .ok_or_else(|| {
+                anyhow!(
+                    "no bundle is named '{}'; list_bundles shows them",
+                    echo(name)
+                )
+            })?,
+    };
     Ok(Bundle {
         id: row.try_get(0)?,
         name: row.try_get(1)?,
         source_type: row.try_get(2)?,
+        file_count: row.try_get(3)?,
     })
+}
+
+/// That the bundle this write will address by name is the one that was read
+/// by id, and that it is this session's to write.
+///
+/// `pgokf.register_bundle_content` resolves a content bundle by **name**
+/// within the session's own tenant, which is not necessarily the row a
+/// lookup by id found: on a session that is not scoped to a tenant, writing
+/// a bundle read from one tenant would create or replace a different bundle
+/// in another. Refuse rather than write to the wrong row.
+async fn same_bundle(tx: &Transaction<'_>, bundle: &Bundle) -> Result<()> {
+    let row = tx
+        .query_one(
+            "SELECT count(*), min(b.id)
+             FROM pgokf.bundles b
+             WHERE b.name = $1 AND b.source_type = 'content'",
+            &[&bundle.name],
+        )
+        .await
+        .context("checking the bundle's name")?;
+    let seen: i64 = row.try_get(0)?;
+    let only: Option<i64> = row.try_get(1)?;
+    if seen == 1 && only == Some(bundle.id) {
+        return Ok(());
+    }
+    bail!(
+        "'{}' does not name bundle {} alone in this session ({seen} content bundles share the \
+         name), and a write addresses a content bundle by name: it would land on another row. \
+         Start this server with --tenant so it sees one tenant's bundles",
+        echo(&bundle.name),
+        bundle.id
+    )
 }
 
 /// That the catalog keeps document sources. Without them a bundle cannot be
 /// read back to be written whole, so a write would drop every document it
 /// did not carry.
-async fn ensure_sources(client: &Client) -> Result<()> {
-    let row = client
+async fn ensure_sources(tx: &Transaction<'_>) -> Result<()> {
+    let row = tx
         .query_one(
             "SELECT coalesce((pgokf.get_config() ->> 'store_source')::boolean, false)",
             &[],
@@ -258,9 +393,92 @@ async fn ensure_sources(client: &Client) -> Result<()> {
     )
 }
 
+/// That nothing in this bundle would be lost by writing it back from what
+/// the catalog stores.
+///
+/// A bundle's reserved files - `index.md`, which carries its `okf_version`,
+/// and `log.md`, which carries its changelog - are read at sync time and
+/// are not concepts, so the catalog keeps no bytes to write back. A full
+/// snapshot that omitted them would silently drop the bundle's version and
+/// its whole log, so a bundle that has them is refused instead.
+async fn ensure_nothing_lost(tx: &Transaction<'_>, bundle: &Bundle) -> Result<()> {
+    let row = tx
+        .query_one(
+            "SELECT b.okf_version IS NOT NULL,
+                    EXISTS (SELECT 1 FROM pgokf.bundle_log l WHERE l.bundle_id = b.id)
+             FROM pgokf.bundles b WHERE b.id = $1",
+            &[&bundle.id],
+        )
+        .await
+        .context("checking what the bundle carries")?;
+    let has_index: bool = row.try_get(0)?;
+    let has_log: bool = row.try_get(1)?;
+    if !has_index && !has_log {
+        return Ok(());
+    }
+    let carries = match (has_index, has_log) {
+        (true, true) => "an index.md and a log.md",
+        (true, false) => "an index.md",
+        _ => "a log.md",
+    };
+    bail!(
+        "bundle {} ({}) carries {carries}, whose bytes the catalog does not keep. Writing one \
+         document rewrites the whole bundle from what it does keep, which would drop them, so \
+         this write is refused; change this bundle where its files come from",
+        bundle.id,
+        echo(&bundle.name)
+    )
+}
+
+/// That this write will not put more into memory than this process is
+/// willing to hold.
+fn ensure_small_enough(bundle: &Bundle) -> Result<()> {
+    if bundle.file_count > MAX_SNAPSHOT_FILES {
+        bail!(
+            "bundle {} holds {} files; writing one document rewrites the whole bundle, and this \
+             server rewrites at most {MAX_SNAPSHOT_FILES}",
+            bundle.id,
+            bundle.file_count
+        );
+    }
+    Ok(())
+}
+
+/// The paths a document write may not take: a skill package's manifest, and
+/// anything inside a package this bundle already holds. A package is served
+/// to agents whole by `get_skill`, scripts included, so it is not something
+/// a contribution edits its way into.
+async fn ensure_not_a_package(tx: &Transaction<'_>, bundle: &Bundle, path: &str) -> Result<()> {
+    if path == "SKILL.md" || path.ends_with("/SKILL.md") {
+        bail!(
+            "{} would be a skill package's manifest. A package is served to agents whole, \
+             scripts included, so it is not written through this API",
+            echo(path)
+        );
+    }
+    let roots = tx
+        .query(
+            "SELECT package_root FROM pgokf.skills WHERE bundle_id = $1",
+            &[&bundle.id],
+        )
+        .await
+        .context("reading the bundle's skill packages")?;
+    for row in &roots {
+        let root: String = row.try_get(0)?;
+        if !root.is_empty() && path.starts_with(&format!("{root}/")) {
+            bail!(
+                "{} is inside the skill package {root}, which is served to agents whole; it is \
+                 not written through this API",
+                echo(path)
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Every file of a content bundle as it stands, ready to be sent back.
-async fn snapshot(client: &Client, bundle_id: i64) -> Result<Vec<(String, Vec<u8>)>> {
-    let rows = client
+async fn snapshot(tx: &Transaction<'_>, bundle_id: i64) -> Result<Vec<(String, Vec<u8>)>> {
+    let rows = tx
         .query(
             "SELECT c.path,
                     coalesce(sk.skill_md, sc.exact_bytes, rd.exact_bytes, s.raw_content)
@@ -278,6 +496,7 @@ async fn snapshot(client: &Client, bundle_id: i64) -> Result<Vec<(String, Vec<u8
         .await
         .context("reading the bundle's documents")?;
     let mut files = Vec::with_capacity(rows.len());
+    let mut held = 0_usize;
     for row in &rows {
         let path: String = row.try_get(0)?;
         let bytes: Option<Vec<u8>> = row.try_get(1)?;
@@ -285,59 +504,102 @@ async fn snapshot(client: &Client, bundle_id: i64) -> Result<Vec<(String, Vec<u8
         // back, and sending the rest would delete it. Refuse the write.
         let bytes = bytes.ok_or_else(|| {
             anyhow!(
-                "the catalog holds no source for {path}, so the bundle cannot be written whole \
-                 without losing it; refresh the bundle with store_source on first"
+                "the catalog holds no source for {}, so the bundle cannot be written whole \
+                 without losing it; refresh the bundle with store_source on first",
+                echo(&path)
             )
         })?;
+        held = held.saturating_add(bytes.len());
+        if held > MAX_SNAPSHOT_BYTES {
+            bail!(
+                "bundle {bundle_id} holds more than {} MiB of documents; writing one rewrites \
+                 the whole bundle, and this server does not hold that much at once",
+                MAX_SNAPSHOT_BYTES / (1024 * 1024)
+            );
+        }
         files.push((path, bytes));
     }
     Ok(files)
 }
 
 /// Send a whole content bundle back, replacing what is there.
-async fn resync(client: &Client, name: &str, files: &[(String, Vec<u8>)]) -> Result<Value> {
+async fn resync(
+    tx: &Transaction<'_>,
+    bundle: &Bundle,
+    files: &[(String, Vec<u8>)],
+) -> Result<Value> {
     let paths: Vec<&str> = files.iter().map(|(path, _)| path.as_str()).collect();
     let contents: Vec<&[u8]> = files.iter().map(|(_, bytes)| bytes.as_slice()).collect();
-    let row = client
+    let row = tx
         .query_one(
             "SELECT to_jsonb(r) FROM pgokf.register_bundle_content($1, $2, $3, '{}'::jsonb) r",
-            &[&name, &paths, &contents],
+            &[&bundle.name, &paths, &contents],
         )
         .await
         .context("writing the bundle")?;
-    Ok(row.get(0))
+    let outcome: Value = row.get(0);
+    // The write addressed the bundle by name; prove it landed on the row
+    // that was read, rather than creating or replacing another.
+    let landed = outcome.get("bundle_id").and_then(Value::as_i64);
+    if landed != Some(bundle.id) {
+        bail!(
+            "the write addressed bundle {} by name but landed on {:?}; nothing was kept",
+            bundle.id,
+            landed
+        );
+    }
+    Ok(outcome)
 }
 
-async fn put_document(writer: &WriterConn, args: &Value, actor: &str) -> Result<Value> {
+/// The content bundle a document tool names, checked every way a write
+/// needs before anything is read: locked, this session's, whole, and small
+/// enough to rewrite.
+async fn writable(tx: &Transaction<'_>, args: &Value) -> Result<Bundle> {
+    ensure_sources(tx).await?;
+    let bundle = resolve(tx, args).await?;
+    bundle.content()?;
+    lock_bundle_name(tx, &bundle.name).await?;
+    // Re-read under the lock: another writer may have changed it between
+    // the lookup and the lock.
+    let bundle = resolve(tx, args).await?;
+    bundle.content()?;
+    same_bundle(tx, &bundle).await?;
+    ensure_nothing_lost(tx, &bundle).await?;
+    ensure_small_enough(&bundle)?;
+    Ok(bundle)
+}
+
+async fn put_document(tx: &Transaction<'_>, args: &Value, actor: &str) -> Result<Value> {
     let path = require_path(args)?;
     let text = args
         .get("text")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("missing required string argument 'text'"))?;
 
-    // One rewrite at a time: two callers reading the same bundle and each
-    // sending back their own snapshot would lose one of the two writes.
-    let _one_at_a_time = writer.one_at_a_time.lock().await;
-    let client = &writer.client;
-    ensure_sources(client).await?;
-    let bundle = resolve(client, args).await?;
-    bundle.content()?;
+    let bundle = writable(tx, args).await?;
+    ensure_not_a_package(tx, &bundle, &path).await?;
 
-    let mut files = snapshot(client, bundle.id).await?;
+    let mut files = snapshot(tx, bundle.id).await?;
     let existing = files.iter().position(|(stored, _)| *stored == path);
+    // Whether this replaces a document is decided by the path being there,
+    // never by whether the stored bytes happen to parse: a stored file that
+    // does not parse is still a document being replaced.
     let stored = existing
         .and_then(|at| std::str::from_utf8(&files[at].1).ok())
         .and_then(|text| Document::parse(text).ok());
 
-    let mut document = Document::parse(text).map_err(|why| anyhow!("{path}: {why}"))?;
+    let mut document = Document::parse(text).map_err(|why| anyhow!("{}: {why}", echo(&path)))?;
     let now = now_iso();
-    let set_aside = match &stored {
-        Some(stored) => document.contribute_edit(actor, &now, Some(stored)),
-        None => document.contribute_new(actor, &now),
+    let set_aside = if existing.is_some() {
+        document.contribute_edit(actor, &now, stored.as_ref())
+    } else {
+        document
+            .contribute_new(actor, &now)
+            .map_err(|why| anyhow!("{}: {why}", echo(&path)))?
     };
     document
         .validate(&path)
-        .map_err(|why| anyhow!("{path}: {why}"))?;
+        .map_err(|why| anyhow!("{}: {why}", echo(&path)))?;
     let bytes = document.render().into_bytes();
 
     match existing {
@@ -345,7 +607,7 @@ async fn put_document(writer: &WriterConn, args: &Value, actor: &str) -> Result<
         None => files.push((path.clone(), bytes)),
     }
     files.sort_by(|(a, _), (b, _)| a.cmp(b));
-    let outcome = resync(client, &bundle.name, &files).await?;
+    let outcome = resync(tx, &bundle, &files).await?;
 
     Ok(json!({
         "bundle_id": bundle.id,
@@ -360,22 +622,21 @@ async fn put_document(writer: &WriterConn, args: &Value, actor: &str) -> Result<
     }))
 }
 
-async fn delete_document(writer: &WriterConn, args: &Value) -> Result<Value> {
+async fn delete_document(tx: &Transaction<'_>, args: &Value) -> Result<Value> {
     let path = require_path(args)?;
+    let bundle = writable(tx, args).await?;
 
-    let _one_at_a_time = writer.one_at_a_time.lock().await;
-    let client = &writer.client;
-    ensure_sources(client).await?;
-    let bundle = resolve(client, args).await?;
-    bundle.content()?;
-
-    let mut files = snapshot(client, bundle.id).await?;
+    let mut files = snapshot(tx, bundle.id).await?;
     let before = files.len();
     files.retain(|(stored, _)| *stored != path);
     if files.len() == before {
-        bail!("{} holds no document at {path}", bundle.name);
+        bail!(
+            "{} holds no document at {}",
+            echo(&bundle.name),
+            echo(&path)
+        );
     }
-    let outcome = resync(client, &bundle.name, &files).await?;
+    let outcome = resync(tx, &bundle, &files).await?;
 
     Ok(json!({
         "bundle_id": bundle.id,
@@ -386,16 +647,18 @@ async fn delete_document(writer: &WriterConn, args: &Value) -> Result<Value> {
     }))
 }
 
-async fn create_content_bundle(client: &Client, args: &Value) -> Result<Value> {
+async fn create_content_bundle(tx: &Transaction<'_>, args: &Value) -> Result<Value> {
     let name = args
         .get("name")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .ok_or_else(|| anyhow!("missing required string argument 'name'"))?;
-    // A content bundle is keyed on its name, so registering an existing one
-    // with no files would empty it. Refuse rather than resync.
-    let taken: bool = client
+    // Registering an existing content bundle with no files would empty it,
+    // so the check and the creation are one: the lock is what every other
+    // writer of this name takes too.
+    lock_bundle_name(tx, name).await?;
+    let taken: bool = tx
         .query_one(
             "SELECT EXISTS (SELECT 1 FROM pgokf.bundles WHERE name = $1 OR path = 'content:' || $1)",
             &[&name],
@@ -404,23 +667,30 @@ async fn create_content_bundle(client: &Client, args: &Value) -> Result<Value> {
         .context("checking the bundle name")?
         .try_get(0)?;
     if taken {
-        bail!("a bundle named '{name}' already exists");
+        bail!("a bundle named '{}' already exists", echo(name));
     }
-    let outcome = resync(client, name, &[]).await?;
-    Ok(json!({ "created": name, "sync": outcome }))
+    let row = tx
+        .query_one(
+            "SELECT to_jsonb(r)
+             FROM pgokf.register_bundle_content($1, '{}'::text[], '{}'::bytea[], '{}'::jsonb) r",
+            &[&name],
+        )
+        .await
+        .context("creating the bundle")?;
+    Ok(json!({ "created": name, "sync": row.get::<_, Value>(0) }))
 }
 
-async fn refresh_bundle(client: &Client, args: &Value) -> Result<Value> {
-    let bundle = resolve(client, args).await?;
+async fn refresh_bundle(tx: &Transaction<'_>, args: &Value) -> Result<Value> {
+    let bundle = resolve(tx, args).await?;
     if bundle.source_type == "content" {
         bail!(
             "bundle {} ({}) is a content bundle: it has no source to re-read, and its documents \
              are written with put_document",
             bundle.id,
-            bundle.name
+            echo(&bundle.name)
         );
     }
-    let row = client
+    let row = tx
         .query_one(
             "SELECT to_jsonb(r) FROM pgokf.refresh_bundle($1) r",
             &[&bundle.id],
@@ -430,21 +700,23 @@ async fn refresh_bundle(client: &Client, args: &Value) -> Result<Value> {
     Ok(json!({ "bundle_id": bundle.id, "bundle": bundle.name, "sync": row.get::<_, Value>(0) }))
 }
 
-async fn set_bundle_state(client: &Client, args: &Value) -> Result<Value> {
+async fn set_bundle_state(tx: &Transaction<'_>, args: &Value) -> Result<Value> {
     let state = args
         .get("state")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("missing required string argument 'state'"))?;
-    let bundle = resolve(client, args).await?;
+    let bundle = resolve(tx, args).await?;
     let sql = match state {
         "enabled" => "SELECT pgokf.set_bundle_enabled($1, true)",
         "disabled" => "SELECT pgokf.set_bundle_enabled($1, false)",
         "retired" => "SELECT pgokf.retire_bundle($1)",
         "active" => "SELECT pgokf.unretire_bundle($1)",
-        other => bail!("'state' is enabled, disabled, retired, or active, not '{other}'"),
+        other => bail!(
+            "'state' is enabled, disabled, retired, or active, not '{}'",
+            echo(other)
+        ),
     };
-    client
-        .execute(sql, &[&bundle.id])
+    tx.execute(sql, &[&bundle.id])
         .await
         .with_context(|| format!("setting bundle {} to {state}", bundle.id))?;
     Ok(json!({ "bundle_id": bundle.id, "bundle": bundle.name, "state": state }))
@@ -475,8 +747,15 @@ mod tests {
         // Act / Assert
         for tool in &tools {
             let name = tool["name"].as_str().expect("a name");
-            assert!(is_write_tool(name), "{name} is declared but not dispatched");
+            assert!(
+                is_write_tool(name) || name == "list_bundles",
+                "{name} is declared but not dispatched"
+            );
         }
+        assert!(
+            !is_write_tool("list_bundles"),
+            "listing only reads, so it must not need the writer connection"
+        );
         assert_eq!(tools.len(), 6);
     }
 
@@ -487,17 +766,62 @@ mod tests {
             id: 1,
             name: "team-docs".to_owned(),
             source_type: "content".to_owned(),
+            file_count: 3,
         };
         let directory = Bundle {
             id: 2,
             name: "handbook".to_owned(),
             source_type: "filesystem".to_owned(),
+            file_count: 3,
         };
 
         // Act / Assert
         assert!(content.content().is_ok());
         let refused = directory.content().expect_err("refused");
         assert!(refused.to_string().contains("refresh_bundle"), "{refused}");
+    }
+
+    #[test]
+    fn a_bundle_too_large_to_hold_is_refused_before_it_is_read() {
+        // Arrange
+        let small = Bundle {
+            id: 1,
+            name: "team-docs".to_owned(),
+            source_type: "content".to_owned(),
+            file_count: MAX_SNAPSHOT_FILES,
+        };
+        let huge = Bundle {
+            file_count: MAX_SNAPSHOT_FILES + 1,
+            ..Bundle {
+                id: 2,
+                name: "everything".to_owned(),
+                source_type: "content".to_owned(),
+                file_count: 0,
+            }
+        };
+
+        // Act / Assert
+        assert!(ensure_small_enough(&small).is_ok());
+        let refused = ensure_small_enough(&huge).expect_err("refused");
+        assert!(refused.to_string().contains("rewrites the whole bundle"));
+    }
+
+    #[test]
+    fn an_error_repeats_only_a_bounded_piece_of_what_the_caller_sent() {
+        // Arrange
+        let long = "a".repeat(5_000);
+
+        // Act
+        let echoed = echo(&long);
+
+        // Assert
+        assert_eq!(
+            echoed.chars().count(),
+            ECHO_MAX + 1,
+            "bounded, with an ellipsis"
+        );
+        assert!(echoed.ends_with('…'));
+        assert_eq!(echo("short"), "short");
     }
 
     #[test]

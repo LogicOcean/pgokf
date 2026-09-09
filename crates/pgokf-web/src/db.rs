@@ -819,6 +819,58 @@ impl Db {
             .unwrap_or(false))
     }
 
+    /// What a content bundle carries whose bytes the catalog does not keep,
+    /// if anything: an `index.md` (its `okf_version`) or a `log.md` (its
+    /// changelog). Neither is a concept, so a full-snapshot rewrite - which
+    /// is how one document is changed in a content bundle - would drop them.
+    ///
+    /// # Errors
+    ///
+    /// The catalog cannot be read.
+    pub(crate) async fn bundle_carries_unstored(&self, bundle_id: i64) -> Result<Option<String>> {
+        let row = self
+            .query_one(
+                "SELECT b.okf_version IS NOT NULL,
+                        EXISTS (SELECT 1 FROM pgokf.bundle_log l WHERE l.bundle_id = b.id)
+                 FROM pgokf.bundles b WHERE b.id = $1",
+                &[&bundle_id],
+            )
+            .await?;
+        let has_index: bool = col(&row, 0)?;
+        let has_log: bool = col(&row, 1)?;
+        Ok(match (has_index, has_log) {
+            (false, false) => None,
+            (true, true) => Some("an index.md and a log.md".to_owned()),
+            (true, false) => Some("an index.md".to_owned()),
+            _ => Some("a log.md".to_owned()),
+        })
+    }
+
+    /// Take the lock every writer of this content bundle takes, on a
+    /// connection held for as long as the change runs, and released with it.
+    ///
+    /// A content change is a read of the whole bundle followed by a write of
+    /// the whole bundle, so two of them interleaving loses one. A lock in
+    /// this process is not enough: `pgokf-mcp` writes into the same bundles,
+    /// and so does a second instance of this UI. This is the lock they all
+    /// take, keyed on the bundle's name, which is what
+    /// `register_bundle_content` addresses.
+    ///
+    /// # Errors
+    ///
+    /// The catalog cannot be reached.
+    pub(crate) async fn lock_content_bundle(&self, name: &str) -> Result<Borrowed> {
+        let held = self.checkout().await?;
+        held.client()
+            .execute(
+                "SELECT pg_advisory_lock(hashtext('pgokf.content_bundle'), hashtext($1))",
+                &[&name],
+            )
+            .await
+            .context("waiting for the bundle's other writers")?;
+        Ok(held)
+    }
+
     /// Whether a content bundle of this name already exists, in any state.
     ///
     /// The extension keys a content bundle on the synthetic path

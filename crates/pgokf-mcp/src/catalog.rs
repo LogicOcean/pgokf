@@ -159,6 +159,11 @@ impl Catalog {
             )
             .await
             .context("setting the statement timeout")?;
+        // The writer is one shared, serialized connection too: an unbounded
+        // statement on it would hold up every other write.
+        if let Some(writer) = &self.writer {
+            writer.set_statement_timeout(millis).await?;
+        }
         Ok(())
     }
 
@@ -321,6 +326,8 @@ impl Catalog {
             return write::call(self.writer()?, name, arguments, actor).await;
         }
         match name {
+            // A read, so it answers on an endpoint that holds no writer.
+            "list_bundles" => write::list_bundles(&self.client, arguments).await,
             "concept_search" => self.concept_search(arguments).await,
             "find_similar" => self.find_similar(arguments).await,
             "concept_neighbors" => self.concept_neighbors(arguments).await,

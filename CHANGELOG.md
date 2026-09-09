@@ -248,10 +248,16 @@ leaving a plain document.
   second implementation of the rule: the frontmatter operations moved into
   `pgokf-companion` (feature `documents`), and the web UI's upload and edit
   paths and this tool now run the same `contribute_new` / `contribute_edit`.
-  A write is a full snapshot of the bundle, so it is serialized in the
-  process and refused when the catalog does not keep document sources
-  (`store_source`), rather than silently dropping what it could not read
-  back. Two things are deliberately not exposed and stay with a person:
+  A write is a full snapshot of the bundle: the read and the write run in one
+  transaction holding an advisory lock on the bundle's name, so a second
+  server or the web UI cannot interleave and drop what the other wrote, and a
+  write that could not put the bundle back as it found it is refused whole -
+  no stored sources, an `index.md` or `log.md` whose bytes the catalog does
+  not keep, a bundle too large to hold, a name that does not resolve to the
+  row that was read, a path inside a skill package, or a document declaring
+  that someone other than its contributor produced it. **The web UI takes the
+  same lock and applies the same refusals**, so its own uploads and edits no
+  longer silently drop a bundle's `index.md` or `log.md` either. Two things are deliberately not exposed and stay with a person:
   `unregister_bundle`, which deletes a bundle's concepts irreversibly, and
   registering a filesystem bundle, whose path is the database server's and an
   operator's to choose.

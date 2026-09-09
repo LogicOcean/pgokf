@@ -146,9 +146,22 @@ impl Document {
     /// both go through here, which is what keeps a verification something
     /// only an approver can grant: a `verified` list typed into a document
     /// never counts. Returns how many events were set aside.
+    ///
+    /// Every shape the field may take is set aside, not only a list: OKF
+    /// allows a single event, and a scalar is stored by some writers, so
+    /// neither may slip through unrecorded.
     pub fn quarantine_verifications(&mut self, actor: &str, at: &str, reason: &str) -> usize {
-        let Some(Value::Sequence(previous)) = self.frontmatter.remove("verified") else {
-            return 0;
+        // `shift_remove` keeps the order of the keys around it; the swapping
+        // remove would move an unrelated field to where this one was.
+        let previous = match self.frontmatter.shift_remove("verified") {
+            None | Some(Value::Null) => {
+                // A `superseded_verifications` of the wrong shape would be a
+                // trail a contributor wrote; normalize it either way.
+                self.list_mut("superseded_verifications");
+                return 0;
+            }
+            Some(Value::Sequence(events)) => events,
+            Some(one) => vec![one],
         };
         let count = previous.len();
         let superseded = self.list_mut("superseded_verifications");
@@ -199,9 +212,39 @@ impl Document {
     /// This is the rule that keeps a verification something an approver
     /// grants rather than something a contributor types. Returns how many
     /// claimed verifications were set aside.
-    pub fn contribute_new(&mut self, actor: &str, at: &str) -> usize {
+    ///
+    /// # Errors
+    ///
+    /// The document attributes itself to a person who is not the
+    /// contributor. A contribution may record the pipeline or agent that
+    /// produced it, but it may not put someone else's name to it: that
+    /// would let an agent file its own output as a person's work.
+    pub fn contribute_new(&mut self, actor: &str, at: &str) -> Result<usize, String> {
+        for key in ["generated", "author"] {
+            if let Some(claimed) = self.actor_of(key)
+                && claimed.starts_with("human:")
+                && claimed != actor
+            {
+                return Err(format!(
+                    "this document is declared {key} by {claimed}, who is not contributing it; \
+                     a contribution may name the pipeline or agent that produced it, never \
+                     another person"
+                ));
+            }
+        }
         self.stamp_origin(actor, at);
-        self.quarantine_verifications(actor, at, "uploaded")
+        Ok(self.quarantine_verifications(actor, at, "uploaded"))
+    }
+
+    /// The actor a field names, whether it is written as the actor itself or
+    /// as an event mapping with a `by`.
+    fn actor_of(&self, key: &str) -> Option<String> {
+        let value = self.frontmatter.get(key)?;
+        let actor = match value {
+            Value::String(actor) => actor.as_str(),
+            other => other.get("by").and_then(Value::as_str)?,
+        };
+        Some(actor.trim().to_owned())
     }
 
     /// Take a document replacing one already in the catalog under `actor`.
@@ -369,6 +412,73 @@ mod tests {
     }
 
     #[test]
+    fn a_contribution_may_not_put_another_persons_name_to_its_origin() {
+        // Arrange: what an agent produced, declaring a person made it.
+        let mut theirs = Document::parse(
+            "---\ntype: Runbook\ntitle: F\ngenerated:\n  by: human:alice\n  at: 2026-01-01T00:00:00Z\n---\nx\n",
+        )
+        .expect("parses");
+        let mut a_pipeline = Document::parse(
+            "---\ntype: Runbook\ntitle: F\ngenerated:\n  by: process:nightly\n  at: 2026-01-01T00:00:00Z\n---\nx\n",
+        )
+        .expect("parses");
+        let mut mine =
+            Document::parse("---\ntype: Runbook\ntitle: F\nauthor: human:alice\n---\nx\n")
+                .expect("parses");
+
+        // Act
+        let forged = theirs.contribute_new("agent:pgokf-mcp", "2026-09-09T00:00:00Z");
+        let pipeline = a_pipeline.contribute_new("agent:pgokf-mcp", "2026-09-09T00:00:00Z");
+        let own = mine.contribute_new("human:alice", "2026-09-09T00:00:00Z");
+
+        // Assert
+        let refused = forged.expect_err("an agent may not file a person's work");
+        assert!(refused.contains("human:alice"), "{refused}");
+        assert!(
+            pipeline.is_ok(),
+            "a contribution may still name the pipeline that produced it"
+        );
+        assert!(own.is_ok(), "and a person may name themselves");
+    }
+
+    #[test]
+    fn a_verification_set_aside_counts_whatever_shape_it_was_written_in() {
+        // Arrange: OKF allows one event, and a bare actor is written too.
+        let one = "---\ntype: Runbook\ntitle: F\nverified:\n  by: human:alice\n---\nx\n";
+        let bare = "---\ntype: Runbook\ntitle: F\nverified: human:alice\n---\nx\n";
+        let bogus_trail = "---\ntype: Runbook\ntitle: F\nsuperseded_verifications: nope\n---\nx\n";
+
+        // Act / Assert
+        for text in [one, bare] {
+            let mut doc = Document::parse(text).expect("parses");
+            let set_aside = doc
+                .contribute_new("agent:pgokf-mcp", "2026-09-09T00:00:00Z")
+                .expect("accepted");
+            assert_eq!(set_aside, 1, "{text}");
+            assert!(!doc.has_human_verification(), "{text}");
+            assert!(doc.frontmatter.get("verified").is_none(), "{text}");
+            assert_eq!(
+                doc.frontmatter["superseded_verifications"]
+                    .as_sequence()
+                    .expect("a list")
+                    .len(),
+                1,
+                "{text}"
+            );
+        }
+        // A trail of the wrong shape is a contributor's, not a record.
+        let mut doc = Document::parse(bogus_trail).expect("parses");
+        doc.contribute_new("agent:pgokf-mcp", "2026-09-09T00:00:00Z")
+            .expect("accepted");
+        assert!(
+            doc.frontmatter["superseded_verifications"]
+                .as_sequence()
+                .is_some_and(std::vec::Vec::is_empty),
+            "a fabricated trail is replaced by a real one"
+        );
+    }
+
+    #[test]
     fn an_edit_supersedes_previous_verifications_and_names_the_editor() {
         // Arrange
         let mut doc = Document::parse(
@@ -408,7 +518,9 @@ mod tests {
         .expect("parses");
 
         // Act
-        let set_aside = uploaded.contribute_new("human:bob", "2026-09-07T10:00:00Z");
+        let set_aside = uploaded
+            .contribute_new("human:bob", "2026-09-07T10:00:00Z")
+            .expect("bob is contributing it himself");
         edited.contribute_edit("human:carol", "2026-09-07T10:00:00Z", Some(&stored));
 
         // Assert

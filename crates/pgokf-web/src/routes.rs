@@ -2819,6 +2819,14 @@ async fn apply_change(
     removals: &[String],
 ) -> Result<SyncOutcome, AppError> {
     let _one_at_a_time = app.rebuilds.lock().await;
+    // A content change rewrites the whole bundle, so it must not interleave
+    // with another writer's - and the other writer may be pgokf-mcp or a
+    // second instance of this UI, which this process's lock says nothing
+    // about. Held until the change is done, released with the connection.
+    let _across_writers = match store.content_name() {
+        Some(name) => Some(writer.lock_content_bundle(name).await?),
+        None => None,
+    };
     Ok(store.apply(writer, changes, removals).await?)
 }
 
@@ -2858,11 +2866,21 @@ async fn open_store(app: &App, bundle_id: i64) -> Result<Result<DocumentStore, S
 /// Whether the workflow can rebuild through this store: a content bundle
 /// needs the catalog to keep sources.
 async fn ensure_store_sources(store: &DocumentStore, writer: &Db) -> Result<(), AppError> {
-    if store.rebuilds_from_catalog() {
-        ensure_sources(writer).await
-    } else {
-        Ok(())
+    if !store.rebuilds_from_catalog() {
+        return Ok(());
     }
+    ensure_sources(writer).await?;
+    // Rebuilding sends back what the catalog stores. A bundle carrying
+    // anything it does not store the bytes of would come back without it,
+    // so the change is refused rather than made at that cost.
+    if let Some(carries) = writer.bundle_carries_unstored(store.bundle_id()).await? {
+        return Err(AppError::unavailable(format!(
+            "This bundle carries {carries}, whose bytes the catalog does not keep. Changing one \
+             document rewrites the whole bundle from what it does keep, which would drop them, \
+             so the change is refused; change this bundle where its files come from."
+        )));
+    }
+    Ok(())
 }
 
 /// A content bundle name as `register_bundle_content` keys it.
@@ -3531,8 +3549,11 @@ async fn upload_documents(app: &App, access: &Access<'_>, multipart: Multipart) 
             .map_err(|_| AppError::bad_request(format!("{name} is not UTF-8 text.")))?;
         let mut document =
             Document::parse(text).map_err(|e| AppError::bad_request(format!("{name}: {e}")))?;
-        // A verification is granted by an approver here, never uploaded.
-        document.contribute_new(&actor, &now);
+        // A verification is granted by an approver here, never uploaded, and
+        // an upload may not put another person's name to its origin.
+        document
+            .contribute_new(&actor, &now)
+            .map_err(|why| AppError::bad_request(format!("{name}: {why}")))?;
         document
             .validate(&path)
             .map_err(|e| AppError::bad_request(format!("{name}: {e}")))?;
