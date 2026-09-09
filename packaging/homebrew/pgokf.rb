@@ -17,7 +17,7 @@ class Pgokf < Formula
   url "https://github.com/LogicOcean/pgokf/archive/refs/tags/v0.2.0.tar.gz"
   # Digest of the GitHub-generated tag tarball. Regenerate on every release with:
   #   curl -fsSL https://github.com/LogicOcean/pgokf/archive/refs/tags/vX.Y.Z.tar.gz | shasum -a 256
-  sha256 "eda23ac62c88cacdd227654efe7b905dbee17bb1a1be2d3b2a8b58c233550a21"
+  sha256 "194441d1b4d6bd5cf5f22a39a3b6c923e9a68d7692202ff7c4bb05109df812e5"
   license "AGPL-3.0-only"
   head "https://github.com/LogicOcean/pgokf.git", branch: "main"
 
