@@ -215,20 +215,22 @@ impl Document {
     ///
     /// # Errors
     ///
-    /// The document attributes itself to a person who is not the
-    /// contributor. A contribution may record the pipeline or agent that
-    /// produced it, but it may not put someone else's name to it: that
-    /// would let an agent file its own output as a person's work.
+    /// Something that is not a person attributes the document to one. A
+    /// pipeline or an agent may record that it produced the document, and a
+    /// person may publish another person's work - editors do - but an agent
+    /// may not file its own output as a person's.
     pub fn contribute_new(&mut self, actor: &str, at: &str) -> Result<usize, String> {
+        let by_a_person = actor.starts_with("human:");
         for key in ["generated", "author"] {
             if let Some(claimed) = self.actor_of(key)
                 && claimed.starts_with("human:")
                 && claimed != actor
+                && !by_a_person
             {
                 return Err(format!(
-                    "this document is declared {key} by {claimed}, who is not contributing it; \
-                     a contribution may name the pipeline or agent that produced it, never \
-                     another person"
+                    "this document is declared {key} by {claimed}, and {actor} is not a person; \
+                     a contribution may name the pipeline or agent that produced it, never a \
+                     person who did not"
                 ));
             }
         }

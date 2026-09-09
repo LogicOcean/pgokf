@@ -2823,11 +2823,15 @@ async fn apply_change(
     // with another writer's - and the other writer may be pgokf-mcp or a
     // second instance of this UI, which this process's lock says nothing
     // about. Held until the change is done, released with the connection.
-    let _across_writers = match store.content_name() {
+    let across_writers = match store.content_name() {
         Some(name) => Some(writer.lock_content_bundle(name).await?),
         None => None,
     };
-    Ok(store.apply(writer, changes, removals).await?)
+    let outcome = store.apply(writer, changes, removals).await;
+    if let Some(lock) = across_writers {
+        lock.release().await;
+    }
+    Ok(outcome?)
 }
 
 /// The store of a bundle, or why it cannot be changed from here.
@@ -2874,10 +2878,13 @@ async fn ensure_store_sources(store: &DocumentStore, writer: &Db) -> Result<(), 
     // anything it does not store the bytes of would come back without it,
     // so the change is refused rather than made at that cost.
     if let Some(carries) = writer.bundle_carries_unstored(store.bundle_id()).await? {
-        return Err(AppError::unavailable(format!(
-            "This bundle carries {carries}, whose bytes the catalog does not keep. Changing one \
-             document rewrites the whole bundle from what it does keep, which would drop them, \
-             so the change is refused; change this bundle where its files come from."
+        return Err(AppError::bad_request(format!(
+            "This bundle carries {carries}. Those are the bundle's own bookkeeping, not \
+             documents, so the catalog keeps no bytes of them - and changing one document \
+             rewrites the whole bundle from what it does keep, which would drop them. The \
+             change is refused rather than made at that cost. A bundle streamed in by an \
+             ingestion companion is changed at its source and re-synced; one built here can \
+             be re-created without those files."
         )));
     }
     Ok(())
@@ -3505,6 +3512,36 @@ async fn upload_submit(
     }
 }
 
+/// Create a content bundle from the documents uploaded into it.
+///
+/// Held against every other writer of that name for the whole check-and-
+/// create: `register_bundle_content` is a full snapshot resync, so a name
+/// created underneath this - by `pgokf-mcp`, or a second instance of this UI
+/// - would be resynced down to only the files uploaded here.
+async fn create_bundle_with(
+    app: &App,
+    access: &Access<'_>,
+    name: &str,
+    documents: Vec<BundleFile>,
+) -> Result<SyncOutcome, AppError> {
+    let _one_at_a_time = app.rebuilds.lock().await;
+    let across_writers = access.writer.lock_content_bundle(name).await?;
+    let registered = match app.db.content_bundle_exists(name).await {
+        Ok(false) => access
+            .writer
+            .register_content(name, &documents)
+            .await
+            .map_err(AppError::from),
+        Ok(true) => Err(AppError::bad_request(format!(
+            "A bundle called {name} already exists. Choose it in the list to add to it; \
+             creating it again would replace everything already in it."
+        ))),
+        Err(error) => Err(AppError::from(error)),
+    };
+    across_writers.release().await;
+    registered
+}
+
 async fn upload_documents(app: &App, access: &Access<'_>, multipart: Multipart) -> PageResult {
     let fields = read_upload(multipart).await?;
     if fields.files.is_empty() {
@@ -3584,10 +3621,7 @@ async fn upload_documents(app: &App, access: &Access<'_>, multipart: Multipart) 
         UploadTarget::Existing(store) => {
             apply_change(app, access.writer, store, documents, &[]).await?
         }
-        UploadTarget::New(name) => {
-            let _one_at_a_time = app.rebuilds.lock().await;
-            access.writer.register_content(name, &documents).await?
-        }
+        UploadTarget::New(name) => create_bundle_with(app, access, name, documents).await?,
     };
     eprintln!(
         "pgokf-web: {} uploaded {count} document(s) into bundle {} ({} added, {} updated)",

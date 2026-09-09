@@ -45,7 +45,7 @@ use tokio_postgres::{Client, Transaction};
 /// `max_bundle_files`.
 const MAX_SNAPSHOT_FILES: i32 = 5_000;
 /// The same ceiling in bytes.
-const MAX_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_SNAPSHOT_BYTES: i64 = 64 * 1024 * 1024;
 /// How much of a caller-supplied value an error message repeats back.
 const ECHO_MAX: usize = 96;
 
@@ -81,6 +81,28 @@ impl WriterConn {
             )
             .await
             .context("setting the writer's statement timeout")?;
+        Ok(())
+    }
+
+    /// Bound how long a write waits for another writer of the same bundle -
+    /// the web UI, or another instance of this server - so a wedged writer
+    /// holding the lock cannot hang this one for ever. Applied on every
+    /// transport, stdio included, since the lock is shared with processes
+    /// this one knows nothing about.
+    ///
+    /// # Errors
+    ///
+    /// The `SET` failing.
+    pub(crate) async fn set_lock_timeout(&self, millis: i32) -> Result<()> {
+        self.client
+            .lock()
+            .await
+            .execute(
+                "SELECT set_config('lock_timeout', $1, false)",
+                &[&millis.to_string()],
+            )
+            .await
+            .context("setting the writer's lock timeout")?;
         Ok(())
     }
 }
@@ -302,16 +324,16 @@ async fn resolve(tx: &Transaction<'_>, args: &Value) -> Result<Bundle> {
         (Some(id), None) => tx
             .query_opt(
                 "SELECT b.id, coalesce(b.name, b.path), b.source_type, b.file_count
-                 FROM pgokf.bundles b WHERE b.id = $1",
+                 FROM pgokf.bundles b WHERE b.id = $1 AND b.retired_at IS NULL",
                 &[&id],
             )
             .await
             .context("looking the bundle up")?
-            .ok_or_else(|| anyhow!("no bundle has id {id}"))?,
+            .ok_or_else(|| anyhow!("no bundle has id {id}, or it is retired"))?,
         (None, Some(name)) => tx
             .query_opt(
                 "SELECT b.id, coalesce(b.name, b.path), b.source_type, b.file_count
-                 FROM pgokf.bundles b WHERE b.name = $1",
+                 FROM pgokf.bundles b WHERE b.name = $1 AND b.retired_at IS NULL",
                 &[&name],
             )
             .await
@@ -478,6 +500,34 @@ async fn ensure_not_a_package(tx: &Transaction<'_>, bundle: &Bundle, path: &str)
 
 /// Every file of a content bundle as it stands, ready to be sent back.
 async fn snapshot(tx: &Transaction<'_>, bundle_id: i64) -> Result<Vec<(String, Vec<u8>)>> {
+    // Asked before the bytes are fetched: reading them to find out how many
+    // there were would be the very thing the ceiling is for.
+    let held: i64 = tx
+        .query_one(
+            "SELECT coalesce(sum(octet_length(
+                 coalesce(sk.skill_md, sc.exact_bytes, rd.exact_bytes, s.raw_content)
+             )), 0)::bigint
+             FROM pgokf.concepts c
+             LEFT JOIN pgokf.concept_source s
+                    ON s.bundle_id = c.bundle_id AND s.concept_id = c.id
+             LEFT JOIN pgokf.skills sk ON sk.bundle_id = c.bundle_id AND sk.concept_id = c.id
+             LEFT JOIN pgokf.scripts sc ON sc.bundle_id = c.bundle_id AND sc.concept_id = c.id
+             LEFT JOIN pgokf.reference_documents rd
+                    ON rd.bundle_id = c.bundle_id AND rd.concept_id = c.id
+             WHERE c.bundle_id = $1",
+            &[&bundle_id],
+        )
+        .await
+        .context("measuring the bundle")?
+        .try_get(0)?;
+    if held > MAX_SNAPSHOT_BYTES {
+        bail!(
+            "bundle {bundle_id} holds {} MiB of documents; writing one rewrites the whole \
+             bundle, and this server does not hold more than {} MiB at once",
+            held / (1024 * 1024),
+            MAX_SNAPSHOT_BYTES / (1024 * 1024)
+        );
+    }
     let rows = tx
         .query(
             "SELECT c.path,
@@ -496,7 +546,7 @@ async fn snapshot(tx: &Transaction<'_>, bundle_id: i64) -> Result<Vec<(String, V
         .await
         .context("reading the bundle's documents")?;
     let mut files = Vec::with_capacity(rows.len());
-    let mut held = 0_usize;
+    let mut carried = 0_i64;
     for row in &rows {
         let path: String = row.try_get(0)?;
         let bytes: Option<Vec<u8>> = row.try_get(1)?;
@@ -509,8 +559,10 @@ async fn snapshot(tx: &Transaction<'_>, bundle_id: i64) -> Result<Vec<(String, V
                 echo(&path)
             )
         })?;
-        held = held.saturating_add(bytes.len());
-        if held > MAX_SNAPSHOT_BYTES {
+        // The measure above is the bound; this is the same tally kept while
+        // the rows are turned into owned buffers, in case they disagree.
+        carried = carried.saturating_add(i64::try_from(bytes.len()).unwrap_or(i64::MAX));
+        if carried > MAX_SNAPSHOT_BYTES {
             bail!(
                 "bundle {bundle_id} holds more than {} MiB of documents; writing one rewrites \
                  the whole bundle, and this server does not hold that much at once",
@@ -625,6 +677,9 @@ async fn put_document(tx: &Transaction<'_>, args: &Value, actor: &str) -> Result
 async fn delete_document(tx: &Transaction<'_>, args: &Value) -> Result<Value> {
     let path = require_path(args)?;
     let bundle = writable(tx, args).await?;
+    // A package is served to agents whole; taking a file out of one - its
+    // manifest most of all - is not a document deletion.
+    ensure_not_a_package(tx, &bundle, &path).await?;
 
     let mut files = snapshot(tx, bundle.id).await?;
     let before = files.len();

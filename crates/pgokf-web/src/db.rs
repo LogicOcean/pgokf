@@ -35,6 +35,10 @@ pub(crate) struct DbConfig<'a> {
 /// How long a request waits for a pooled connection before it is turned
 /// away as "busy" rather than queued without bound.
 const POOL_WAIT: Duration = Duration::from_secs(5);
+/// How long a content change waits for another writer of the same bundle
+/// before giving up, in milliseconds as `lock_timeout` takes it. A writer
+/// that has wedged holding the lock must not stop every other one for ever.
+const LOCK_WAIT: &str = "15000";
 
 /// A pooled reader connection to one catalog.
 #[derive(Clone)]
@@ -859,16 +863,31 @@ impl Db {
     /// # Errors
     ///
     /// The catalog cannot be reached.
-    pub(crate) async fn lock_content_bundle(&self, name: &str) -> Result<Borrowed> {
+    pub(crate) async fn lock_content_bundle(&self, name: &str) -> Result<ContentLock> {
         let held = self.checkout().await?;
+        // Bounded: a writer that has wedged holding this lock must not stop
+        // every other writer for ever.
+        held.client()
+            .execute(
+                "SELECT set_config('lock_timeout', $1, false)",
+                &[&LOCK_WAIT],
+            )
+            .await
+            .context("bounding the wait for the bundle's other writers")?;
         held.client()
             .execute(
                 "SELECT pg_advisory_lock(hashtext('pgokf.content_bundle'), hashtext($1))",
                 &[&name],
             )
             .await
-            .context("waiting for the bundle's other writers")?;
-        Ok(held)
+            .context(
+                "waiting for the bundle's other writers (another writer is changing this \
+                 bundle; try again)",
+            )?;
+        Ok(ContentLock {
+            held,
+            name: name.to_owned(),
+        })
     }
 
     /// Whether a content bundle of this name already exists, in any state.
@@ -1957,6 +1976,35 @@ impl Db {
 /// mid-flight (the request timed out or the client went away) takes the
 /// connection out of the pool and closes it instead, so the server aborts
 /// the statement and no later request queues behind it.
+/// The lock a content change holds against every other writer of the same
+/// bundle, in this process or another. Released when it is dropped, and the
+/// connection goes back to the pool rather than being closed.
+pub(crate) struct ContentLock {
+    held: Borrowed,
+    name: String,
+}
+
+impl ContentLock {
+    /// Let the next writer of this bundle in, and give the connection back.
+    ///
+    /// Dropping the lock without this is safe - the connection closes and
+    /// `PostgreSQL` releases a session lock with its session - it merely costs
+    /// the pool a connection, so the callers release explicitly.
+    pub(crate) async fn release(mut self) {
+        let released = self
+            .held
+            .client()
+            .execute(
+                "SELECT pg_advisory_unlock(hashtext('pgokf.content_bundle'), hashtext($1))",
+                &[&self.name],
+            )
+            .await;
+        if released.is_ok() {
+            self.held.finish();
+        }
+    }
+}
+
 pub(crate) struct Borrowed {
     object: Option<Object>,
     done: bool,

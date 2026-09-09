@@ -231,6 +231,16 @@ whatever writes:
   agents whole; and a document declaring that a person who is not the
   contributor produced it.
 
+One limitation is worth stating plainly: a rewrite puts back what the catalog
+stores, and a bundle's reserved files (`index.md`, `log.md`) are bookkeeping
+rather than documents, so the catalog keeps no bytes of them. Everything they
+contribute *to the catalog* - the bundle's `okf_version`, its log entries - is
+detected and the write is refused. A reserved file that contributes nothing
+(a nested `index.md`, or a root one declaring no `okf_version`) cannot be
+detected, and a rewrite does not put it back. For a bundle an ingestion
+companion streams in, the next resync restores it; for one built here, it is
+gone. The same holds for the web UI's own uploads and edits.
+
 Two things are deliberately **not** exposed here, and stay with a person at the
 web UI or at `psql`: `unregister_bundle`, which deletes every concept of a
 bundle irreversibly, and registering a filesystem bundle, whose path is read by

@@ -2,8 +2,17 @@
 {% block admin %}
 <section class="panel">
   <div class="panel-head"><h2>Bundles <span class="muted">({{ bundles.len() }})</span></h2></div>
+  <div class="adder">
+  <h3>Register a directory bundle</h3>
+  <form method="post" action="/admin/bundles" class="form-row fields-2" data-once>
+    <input type="hidden" name="action" value="register">
+    <div class="field"><label for="ab-path">Path <span class="muted">(as the database server sees it)</span></label><input id="ab-path" type="text" name="path" placeholder="/bundles/team-docs" required spellcheck="false"></div>
+    <div class="field"><label for="ab-name">Name <span class="muted">(optional)</span></label><input id="ab-name" type="text" name="name" spellcheck="false"></div>
+    <div><button type="submit" class="btn primary">Register</button></div>
+  </form>
+  </div>
   <div class="table-wrap">
-  <table class="table" id="pgokf-admin-bundles">
+  <table class="table admin" id="pgokf-admin-bundles">
     <thead><tr><th>Bundle</th><th>Source</th><th>State</th><th class="num">Files</th><th>Last sync</th><th>Actions</th></tr></thead>
     <tbody>
     {% for b in bundles %}
@@ -28,12 +37,5 @@
     </tbody>
   </table>
   </div>
-  <h3>Register a directory bundle</h3>
-  <form method="post" action="/admin/bundles" class="form-row fields-2" data-once>
-    <input type="hidden" name="action" value="register">
-    <div class="field"><label for="ab-path">Path <span class="muted">(as the database server sees it)</span></label><input id="ab-path" type="text" name="path" placeholder="/bundles/team-docs" required spellcheck="false"></div>
-    <div class="field"><label for="ab-name">Name <span class="muted">(optional)</span></label><input id="ab-name" type="text" name="name" spellcheck="false"></div>
-    <div><button type="submit" class="btn primary">Register</button></div>
-  </form>
 </section>
 {% endblock %}

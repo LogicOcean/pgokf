@@ -520,12 +520,17 @@ html[data-js] [data-needs][hidden] { display: none; }
 .toolbar .toolbar-right { margin-left: auto; }
 .toolbar-right a, .toolbar-right strong { margin-left: .35rem; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-/* Every cell of a row sits on one line, so the columns line up row after row. */
-.table.people td, .table.providers td { vertical-align: middle; }
-.table.people .cell-form { display: inline-flex; gap: .35rem; align-items: center; white-space: nowrap; }
-.table.people .cell-form select, .table.people .cell-form input { width: auto; min-width: 8rem; height: 2rem; padding: 0 .5rem; font-size: .9em; }
-.table.people .cell-form .btn { min-height: 2rem; padding: 0 .6rem; font-size: .85rem; }
+/* Every cell of a row sits on one line, so the columns line up row after row,
+   in every table on the Admin page. */
+.table.admin td { vertical-align: middle; }
+.table.admin .cell-form { display: inline-flex; gap: .35rem; align-items: center; white-space: nowrap; }
+.table.admin .cell-form select, .table.admin .cell-form input { width: auto; min-width: 8rem; height: 2rem; padding: 0 .5rem; font-size: .9em; }
+.table.admin .cell-form .btn { min-height: 2rem; padding: 0 .6rem; font-size: .85rem; }
 .table .person .desc { max-width: 28ch; }
-.table.people .person strong, .table.providers strong { white-space: nowrap; }
+.table.admin td > strong, .table.admin td > a > strong { white-space: nowrap; }
+/* The form that adds a row sits at the top of its card, above what it adds. */
+.adder { margin: 0 0 1.1rem; padding: 0 0 1rem; border-bottom: 1px solid var(--border); }
+.adder h3 { margin: 0 0 .6rem; }
+.adder .form-row { margin-bottom: 0; }
 .pager { display: flex; gap: .6rem; align-items: center; justify-content: flex-end; flex-wrap: wrap; margin-top: .75rem; }
 .provider-buttons { display: grid; gap: .5rem; }

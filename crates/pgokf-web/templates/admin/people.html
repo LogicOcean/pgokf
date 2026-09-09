@@ -3,6 +3,18 @@
 <section class="panel">
   <div class="panel-head"><h2>People <span class="muted">({{ nav.total }})</span></h2></div>
   {% if users_managed_here %}
+  <div class="adder">
+  <h3>Add a person</h3>
+  <form method="post" action="/admin/users" class="form-row fields-4" data-once>
+    <input type="hidden" name="action" value="add">
+    {% include "admin/place.html" %}
+    <div class="field"><label for="au-name">Sign-in name</label><input id="au-name" type="text" name="name" required pattern="[A-Za-z0-9._@+-]{1,128}" spellcheck="false" autocomplete="off"></div>
+    <div class="field"><label for="au-display">Name <span class="muted">(optional)</span></label><input id="au-display" type="text" name="display" maxlength="256" autocomplete="off"></div>
+    <div class="field"><label for="au-role">Role</label><select id="au-role" name="role">{% for r in roles %}<option value="{{ r }}">{{ r }}</option>{% endfor %}</select></div>
+    <div class="field"><label for="au-pw">Password <span class="muted">(at least 12 characters)</span></label><input id="au-pw" type="password" name="password" minlength="12" required autocomplete="new-password"></div>
+    <div><button type="submit" class="btn primary">Add</button></div>
+  </form>
+  </div>
   <form method="get" action="/admin/people" class="toolbar" role="search">
     <input type="hidden" name="per" value="{{ nav.per }}">
     <label class="sr-only" for="pq">Search people</label>
@@ -15,7 +27,7 @@
   <p class="muted">{% if nav.search.is_empty() %}Nobody yet.{% else %}Nobody matches “{{ nav.search }}”.{% endif %}</p>
   {% else %}
   <div class="table-wrap">
-  <table class="table people" id="pgokf-users">
+  <table class="table admin people" id="pgokf-users">
     <thead><tr><th>Person</th><th>Role</th><th>Sign-in</th><th>Actions</th></tr></thead>
     <tbody>
     {% for u in people %}
@@ -46,16 +58,6 @@
   </nav>
   {% endif %}
   <p class="hint">A person who signs in through an identity provider holds the higher of the role set here and the role their groups map to there; a person with a password holds the role set here. Removing someone ends their sessions at once; a provider person gets a fresh row, as a viewer, at their next sign-in.</p>
-  <h3>Add a person</h3>
-  <form method="post" action="/admin/users" class="form-row fields-4" data-once>
-    <input type="hidden" name="action" value="add">
-    {% include "admin/place.html" %}
-    <div class="field"><label for="au-name">Sign-in name</label><input id="au-name" type="text" name="name" required pattern="[A-Za-z0-9._@+-]{1,128}" spellcheck="false" autocomplete="off"></div>
-    <div class="field"><label for="au-display">Name <span class="muted">(optional)</span></label><input id="au-display" type="text" name="display" maxlength="256" autocomplete="off"></div>
-    <div class="field"><label for="au-role">Role</label><select id="au-role" name="role">{% for r in roles %}<option value="{{ r }}">{{ r }}</option>{% endfor %}</select></div>
-    <div class="field"><label for="au-pw">Password <span class="muted">(at least 12 characters)</span></label><input id="au-pw" type="password" name="password" minlength="12" required autocomplete="new-password"></div>
-    <div><button type="submit" class="btn primary">Add</button></div>
-  </form>
   {% else %}
   <p class="muted">People are identified by the identity provider in front of this site and their roles come from its groups (<code>OKF_WEB_AUTH_ROLE_MAP</code>); manage them there.</p>
   {% if sessions_revocable %}

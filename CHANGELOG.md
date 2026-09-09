@@ -254,8 +254,12 @@ leaving a plain document.
   write that could not put the bundle back as it found it is refused whole -
   no stored sources, an `index.md` or `log.md` whose bytes the catalog does
   not keep, a bundle too large to hold, a name that does not resolve to the
-  row that was read, a path inside a skill package, or a document declaring
-  that someone other than its contributor produced it. **The web UI takes the
+  row that was read, a path inside or under a skill package, or a document
+  declaring that a person who is not the contributor produced it. What a
+  rewrite cannot put back is bounded and stated: everything a bundle's
+  reserved files contribute to the catalog is detected and refused, but a
+  reserved file contributing nothing (a nested `index.md`) is not stored and
+  is not restored. **The web UI takes the
   same lock and applies the same refusals**, so its own uploads and edits no
   longer silently drop a bundle's `index.md` or `log.md` either. Two things are deliberately not exposed and stay with a person:
   `unregister_bundle`, which deletes a bundle's concepts irreversibly, and

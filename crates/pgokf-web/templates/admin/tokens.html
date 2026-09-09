@@ -6,6 +6,15 @@
   {% if !mcp_tokens_managed_here %}
   <p class="muted">Minting needs the writer connection (<code>OKF_PG_WRITER_URL</code>).</p>
   {% else %}
+  <div class="adder">
+  <h3>Mint a token{% if let Some(tenant) = mcp_tenant %} <span class="muted">for tenant {{ tenant }}</span>{% endif %}</h3>
+  <form method="post" action="/admin/mcp-tokens" class="form-row fields-2" data-once>
+    <input type="hidden" name="action" value="mint">
+    <div class="field"><label for="mt-name">Name <span class="muted">(what the MCP log calls it)</span></label><input id="mt-name" type="text" name="name" required pattern="[A-Za-z0-9._@+-]{1,128}" placeholder="fleet" spellcheck="false" autocomplete="off"></div>
+    <div class="field"><label for="mt-role">Role</label><select id="mt-role" name="role">{% for r in mcp_roles %}<option value="{{ r }}">{{ r }}</option>{% endfor %}</select></div>
+    <div><button type="submit" class="btn primary">Mint</button></div>
+  </form>
+  </div>
   {% if let Some(m) = minted %}
   <div class="notice ok token-reveal" id="pgokf-minted-token">
     <p><strong>Token <code>{{ m.name }}</code> ({{ m.role }})</strong> - copy it now; it is not shown again.</p>
@@ -17,7 +26,7 @@
   <p class="muted">No token has been minted, so the HTTP endpoint refuses every request.</p>
   {% else %}
   <div class="table-wrap">
-  <table class="table" id="pgokf-mcp-tokens">
+  <table class="table admin" id="pgokf-mcp-tokens">
     <thead><tr><th>Name</th><th>Role</th><th>Minted by</th><th>Minted</th><th>Change</th></tr></thead>
     <tbody>
     {% for t in mcp_tokens %}
@@ -34,13 +43,6 @@
   </table>
   </div>
   {% endif %}
-  <h3>Mint a token{% if let Some(tenant) = mcp_tenant %} <span class="muted">for tenant {{ tenant }}</span>{% endif %}</h3>
-  <form method="post" action="/admin/mcp-tokens" class="form-row fields-2" data-once>
-    <input type="hidden" name="action" value="mint">
-    <div class="field"><label for="mt-name">Name <span class="muted">(what the MCP log calls it)</span></label><input id="mt-name" type="text" name="name" required pattern="[A-Za-z0-9._@+-]{1,128}" placeholder="fleet" spellcheck="false" autocomplete="off"></div>
-    <div class="field"><label for="mt-role">Role</label><select id="mt-role" name="role">{% for r in mcp_roles %}<option value="{{ r }}">{{ r }}</option>{% endfor %}</select></div>
-    <div><button type="submit" class="btn primary">Mint</button></div>
-  </form>
   {% endif %}
 </section>
 {% endblock %}

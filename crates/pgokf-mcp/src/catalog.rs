@@ -27,6 +27,13 @@ const DEFAULT_SEARCH_LIMIT: i32 = 20;
 const DEFAULT_SIMILAR_LIMIT: i32 = 10;
 /// Default `max_hops` for `concept_neighbors` when the caller omits it.
 const DEFAULT_MAX_HOPS: i32 = 2;
+/// How long a write waits for another writer of the same bundle before it
+/// gives up, in milliseconds.
+const WRITER_LOCK_WAIT_MS: i32 = 15_000;
+/// The bound on a writer's statements, in milliseconds, applied on every
+/// transport; the HTTP transport lowers it to its own request budget.
+const WRITER_STATEMENT_MS: i32 = 50_000;
+
 /// Largest plugin whose file contents are returned inline (bytes); above
 /// it the caller is told to narrow the selection.
 const INLINE_PLUGIN_BYTES: usize = 1_048_576;
@@ -111,7 +118,13 @@ impl Catalog {
         if let Some(tenant) = &self.tenant {
             pgokf_pgconn::set_tenant(&client, tenant).await?;
         }
-        self.writer = Some(WriterConn::new(client));
+        let writer = WriterConn::new(client);
+        // Bounded on every transport, stdio included: the lock a write takes
+        // is shared with processes this one knows nothing about, and a write
+        // that waits for ever on one of them is worse than one that fails.
+        writer.set_lock_timeout(WRITER_LOCK_WAIT_MS).await?;
+        writer.set_statement_timeout(WRITER_STATEMENT_MS).await?;
+        self.writer = Some(writer);
         self.writer_driver = Some(driver);
         Ok(self)
     }
