@@ -10,7 +10,7 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-09-08
+## [0.2.0] - 2026-09-09
 
 **Skill packages are catalog content, and a web UI to work with them.** A
 bundle may now carry [Agent Skills](https://agentskills.io/) packages whose
