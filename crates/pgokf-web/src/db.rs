@@ -514,6 +514,10 @@ pub(crate) fn classify(error: &anyhow::Error) -> Failure {
             let code = db.code().code();
             return match code {
                 "57014" => Failure::Timeout,
+                // 55P03 lock_not_available: another writer holds the bundle
+                // and this one waited its bounded turn. Retryable, and a
+                // server fault only if it keeps happening.
+                "55P03" => Failure::Busy,
                 _ if code.starts_with("22") => Failure::InvalidInput,
                 _ => Failure::Other,
             };
@@ -821,6 +825,34 @@ impl Db {
         Ok(self.config().await?["store_source"]
             .as_bool()
             .unwrap_or(false))
+    }
+
+    /// Whether `name` is this session's name for bundle `id` alone.
+    ///
+    /// `register_bundle_content` resolves a content bundle by **name**
+    /// within the session's own tenant, which is not necessarily the row a
+    /// lookup by id found: a session not scoped to a tenant sees every
+    /// tenant's bundles, so writing one back by name could create or
+    /// replace a different tenant's. Proven before the write, and the
+    /// outcome's bundle id is checked against it after.
+    ///
+    /// # Errors
+    ///
+    /// The catalog cannot be read.
+    pub(crate) async fn content_name_is_only(&self, name: &str, id: i64) -> Result<bool> {
+        let row = self
+            .query_one(
+                "SELECT count(*), min(b.id)
+                 FROM pgokf.bundles b
+                 WHERE b.name = $1 AND b.source_type = 'content'
+                   AND b.tenant_id
+                       = coalesce(nullif(current_setting('pgokf.tenant', true), ''), 'default')",
+                &[&name],
+            )
+            .await?;
+        let seen: i64 = col(&row, 0)?;
+        let only: Option<i64> = col(&row, 1)?;
+        Ok(seen == 1 && only == Some(id))
     }
 
     /// What a content bundle carries whose bytes the catalog does not keep,
@@ -1971,14 +2003,12 @@ impl Db {
     }
 }
 
-/// A pooled connection for one statement. A statement that completes (or
-/// fails) hands the connection back to the pool; one that is abandoned
-/// mid-flight (the request timed out or the client went away) takes the
-/// connection out of the pool and closes it instead, so the server aborts
-/// the statement and no later request queues behind it.
 /// The lock a content change holds against every other writer of the same
-/// bundle, in this process or another. Released when it is dropped, and the
-/// connection goes back to the pool rather than being closed.
+/// bundle, in this process or another.
+///
+/// [`ContentLock::release`] unlocks and returns the connection to the pool.
+/// Dropping it without that is safe but wasteful: the connection is closed,
+/// which is what releases the session lock.
 pub(crate) struct ContentLock {
     held: Borrowed,
     name: String,
@@ -1991,6 +2021,8 @@ impl ContentLock {
     /// `PostgreSQL` releases a session lock with its session - it merely costs
     /// the pool a connection, so the callers release explicitly.
     pub(crate) async fn release(mut self) {
+        // The bound was set on the session, and the pool hands this
+        // connection on as it is, so it is put back as it was found.
         let released = self
             .held
             .client()
@@ -1999,12 +2031,24 @@ impl ContentLock {
                 &[&self.name],
             )
             .await;
-        if released.is_ok() {
+        // '0' is the server default: no bound. Restored so the next borrower
+        // of this connection does not inherit this one's.
+        let restored = self
+            .held
+            .client()
+            .execute("SELECT set_config('lock_timeout', '0', false)", &[])
+            .await;
+        if released.is_ok() && restored.is_ok() {
             self.held.finish();
         }
     }
 }
 
+/// A pooled connection for one statement. A statement that completes (or
+/// fails) hands the connection back to the pool; one that is abandoned
+/// mid-flight (the request timed out or the client went away) takes the
+/// connection out of the pool and closes it instead, so the server aborts
+/// the statement and no later request queues behind it.
 pub(crate) struct Borrowed {
     object: Option<Object>,
     done: bool,

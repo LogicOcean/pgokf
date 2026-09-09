@@ -2874,6 +2874,20 @@ async fn ensure_store_sources(store: &DocumentStore, writer: &Db) -> Result<(), 
         return Ok(());
     }
     ensure_sources(writer).await?;
+    // A change addresses a content bundle by name, and the catalog resolves
+    // that name within this instance's own tenant. If it does not resolve to
+    // the bundle being changed, the change would land on another row, so it
+    // is refused here - before anything is read or written - and said in
+    // words rather than left to the backstop in the store.
+    if let Some(name) = store.content_name()
+        && !writer.content_name_is_only(name, store.bundle_id()).await?
+    {
+        return Err(AppError::bad_request(format!(
+            "This site cannot change {name}: a change addresses a content bundle by name, and \
+             in this site's own tenant that name is not this bundle alone. A bundle belonging \
+             to another tenant is changed from a site serving that tenant (OKF_TENANT)."
+        )));
+    }
     // Rebuilding sends back what the catalog stores. A bundle carrying
     // anything it does not store the bytes of would come back without it,
     // so the change is refused rather than made at that cost.

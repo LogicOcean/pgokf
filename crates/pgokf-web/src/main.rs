@@ -159,7 +159,10 @@ async fn connect_writer(cli: &Cli) -> Result<Option<Db>> {
     let writer = Db::connect(&DbConfig {
         database_url: url,
         force_tls: cli.tls,
-        pool_size: 2,
+        // Three, not two: a content change holds one connection for the lock
+        // every writer of that bundle takes and does its work on another, so
+        // an admin action must not have to wait for both.
+        pool_size: 3,
         tenant: cli.tenant.as_deref(),
         statement_timeout_ms: cli.statement_timeout_ms.max(60_000),
     })?;

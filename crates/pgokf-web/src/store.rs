@@ -130,6 +130,20 @@ impl DocumentStore {
     ) -> Result<SyncOutcome> {
         match self {
             DocumentStore::Content(bundle) => {
+                // The write addresses the bundle by name and the read used
+                // its id; on a session not scoped to a tenant those can be
+                // two different rows, and writing would copy one tenant's
+                // documents into another's bundle.
+                if !writer.content_name_is_only(&bundle.name, bundle.id).await? {
+                    bail!(
+                        "This instance cannot change {}: a change addresses a content bundle \
+                         by name, and in this instance's own tenant that name is not bundle \
+                         {} alone. A bundle belonging to another tenant is changed by an \
+                         instance serving that tenant (OKF_TENANT).",
+                        bundle.name,
+                        bundle.id
+                    );
+                }
                 let mut files = writer.bundle_files(bundle.id).await?;
                 for change in changes {
                     match files.iter_mut().find(|f| f.path == change.path) {
@@ -138,7 +152,20 @@ impl DocumentStore {
                     }
                 }
                 files.retain(|f| !removals.contains(&f.path));
-                writer.register_content(&bundle.name, &files).await
+                let outcome = writer.register_content(&bundle.name, &files).await?;
+                if outcome.bundle_id != bundle.id {
+                    // The check above should make this unreachable; it is the
+                    // backstop, and it says plainly that it fired late.
+                    bail!(
+                        "the change addressed bundle {} by name and landed on {}: the catalog \
+                         resolved that name to another bundle. Bundle {} now holds what was \
+                         written and an admin should remove it.",
+                        bundle.id,
+                        outcome.bundle_id,
+                        outcome.bundle_id
+                    );
+                }
+                Ok(outcome)
             }
             DocumentStore::Directory { bundle_id, root } => {
                 for change in &changes {

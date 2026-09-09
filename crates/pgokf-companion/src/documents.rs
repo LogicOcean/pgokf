@@ -240,7 +240,8 @@ impl Document {
 
     /// The actor a field names, whether it is written as the actor itself or
     /// as an event mapping with a `by`.
-    fn actor_of(&self, key: &str) -> Option<String> {
+    #[must_use]
+    pub fn actor_of(&self, key: &str) -> Option<String> {
         let value = self.frontmatter.get(key)?;
         let actor = match value {
             Value::String(actor) => actor.as_str(),
@@ -441,6 +442,33 @@ mod tests {
             "a contribution may still name the pipeline that produced it"
         );
         assert!(own.is_ok(), "and a person may name themselves");
+    }
+
+    #[test]
+    fn a_person_may_publish_another_persons_document() {
+        // Arrange: an editor filing a colleague's work, which is ordinary.
+        let mut theirs = Document::parse(
+            "---\ntype: Runbook\ntitle: F\ngenerated:\n  by: human:alice\n  at: 2026-01-01T00:00:00Z\n---\nx\n",
+        )
+        .expect("parses");
+
+        // Act
+        let published = theirs.contribute_new("human:bob", "2026-09-09T00:00:00Z");
+
+        // Assert
+        assert!(
+            published.is_ok(),
+            "an editor may publish a colleague's work"
+        );
+        assert_eq!(
+            theirs.frontmatter["generated"]["by"], "human:alice",
+            "and the person who produced it keeps the credit"
+        );
+        assert_eq!(
+            theirs.actor_of("author").as_deref(),
+            Some("human:bob"),
+            "while the one publishing it is recorded"
+        );
     }
 
     #[test]

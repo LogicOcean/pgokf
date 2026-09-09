@@ -215,6 +215,7 @@ struct Bundle {
     name: String,
     source_type: String,
     file_count: i32,
+    retired: bool,
 }
 
 impl Bundle {
@@ -323,17 +324,19 @@ async fn resolve(tx: &Transaction<'_>, args: &Value) -> Result<Bundle> {
         (Some(_), Some(_)) => bail!("pass 'bundle' or 'bundle_id', not both"),
         (Some(id), None) => tx
             .query_opt(
-                "SELECT b.id, coalesce(b.name, b.path), b.source_type, b.file_count
-                 FROM pgokf.bundles b WHERE b.id = $1 AND b.retired_at IS NULL",
+                "SELECT b.id, coalesce(b.name, b.path), b.source_type, b.file_count,
+                        (b.retired_at IS NOT NULL)
+                 FROM pgokf.bundles b WHERE b.id = $1",
                 &[&id],
             )
             .await
             .context("looking the bundle up")?
-            .ok_or_else(|| anyhow!("no bundle has id {id}, or it is retired"))?,
+            .ok_or_else(|| anyhow!("no bundle has id {id}"))?,
         (None, Some(name)) => tx
             .query_opt(
-                "SELECT b.id, coalesce(b.name, b.path), b.source_type, b.file_count
-                 FROM pgokf.bundles b WHERE b.name = $1 AND b.retired_at IS NULL",
+                "SELECT b.id, coalesce(b.name, b.path), b.source_type, b.file_count,
+                        (b.retired_at IS NOT NULL)
+                 FROM pgokf.bundles b WHERE b.name = $1",
                 &[&name],
             )
             .await
@@ -359,6 +362,7 @@ async fn resolve(tx: &Transaction<'_>, args: &Value) -> Result<Bundle> {
         name: row.try_get(1)?,
         source_type: row.try_get(2)?,
         file_count: row.try_get(3)?,
+        retired: row.try_get(4)?,
     })
 }
 
@@ -375,7 +379,9 @@ async fn same_bundle(tx: &Transaction<'_>, bundle: &Bundle) -> Result<()> {
         .query_one(
             "SELECT count(*), min(b.id)
              FROM pgokf.bundles b
-             WHERE b.name = $1 AND b.source_type = 'content'",
+             WHERE b.name = $1 AND b.source_type = 'content'
+               AND b.tenant_id
+                   = coalesce(nullif(current_setting('pgokf.tenant', true), ''), 'default')",
             &[&bundle.name],
         )
         .await
@@ -386,11 +392,11 @@ async fn same_bundle(tx: &Transaction<'_>, bundle: &Bundle) -> Result<()> {
         return Ok(());
     }
     bail!(
-        "'{}' does not name bundle {} alone in this session ({seen} content bundles share the \
-         name), and a write addresses a content bundle by name: it would land on another row. \
-         Start this server with --tenant so it sees one tenant's bundles",
-        echo(&bundle.name),
-        bundle.id
+        "this server cannot write bundle {}: a write addresses a content bundle by name, and \
+         in this server's own tenant '{}' is not that bundle alone ({seen} match). A bundle \
+         belonging to another tenant is written by a server started with that --tenant",
+        bundle.id,
+        echo(&bundle.name)
     )
 }
 
@@ -444,9 +450,11 @@ async fn ensure_nothing_lost(tx: &Transaction<'_>, bundle: &Bundle) -> Result<()
         _ => "a log.md",
     };
     bail!(
-        "bundle {} ({}) carries {carries}, whose bytes the catalog does not keep. Writing one \
-         document rewrites the whole bundle from what it does keep, which would drop them, so \
-         this write is refused; change this bundle where its files come from",
+        "bundle {} ({}) carries {carries}. Those are the bundle's own bookkeeping, not \
+         documents, so the catalog keeps no bytes of them - and writing one document rewrites \
+         the whole bundle from what it does keep, which would drop them. The write is refused \
+         rather than made at that cost. A bundle an ingestion companion streams in is changed \
+         at its source and re-synced; one built here can be re-created without those files",
         bundle.id,
         echo(&bundle.name)
     )
@@ -616,6 +624,14 @@ async fn writable(tx: &Transaction<'_>, args: &Value) -> Result<Bundle> {
     let bundle = resolve(tx, args).await?;
     bundle.content()?;
     same_bundle(tx, &bundle).await?;
+    if bundle.retired {
+        bail!(
+            "bundle {} ({}) is retired: it is out of the catalog until it is brought back, \
+             which set_bundle_state does",
+            bundle.id,
+            echo(&bundle.name)
+        );
+    }
     ensure_nothing_lost(tx, &bundle).await?;
     ensure_small_enough(&bundle)?;
     Ok(bundle)
@@ -661,12 +677,19 @@ async fn put_document(tx: &Transaction<'_>, args: &Value, actor: &str) -> Result
     files.sort_by(|(a, _), (b, _)| a.cmp(b));
     let outcome = resync(tx, &bundle, &files).await?;
 
+    // What the document ends up declaring, which is what the catalog derives
+    // the trust tier from - not simply this token, since a contribution may
+    // record the pipeline that produced it.
+    let generated_by = document
+        .actor_of("generated")
+        .unwrap_or_else(|| actor.to_owned());
     Ok(json!({
         "bundle_id": bundle.id,
         "bundle": bundle.name,
         "path": path,
         "replaced": existing.is_some(),
-        "generated_by": actor,
+        "written_by": actor,
+        "generated_by": generated_by,
         "verifications_set_aside": set_aside,
         "sync": outcome,
         "note": "Written as machine-generated. A person reviews it in the catalog's web UI; \
@@ -822,12 +845,14 @@ mod tests {
             name: "team-docs".to_owned(),
             source_type: "content".to_owned(),
             file_count: 3,
+            retired: false,
         };
         let directory = Bundle {
             id: 2,
             name: "handbook".to_owned(),
             source_type: "filesystem".to_owned(),
             file_count: 3,
+            retired: false,
         };
 
         // Act / Assert
@@ -844,6 +869,7 @@ mod tests {
             name: "team-docs".to_owned(),
             source_type: "content".to_owned(),
             file_count: MAX_SNAPSHOT_FILES,
+            retired: false,
         };
         let huge = Bundle {
             file_count: MAX_SNAPSHOT_FILES + 1,
@@ -852,6 +878,7 @@ mod tests {
                 name: "everything".to_owned(),
                 source_type: "content".to_owned(),
                 file_count: 0,
+                retired: false,
             }
         };
 
