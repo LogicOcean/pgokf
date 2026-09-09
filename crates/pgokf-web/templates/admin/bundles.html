@@ -1,0 +1,39 @@
+{% extends "admin/layout.html" %}
+{% block admin %}
+<section class="panel">
+  <div class="panel-head"><h2>Bundles <span class="muted">({{ bundles.len() }})</span></h2></div>
+  <div class="table-wrap">
+  <table class="table" id="pgokf-admin-bundles">
+    <thead><tr><th>Bundle</th><th>Source</th><th>State</th><th class="num">Files</th><th>Last sync</th><th>Actions</th></tr></thead>
+    <tbody>
+    {% for b in bundles %}
+      <tr>
+        <td><a href="/bundles/{{ b.id }}"><strong>{{ b.name }}</strong></a><span class="desc path" title="{{ b.path }}">{{ b.path }}</span></td>
+        <td>{{ b.source_type }}</td>
+        <td>{% if b.retired %}<span class="pill muted">retired</span>{% else if !b.enabled %}<span class="pill warn">disabled</span>{% else %}<span class="pill ok">active</span>{% endif %}</td>
+        <td class="num">{{ b.file_count }}</td>
+        <td class="when">{{ b.last_synced_at.as_deref().unwrap_or("never")|datetime }}</td>
+        <td class="row-actions">
+          {% if !b.retired %}
+          {% if b.source_type.as_str() != "content" %}<form method="post" action="/admin/bundles"><input type="hidden" name="id" value="{{ b.id }}"><input type="hidden" name="action" value="refresh"><button type="submit" class="btn" title="Re-read the source and index what changed">Refresh</button></form>{% endif %}
+          <form method="post" action="/admin/bundles"><input type="hidden" name="id" value="{{ b.id }}"><input type="hidden" name="action" value="{% if b.enabled %}disable{% else %}enable{% endif %}"><button type="submit" class="btn">{% if b.enabled %}Disable{% else %}Enable{% endif %}</button></form>
+          <form method="post" action="/admin/bundles"><input type="hidden" name="id" value="{{ b.id }}"><input type="hidden" name="action" value="retire"><button type="submit" class="btn" data-confirm="Retire {{ b.name }}? It leaves search and browsing; it can be brought back until it is purged.">Retire</button></form>
+          {% else %}
+          <form method="post" action="/admin/bundles"><input type="hidden" name="id" value="{{ b.id }}"><input type="hidden" name="action" value="unretire"><button type="submit" class="btn">Bring back</button></form>
+          <form method="post" action="/admin/bundles"><input type="hidden" name="id" value="{{ b.id }}"><input type="hidden" name="action" value="unregister"><button type="submit" class="btn danger" data-confirm="Unregister {{ b.name }} now? Every concept of it is deleted from the catalog. This cannot be undone.">Unregister</button></form>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <h3>Register a directory bundle</h3>
+  <form method="post" action="/admin/bundles" class="form-row fields-2" data-once>
+    <input type="hidden" name="action" value="register">
+    <div class="field"><label for="ab-path">Path <span class="muted">(as the database server sees it)</span></label><input id="ab-path" type="text" name="path" placeholder="/bundles/team-docs" required spellcheck="false"></div>
+    <div class="field"><label for="ab-name">Name <span class="muted">(optional)</span></label><input id="ab-name" type="text" name="name" spellcheck="false"></div>
+    <div><button type="submit" class="btn primary">Register</button></div>
+  </form>
+</section>
+{% endblock %}

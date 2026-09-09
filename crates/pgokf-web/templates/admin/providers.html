@@ -1,0 +1,34 @@
+{% extends "admin/layout.html" %}
+{% block admin %}
+<section class="panel">
+  <div class="panel-head"><h2>Identity providers <span class="muted">({{ providers.len() }})</span></h2>{% if providers_managed_here %}<a class="btn primary" href="/admin/providers/new">Add a provider</a>{% endif %}</div>
+  {% if !providers_managed_here %}
+  <p class="muted">Identity providers are set up here in the users mode only. In this mode the identity provider in front of this site, or the one this instance was started with, signs people in.</p>
+  {% else %}
+  <p class="muted small">Let people sign in with an identity provider they already have, beside this site's own passwords: any number of OpenID Connect providers (Entra ID, Okta, Keycloak, Auth0, Google…) or GitHub, each with a button of its own on the sign-in page. People who sign in this way appear under People at their first sign-in, without a password and at the bottom of the ladder: on every request they hold the higher of the role set there and the role their groups map to (those in no mapped group get the provider's role of everyone else), so a group taken away at the provider takes its role away here. A name belongs to exactly one way in: a provider never signs in a password person's name, nor a name another provider brought.</p>
+  {% if !can_seal %}<p class="notice">Without <code>OKF_WEB_SESSION_SECRET</code> this site cannot keep a client secret (and every session ends when it restarts). Set it to use confidential clients; a public client works without one, though some providers (GitHub, Google, Entra ID's web registrations) insist on a secret.</p>{% endif %}
+  {% if providers.is_empty() %}
+  <p class="muted">No identity provider is set up; people sign in with their passwords.</p>
+  {% else %}
+  <div class="table-wrap">
+  <table class="table providers" id="pgokf-providers">
+    <thead><tr><th>Provider</th><th>Speaks</th><th>Issuer</th><th>State</th><th>Last change</th><th>Actions</th></tr></thead>
+    <tbody>
+    {% for p in providers %}
+      <tr>
+        <td><a href="/admin/providers/{{ p.id }}"><strong>{{ p.name }}</strong></a><span class="desc" title="Its handle in the sign-in URL and on the people it brought">{{ p.id }}</span></td>
+        <td>{{ p.kind }}</td>
+        <td class="path">{{ p.issuer }}</td>
+        <td>{% if let Some(why) = p.trouble %}<span class="pill bad" title="{{ why }}">unusable here</span>{% else if p.enabled %}<span class="pill ok">on</span>{% else %}<span class="pill warn">off</span>{% endif %} {% if p.has_secret %}<span class="pill muted" title="A client secret is stored, sealed under this site's session secret">confidential</span>{% else %}<span class="pill muted" title="A public client, protected by PKCE alone">public</span>{% endif %}</td>
+        <td class="when">{{ p.updated_at|datetime }}<span class="desc">by {{ p.updated_by }}</span></td>
+        <td class="row-actions actions"><a class="btn" href="/admin/providers/{{ p.id }}">Edit</a>
+          <form method="post" action="/admin/providers"><input type="hidden" name="action" value="remove"><input type="hidden" name="id" value="{{ p.id }}"><button type="submit" class="btn danger" data-confirm="Remove {{ p.name }}? People signed in through it are signed out now.">Remove</button></form></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+  {% endif %}
+</section>
+{% endblock %}

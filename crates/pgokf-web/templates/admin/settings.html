@@ -1,0 +1,8 @@
+{% extends "admin/layout.html" %}
+{% block admin %}
+<section class="panel">
+  <div class="panel-head"><h2>Catalog settings</h2></div>
+  <p class="muted small">Read from <code>pgokf.get_config()</code>. They are changed by a database admin, for example <code>SELECT pgokf.set_config('store_source', 'true')</code>; the UI's writer role cannot.</p>
+  <pre class="json">{{ config_json }}</pre>
+</section>
+{% endblock %}

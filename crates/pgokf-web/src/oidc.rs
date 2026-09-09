@@ -56,7 +56,8 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::auth::{
-    FLOW_COOKIE, Mode, Principal, RoleMapping, Sessions, cookie_value, random_bytes, valid_subject,
+    FLOW_COOKIE, Mode, Principal, RoleMapping, SessionClaims, Sessions, cookie_value, random_bytes,
+    valid_subject,
 };
 use crate::provider_settings::ProviderKind;
 use crate::routes::filters::percent_encode;
@@ -97,6 +98,10 @@ const GITHUB_PAGES: usize = 5;
 /// What the operator configured.
 #[derive(Clone)]
 pub(crate) struct OidcConfig {
+    /// The slug the provider is stored under when an admin set it up on
+    /// the Admin page; `None` for the `oidc` mode's own provider, set by
+    /// the operator.
+    pub id: Option<String>,
     /// What the provider speaks.
     pub kind: ProviderKind,
     /// The issuer URL, exactly as the provider declares it - or, for
@@ -124,6 +129,7 @@ pub(crate) struct OidcConfig {
 impl fmt::Debug for OidcConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OidcConfig")
+            .field("id", &self.id)
             .field("kind", &self.kind)
             .field("issuer", &self.issuer)
             .field("client_id", &self.client_id)
@@ -171,6 +177,10 @@ struct Metadata {
 /// person is away at the provider.
 #[derive(Debug, Serialize, Deserialize)]
 struct Flow {
+    /// The provider this sign-in started at (its slug), so the callback
+    /// finishes it with the same one.
+    #[serde(rename = "p", default, skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
     #[serde(rename = "s")]
     state: String,
     #[serde(rename = "n")]
@@ -268,6 +278,12 @@ impl OidcAuth {
         &self.config.provider_name
     }
 
+    /// The slug this provider is stored under, when an admin set it up on
+    /// the Admin page.
+    pub(crate) fn stored_id(&self) -> Option<&str> {
+        self.config.id.as_deref()
+    }
+
     /// The configured issuer.
     pub(crate) fn issuer(&self) -> &str {
         &self.config.issuer
@@ -279,7 +295,8 @@ impl OidcAuth {
     pub(crate) fn binding(&self) -> String {
         let digest = Sha256::digest(
             format!(
-                "{}\n{}\n{}",
+                "{}\n{}\n{}\n{}",
+                self.config.id.as_deref().unwrap_or_default(),
                 self.config.kind.id(),
                 self.config.issuer.trim_end_matches('/'),
                 self.config.client_id
@@ -341,6 +358,7 @@ impl OidcAuth {
         let verifier = URL_SAFE_NO_PAD.encode(random_bytes(32)?);
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
         let flow = Flow {
+            provider: self.config.id.clone(),
             state: state.clone(),
             nonce: nonce.clone(),
             verifier,
@@ -393,6 +411,9 @@ impl OidcAuth {
         if !constant_time_eq(&flow.state, state) {
             bail!("this sign-in does not match the one that started here");
         }
+        if flow.provider != self.config.id {
+            bail!("this sign-in started at another provider");
+        }
         let tokens = self.exchange(code, &flow.verifier).await?;
         let claims = match self.config.kind {
             ProviderKind::Oidc => {
@@ -426,19 +447,24 @@ impl OidcAuth {
         let Some(claims) = self.sessions.read_session(headers, Mode::Oidc).await? else {
             return Ok(None);
         };
+        Ok(self.recognize(&claims))
+    }
+
+    /// The person a live session's claims name, when this provider opened
+    /// the session: one opened by another provider, or by this one under
+    /// another registration, names nobody here.
+    pub(crate) fn recognize(&self, claims: &SessionClaims) -> Option<Principal> {
         if !valid_subject(&claims.subject) || claims.binding != self.binding() {
-            // Opened by another provider, or by this one under another
-            // registration: not a session of this configuration.
-            return Ok(None);
+            return None;
         }
-        Ok(Some(Principal {
+        Some(Principal {
             role: self.config.roles.role_for(&claims.groups),
             display: claims
                 .display
                 .clone()
                 .unwrap_or_else(|| claims.subject.clone()),
-            subject: claims.subject,
-        }))
+            subject: claims.subject.clone(),
+        })
     }
 
     /// Where to send someone after this site's own session ends, when the
@@ -1140,6 +1166,39 @@ fn scope_granted(granted: &str, wanted: &str) -> bool {
         })
 }
 
+/// Where a sign-in flow started.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StartedAt {
+    /// The `oidc` mode's own provider.
+    Own,
+    /// A provider set up on the Admin page, by its slug.
+    Stored(String),
+}
+
+impl StartedAt {
+    /// The slug, as [`crate::auth::Authenticator::provider`] takes it.
+    pub(crate) fn id(&self) -> Option<&str> {
+        match self {
+            Self::Own => None,
+            Self::Stored(id) => Some(id),
+        }
+    }
+}
+
+/// The provider a request's sign-in flow started at, or `None` when no flow
+/// of this site's, still within its time, is presented. Read before the
+/// provider itself is known, so the callback can find it.
+pub(crate) fn flow_provider(sessions: &Sessions, headers: &HeaderMap) -> Option<StartedAt> {
+    let flow: Flow = sessions.open(&cookie_value(headers, FLOW_COOKIE)?)?;
+    if flow.expires <= now_unix() {
+        return None;
+    }
+    Some(match flow.provider {
+        Some(id) => StartedAt::Stored(id),
+        None => StartedAt::Own,
+    })
+}
+
 /// The origin of a URL (`scheme://authority`), what a page of the same API
 /// must start with.
 fn api_origin(url: &str) -> String {
@@ -1271,6 +1330,7 @@ mod tests {
 
     fn config() -> OidcConfig {
         OidcConfig {
+            id: None,
             kind: ProviderKind::Oidc,
             issuer: "https://id.example.test/realms/okf".to_owned(),
             client_id: "pgokf".to_owned(),
@@ -1745,6 +1805,7 @@ mod tests {
         // Arrange
         let sessions = Sessions::new(vec![5_u8; 32], 3600, false).expect("valid");
         let flow = Flow {
+            provider: None,
             state: "st".to_owned(),
             nonce: "no".to_owned(),
             verifier: "ve".to_owned(),

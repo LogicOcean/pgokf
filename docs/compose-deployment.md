@@ -267,16 +267,20 @@ locked-out admin. Keep the passwords themselves elsewhere (a password
 manager): the catalog holds only the Argon2id hashes, which `pgokf_reader`
 cannot see.
 
-The Admin page is also where, in this mode, an admin sets up an OpenID
-Connect provider (Entra ID, Okta, Keycloak, Auth0, Google…) or GitHub, so
-people can sign in with the account they already have, beside the password
+The Admin page is also where, in this mode, an admin sets up identity
+providers - any number of OpenID Connect providers (Entra ID, Okta,
+Keycloak, Auth0, Google…) or GitHub - so people can sign in with an account
+they already have, each provider by a button of its own below the password
 form: register `https://<this site>/auth/callback` with the provider (a
 GitHub *OAuth App* for GitHub), enter the issuer, client id and secret, and
 the group-to-role map (GitHub organizations and `org/team` slugs are the
 groups), and *Save and test* checks the provider answers before storing
 anything. The settings live in the catalog
-(`pgokf_web.identity_provider`), the client secret sealed under
+(`pgokf_web.identity_providers`), the client secret sealed under
 `OKF_UI_SESSION_SECRET` - so set that before saving a confidential client.
+People who sign in this way appear under *People* with the name their
+provider reports, where an admin can set their role; *People* searches and
+pages, so it stays usable as the site grows.
 
 Uploaders add documents, editors change them (which sends them back to
 review), approvers record the human verification the trust tier derives

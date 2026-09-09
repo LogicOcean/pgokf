@@ -395,7 +395,7 @@ CREATE SCHEMA pgokf_web;
 REVOKE ALL ON SCHEMA pgokf_web FROM PUBLIC;
 GRANT USAGE ON SCHEMA pgokf_web TO pgokf_writer;
 COMMENT ON SCHEMA pgokf_web IS
-    'The web UI''s identity state: the people a local sign-in knows, the sessions the UI has issued, the bearer tokens the MCP server accepts over HTTP, and the identity provider an admin set up. Owned by the extension so it is transactional, shared by every UI instance, and dumped with the catalog; read and written by pgokf_writer only, and never by the extension itself.';
+    'The web UI''s identity state: the people a local sign-in knows, the sessions the UI has issued, the bearer tokens the MCP server accepts over HTTP, and the identity providers an admin set up. Owned by the extension so it is transactional, shared by every UI instance, and dumped with the catalog; read and written by pgokf_writer only, and never by the extension itself.';
 
 CREATE TABLE pgokf_web.users (
     name          text        NOT NULL,
@@ -403,10 +403,16 @@ CREATE TABLE pgokf_web.users (
         CONSTRAINT users_role_check
         CHECK (role IN ('viewer', 'uploader', 'editor', 'approver', 'admin')),
     password_hash text,
+    display_name  text
+        CONSTRAINT users_display_name_check
+        CHECK (display_name ~ '^[^[:cntrl:]]+$' AND char_length(display_name) <= 256),
+    provider      text
+        CONSTRAINT users_provider_check CHECK (provider ~ '^[a-z0-9][a-z0-9-]{0,31}$'),
     created_at    timestamptz NOT NULL DEFAULT now(),
     updated_at    timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT users_pkey PRIMARY KEY (name),
-    CONSTRAINT users_name_check CHECK (name ~ '^[A-Za-z0-9._@+-]{1,128}$')
+    CONSTRAINT users_name_check CHECK (name ~ '^[A-Za-z0-9._@+-]{1,128}$'),
+    CONSTRAINT users_sign_in_check CHECK ((password_hash IS NULL) <> (provider IS NULL))
 );
 
 CREATE TABLE pgokf_web.sessions (
@@ -414,9 +420,12 @@ CREATE TABLE pgokf_web.sessions (
     subject    text        NOT NULL,
     mode       text        NOT NULL
         CONSTRAINT sessions_mode_check CHECK (mode IN ('users', 'oidc')),
+    provider   text
+        CONSTRAINT sessions_provider_check CHECK (provider ~ '^[a-z0-9][a-z0-9-]{0,31}$'),
     expires_at timestamptz NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT sessions_pkey PRIMARY KEY (nonce)
+    CONSTRAINT sessions_pkey PRIMARY KEY (nonce),
+    CONSTRAINT sessions_provider_mode_check CHECK (provider IS NULL OR mode = 'oidc')
 );
 CREATE INDEX sessions_subject_idx ON pgokf_web.sessions (subject);
 CREATE INDEX sessions_expires_at_idx ON pgokf_web.sessions (expires_at);
@@ -425,21 +434,26 @@ REVOKE ALL ON TABLE pgokf_web.users, pgokf_web.sessions FROM PUBLIC;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE pgokf_web.users, pgokf_web.sessions TO pgokf_writer;
 
 COMMENT ON TABLE pgokf_web.users IS
-    'People the web UI''s users identity mode signs in: one row per person with their role on the viewer < uploader < editor < approver < admin ladder and an Argon2id hash of their password - or none, for a person the identity provider signed in, whose row appears at their first sign-in. Managed by pgokf-web (its user add / set-password commands and the Admin page); pgokf_writer only, so a reader never sees a hash.';
+    'People the web UI''s users identity mode signs in: one row per person with their role on the viewer < uploader < editor < approver < admin ladder and an Argon2id hash of their password - or, for a person an identity provider signed in, no password and the provider that brought them, their row appearing at their first sign-in. A name belongs to exactly one way in. Managed by pgokf-web (its user add / set-password commands and the Admin page); pgokf_writer only, so a reader never sees a hash.';
 COMMENT ON COLUMN pgokf_web.users.name IS
-    'The sign-in name: one plain token of letters, digits, and . _ @ + - (at most 128), which is also the person''s OKF actor (human:<name>).';
+    'The sign-in name: one plain token of letters, digits, and . _ @ + - (at most 128), which is also the person''s OKF actor (human:<name>). For a person an identity provider signed in, the identity claim the provider was set up with (sub, login, email...).';
 COMMENT ON COLUMN pgokf_web.users.role IS
-    'The role the UI grants on every request: viewer, uploader, editor, approver, or admin (each holds everything below it). A session cookie carries no role, so a change here takes effect at once.';
+    'The role the UI grants on every request: viewer, uploader, editor, approver, or admin (each holds everything below it). A session cookie carries no role, so a change here takes effect at once. A person an identity provider signed in holds the higher of this role and the one their groups map to.';
 COMMENT ON COLUMN pgokf_web.users.password_hash IS
-    'An Argon2id PHC string of the password, or NULL for a person the identity provider signed in: they have no password here, a password sign-in under their name is refused, and their row exists so an admin can see them and set their role. A fingerprint of the hash is bound into every session a password opens, so a changed password ends the sessions opened before it.';
-COMMENT ON COLUMN pgokf_web.users.created_at IS 'When the person was added.';
-COMMENT ON COLUMN pgokf_web.users.updated_at IS 'When the role or password last changed.';
+    'An Argon2id PHC string of the password, or NULL for a person an identity provider signed in: they have no password here, a password sign-in under their name is refused, and their row exists so an admin can see them and set their role. A fingerprint of the hash is bound into every session a password opens, so a changed password ends the sessions opened before it.';
+COMMENT ON COLUMN pgokf_web.users.display_name IS
+    'What the person is called wherever the UI shows them: for a person an identity provider signed in, the name the provider reports, refreshed at every sign-in; for a password person, what an admin entered, or NULL to show the sign-in name. Their OKF actor stays human:<name>.';
+COMMENT ON COLUMN pgokf_web.users.provider IS
+    'For a person without a password, the identity provider that signed them in (identity_providers.id); NULL for a password person. With users_sign_in_check this makes a name belong to exactly one way in: a provider never signs in a password person''s name, nor a name another provider brought.';
+COMMENT ON COLUMN pgokf_web.users.created_at IS 'When the person was added, or first signed in.';
+COMMENT ON COLUMN pgokf_web.users.updated_at IS 'When the role, password, or name last changed.';
 
 COMMENT ON TABLE pgokf_web.sessions IS
     'The sessions the web UI has issued and not yet ended, in either local identity mode (users or oidc). A session cookie is signed, so the UI could always verify one but never forget one; this table is its memory: a cookie whose nonce is not here is refused, so signing out, sign out everywhere, or an admin ending someone''s sessions takes effect on every device at once. pgokf_writer only: a session identifier is not for readers.';
 COMMENT ON COLUMN pgokf_web.sessions.nonce IS 'The random session identifier the signed cookie carries.';
 COMMENT ON COLUMN pgokf_web.sessions.subject IS 'Whose session it is: the users-mode name or the provider''s subject claim.';
 COMMENT ON COLUMN pgokf_web.sessions.mode IS 'The identity mode that opened it (users or oidc); a mode never honours the other''s sessions.';
+COMMENT ON COLUMN pgokf_web.sessions.provider IS 'For a session opened by an identity provider set up on the Admin page: that provider (identity_providers.id), so switching it off or removing it ends its sessions alone; NULL for a password session, or one the oidc mode''s own provider opened.';
 COMMENT ON COLUMN pgokf_web.sessions.expires_at IS 'When the session ends by itself; expired rows are pruned as new sessions are opened.';
 COMMENT ON COLUMN pgokf_web.sessions.created_at IS 'When the person signed in.';
 
@@ -473,61 +487,65 @@ COMMENT ON COLUMN pgokf_web.mcp_tokens.digest IS
 COMMENT ON COLUMN pgokf_web.mcp_tokens.created_by IS 'Who minted it: the admin''s sign-in name or subject, or cli.';
 COMMENT ON COLUMN pgokf_web.mcp_tokens.created_at IS 'When it was minted.';
 
-CREATE TABLE pgokf_web.identity_provider (
-    singleton      boolean     NOT NULL DEFAULT true
-        CONSTRAINT identity_provider_singleton_check CHECK (singleton),
+CREATE TABLE pgokf_web.identity_providers (
+    id             text        NOT NULL
+        CONSTRAINT identity_providers_id_check CHECK (id ~ '^[a-z0-9][a-z0-9-]{0,31}$'),
     enabled        boolean     NOT NULL DEFAULT true,
     kind           text        NOT NULL DEFAULT 'oidc'
-        CONSTRAINT identity_provider_kind_check CHECK (kind IN ('oidc', 'github')),
+        CONSTRAINT identity_providers_kind_check CHECK (kind IN ('oidc', 'github')),
     issuer         text        NOT NULL
-        CONSTRAINT identity_provider_issuer_check
+        CONSTRAINT identity_providers_issuer_check
         CHECK (issuer ~ '^https?://[^[:space:][:cntrl:]]+$' AND char_length(issuer) <= 2048),
     client_id      text        NOT NULL
-        CONSTRAINT identity_provider_client_id_check
+        CONSTRAINT identity_providers_client_id_check
         CHECK (client_id ~ '^[^[:cntrl:]]+$' AND char_length(client_id) <= 512),
     client_secret  text
-        CONSTRAINT identity_provider_client_secret_check CHECK (client_secret ~ '^v1:[A-Za-z0-9_-]{16}:[A-Za-z0-9_-]{22,}$'),
+        CONSTRAINT identity_providers_client_secret_check CHECK (client_secret ~ '^v1:[A-Za-z0-9_-]{16}:[A-Za-z0-9_-]{22,}$'),
     redirect_url   text        NOT NULL
-        CONSTRAINT identity_provider_redirect_url_check
+        CONSTRAINT identity_providers_redirect_url_check
         CHECK (redirect_url ~ '^https?://[^[:space:][:cntrl:]]+$' AND char_length(redirect_url) <= 2048),
     scopes         text        NOT NULL DEFAULT 'openid profile email'
-        CONSTRAINT identity_provider_scopes_check CHECK (scopes ~ '^[^[:cntrl:]]*$' AND char_length(scopes) <= 512),
+        CONSTRAINT identity_providers_scopes_check CHECK (scopes ~ '^[^[:cntrl:]]*$' AND char_length(scopes) <= 512),
     subject_claims text        NOT NULL DEFAULT 'sub'
-        CONSTRAINT identity_provider_subject_claims_check
+        CONSTRAINT identity_providers_subject_claims_check
         CHECK (subject_claims ~ '^[^[:cntrl:]]+$' AND char_length(subject_claims) <= 512),
     groups_claim   text        NOT NULL DEFAULT 'groups'
-        CONSTRAINT identity_provider_groups_claim_check CHECK (groups_claim ~ '^[^[:space:][:cntrl:]]{1,128}$'),
-    provider_name  text        NOT NULL DEFAULT 'your identity provider'
-        CONSTRAINT identity_provider_provider_name_check CHECK (provider_name ~ '^[^[:cntrl:]]{1,64}$'),
+        CONSTRAINT identity_providers_groups_claim_check CHECK (groups_claim ~ '^[^[:space:][:cntrl:]]{1,128}$'),
+    provider_name  text        NOT NULL
+        CONSTRAINT identity_providers_provider_name_check CHECK (provider_name ~ '^[^[:cntrl:]]{1,64}$'),
     role_map       text        NOT NULL DEFAULT ''
-        CONSTRAINT identity_provider_role_map_check CHECK (role_map ~ '^[^[:cntrl:]]*$' AND char_length(role_map) <= 4096),
+        CONSTRAINT identity_providers_role_map_check CHECK (role_map ~ '^[^[:cntrl:]]*$' AND char_length(role_map) <= 4096),
     default_role   text        NOT NULL DEFAULT 'viewer'
-        CONSTRAINT identity_provider_default_role_check
+        CONSTRAINT identity_providers_default_role_check
         CHECK (default_role IN ('viewer', 'uploader', 'editor', 'approver', 'admin')),
+    created_at     timestamptz NOT NULL DEFAULT now(),
     updated_at     timestamptz NOT NULL DEFAULT now(),
     updated_by     text        NOT NULL,
-    CONSTRAINT identity_provider_pkey PRIMARY KEY (singleton)
+    CONSTRAINT identity_providers_pkey PRIMARY KEY (id)
 );
-REVOKE ALL ON TABLE pgokf_web.identity_provider FROM PUBLIC;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE pgokf_web.identity_provider TO pgokf_writer;
+CREATE UNIQUE INDEX identity_providers_provider_name_idx
+    ON pgokf_web.identity_providers (lower(provider_name));
+REVOKE ALL ON TABLE pgokf_web.identity_providers FROM PUBLIC;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE pgokf_web.identity_providers TO pgokf_writer;
 
-COMMENT ON TABLE pgokf_web.identity_provider IS
-    'The identity provider the web UI signs people in against, when an admin has set one up on the Admin page (the users mode''s own sign-in stays beside it): an OpenID Connect provider, or GitHub - github.com or a GitHub Enterprise Server - by its OAuth web flow; one row at most. The client secret is stored sealed by pgokf-web under a key derived from its session secret, so the catalog - and any writer credential - holds ciphertext, never the secret. pgokf_writer only.';
-COMMENT ON COLUMN pgokf_web.identity_provider.singleton IS 'Always true: the key of the one row.';
-COMMENT ON COLUMN pgokf_web.identity_provider.enabled IS 'Whether the provider is offered on the sign-in page. Off keeps the settings for later.';
-COMMENT ON COLUMN pgokf_web.identity_provider.kind IS 'What the provider speaks: oidc (OpenID Connect discovery and an ID token verified against the provider''s published keys) or github (GitHub''s OAuth web flow: the person from /user, their verified email from /user/emails, their groups from the organizations and org/team slugs they belong to).';
-COMMENT ON COLUMN pgokf_web.identity_provider.issuer IS 'The issuer URL, exactly as the provider declares it in its discovery document - or, for GitHub, the GitHub host: https://github.com, or a GitHub Enterprise Server.';
-COMMENT ON COLUMN pgokf_web.identity_provider.client_id IS 'The client id this site is registered with at the provider.';
-COMMENT ON COLUMN pgokf_web.identity_provider.client_secret IS 'The client secret for a confidential client, sealed (v1:<nonce>:<ciphertext>, AES-256-GCM under a key derived from the UI''s session secret); NULL for a public client, which PKCE alone protects. The constraint refuses anything that is not the sealed form, so a plaintext secret can never be stored.';
-COMMENT ON COLUMN pgokf_web.identity_provider.redirect_url IS 'This site''s callback URL (<site>/auth/callback), as registered with the provider.';
-COMMENT ON COLUMN pgokf_web.identity_provider.scopes IS 'The scopes asked for, space-separated; openid is always included for an OpenID Connect provider, and GitHub takes its own (read:user user:email read:org).';
-COMMENT ON COLUMN pgokf_web.identity_provider.subject_claims IS 'The claims tried in order for the person''s identity, comma-separated (sub is always stable; email only when the provider says it is verified). For GitHub the claims are sub (the numeric account id), login, name, and email.';
-COMMENT ON COLUMN pgokf_web.identity_provider.groups_claim IS 'The claim carrying the person''s groups, which the role map turns into a role; for GitHub, the organizations and org/team slugs the person belongs to, under this name.';
-COMMENT ON COLUMN pgokf_web.identity_provider.provider_name IS 'What the sign-in button calls the provider.';
-COMMENT ON COLUMN pgokf_web.identity_provider.role_map IS 'group=role entries, comma-separated; the highest matching role wins.';
-COMMENT ON COLUMN pgokf_web.identity_provider.default_role IS 'The role of a person in no mapped group.';
-COMMENT ON COLUMN pgokf_web.identity_provider.updated_at IS 'When the settings last changed; every UI instance notices a change through it.';
-COMMENT ON COLUMN pgokf_web.identity_provider.updated_by IS 'The admin who last changed them.';
+COMMENT ON TABLE pgokf_web.identity_providers IS
+    'The identity providers the web UI signs people in against, as an admin set them up on the Admin page (the users mode''s own sign-in stays beside them): any number, each an OpenID Connect provider or GitHub - github.com or a GitHub Enterprise Server - by its OAuth web flow, each with its own button on the sign-in page. The client secret is stored sealed by pgokf-web under a key derived from its session secret, so the catalog - and any writer credential - holds ciphertext, never the secret. pgokf_writer only.';
+COMMENT ON COLUMN pgokf_web.identity_providers.id IS 'A short slug made from the provider''s name when it was added: its handle in the sign-in URL, in the sessions it opens, and on the people it signed in. It never changes, even when the name does.';
+COMMENT ON COLUMN pgokf_web.identity_providers.enabled IS 'Whether the provider is offered on the sign-in page. Off keeps the settings for later.';
+COMMENT ON COLUMN pgokf_web.identity_providers.kind IS 'What the provider speaks: oidc (OpenID Connect discovery and an ID token verified against the provider''s published keys) or github (GitHub''s OAuth web flow: the person from /user, their verified email from /user/emails, their groups from the organizations and org/team slugs they belong to).';
+COMMENT ON COLUMN pgokf_web.identity_providers.issuer IS 'The issuer URL, exactly as the provider declares it in its discovery document - or, for GitHub, the GitHub host: https://github.com, or a GitHub Enterprise Server.';
+COMMENT ON COLUMN pgokf_web.identity_providers.client_id IS 'The client id this site is registered with at the provider.';
+COMMENT ON COLUMN pgokf_web.identity_providers.client_secret IS 'The client secret for a confidential client, sealed (v1:<nonce>:<ciphertext>, AES-256-GCM under a key derived from the UI''s session secret); NULL for a public client, which PKCE alone protects. The constraint refuses anything that is not the sealed form, so a plaintext secret can never be stored.';
+COMMENT ON COLUMN pgokf_web.identity_providers.redirect_url IS 'This site''s callback URL (<site>/auth/callback, shared by every provider), as registered with the provider.';
+COMMENT ON COLUMN pgokf_web.identity_providers.scopes IS 'The scopes asked for, space-separated; openid is always included for an OpenID Connect provider, and GitHub takes its own (read:user user:email read:org).';
+COMMENT ON COLUMN pgokf_web.identity_providers.subject_claims IS 'The claims tried in order for the person''s identity, comma-separated (sub is always stable; email only when the provider says it is verified). For GitHub the claims are sub (the numeric account id), login, name, and email.';
+COMMENT ON COLUMN pgokf_web.identity_providers.groups_claim IS 'The claim carrying the person''s groups, which the role map turns into a role; for GitHub, the organizations and org/team slugs the person belongs to, under this name.';
+COMMENT ON COLUMN pgokf_web.identity_providers.provider_name IS 'What the sign-in button calls the provider; unique among the providers, case aside.';
+COMMENT ON COLUMN pgokf_web.identity_providers.role_map IS 'group=role entries, comma-separated; the highest matching role wins.';
+COMMENT ON COLUMN pgokf_web.identity_providers.default_role IS 'The role of a person in no mapped group.';
+COMMENT ON COLUMN pgokf_web.identity_providers.created_at IS 'When the provider was added.';
+COMMENT ON COLUMN pgokf_web.identity_providers.updated_at IS 'When the settings last changed; every UI instance notices a change through it.';
+COMMENT ON COLUMN pgokf_web.identity_providers.updated_by IS 'The admin who last changed them.';
 
 CREATE FUNCTION pgokf.mcp_token_bearer(digest text)
 RETURNS TABLE (name text, role text, tenant text)
@@ -543,6 +561,6 @@ GRANT EXECUTE ON FUNCTION pgokf.mcp_token_bearer(text) TO pgokf_reader;
 COMMENT ON FUNCTION pgokf.mcp_token_bearer(text) IS
     'The name, role, and tenant of the MCP token whose SHA-256 digest this is, or no row; the server accepts only a token minted for its own tenant. How pgokf-mcp, which connects as a reader, authenticates a request over HTTP: it hashes the presented token itself and asks for that digest, so the token never travels to the database and a reader learns the bearer of a digest it holds and nothing about any other. SECURITY DEFINER over pgokf_web.mcp_tokens, which no reader may see; STABLE, STRICT, executable by pgokf_reader. A revoked token is refused with the very next request: nothing is cached.';
 
--- Last, so the seven new relations are registered for pg_dump (the rule for
+-- Last, so the eight new relations are registered for pg_dump (the rule for
 -- every upgrade script since 0.1.14).
 SELECT pgokf_private.register_dump_relations();

@@ -1423,14 +1423,14 @@ writes go through the `SECURITY DEFINER` sync/admin functions; no role has
 direct DML. The four administrator-only `pgokf_private` state tables (`config`,
 `sync_log`, `sync_log_change`, `access_log`) are reachable only through the
 config and `list_*` functions. The four `pgokf_web` tables (`users`,
-`sessions`, `mcp_tokens`, `identity_provider`) hold the web UI's identity
+`sessions`, `mcp_tokens`, `identity_providers`) hold the web UI's identity
 state - the people its `users` mode signs in, the sessions it has issued,
-the bearer tokens `pgokf-mcp` accepts over HTTP, and the identity provider
+the bearer tokens `pgokf-mcp` accepts over HTTP, and the identity providers
 an admin set up - and are the one exception to "no direct DML": `pgokf_writer` holds
 `SELECT`, `INSERT`, `UPDATE`, and `DELETE` on all but `mcp_tokens`, which it
 may not `UPDATE`, so `pgokf-web` reads and writes them through its writer
 connection, while `pgokf_reader` has no access at all (a reader must never
-see a password hash, a session identifier, which tokens exist, or the
+see a password hash, a session identifier, which tokens exist, or a
 provider's settings; the one thing it may ask is
 [`mcp_token_bearer(digest)`](#pgokfmcp_token_bearerdigest-text-table-name-text-role-text-tenant-text)).
 The extension owns them but never reads them; they are not tenant-scoped.
@@ -1441,11 +1441,13 @@ One person the web UI's `users` identity mode can sign in.
 
 | Column | Type | Notes |
 | ------ | ---- | ----- |
-| `name` | `text` | Primary key: the sign-in name, one plain token (`^[A-Za-z0-9._@+-]{1,128}$`), also the person's OKF actor `human:<name>`. |
-| `role` | `text` | `viewer`, `uploader`, `editor`, `approver`, or `admin` (a `CHECK`); read on every request, so a change takes effect at once. |
-| `password_hash` | `text` | An Argon2id PHC string, or `NULL` for a person the identity provider signed in (their row appears at their first sign-in, so an admin can set their role; a password sign-in under their name is refused). A fingerprint of the hash is bound into each password session, so a changed password ends earlier sessions. |
-| `created_at` | `timestamptz` | When the person was added. |
-| `updated_at` | `timestamptz` | When the role or password last changed. |
+| `name` | `text` | Primary key: the sign-in name, one plain token (`^[A-Za-z0-9._@+-]{1,128}$`), also the person's OKF actor `human:<name>`. For a person an identity provider signed in, the identity claim the provider was set up with (`sub`, `login`, `email`...). |
+| `role` | `text` | `viewer`, `uploader`, `editor`, `approver`, or `admin` (a `CHECK`); read on every request, so a change takes effect at once. A person an identity provider signed in holds the higher of this role and the one their groups map to. |
+| `password_hash` | `text` | An Argon2id PHC string, or `NULL` for a person an identity provider signed in (their row appears at their first sign-in, so an admin can set their role; a password sign-in under their name is refused, and none can be set). A fingerprint of the hash is bound into each password session, so a changed password ends earlier sessions. |
+| `display_name` | `text` | What the person is called wherever the UI shows them (printable, at most 256 characters): the name the provider reports, refreshed at every sign-in, or what an admin entered for a password person; `NULL` shows the sign-in name. The OKF actor stays `human:<name>`. |
+| `provider` | `text` | For a person without a password, the identity provider that signed them in (`identity_providers.id`); `NULL` for a password person. `users_sign_in_check` requires exactly one of `password_hash` and `provider`: a name belongs to one way in, so a provider never signs in a password person's name, nor a name another provider brought. |
+| `created_at` | `timestamptz` | When the person was added, or first signed in. |
+| `updated_at` | `timestamptz` | When the role, password, or name last changed. |
 
 ### `pgokf_web.sessions`
 
@@ -1456,6 +1458,7 @@ One session the web UI has issued and not yet ended (`users` or `oidc` mode).
 | `nonce` | `text` | Primary key: the random identifier the signed cookie carries. A cookie whose nonce is not here is refused. |
 | `subject` | `text` | Whose session: the `users`-mode name, or the provider's subject claim. Indexed. |
 | `mode` | `text` | `users` or `oidc` (a `CHECK`); a mode never honours the other's sessions. |
+| `provider` | `text` | For a session an identity provider set up on the Admin page opened: that provider (`identity_providers.id`), so switching it off or removing it ends its sessions alone; `NULL` for a password session or one the `oidc` mode's own provider opened (a `CHECK`: only an `oidc` session names one). |
 | `expires_at` | `timestamptz` | When the session ends by itself; expired rows are pruned as sessions are opened. Indexed. |
 | `created_at` | `timestamptz` | When the person signed in. |
 
@@ -1473,27 +1476,28 @@ token.
 | `created_by` | `text` | Who minted it: the admin's subject, or `cli`. |
 | `created_at` | `timestamptz` | When it was minted. |
 
-### `pgokf_web.identity_provider`
+### `pgokf_web.identity_providers`
 
-The identity provider the web UI's `users` mode offers beside its own
-sign-in, as set up on the Admin page - an OpenID Connect provider, or
-GitHub: one row at most.
+The identity providers the web UI's `users` mode offers beside its own
+sign-in, as set up on the Admin page - any number of OpenID Connect
+providers, or GitHub - each with a button of its own on the sign-in page.
 
 | Column | Type | Notes |
 | ------ | ---- | ----- |
-| `singleton` | `boolean` | Primary key, always `true` (a `CHECK`): the key of the one row. |
+| `id` | `text` | Primary key: a short slug (`^[a-z0-9][a-z0-9-]{0,31}$`, a `CHECK`) made from the provider's name when it was added (`github`, `okta`, `okta-2`); its handle in the sign-in URL, on the sessions it opens, and on the people it signed in. It never changes, even when the name does. |
 | `enabled` | `boolean` | Whether the provider is offered on the sign-in page; off keeps the settings. |
 | `kind` | `text` | `oidc` (discovery and an ID token verified against the provider's keys) or `github` (GitHub's OAuth web flow; the person from `/user`, groups from organizations and `org/team` slugs) - a `CHECK`. |
 | `issuer` | `text` | The issuer URL as the provider declares it (`https?://…`, a `CHECK`); for GitHub, the GitHub host (`https://github.com` or an Enterprise Server). |
 | `client_id` | `text` | The client id this site is registered with. |
 | `client_secret` | `text` | `NULL` for a public client; otherwise the secret sealed by `pgokf-web` (`v1:<nonce>:<ciphertext>`, AES-256-GCM under a key derived from `OKF_WEB_SESSION_SECRET`). A `CHECK` refuses anything but the sealed form, so a plaintext secret can never be stored. |
-| `redirect_url` | `text` | This site's callback URL, as registered with the provider. |
+| `redirect_url` | `text` | This site's callback URL (`<site>/auth/callback`, shared by every provider), as registered with the provider. |
 | `scopes` | `text` | Space-separated; `openid` is always included for OpenID Connect, and GitHub takes its own (`read:user user:email read:org`). |
 | `subject_claims` | `text` | Comma-separated claims tried in order for the person's identity; for GitHub `sub` is the numeric account id, then `login`, `name`, `email`. |
 | `groups_claim` | `text` | The claim carrying the person's groups; for GitHub, the organizations and `org/team` slugs under this name. |
-| `provider_name` | `text` | What the sign-in button calls the provider. |
+| `provider_name` | `text` | What the sign-in button calls the provider; unique among the providers, case aside (a unique index on `lower(provider_name)`). |
 | `role_map` | `text` | `group=role` entries, comma-separated; the highest matching role wins. |
 | `default_role` | `text` | The role of a person in no mapped group (a `CHECK` on the ladder). |
+| `created_at` | `timestamptz` | When the provider was added. |
 | `updated_at` | `timestamptz` | When the settings last changed; every UI instance notices a change through it. |
 | `updated_by` | `text` | The admin who last changed them. |
 

@@ -365,36 +365,47 @@ leaving a plain document.
   mode, and a changed password or a removed person ends theirs. A session
   is a lever, not a detector: a copied cookie works until its session is
   ended or expires.
-- **The web UI's people, sessions, MCP tokens, and identity provider live
+- **The web UI's people, sessions, MCP tokens, and identity providers live
   in the catalog.** Four extension-owned tables, `pgokf_web.users`,
   `pgokf_web.sessions`, `pgokf_web.mcp_tokens`, and
-  `pgokf_web.identity_provider`, hold
+  `pgokf_web.identity_providers`, hold
   the `users` mode's people, every live session of the `users` and `oidc`
   modes, the digests of the bearer tokens `pgokf-mcp` accepts over HTTP, and
-  the identity provider an admin set up; they are granted to `pgokf_writer`
+  the identity providers an admin set up; they are granted to `pgokf_writer`
   only (a reader never sees a hash, a session identifier, which tokens
-  exist, or the provider's settings), transactional, shared by every UI
-  instance, and carried by `pg_dump`. **An admin sets the identity provider
-  up on the Admin page** in `users` mode - issuer, client id and secret,
-  callback URL, claims, and the group-to-role map - and the sign-in page then
-  offers "Sign in with …" beside the password form; saving reaches the
-  provider first, so a wrong issuer is refused before it is stored, switching
-  the provider off, removing it, or changing its issuer or client ends the
-  sessions it opened, and every UI instance picks a change up on its next
-  sign-in. The provider may be any OpenID Connect provider, or **GitHub**
+  exist, or a provider's settings), transactional, shared by every UI
+  instance, and carried by `pg_dump`. **An admin sets identity providers up
+  on the Admin page** in `users` mode - any number, each with a name, the
+  issuer, client id and secret, the callback URL, claims, and the
+  group-to-role map - and the sign-in page then offers one "Sign in with …"
+  button per provider below the password form; saving reaches the provider
+  first, so a wrong issuer is refused before it is stored; a provider is
+  known by a slug made from its name (`okta`, `github`) that its sessions
+  and the people it brought carry, so switching it off, removing it, or
+  changing its issuer or client ends the sessions it opened and no other
+  (and re-registering it puts its people back at the bottom of the ladder),
+  and every UI instance picks a change up on its next sign-in. A provider
+  may be any OpenID Connect provider, or **GitHub**
   (github.com or an Enterprise Server), which speaks OAuth but not OpenID
   Connect: the same code flow with PKCE yields an access token, and the
   person comes from GitHub's API (`sub` the numeric account id, `login`,
   `name`, the primary verified `email`) with their organizations and
   `org/team` slugs as groups. A callback URL may be plain `http://` on the
   loopback interface or a private address, where the site is already served
-  that way. A person the provider signs in appears under People at their
-  first sign-in, without a password and at the bottom of the ladder; an
-  admin can set their role there, and the higher of that role and the
-  group-mapped one applies on every request (`pgokf_web.users` gains a
-  `NULL` password hash for them, which refuses a password sign-in under
-  their name; a name that signs in with a password is never signed in
-  through the provider, and no password can be set for a provider person). The
+  that way. A person a provider signs in appears under People at their
+  first sign-in, with the name the provider reports, without a password and
+  at the bottom of the ladder; an admin can set their role there, and the
+  higher of that role and the group-mapped one applies on every request
+  (`pgokf_web.users` gains `display_name` and `provider`, and a `NULL`
+  password hash for them, which refuses a password sign-in under their
+  name; a name belongs to exactly one way in - a provider never signs in a
+  password person's name nor a name another provider brought - and no
+  password can be set for a provider person). **The Admin page is tabs**
+  now - People, Identity providers, MCP tokens, Bundles, Catalog settings -
+  and People shows everyone by name with their sign-in name beneath,
+  searches by either, and pages (25 to 200 to a page), so a site with
+  hundreds of people stays usable; a password person may be given a name
+  to show (`pgokf-web user add --display`, or the form). The
   client secret is stored sealed (AES-256-GCM under a key derived from
   `OKF_WEB_SESSION_SECRET`), the table refuses anything but the sealed form,
   and without a session secret of its own the UI keeps no client secret (a

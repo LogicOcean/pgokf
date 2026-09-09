@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! The identity provider the `users` mode offers beside its own sign-in,
-//! as set up on the Admin page: built from the catalog's settings, kept
-//! while they stand, rebuilt when they change.
+//! The identity providers the `users` mode offers beside its own sign-in,
+//! as set up on the Admin page: each built from the catalog's settings,
+//! kept while they stand, rebuilt when they change.
 //!
 //! Settings are read on the paths where a provider is *used to sign in*
-//! (the sign-in page, the callback, sign-out) - one row, rarely - and never
-//! on the request path: a session the provider opened is recognized by the
-//! provider already built, and the first such request after a start builds
-//! it once. A change saved on any instance is noticed by every other
-//! through the row's stamp on its next sign-in.
+//! (the sign-in page, the callback, sign-out) - a few rows, rarely - and
+//! never on the request path: a session a provider opened names the
+//! provider (its slug), which is recognized by the one already built, and
+//! the first such request after a start builds it once. A change saved on
+//! any instance is noticed by every other through the row's stamp on its
+//! next sign-in.
 
+use std::collections::HashMap;
 use std::sync::{Arc, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
@@ -17,12 +19,17 @@ use anyhow::{Context, Result, bail};
 
 use crate::auth::{Role, Sessions};
 use crate::oidc::OidcAuth;
-use crate::provider_settings::{ProviderKind, ProviderSettings, ProviderSettingsStore};
+use crate::provider_settings::{
+    ProviderKind, ProviderSettings, ProviderSettingsStore, free_slug, valid_slug,
+};
 use crate::seal::Sealer;
 
 /// What the Admin page's form says.
 #[derive(Clone)]
 pub(crate) struct ProviderDraft {
+    /// The slug of the provider being changed; `None` for a new one, which
+    /// gets a slug made from its name.
+    pub id: Option<String>,
     pub enabled: bool,
     pub kind: ProviderKind,
     pub issuer: String,
@@ -76,31 +83,31 @@ enum State {
     Provider(Arc<OidcAuth>),
     /// The row is there and enabled, but this instance cannot build it: a
     /// client secret sealed under another session secret, or none to open
-    /// it with. Sign-in goes on without the provider, and the Admin page
+    /// it with. Sign-in goes on without this provider, and the Admin page
     /// says why.
     Unbuildable(String),
 }
 
-/// The slot the `users` mode keeps its provider in.
-pub(crate) struct ProviderSlot {
+/// The registry the `users` mode keeps its providers in, by slug.
+pub(crate) struct ProviderRegistry {
     store: ProviderSettingsStore,
     /// Present when the operator set a session secret: the only key a
     /// client secret can be sealed under.
     sealer: Option<Sealer>,
     sessions: Arc<Sessions>,
-    live: RwLock<Option<Live>>,
+    live: RwLock<HashMap<String, Live>>,
 }
 
-impl std::fmt::Debug for ProviderSlot {
+impl std::fmt::Debug for ProviderRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ProviderSlot")
+        f.debug_struct("ProviderRegistry")
             .field("store", &self.store)
             .field("can_seal", &self.sealer.is_some())
             .finish_non_exhaustive()
     }
 }
 
-impl ProviderSlot {
+impl ProviderRegistry {
     pub(crate) fn new(
         store: ProviderSettingsStore,
         sealer: Option<Sealer>,
@@ -110,7 +117,7 @@ impl ProviderSlot {
             store,
             sealer,
             sessions,
-            live: RwLock::new(None),
+            live: RwLock::new(HashMap::new()),
         }
     }
 
@@ -119,76 +126,104 @@ impl ProviderSlot {
         self.sealer.is_some()
     }
 
-    /// The provider as the catalog has it now: built on first use, kept
-    /// while the settings' stamp stands, rebuilt when it moves, and `None`
-    /// while no enabled provider is set up - or while the settings cannot
-    /// be built into one (see [`Self::trouble`]), which must not stop the
-    /// password sign-in beside it.
+    /// Every enabled provider as the catalog has them now, in the order the
+    /// sign-in page shows them: each built on first use, kept while its
+    /// settings' stamp stands, rebuilt when it moves. One whose settings
+    /// cannot be built into a provider here (see [`Self::trouble`]) is left
+    /// out, which must not stop the others or the password sign-in.
     ///
     /// # Errors
     ///
     /// The catalog cannot be read.
-    pub(crate) async fn current(&self) -> Result<Option<Arc<OidcAuth>>> {
-        let Some(settings) = self.store.load().await?.filter(|s| s.enabled) else {
-            self.forget();
+    pub(crate) async fn all_current(&self) -> Result<Vec<Arc<OidcAuth>>> {
+        let all = self.store.load_all().await?;
+        // A provider removed or switched off elsewhere is forgotten here,
+        // so the request path stops believing it too.
+        let enabled: Vec<&ProviderSettings> = all.iter().filter(|s| s.enabled).collect();
+        self.live
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|id, _| enabled.iter().any(|s| s.id == *id));
+        Ok(enabled
+            .into_iter()
+            .filter_map(|settings| self.refresh(settings))
+            .collect())
+    }
+
+    /// One provider by its slug, as the catalog has it now, or `None`
+    /// while it is not set up, not enabled, or cannot be built here.
+    ///
+    /// # Errors
+    ///
+    /// The catalog cannot be read.
+    pub(crate) async fn current(&self, id: &str) -> Result<Option<Arc<OidcAuth>>> {
+        let Some(settings) = self.store.load(id).await?.filter(|s| s.enabled) else {
+            self.forget(id);
             return Ok(None);
         };
+        Ok(self.refresh(&settings))
+    }
+
+    /// The provider `settings` make, from the cache while the stamp stands
+    /// and built afresh when it moved.
+    fn refresh(&self, settings: &ProviderSettings) -> Option<Arc<OidcAuth>> {
         let known = self
             .live
             .read()
             .unwrap_or_else(PoisonError::into_inner)
-            .as_ref()
+            .get(&settings.id)
             .filter(|live| live.stamp == settings.updated_at)
             .map(Live::answer);
         if let Some(answer) = known {
-            self.touch();
-            return Ok(answer);
+            self.touch(&settings.id);
+            return answer;
         }
-        let state = match self.build(&settings) {
+        let state = match self.build(settings) {
             Ok(provider) => State::Provider(Arc::new(provider)),
             Err(error) => {
                 // Said once per change of the settings, not per request.
                 eprintln!(
-                    "pgokf-web: the identity provider set up on the Admin page cannot be used \
-                     here: {error:#}"
+                    "pgokf-web: the identity provider {} set up on the Admin page cannot be used \
+                     here: {error:#}",
+                    settings.provider_name
                 );
                 State::Unbuildable(format!("{error:#}"))
             }
         };
-        Ok(self.remember(settings.updated_at, state))
+        self.remember(&settings.id, settings.updated_at.clone(), state)
     }
 
-    /// The provider last built, for the request path: without asking the
-    /// catalog while it was built or confirmed recently, and read again
-    /// when it was not - so another instance's change is seen here within
-    /// [`BELIEVED_FOR`].
+    /// The provider last built under `id`, for the request path: without
+    /// asking the catalog while it was built or confirmed recently, and
+    /// read again when it was not - so another instance's change is seen
+    /// here within [`BELIEVED_FOR`].
     ///
     /// # Errors
     ///
     /// The catalog cannot be read.
-    pub(crate) async fn recent(&self) -> Result<Option<Arc<OidcAuth>>> {
+    pub(crate) async fn recent(&self, id: &str) -> Result<Option<Arc<OidcAuth>>> {
         let believed = self
             .live
             .read()
             .unwrap_or_else(PoisonError::into_inner)
-            .as_ref()
+            .get(id)
             .filter(|live| live.at.elapsed() < BELIEVED_FOR)
             .map(Live::answer);
         match believed {
             Some(answer) => Ok(answer),
-            None => self.current().await,
+            None => self.current(id).await,
         }
     }
 
-    /// Why the stored settings cannot be used by this instance, if that is
-    /// so: shown on the Admin page, where an admin can enter the client
-    /// secret again after a session-secret rotation.
-    pub(crate) fn trouble(&self) -> Option<String> {
+    /// Why the stored settings of `id` cannot be used by this instance, if
+    /// that is so: shown on the Admin page, where an admin can enter the
+    /// client secret again after a session-secret rotation.
+    pub(crate) fn trouble(&self, id: &str) -> Option<String> {
         match self
             .live
             .read()
             .unwrap_or_else(PoisonError::into_inner)
-            .as_ref()
+            .get(id)
             .map(|live| &live.state)
         {
             Some(State::Unbuildable(why)) => Some(why.clone()),
@@ -196,70 +231,47 @@ impl ProviderSlot {
         }
     }
 
-    /// The settings as stored, for the Admin page's form.
+    /// Every provider's settings as stored, enabled or not, for the Admin
+    /// page.
     ///
     /// # Errors
     ///
     /// The catalog cannot be read.
-    pub(crate) async fn settings(&self) -> Result<Option<ProviderSettings>> {
-        self.store.load().await
+    pub(crate) async fn settings(&self) -> Result<Vec<ProviderSettings>> {
+        self.store.load_all().await
+    }
+
+    /// One provider's settings as stored, for the Admin page's form.
+    ///
+    /// # Errors
+    ///
+    /// The catalog cannot be read.
+    pub(crate) async fn setting(&self, id: &str) -> Result<Option<ProviderSettings>> {
+        self.store.load(id).await
     }
 
     /// Turn the form into settings ready to store, and prove they build a
     /// provider - URLs, client id, claims, role map - without touching the
-    /// network. The provider comes back so the caller can ask it to reach
-    /// the issuer before anything is stored.
+    /// network. `all` is every provider stored now: the one being changed
+    /// is found there by the draft's slug (its stored secret kept when the
+    /// form left the field blank), and a new one gets a slug none of them
+    /// has. The provider comes back so the caller can ask it to reach the
+    /// issuer before anything is stored.
     ///
     /// # Errors
     ///
-    /// A setting that cannot be right, or a client secret with no session
+    /// A setting that cannot be right, another provider of the same name,
+    /// a slug that names no provider, or a client secret with no session
     /// secret to seal it under.
     pub(crate) fn prepare(
         &self,
         draft: &ProviderDraft,
-        stored: Option<&ProviderSettings>,
+        all: &[ProviderSettings],
         by: &str,
     ) -> Result<(ProviderSettings, OidcAuth)> {
-        // The catalog's own constraints, checked here first so a slip is a
-        // message on the form rather than a refused row.
-        let issuer = match (draft.kind, draft.issuer.trim()) {
-            // GitHub's own host, unless a GitHub Enterprise Server is named.
-            (ProviderKind::GitHub, "") => "https://github.com".to_owned(),
-            (_, issuer) => issuer.to_owned(),
-        };
-        plain("the issuer URL", &issuer, 1, 2048)?;
-        plain("the client id", &draft.client_id, 1, 512)?;
-        plain("the callback URL", &draft.redirect_url, 1, 2048)?;
-        for (what, url) in [
-            ("the issuer URL", &issuer),
-            ("the callback URL", &draft.redirect_url),
-        ] {
-            if url.trim().chars().any(char::is_whitespace) {
-                bail!("{what} holds a space");
-            }
-        }
-        if draft.kind == ProviderKind::GitHub
-            && draft
-                .scopes
-                .split_whitespace()
-                .any(|scope| scope == "openid" || scope == "profile")
-        {
-            bail!(
-                "openid and profile are not GitHub scopes: ask for read:user user:email read:org \
-                 (read:org only if the role map names organizations or teams)"
-            );
-        }
-        plain("the scopes", &draft.scopes, 0, 512)?;
-        plain("the identity claims", &draft.subject_claims, 1, 512)?;
-        plain("the groups claim", &draft.groups_claim, 1, 128)?;
-        if draft.groups_claim.trim().chars().any(char::is_whitespace) {
-            bail!("the groups claim is one claim name, without spaces");
-        }
-        plain("the provider name", &draft.provider_name, 1, 64)?;
-        plain("the role map", &draft.role_map, 0, 4096)?;
-        if let SecretChange::Set(secret) = &draft.client_secret {
-            plain("the client secret", secret, 1, 4096)?;
-        }
+        let issuer = checked(draft)?;
+        let provider_name = draft.provider_name.trim().to_owned();
+        let (id, stored) = placed(draft, all, &provider_name)?;
         let client_secret = match &draft.client_secret {
             SecretChange::Keep => stored.and_then(|s| s.client_secret.clone()),
             SecretChange::Clear => None,
@@ -286,6 +298,7 @@ impl ProviderSlot {
             );
         }
         let settings = ProviderSettings {
+            id,
             enabled: draft.enabled,
             kind: draft.kind,
             issuer,
@@ -295,7 +308,7 @@ impl ProviderSlot {
             scopes: draft.scopes.trim().to_owned(),
             subject_claims: draft.subject_claims.trim().to_owned(),
             groups_claim: draft.groups_claim.trim().to_owned(),
-            provider_name: draft.provider_name.trim().to_owned(),
+            provider_name,
             role_map: draft.role_map.trim().to_owned(),
             default_role: draft.default_role,
             updated_at: String::new(),
@@ -312,32 +325,35 @@ impl ProviderSlot {
     ///
     /// # Errors
     ///
-    /// The catalog refuses the row or cannot be written.
+    /// The catalog refuses the row (a name or handle already taken) or
+    /// cannot be written.
     pub(crate) async fn store(
         &self,
         settings: &ProviderSettings,
         provider: OidcAuth,
+        is_new: bool,
     ) -> Result<ProviderSettings> {
-        let saved = self.store.save(settings).await?;
+        let saved = self.store.save(settings, is_new).await?;
         if saved.enabled {
             self.remember(
+                &saved.id,
                 saved.updated_at.clone(),
                 State::Provider(Arc::new(provider)),
             );
         } else {
-            self.forget();
+            self.forget(&saved.id);
         }
         Ok(saved)
     }
 
-    /// Forget the provider altogether: `false` when none was set up.
+    /// Forget a provider altogether: `false` when none was set up as `id`.
     ///
     /// # Errors
     ///
     /// The catalog cannot be written.
-    pub(crate) async fn remove(&self) -> Result<bool> {
-        let removed = self.store.remove().await?;
-        self.forget();
+    pub(crate) async fn remove(&self, id: &str) -> Result<bool> {
+        let removed = self.store.remove(id).await?;
+        self.forget(id);
         Ok(removed)
     }
 
@@ -348,43 +364,46 @@ impl ProviderSlot {
         )
     }
 
-    /// Keep what a read of the settings came to. A read that straddled a
+    /// Keep what a read of `id`'s settings came to. A read that straddled a
     /// save - it saw the row before, and gets here after the saver
     /// remembered the newer settings - must not put the older ones back:
     /// the stamps order (an instant, to the microsecond), so a newer entry
     /// believed within [`BELIEVED_FOR`] stands.
-    fn remember(&self, stamp: String, state: State) -> Option<Arc<OidcAuth>> {
-        let mut slot = self.live.write().unwrap_or_else(PoisonError::into_inner);
-        if let Some(newer) = slot
-            .as_ref()
-            .filter(|live| live.stamp > stamp && live.at.elapsed() < BELIEVED_FOR)
+    fn remember(&self, id: &str, stamp: String, state: State) -> Option<Arc<OidcAuth>> {
+        let mut live = self.live.write().unwrap_or_else(PoisonError::into_inner);
+        if let Some(newer) = live
+            .get(id)
+            .filter(|known| known.stamp > stamp && known.at.elapsed() < BELIEVED_FOR)
         {
             return newer.answer();
         }
-        let live = Live {
+        let entry = Live {
             stamp,
             at: Instant::now(),
             state,
         };
-        let answer = live.answer();
-        *slot = Some(live);
+        let answer = entry.answer();
+        live.insert(id.to_owned(), entry);
         answer
     }
 
-    /// The settings were read again and stand: believed afresh.
-    fn touch(&self) {
+    /// The settings of `id` were read again and stand: believed afresh.
+    fn touch(&self, id: &str) {
         if let Some(live) = self
             .live
             .write()
             .unwrap_or_else(PoisonError::into_inner)
-            .as_mut()
+            .get_mut(id)
         {
             live.at = Instant::now();
         }
     }
 
-    fn forget(&self) {
-        *self.live.write().unwrap_or_else(PoisonError::into_inner) = None;
+    fn forget(&self, id: &str) {
+        self.live
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(id);
     }
 }
 
@@ -395,6 +414,88 @@ impl Live {
             State::Unbuildable(_) => None,
         }
     }
+}
+
+/// The form's fields against the catalog's own constraints, checked here
+/// first so a slip is a message on the form rather than a refused row; the
+/// issuer comes back as it will be stored.
+fn checked(draft: &ProviderDraft) -> Result<String> {
+    let issuer = match (draft.kind, draft.issuer.trim()) {
+        // GitHub's own host, unless a GitHub Enterprise Server is named.
+        (ProviderKind::GitHub, "") => "https://github.com".to_owned(),
+        (_, issuer) => issuer.to_owned(),
+    };
+    plain("the issuer URL", &issuer, 1, 2048)?;
+    plain("the client id", &draft.client_id, 1, 512)?;
+    plain("the callback URL", &draft.redirect_url, 1, 2048)?;
+    for (what, url) in [
+        ("the issuer URL", &issuer),
+        ("the callback URL", &draft.redirect_url),
+    ] {
+        if url.trim().chars().any(char::is_whitespace) {
+            bail!("{what} holds a space");
+        }
+    }
+    if draft.kind == ProviderKind::GitHub
+        && draft
+            .scopes
+            .split_whitespace()
+            .any(|scope| scope == "openid" || scope == "profile")
+    {
+        bail!(
+            "openid and profile are not GitHub scopes: ask for read:user user:email read:org \
+             (read:org only if the role map names organizations or teams)"
+        );
+    }
+    plain("the scopes", &draft.scopes, 0, 512)?;
+    plain("the identity claims", &draft.subject_claims, 1, 512)?;
+    plain("the groups claim", &draft.groups_claim, 1, 128)?;
+    if draft.groups_claim.trim().chars().any(char::is_whitespace) {
+        bail!("the groups claim is one claim name, without spaces");
+    }
+    plain("the provider name", &draft.provider_name, 1, 64)?;
+    plain("the role map", &draft.role_map, 0, 4096)?;
+    if let SecretChange::Set(secret) = &draft.client_secret {
+        plain("the client secret", secret, 1, 4096)?;
+    }
+    Ok(issuer)
+}
+
+/// The slug the draft is stored under and, for a change, the row as it is
+/// now - among `all`, where the name must be the draft's alone.
+fn placed<'a>(
+    draft: &ProviderDraft,
+    all: &'a [ProviderSettings],
+    provider_name: &str,
+) -> Result<(String, Option<&'a ProviderSettings>)> {
+    let (id, stored) = if let Some(id) = draft
+        .id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        let stored = all
+            .iter()
+            .find(|s| s.id == id)
+            .with_context(|| format!("no identity provider is set up as {id}"))?;
+        (id.to_owned(), Some(stored))
+    } else {
+        let taken: Vec<String> = all.iter().map(|s| s.id.clone()).collect();
+        (free_slug(provider_name, draft.kind, &taken), None)
+    };
+    if !valid_slug(&id) {
+        bail!("{id:?} is not a provider slug");
+    }
+    if let Some(other) = all
+        .iter()
+        .find(|s| s.id != id && s.provider_name.eq_ignore_ascii_case(provider_name))
+    {
+        bail!(
+            "another provider is already called {}: give this one a name of its own",
+            other.provider_name
+        );
+    }
+    Ok((id, stored))
 }
 
 /// One printable field within its bounds - what the catalog's constraints
@@ -424,8 +525,8 @@ mod tests {
         Arc::new(Sessions::new(SECRET.as_bytes().to_vec(), 3_600, false).expect("sessions"))
     }
 
-    fn slot(sealer: bool) -> ProviderSlot {
-        ProviderSlot::new(
+    fn registry(sealer: bool) -> ProviderRegistry {
+        ProviderRegistry::new(
             ProviderSettingsStore::memory(),
             sealer.then(|| Sealer::from_secret(SECRET.as_bytes()).expect("sealer")),
             sessions(),
@@ -434,6 +535,7 @@ mod tests {
 
     fn draft(name: &str) -> ProviderDraft {
         ProviderDraft {
+            id: None,
             enabled: true,
             kind: ProviderKind::Oidc,
             issuer: "https://id.example".to_owned(),
@@ -449,35 +551,65 @@ mod tests {
         }
     }
 
+    /// The form filled in to change the provider stored as `stored`.
+    fn change(stored: &ProviderSettings, name: &str) -> ProviderDraft {
+        ProviderDraft {
+            id: Some(stored.id.clone()),
+            ..draft(name)
+        }
+    }
+
     #[tokio::test]
     async fn a_provider_is_built_once_and_rebuilt_when_the_settings_change() {
         // Arrange
-        let slot = slot(false);
-        let (settings, settings_provider) = slot
-            .prepare(&draft("Okta"), None, "root")
+        let registry = registry(false);
+        let (settings, settings_provider) = registry
+            .prepare(&draft("Okta"), &[], "root")
             .expect("prepares");
-        slot.store(&settings, settings_provider)
+        let stored = registry
+            .store(&settings, settings_provider, true)
             .await
             .expect("stores");
 
         // Act
-        let first = slot.current().await.expect("reads").expect("a provider");
-        let again = slot.current().await.expect("reads").expect("a provider");
-        let (changed, changed_provider) = slot
-            .prepare(&draft("Entra ID"), Some(&settings), "root")
+        let first = registry
+            .current("okta")
+            .await
+            .expect("reads")
+            .expect("a provider");
+        let again = registry
+            .current("okta")
+            .await
+            .expect("reads")
+            .expect("a provider");
+        let (changed, changed_provider) = registry
+            .prepare(
+                &change(&stored, "Entra ID"),
+                std::slice::from_ref(&stored),
+                "root",
+            )
             .expect("prepares");
-        slot.store(&changed, changed_provider)
+        registry
+            .store(&changed, changed_provider, false)
             .await
             .expect("stores");
-        let rebuilt = slot.current().await.expect("reads").expect("a provider");
+        let rebuilt = registry
+            .current("okta")
+            .await
+            .expect("reads")
+            .expect("a provider");
 
         // Assert
+        assert_eq!(stored.id, "okta", "a slug made from the name");
         assert!(Arc::ptr_eq(&first, &again), "kept while the stamp stands");
         assert_eq!(first.provider_name(), "Okta");
+        assert_eq!(first.stored_id(), Some("okta"));
         assert!(!Arc::ptr_eq(&first, &rebuilt), "rebuilt when it moves");
         assert_eq!(rebuilt.provider_name(), "Entra ID");
+        assert_eq!(changed.id, "okta", "the slug survives a rename");
         assert!(
-            slot.recent()
+            registry
+                .recent("okta")
                 .await
                 .expect("reads")
                 .is_some_and(|p| Arc::ptr_eq(&p, &rebuilt))
@@ -485,28 +617,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn every_provider_has_its_own_slug_and_name() {
+        // Arrange
+        let registry = registry(true);
+        let (okta, okta_provider) = registry
+            .prepare(&draft("Okta"), &[], "root")
+            .expect("prepares");
+        let okta = registry
+            .store(&okta, okta_provider, true)
+            .await
+            .expect("stores");
+        let mut github = draft("GitHub");
+        github.kind = ProviderKind::GitHub;
+        github.issuer = String::new();
+        github.scopes = "read:user".to_owned();
+        github.client_secret = SecretChange::Set("s3cret".to_owned());
+        let (github, github_provider) = registry
+            .prepare(&github, std::slice::from_ref(&okta), "root")
+            .expect("prepares");
+        let github = registry
+            .store(&github, github_provider, true)
+            .await
+            .expect("stores");
+        let all = registry.settings().await.expect("reads");
+
+        // Act
+        let same_name = registry.prepare(&draft("OKTA"), &all, "root");
+        let (same_slug, _) = registry
+            .prepare(&draft("Okta!"), &all, "root")
+            .expect("a name of its own, though the slug collides");
+        let unknown = registry.prepare(
+            &ProviderDraft {
+                id: Some("nobody".to_owned()),
+                ..draft("Nobody")
+            },
+            &all,
+            "root",
+        );
+        let offered = registry.all_current().await.expect("reads");
+
+        // Assert
+        assert_eq!(github.id, "github");
+        assert!(
+            same_name
+                .expect_err("two buttons with one label")
+                .to_string()
+                .contains("already called Okta")
+        );
+        assert_eq!(same_slug.id, "okta-2");
+        assert!(unknown.is_err());
+        assert_eq!(
+            offered
+                .iter()
+                .map(|p| p.provider_name())
+                .collect::<Vec<_>>(),
+            ["GitHub", "Okta"],
+            "by name"
+        );
+    }
+
+    #[tokio::test]
     async fn a_disabled_or_absent_provider_is_not_offered() {
         // Arrange
-        let slot = slot(false);
-        let none = slot.current().await.expect("reads");
+        let registry = registry(false);
+        let none = registry.current("okta").await.expect("reads");
         let mut off = draft("Okta");
         off.enabled = false;
-        let (settings, settings_provider) = slot.prepare(&off, None, "root").expect("prepares");
-        slot.store(&settings, settings_provider)
+        let (settings, settings_provider) = registry.prepare(&off, &[], "root").expect("prepares");
+        registry
+            .store(&settings, settings_provider, true)
             .await
             .expect("stores");
 
         // Act
-        let disabled = slot.current().await.expect("reads");
-        let removed = slot.remove().await.expect("removes");
+        let disabled = registry.current("okta").await.expect("reads");
+        let offered = registry.all_current().await.expect("reads");
+        let removed = registry.remove("okta").await.expect("removes");
 
         // Assert
         assert!(none.is_none());
         assert!(disabled.is_none());
-        assert!(slot.recent().await.expect("reads").is_none());
+        assert!(offered.is_empty());
+        assert!(registry.recent("okta").await.expect("reads").is_none());
         assert!(removed);
         assert!(
-            !slot.remove().await.expect("answers"),
+            !registry.remove("okta").await.expect("answers"),
             "nothing left to remove"
         );
     }
@@ -514,15 +709,15 @@ mod tests {
     #[tokio::test]
     async fn a_client_secret_needs_a_session_secret_and_is_stored_sealed() {
         // Arrange
-        let without = slot(false);
-        let with = slot(true);
+        let without = registry(false);
+        let with = registry(true);
         let mut confidential = draft("Okta");
         confidential.client_secret = SecretChange::Set("s3cret".to_owned());
 
         // Act
-        let refused = without.prepare(&confidential, None, "root");
-        let public = without.prepare(&draft("Okta"), None, "root");
-        let (sealed, provider) = with.prepare(&confidential, None, "root").expect("prepares");
+        let refused = without.prepare(&confidential, &[], "root");
+        let public = without.prepare(&draft("Okta"), &[], "root");
+        let (sealed, provider) = with.prepare(&confidential, &[], "root").expect("prepares");
 
         // Assert
         assert!(
@@ -548,21 +743,24 @@ mod tests {
     #[tokio::test]
     async fn keep_leaves_the_stored_secret_and_clear_drops_it() {
         // Arrange
-        let slot = slot(true);
+        let registry = registry(true);
         let mut confidential = draft("Okta");
         confidential.client_secret = SecretChange::Set("s3cret".to_owned());
-        let (stored, stored_provider) =
-            slot.prepare(&confidential, None, "root").expect("prepares");
-        let stored = slot.store(&stored, stored_provider).await.expect("stores");
+        let (stored, stored_provider) = registry
+            .prepare(&confidential, &[], "root")
+            .expect("prepares");
+        let stored = registry
+            .store(&stored, stored_provider, true)
+            .await
+            .expect("stores");
+        let all = [stored.clone()];
 
         // Act
-        let mut renamed = draft("Okta again");
+        let mut renamed = change(&stored, "Okta again");
         renamed.client_secret = SecretChange::Keep;
-        let (kept, _) = slot
-            .prepare(&renamed, Some(&stored), "root")
-            .expect("prepares");
-        let (cleared, _) = slot
-            .prepare(&draft("Okta"), Some(&stored), "root")
+        let (kept, _) = registry.prepare(&renamed, &all, "root").expect("prepares");
+        let (cleared, _) = registry
+            .prepare(&change(&stored, "Okta"), &all, "root")
             .expect("prepares");
 
         // Assert
@@ -573,7 +771,7 @@ mod tests {
     #[tokio::test]
     async fn a_setting_that_cannot_be_right_is_refused_before_anything_is_stored() {
         // Arrange
-        let slot = slot(false);
+        let registry = registry(false);
         let mut plain_http = draft("Okta");
         plain_http.issuer = "http://id.example".to_owned();
         let mut bad_map = draft("Okta");
@@ -585,12 +783,12 @@ mod tests {
         spaced.groups_claim = "my groups".to_owned();
 
         // Act / Assert
-        assert!(slot.prepare(&plain_http, None, "root").is_err());
-        assert!(slot.prepare(&bad_map, None, "root").is_err());
-        assert!(slot.prepare(&nameless, None, "root").is_err());
-        assert!(slot.prepare(&spaced, None, "root").is_err());
+        assert!(registry.prepare(&plain_http, &[], "root").is_err());
+        assert!(registry.prepare(&bad_map, &[], "root").is_err());
+        assert!(registry.prepare(&nameless, &[], "root").is_err());
+        assert!(registry.prepare(&spaced, &[], "root").is_err());
         assert!(
-            slot.store.load().await.expect("reads").is_none(),
+            registry.store.load_all().await.expect("reads").is_empty(),
             "nothing was stored"
         );
     }
@@ -598,7 +796,7 @@ mod tests {
     #[test]
     fn a_github_provider_defaults_to_github_dot_com_and_takes_github_scopes_only() {
         // Arrange
-        let slot = slot(true);
+        let registry = registry(true);
         let mut github = draft("GitHub");
         github.kind = ProviderKind::GitHub;
         github.issuer = String::new();
@@ -613,10 +811,12 @@ mod tests {
         public.client_secret = SecretChange::Clear;
 
         // Act
-        let (settings, provider) = slot.prepare(&github, None, "root").expect("prepares");
-        let refused = slot.prepare(&oidc_scopes, None, "root");
-        let (ghes, _) = slot.prepare(&enterprise, None, "root").expect("prepares");
-        let secretless = slot.prepare(&public, None, "root");
+        let (settings, provider) = registry.prepare(&github, &[], "root").expect("prepares");
+        let refused = registry.prepare(&oidc_scopes, &[], "root");
+        let (ghes, _) = registry
+            .prepare(&enterprise, &[], "root")
+            .expect("prepares");
+        let secretless = registry.prepare(&public, &[], "root");
 
         // Assert
         assert_eq!(settings.kind, ProviderKind::GitHub);
@@ -638,17 +838,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn settings_this_instance_cannot_build_stop_the_provider_and_nothing_else() {
+    async fn settings_this_instance_cannot_build_stop_that_provider_and_nothing_else() {
         // Arrange: a client secret sealed under one session secret, read by
-        // an instance started with another - the rotation case.
-        let writer = slot(true);
+        // an instance started with another - the rotation case - beside a
+        // public client that needs no secret.
+        let writer = registry(true);
         let mut confidential = draft("Okta");
         confidential.client_secret = SecretChange::Set("s3cret".to_owned());
         let (settings, provider) = writer
-            .prepare(&confidential, None, "root")
+            .prepare(&confidential, &[], "root")
             .expect("prepares");
-        let saved = writer.store(&settings, provider).await.expect("stores");
-        let other = ProviderSlot::new(
+        let saved = writer
+            .store(&settings, provider, true)
+            .await
+            .expect("stores");
+        let (public, public_provider) = writer
+            .prepare(&draft("Entra"), std::slice::from_ref(&saved), "root")
+            .expect("prepares");
+        let public = writer
+            .store(&public, public_provider, true)
+            .await
+            .expect("stores");
+        let other = ProviderRegistry::new(
             ProviderSettingsStore::memory(),
             Some(
                 Sealer::from_secret(b"a different session secret, also long enough")
@@ -656,50 +867,83 @@ mod tests {
             ),
             sessions(),
         );
-        other
-            .store
-            .save(&saved)
-            .await
-            .expect("the same row, seen elsewhere");
+        for row in [&saved, &public] {
+            other
+                .store
+                .save(row, true)
+                .await
+                .expect("the same rows, seen elsewhere");
+        }
 
         // Act
-        let current = other.current().await.expect("not an outage");
-        let recent = other.recent().await.expect("not an outage");
+        let current = other.current("okta").await.expect("not an outage");
+        let recent = other.recent("okta").await.expect("not an outage");
+        let offered = other.all_current().await.expect("not an outage");
 
         // Assert
         assert!(current.is_none(), "no provider to offer");
         assert!(recent.is_none());
+        assert_eq!(
+            offered
+                .iter()
+                .map(|p| p.provider_name())
+                .collect::<Vec<_>>(),
+            ["Entra"],
+            "the other provider goes on"
+        );
         assert!(
             other
-                .trouble()
+                .trouble("okta")
                 .is_some_and(|why| why.contains("OKF_WEB_SESSION_SECRET")),
             "and the Admin page can say why"
         );
+        assert!(other.trouble("entra").is_none());
     }
 
     #[tokio::test]
     async fn a_read_that_straddled_a_save_does_not_put_the_older_settings_back() {
         // Arrange: the saver remembered the newer settings first.
-        let slot = slot(false);
-        let (older, older_provider) = slot
-            .prepare(&draft("Okta"), None, "root")
+        let registry = registry(false);
+        let (older, older_provider) = registry
+            .prepare(&draft("Okta"), &[], "root")
             .expect("prepares");
-        let (newer, newer_provider) = slot
-            .prepare(&draft("Entra ID"), None, "root")
+        let older = registry
+            .store(&older, older_provider, true)
+            .await
+            .expect("stores");
+        let (newer, newer_provider) = registry
+            .prepare(
+                &change(&older, "Entra ID"),
+                std::slice::from_ref(&older),
+                "root",
+            )
             .expect("prepares");
-        slot.store(&newer, newer_provider).await.expect("stores");
+        registry
+            .store(&newer, newer_provider, false)
+            .await
+            .expect("stores");
+        let (older_again, older_again_provider) = registry
+            .prepare(
+                &change(&older, "Okta"),
+                std::slice::from_ref(&older),
+                "root",
+            )
+            .expect("prepares");
+        drop(older_again);
 
         // Act: a slower read, which had seen the row before the save,
         // arrives with the older settings under a stamp that sorts first.
-        let answer = slot.remember(
+        let answer = registry.remember(
+            "okta",
             older.updated_at.clone(),
-            State::Provider(Arc::new(older_provider)),
+            State::Provider(Arc::new(older_again_provider)),
         );
 
         // Assert
         assert_eq!(answer.expect("a provider").provider_name(), "Entra ID");
         assert_eq!(
-            slot.recent()
+            registry
+                .recent("okta")
                 .await
                 .expect("reads")
                 .expect("a provider")
@@ -712,30 +956,53 @@ mod tests {
     async fn the_request_path_believes_a_provider_briefly_and_then_asks_again() {
         // Arrange: a provider built here, then changed "elsewhere" (the
         // store is shared; the cache is not told).
-        let slot = slot(false);
-        let (settings, provider) = slot
-            .prepare(&draft("Okta"), None, "root")
+        let registry = registry(false);
+        let (settings, provider) = registry
+            .prepare(&draft("Okta"), &[], "root")
             .expect("prepares");
-        slot.store(&settings, provider).await.expect("stores");
-        let believed = slot.recent().await.expect("reads").expect("a provider");
-        let (changed, _) = slot
-            .prepare(&draft("Entra ID"), Some(&settings), "root")
+        let stored = registry
+            .store(&settings, provider, true)
+            .await
+            .expect("stores");
+        let believed = registry
+            .recent("okta")
+            .await
+            .expect("reads")
+            .expect("a provider");
+        let (changed, _) = registry
+            .prepare(
+                &change(&stored, "Entra ID"),
+                std::slice::from_ref(&stored),
+                "root",
+            )
             .expect("prepares");
-        slot.store.save(&changed).await.expect("changed elsewhere");
+        registry
+            .store
+            .save(&changed, false)
+            .await
+            .expect("changed elsewhere");
 
         // Act
-        let still = slot.recent().await.expect("reads").expect("a provider");
-        if let Some(live) = slot
+        let still = registry
+            .recent("okta")
+            .await
+            .expect("reads")
+            .expect("a provider");
+        if let Some(live) = registry
             .live
             .write()
             .unwrap_or_else(PoisonError::into_inner)
-            .as_mut()
+            .get_mut("okta")
         {
             live.at = Instant::now()
                 .checked_sub(BELIEVED_FOR)
                 .expect("the process has been up for longer than that");
         }
-        let later = slot.recent().await.expect("reads").expect("a provider");
+        let later = registry
+            .recent("okta")
+            .await
+            .expect("reads")
+            .expect("a provider");
 
         // Assert
         assert!(Arc::ptr_eq(&believed, &still), "believed for a while");

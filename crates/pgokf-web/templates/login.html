@@ -20,9 +20,11 @@
       <button type="submit" class="btn primary wide">Sign in</button>
     </form>
     {% endif %}
-    {% if let Some(p) = provider %}
-    {% if password_form %}<p class="or"><span>or</span></p>{% else %}<p class="muted">This catalog signs you in with {{ p }}.</p>{% endif %}
-    <a class="btn {% if !password_form %}primary {% endif %}wide" href="/login/provider?next={{ next|urlencode }}">Sign in with {{ p }}</a>
+    {% if !providers.is_empty() %}
+    {% if password_form %}<p class="or"><span>or</span></p>{% else %}<p class="muted">This catalog signs you in with an identity provider.</p>{% endif %}
+    <div class="provider-buttons">
+    {% for p in providers %}<a class="btn {% if !password_form %}primary {% endif %}wide" href="/login/provider?with={{ p.id|urlencode }}&amp;next={{ next|urlencode }}">Sign in with {{ p.name }}</a>{% endfor %}
+    </div>
     {% endif %}
     <p class="hint">Signing in unlocks what your role allows: uploading documents, editing them, or approving them.</p>
   </section>

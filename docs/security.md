@@ -366,24 +366,27 @@ and the sync history through `list_sync_log` / `list_sync_changes`, but cannot
 read or write the tables directly; `list_access_log` stays admin-only.
 
 `pgokf_web` holds the web UI's identity state - `users` (the people a local
-sign-in knows, with Argon2id password hashes - or none, for a person the
-identity provider signed in, whose row carries only the role an admin gave
-them and refuses a password sign-in), `sessions` (the sessions the
-UI has issued and not yet ended), `mcp_tokens` (the SHA-256 digests of the
-bearer tokens `pgokf-mcp` accepts over HTTP, minted on the Admin page), and
-`identity_provider` (the OpenID Connect provider - or GitHub, by its OAuth
-web flow - an admin set up on the Admin page, one row).
-The one secret among them that is not a one-way hash is the provider's
-client secret, which the UI must present to the provider: it is stored
+sign-in knows, with Argon2id password hashes - or none, for a person an
+identity provider signed in, whose row names that provider, carries only
+the role an admin gave them, and refuses a password sign-in; a name belongs
+to exactly one way in, so no provider can sign in a password person's name
+or a name another provider brought), `sessions` (the sessions the UI has
+issued and not yet ended, each naming the provider that opened it, if one
+did), `mcp_tokens` (the SHA-256 digests of the bearer tokens `pgokf-mcp`
+accepts over HTTP, minted on the Admin page), and `identity_providers` (the
+OpenID Connect providers - or GitHub, by its OAuth web flow - an admin set
+up on the Admin page, any number). The one secret among them that is not a
+one-way hash is a provider's client secret, which the UI must present to
+the provider: it is stored
 sealed - AES-256-GCM under a key derived by HKDF-SHA256 from
 `OKF_WEB_SESSION_SECRET` - so the catalog, a backup, and every writer
 credential hold ciphertext, the table's own constraint refuses anything but
 the sealed form, and without a session secret of its own the UI stores no
 client secret at all (a public client with PKCE still works, where the
 provider allows one). Rotating `OKF_WEB_SESSION_SECRET` therefore also
-retires the sealed secret: the password sign-in goes on, the provider is not
-offered until an admin enters the client secret again on the Admin page,
-which says so. As with `users` and `mcp_tokens`, any `pgokf_writer`
+retires the sealed secrets: the password sign-in goes on, a provider with a
+sealed secret is not offered until an admin enters it again on the Admin
+page, which says so. As with `users` and `mcp_tokens`, any `pgokf_writer`
 credential may rewrite this row - and so point sign-in at a provider of its
 own choosing with any role map - so the writer credential is the boundary
 here as it is for people and tokens.

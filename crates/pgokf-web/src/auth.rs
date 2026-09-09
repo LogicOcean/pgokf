@@ -31,9 +31,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::oidc::OidcAuth;
-use crate::provider::ProviderSlot;
+use crate::provider::ProviderRegistry;
 use crate::session_store::SessionStore;
-use crate::user_store::UserStore;
+use crate::user_store::{PeoplePage, PeopleQuery, UserStore};
 
 use anyhow::{Context, Result, anyhow, bail};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
@@ -410,9 +410,38 @@ fn header_text(headers: &HeaderMap, name: &HeaderName) -> Option<String> {
 #[derive(Debug, Clone)]
 pub(crate) struct UserRecord {
     pub(crate) role: Role,
-    /// The Argon2id hash, or `None` for a person the identity provider
+    /// The Argon2id hash, or `None` for a person an identity provider
     /// signed in, who has no password here.
     pub(crate) hash: Option<String>,
+    /// What to call them, when that is more than their name.
+    pub(crate) display: Option<String>,
+    /// The identity provider that brought them (its slug), for a person
+    /// without a password. A name belongs to exactly one way in.
+    pub(crate) provider: Option<String>,
+}
+
+impl UserRecord {
+    /// A person who signs in with a password.
+    #[cfg(test)]
+    pub(crate) fn with_password(role: Role, hash: &str) -> Self {
+        Self {
+            role,
+            hash: Some(hash.to_owned()),
+            display: None,
+            provider: None,
+        }
+    }
+
+    /// A person an identity provider signed in.
+    #[cfg(test)]
+    pub(crate) fn from_provider(role: Role, provider: &str, display: Option<&str>) -> Self {
+        Self {
+            role,
+            hash: None,
+            display: display.map(str::to_owned),
+            provider: Some(provider.to_owned()),
+        }
+    }
 }
 
 /// One person as the Admin page lists them.
@@ -420,9 +449,35 @@ pub(crate) struct UserRecord {
 pub(crate) struct UserSummary {
     pub(crate) name: String,
     pub(crate) role: Role,
-    /// Whether they sign in with a password here; otherwise the identity
-    /// provider brought them, and their row is for their role.
-    pub(crate) has_password: bool,
+    /// What to call them, when that is more than their name.
+    pub(crate) display: Option<String>,
+    /// The identity provider that brought them; `None` for a person who
+    /// signs in with a password here.
+    pub(crate) provider: Option<String>,
+}
+
+impl UserSummary {
+    /// Whether they sign in with a password here.
+    #[cfg(test)]
+    pub(crate) fn has_password(&self) -> bool {
+        self.provider.is_none()
+    }
+}
+
+/// What became of a person an identity provider signed in, at the People
+/// table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Admission {
+    /// Their first sign-in here: a row of their own, at the bottom of the
+    /// ladder.
+    New,
+    /// Their row from an earlier sign-in, kept as it is (their name
+    /// refreshed).
+    Known,
+    /// The name is somebody else's - a password person's, or one another
+    /// provider brought - and this account gets no row, no role, and no
+    /// session under it.
+    Refused(String),
 }
 
 /// The `users` mode: the people in the catalog's `pgokf_web.users`, a
@@ -446,7 +501,7 @@ pub(crate) struct UsersAuth {
     verifying: tokio::sync::Semaphore,
     /// The identity provider an admin set up on the Admin page, offered
     /// beside the password sign-in; sessions it opens are recognized here.
-    provider: Option<ProviderSlot>,
+    provider: Option<ProviderRegistry>,
 }
 
 /// Recent failed sign-ins for one name: after a few, each further attempt
@@ -614,10 +669,16 @@ impl Sessions {
     /// The mode that opened the session a request presents, by the cookie
     /// alone - so a site that offers two ways in knows which one to ask.
     pub(crate) fn presented_mode(&self, headers: &HeaderMap) -> Option<Mode> {
+        Mode::parse(&self.presented_claims(headers)?.mode)
+    }
+
+    /// The claims of the session a request presents, whatever mode opened
+    /// it, when the cookie is this site's and has not expired - by the
+    /// cookie alone: who the session says it is for, not whether it is
+    /// still live.
+    pub(crate) fn presented_claims(&self, headers: &HeaderMap) -> Option<SessionClaims> {
         let claims: SessionClaims = self.open(&cookie_value(headers, SESSION_COOKIE)?)?;
-        (claims.expires > now_unix())
-            .then(|| Mode::parse(&claims.mode))
-            .flatten()
+        (claims.expires > now_unix()).then_some(claims)
     }
 
     /// The claims of a request's session cookie when it is this site's, was
@@ -658,15 +719,15 @@ impl Sessions {
         }
     }
 
-    /// End every session `mode` opened - when the way in that opened them
-    /// is switched off or removed.
+    /// End every session the identity provider `provider` (its slug)
+    /// opened - when it is switched off, removed, or re-registered.
     ///
     /// # Errors
     ///
     /// The catalog cannot be written.
-    pub(crate) async fn end_sessions_opened_by(&self, mode: Mode) -> Result<()> {
+    pub(crate) async fn end_sessions_opened_by_provider(&self, provider: &str) -> Result<()> {
         match &self.store {
-            Some(store) => store.remove_mode(mode.id()).await,
+            Some(store) => store.remove_provider(provider).await,
             None => Ok(()),
         }
     }
@@ -709,12 +770,15 @@ impl Sessions {
         mode: Mode,
         binding: String,
     ) -> Result<String> {
-        self.open_session_with(subject, mode, binding, None, Vec::new())
+        self.open_session_with(subject, mode, binding, None, Vec::new(), None)
             .await
     }
 
     /// A session cookie carrying what a provider told this site about the
-    /// person: what to call them, and the groups their role comes from.
+    /// person: what to call them, and the groups their role comes from -
+    /// and which provider it was, when it is one set up on the Admin page
+    /// (its slug), so the session is recognized by that one alone and
+    /// ends with it.
     ///
     /// # Errors
     ///
@@ -727,6 +791,7 @@ impl Sessions {
         binding: String,
         display: Option<String>,
         groups: Vec<String>,
+        provider: Option<&str>,
     ) -> Result<String> {
         let now = now_unix();
         let claims = SessionClaims {
@@ -736,13 +801,14 @@ impl Sessions {
             binding,
             display,
             groups,
+            provider: provider.map(str::to_owned),
             mode: mode.id().to_owned(),
         };
         // Recorded before the cookie is handed out: a session the store
         // does not know is refused, so an unrecorded one must never exist.
         if let Some(store) = &self.store {
             store
-                .add(&claims.nonce, subject, mode.id(), claims.expires)
+                .add(&claims.nonce, subject, mode.id(), provider, claims.expires)
                 .await?;
         }
         Ok(self.cookie(SESSION_COOKIE, &self.seal(&claims)?, self.seconds))
@@ -788,6 +854,12 @@ pub(crate) struct SessionClaims {
     /// again on every request rather than carried.
     #[serde(rename = "g", default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<String>,
+    /// The identity provider set up on the Admin page that opened it (its
+    /// slug), so the session is recognized by that provider alone; `None`
+    /// for a password session, or one the `oidc` mode's own provider
+    /// opened.
+    #[serde(rename = "pv", default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     /// The mode that opened this session. A server reconfigured from one
     /// mode to another keeps its signing key, and a session opened under
     /// the old mode must not be honoured by the new one.
@@ -815,26 +887,40 @@ impl UsersAuth {
         }
     }
 
-    /// Offer the identity provider kept in the catalog beside the
+    /// Offer the identity providers kept in the catalog beside the
     /// password sign-in.
-    pub(crate) fn with_provider(mut self, slot: ProviderSlot) -> Self {
-        self.provider = Some(slot);
+    pub(crate) fn with_provider(mut self, registry: ProviderRegistry) -> Self {
+        self.provider = Some(registry);
         self
     }
 
-    /// The slot the provider lives in, for the Admin page.
-    pub(crate) fn provider_slot(&self) -> Option<&ProviderSlot> {
+    /// The registry the providers live in, for the Admin page.
+    pub(crate) fn provider_registry(&self) -> Option<&ProviderRegistry> {
         self.provider.as_ref()
     }
 
-    /// The provider as the catalog has it now, if an enabled one is set up.
+    /// Every enabled provider as the catalog has them now, in the order
+    /// the sign-in page shows them.
     ///
     /// # Errors
     ///
-    /// The catalog cannot be read, or the settings do not build a provider.
-    pub(crate) async fn provider(&self) -> Result<Option<Arc<OidcAuth>>> {
+    /// The catalog cannot be read.
+    pub(crate) async fn providers(&self) -> Result<Vec<Arc<OidcAuth>>> {
         match &self.provider {
-            Some(slot) => slot.current().await,
+            Some(registry) => registry.all_current().await,
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// One provider by its slug, as the catalog has it now, if it is set
+    /// up and enabled.
+    ///
+    /// # Errors
+    ///
+    /// The catalog cannot be read.
+    pub(crate) async fn provider(&self, id: &str) -> Result<Option<Arc<OidcAuth>>> {
+        match &self.provider {
+            Some(registry) => registry.current(id).await,
             None => Ok(None),
         }
     }
@@ -842,51 +928,115 @@ impl UsersAuth {
     /// One person's record, looked up now. A catalog that cannot answer is
     /// an error the caller surfaces (a 503), never a wrong password: an
     /// outage must not admit anyone, and must not count against anyone.
-    async fn record(&self, name: &str) -> Result<Option<UserRecord>> {
+    pub(crate) async fn record(&self, name: &str) -> Result<Option<UserRecord>> {
         self.store.record(name).await
     }
 
-    /// Everyone with their role, sorted by name (for the admin page).
+    /// A page of people, sorted by name, for the Admin page.
     ///
     /// # Errors
     ///
     /// The catalog cannot be read.
-    pub(crate) async fn list(&self) -> Result<Vec<UserSummary>> {
-        self.store.list().await
+    pub(crate) async fn people(&self, query: &PeopleQuery) -> Result<PeoplePage> {
+        self.store.people(query).await
     }
 
-    /// Give a person the identity provider signed in their row, so the
-    /// Admin page shows them and an admin can set their role there. The row
-    /// starts at the bottom of the ladder: it carries only what an admin
-    /// grants there, never a snapshot of what their groups mapped to, so a
-    /// group taken away at the provider takes its role away here too. A row
-    /// already there is left as it is.
+    /// Admit a person `provider` signed in to the People table: a row of
+    /// their own at their first sign-in, so an admin sees them and can set
+    /// their role there. The row starts at the bottom of the ladder - it
+    /// carries only what an admin grants there, never a snapshot of what
+    /// their groups mapped to, so a group taken away at the provider takes
+    /// its role away here too - and is left as it is afterwards, except for
+    /// the name the provider reports, kept current. A name that is somebody
+    /// else's here (a password person's, or one another provider brought)
+    /// is refused: the account is nobody on this site.
+    ///
+    /// # Errors
+    ///
+    /// The catalog cannot be read or written.
+    pub(crate) async fn admit(
+        &self,
+        principal: &Principal,
+        provider: &OidcAuth,
+    ) -> Result<Admission> {
+        let Some(id) = provider.stored_id() else {
+            bail!("only a provider set up on the Admin page admits people here");
+        };
+        let name = principal.subject.as_str();
+        // Kept to what the catalog holds (256 characters), so a provider
+        // that reports a very long name shortens the row rather than
+        // failing the sign-in on the column's CHECK.
+        let shown: String = principal.display.chars().take(DISPLAY_MAX).collect();
+        let display = (shown != principal.subject).then_some(shown.as_str());
+        if let Some(record) = self.record(name).await? {
+            return self.settle(name, record, id, display).await;
+        }
+        if self
+            .store
+            .provision(name, Role::Viewer, display, id)
+            .await?
+        {
+            return Ok(Admission::New);
+        }
+        // A row appeared between the two statements: whose is it?
+        match self.record(name).await? {
+            Some(record) => self.settle(name, record, id, display).await,
+            None => bail!("{name} could neither be found nor recorded"),
+        }
+    }
+
+    /// The row `name` has, against the provider that signed them in now.
+    async fn settle(
+        &self,
+        name: &str,
+        record: UserRecord,
+        provider: &str,
+        display: Option<&str>,
+    ) -> Result<Admission> {
+        Ok(match record.provider.as_deref() {
+            Some(own) if own == provider => {
+                self.store.refresh_display(name, provider, display).await?;
+                Admission::Known
+            }
+            Some(other) => Admission::Refused(format!(
+                "That account's name belongs to someone who signs in here through another \
+                 identity provider ({other})."
+            )),
+            None => Admission::Refused(
+                "That account's name belongs to someone who signs in here with a password."
+                    .to_owned(),
+            ),
+        })
+    }
+
+    /// Put every person `provider` brought back at the bottom of the
+    /// ladder: when it is re-registered as another provider, a role an
+    /// admin granted must not pass to whoever the new one calls by the same
+    /// name. How many rows changed comes back.
     ///
     /// # Errors
     ///
     /// The catalog cannot be written.
-    pub(crate) async fn provision(&self, principal: &Principal) -> Result<bool> {
-        self.store.provision(&principal.subject, Role::Viewer).await
+    pub(crate) async fn demote_people_of(&self, provider: &str) -> Result<u64> {
+        self.store.demote_people_of(provider).await
     }
 
-    /// Whether `name` signs in with a password here (a person the
-    /// provider brought does not).
-    ///
-    /// # Errors
-    ///
-    /// The catalog cannot be read.
-    pub(crate) async fn has_password(&self, name: &str) -> Result<bool> {
-        Ok(self.record(name).await?.is_some_and(|r| r.hash.is_some()))
-    }
-
-    /// Add a person (a new name) with a hashed password.
-    pub(crate) async fn add_user(&self, name: &str, role: Role, password: &str) -> Result<()> {
+    /// Add a person (a new name) with a hashed password, and what to call
+    /// them when that is more than their name.
+    pub(crate) async fn add_user(
+        &self,
+        name: &str,
+        role: Role,
+        display: Option<&str>,
+        password: &str,
+    ) -> Result<()> {
         let name = name.trim();
         if !valid_subject(name) {
             bail!("{name:?} is not a valid user name (letters, digits, . _ - @ +)");
         }
+        let display = validated_display(display)?;
         let hash = validated_password(password).and_then(hash_password)?;
-        self.store.insert(name, role, &hash).await
+        self.store.insert(name, role, &hash, display).await
     }
 
     pub(crate) async fn set_role(&self, name: &str, role: Role) -> Result<()> {
@@ -972,7 +1122,7 @@ impl UsersAuth {
                 self.forget_failures(name, peer);
                 Ok(Some(Principal {
                     subject: name.to_owned(),
-                    display: name.to_owned(),
+                    display: record.display.unwrap_or_else(|| name.to_owned()),
                     role: record.role,
                 }))
             }
@@ -1084,8 +1234,8 @@ impl UsersAuth {
             return Ok(None);
         }
         Ok(Some(Principal {
-            subject: claims.subject.clone(),
-            display: claims.subject,
+            display: record.display.unwrap_or_else(|| claims.subject.clone()),
+            subject: claims.subject,
             role: record.role,
         }))
     }
@@ -1097,21 +1247,29 @@ impl UsersAuth {
     /// longer lists (the provider was removed, or the person signed out
     /// everywhere) is refused as any other.
     async fn identify_through_provider(&self, headers: &HeaderMap) -> Result<Option<Principal>> {
-        let Some(slot) = &self.provider else {
+        let Some(registry) = &self.provider else {
             return Ok(None);
         };
-        let Some(provider) = slot.recent().await? else {
+        let Some(claims) = self.sessions.read_session(headers, Mode::Oidc).await? else {
             return Ok(None);
         };
-        let Some(mut principal) = provider.identify(headers).await? else {
+        // The session names the provider that opened it; only that one,
+        // as set up now, recognizes it.
+        let Some(id) = claims.provider.as_deref() else {
+            return Ok(None);
+        };
+        let Some(provider) = registry.recent(id).await? else {
+            return Ok(None);
+        };
+        let Some(mut principal) = provider.recognize(&claims) else {
             return Ok(None);
         };
         // Their row on the People table, if they have one: the higher of
         // the role an admin set there and the role their groups map to. A
-        // row with a password belongs to someone else who happens to share
-        // the name, and lends nothing: the provider's account is nobody here.
+        // row that is somebody else's - a password person's, or another
+        // provider's - lends nothing: this account is nobody here.
         match self.record(&principal.subject).await? {
-            Some(record) if record.hash.is_none() => {
+            Some(record) if record.provider.as_deref() == Some(id) => {
                 principal.role = principal.role.max(record.role);
             }
             Some(_) => return Ok(None),
@@ -1123,6 +1281,24 @@ impl UsersAuth {
 
 /// The shortest password the UI accepts when one is set through it.
 const PASSWORD_MIN: usize = 12;
+
+/// The longest display name the catalog keeps.
+const DISPLAY_MAX: usize = 256;
+
+/// A display name as the catalog constrains it - printable, at most
+/// [`DISPLAY_MAX`] characters - trimmed; blank means none.
+fn validated_display(display: Option<&str>) -> Result<Option<&str>> {
+    let Some(display) = display.map(str::trim).filter(|d| !d.is_empty()) else {
+        return Ok(None);
+    };
+    if display.chars().any(char::is_control) {
+        bail!("a name holds no control characters");
+    }
+    if display.chars().count() > DISPLAY_MAX {
+        bail!("a name is at most {DISPLAY_MAX} characters");
+    }
+    Ok(Some(display))
+}
 
 /// A password long enough to be worth hashing.
 fn validated_password(password: &str) -> Result<&str> {
@@ -1219,18 +1395,32 @@ impl Authenticator {
         }
     }
 
-    /// The identity provider people may sign in with, if there is one: the
-    /// `oidc` mode's own, or - in the `users` mode - the one an admin set
-    /// up on the Admin page, read from the catalog so a change made on any
-    /// instance is seen by this one.
+    /// The identity providers people may sign in with, in the order the
+    /// sign-in page offers them: the `oidc` mode's own, or - in the `users`
+    /// mode - those an admin set up on the Admin page, read from the
+    /// catalog so a change made on any instance is seen by this one.
     ///
     /// # Errors
     ///
-    /// The catalog cannot be read, or its settings do not build a provider.
-    pub(crate) async fn provider(&self) -> Result<Option<Arc<OidcAuth>>> {
+    /// The catalog cannot be read.
+    pub(crate) async fn providers(&self) -> Result<Vec<Arc<OidcAuth>>> {
         match self {
-            Authenticator::Oidc(o) => Ok(Some(Arc::clone(o))),
-            Authenticator::Users(u) => u.provider().await,
+            Authenticator::Oidc(o) => Ok(vec![Arc::clone(o)]),
+            Authenticator::Users(u) => u.providers().await,
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    /// One provider: the `oidc` mode's own when `id` names none, or the
+    /// one an admin set up under that slug, if it is enabled now.
+    ///
+    /// # Errors
+    ///
+    /// The catalog cannot be read.
+    pub(crate) async fn provider(&self, id: Option<&str>) -> Result<Option<Arc<OidcAuth>>> {
+        match (self, id) {
+            (Authenticator::Oidc(o), None) => Ok(Some(Arc::clone(o))),
+            (Authenticator::Users(u), Some(id)) => u.provider(id).await,
             _ => Ok(None),
         }
     }
@@ -1646,10 +1836,7 @@ mod tests {
         let store = UserStore::memory(people.iter().map(|(name, role, password)| {
             (
                 (*name).to_owned(),
-                UserRecord {
-                    role: *role,
-                    hash: Some(hash_password(password).expect("hashes")),
-                },
+                UserRecord::with_password(*role, &hash_password(password).expect("hashes")),
             )
         }));
         let sessions = Sessions::new(secret, 3600, false)
@@ -1661,16 +1848,17 @@ mod tests {
     /// A users mode with an identity provider set up in its (memory)
     /// catalog, mapping `okf-approvers` to approver.
     async fn users_auth_with_provider(secret: Vec<u8>) -> UsersAuth {
-        use crate::provider::{ProviderDraft, ProviderSlot, SecretChange};
+        use crate::provider::{ProviderDraft, ProviderRegistry, SecretChange};
         use crate::provider_settings::ProviderSettingsStore;
 
         let users = users_auth_with(secret);
-        let slot = ProviderSlot::new(
+        let registry = ProviderRegistry::new(
             ProviderSettingsStore::memory(),
             None,
             Arc::clone(&users.sessions),
         );
         let draft = ProviderDraft {
+            id: None,
             enabled: true,
             kind: crate::provider_settings::ProviderKind::Oidc,
             issuer: "https://id.example".to_owned(),
@@ -1684,9 +1872,12 @@ mod tests {
             role_map: "okf-approvers=approver".to_owned(),
             default_role: Role::Viewer,
         };
-        let (settings, provider) = slot.prepare(&draft, None, "root").expect("prepares");
-        slot.store(&settings, provider).await.expect("stores");
-        users.with_provider(slot)
+        let (settings, provider) = registry.prepare(&draft, &[], "root").expect("prepares");
+        registry
+            .store(&settings, provider, true)
+            .await
+            .expect("stores");
+        users.with_provider(registry)
     }
 
     #[tokio::test]
@@ -1700,7 +1891,7 @@ mod tests {
             .expect("alice signs in");
         let by_password = users.issue_cookie(&alice).await.expect("a cookie");
         let binding = users
-            .provider()
+            .provider("okta")
             .await
             .expect("reads")
             .expect("a provider")
@@ -1713,6 +1904,7 @@ mod tests {
                 binding.clone(),
                 Some("Carol".to_owned()),
                 vec!["okf-approvers".to_owned()],
+                Some("okta"),
             )
             .await
             .expect("a cookie");
@@ -1725,6 +1917,7 @@ mod tests {
                 "another-provider".to_owned(),
                 None,
                 Vec::new(),
+                Some("other"),
             )
             .await
             .expect("a cookie");
@@ -1761,7 +1954,7 @@ mod tests {
             role: Role::Approver,
         };
         let binding = users
-            .provider()
+            .provider("okta")
             .await
             .expect("reads")
             .expect("a provider")
@@ -1774,14 +1967,20 @@ mod tests {
                 binding,
                 None,
                 vec!["okf-approvers".to_owned()],
+                Some("okta"),
             )
             .await
             .expect("a cookie");
+        let okta = users
+            .provider("okta")
+            .await
+            .expect("reads")
+            .expect("set up");
 
         // Act
-        let first = users.provision(&carol).await.expect("records");
-        let again = users.provision(&carol).await.expect("answers");
-        let as_listed = users.list().await.expect("lists");
+        let first = users.admit(&carol, &okta).await.expect("records");
+        let again = users.admit(&carol, &okta).await.expect("answers");
+        let as_listed = users.people(&everyone()).await.expect("lists").people;
         let before = users.identify_ok(&cookie_headers(&cookie)).await;
         users
             .set_role("carol@example.com", Role::Admin)
@@ -1792,15 +1991,19 @@ mod tests {
             .verify_ok("carol@example.com", "anything at all", None)
             .await;
         let password_flag = users
-            .has_password("carol@example.com")
+            .record("carol@example.com")
             .await
-            .expect("reads");
+            .expect("reads")
+            .is_some_and(|r| r.hash.is_some());
 
         // Assert
-        assert!(first && !again, "one row, kept as it is");
+        assert_eq!(first, Admission::New);
+        assert_eq!(again, Admission::Known, "one row, kept as it is");
         assert!(
             as_listed.iter().any(|u| u.name == "carol@example.com"
-                && !u.has_password
+                && !u.has_password()
+                && u.provider.as_deref() == Some("okta")
+                && u.display.as_deref() == Some("Carol")
                 && u.role == Role::Viewer),
             "the row starts at the bottom of the ladder, not at the mapped role"
         );
@@ -1828,14 +2031,14 @@ mod tests {
         // provider brought.
         let users = users_auth_with_provider(b"0123456789abcdef0123456789abcdef".to_vec()).await;
         let binding = users
-            .provider()
+            .provider("okta")
             .await
             .expect("reads")
             .expect("a provider")
             .binding();
         let as_alice = users
             .sessions
-            .open_session_with("alice", Mode::Oidc, binding, None, Vec::new())
+            .open_session_with("alice", Mode::Oidc, binding, None, Vec::new(), Some("okta"))
             .await
             .expect("a cookie");
         let carol = Principal {
@@ -1843,10 +2046,26 @@ mod tests {
             display: "Carol".to_owned(),
             role: Role::Viewer,
         };
-        users.provision(&carol).await.expect("records");
+        let okta = users
+            .provider("okta")
+            .await
+            .expect("reads")
+            .expect("set up");
+        users.admit(&carol, &okta).await.expect("records");
 
         // Act
         let identified = users.identify_ok(&cookie_headers(&as_alice)).await;
+        let alice_through_okta = users
+            .admit(
+                &Principal {
+                    subject: "alice".to_owned(),
+                    display: "Alice at Okta".to_owned(),
+                    role: Role::Viewer,
+                },
+                &okta,
+            )
+            .await
+            .expect("answers");
         let given_a_password = users
             .set_password("carol@example.com", "a long enough password")
             .await;
@@ -1856,20 +2075,185 @@ mod tests {
             identified.is_none(),
             "a password person's name lends the provider's account nothing"
         );
+        assert!(
+            matches!(alice_through_okta, Admission::Refused(ref why) if why.contains("password")),
+            "{alice_through_okta:?}"
+        );
         let refused = given_a_password.expect_err("refused");
         assert!(
             refused
                 .to_string()
-                .contains("signs in through the identity provider"),
+                .contains("signs in through an identity provider"),
             "{refused}"
         );
         assert!(
-            !users
-                .has_password("carol@example.com")
+            users
+                .record("carol@example.com")
                 .await
-                .expect("reads"),
+                .expect("reads")
+                .is_some_and(|r| r.hash.is_none()),
             "no password was stored"
         );
+    }
+
+    #[tokio::test]
+    async fn a_name_one_provider_brought_is_nobody_to_another() {
+        // Arrange: two providers; the first signs carol in, and an admin
+        // grants her a role.
+        let users = users_auth_with_provider(b"0123456789abcdef0123456789abcdef".to_vec()).await;
+        let registry = users.provider_registry().expect("a registry");
+        let all = registry.settings().await.expect("reads");
+        let second = crate::provider::ProviderDraft {
+            provider_name: "Entra".to_owned(),
+            issuer: "https://entra.example".to_owned(),
+            ..draft_of(&all[0])
+        };
+        let (settings, provider) = registry.prepare(&second, &all, "root").expect("prepares");
+        registry
+            .store(&settings, provider, true)
+            .await
+            .expect("stores");
+        let okta = users.provider("okta").await.expect("reads").expect("okta");
+        let entra = users
+            .provider("entra")
+            .await
+            .expect("reads")
+            .expect("entra");
+        let carol = Principal {
+            subject: "carol".to_owned(),
+            display: "Carol".to_owned(),
+            role: Role::Viewer,
+        };
+        users.admit(&carol, &okta).await.expect("admits");
+        users.set_role("carol", Role::Approver).await.expect("sets");
+        let through_entra = users
+            .sessions
+            .open_session_with(
+                "carol",
+                Mode::Oidc,
+                entra.binding(),
+                None,
+                Vec::new(),
+                Some("entra"),
+            )
+            .await
+            .expect("a cookie");
+
+        // Act
+        let admitted = users.admit(&carol, &entra).await.expect("answers");
+        let identified = users.identify_ok(&cookie_headers(&through_entra)).await;
+        let demoted = users.demote_people_of("okta").await.expect("demotes");
+        let row = users.record("carol").await.expect("reads").expect("a row");
+
+        // Assert
+        assert!(
+            matches!(admitted, Admission::Refused(ref why) if why.contains("okta")),
+            "{admitted:?}"
+        );
+        assert!(
+            identified.is_none(),
+            "the other provider's session is nobody"
+        );
+        assert_eq!(demoted, 1);
+        assert_eq!(row.role, Role::Viewer, "back at the bottom of the ladder");
+    }
+
+    #[tokio::test]
+    async fn a_provider_re_added_under_a_freed_handle_does_not_inherit_its_people() {
+        // Arrange: Okta signs carol in and an admin makes her an approver.
+        let users = users_auth_with_provider(b"0123456789abcdef0123456789abcdef".to_vec()).await;
+        let registry = users.provider_registry().expect("a registry");
+        let okta = users.provider("okta").await.expect("reads").expect("okta");
+        let carol = Principal {
+            subject: "carol".to_owned(),
+            display: "Carol".to_owned(),
+            role: Role::Viewer,
+        };
+        users.admit(&carol, &okta).await.expect("admits");
+        users.set_role("carol", Role::Approver).await.expect("sets");
+
+        // Act: Okta is removed, then a different provider is added that
+        // takes the freed `okta` handle (this is what save_provider does for
+        // a new provider). Carol - a different person at the new provider -
+        // signs in.
+        registry.remove("okta").await.expect("removes");
+        let all = registry.settings().await.expect("reads");
+        let (settings, provider) = registry
+            .prepare(&draft_okta(), &all, "root")
+            .expect("prepares");
+        assert_eq!(settings.id, "okta", "the freed handle is taken again");
+        registry
+            .store(&settings, provider, true)
+            .await
+            .expect("stores");
+        let demoted = users.demote_people_of(&settings.id).await.expect("demotes");
+        let readmit = users.admit(&carol, &okta).await.expect("answers");
+        let row = users.record("carol").await.expect("reads").expect("a row");
+
+        // Assert
+        assert_eq!(
+            demoted, 1,
+            "the leftover row is reset when the handle is retaken"
+        );
+        assert_eq!(
+            row.role,
+            Role::Viewer,
+            "the new registration does not inherit the old one's role"
+        );
+        assert_eq!(
+            readmit,
+            Admission::Known,
+            "the row is hers under the new provider"
+        );
+    }
+
+    /// A fresh Okta draft (no id), as the Add-a-provider form would send it.
+    fn draft_okta() -> crate::provider::ProviderDraft {
+        crate::provider::ProviderDraft {
+            id: None,
+            enabled: true,
+            kind: crate::provider_settings::ProviderKind::Oidc,
+            issuer: "https://id.example".to_owned(),
+            client_id: "catalog".to_owned(),
+            client_secret: crate::provider::SecretChange::Clear,
+            redirect_url: "https://catalog.example/auth/callback".to_owned(),
+            scopes: "openid".to_owned(),
+            subject_claims: "sub".to_owned(),
+            groups_claim: "groups".to_owned(),
+            provider_name: "Okta".to_owned(),
+            role_map: "okf-approvers=approver".to_owned(),
+            default_role: Role::Viewer,
+        }
+    }
+
+    /// The form as it would be filled in to edit `settings`.
+    fn draft_of(
+        settings: &crate::provider_settings::ProviderSettings,
+    ) -> crate::provider::ProviderDraft {
+        crate::provider::ProviderDraft {
+            id: None,
+            enabled: settings.enabled,
+            kind: settings.kind,
+            issuer: settings.issuer.clone(),
+            client_id: settings.client_id.clone(),
+            client_secret: crate::provider::SecretChange::Clear,
+            redirect_url: settings.redirect_url.clone(),
+            scopes: settings.scopes.clone(),
+            subject_claims: settings.subject_claims.clone(),
+            groups_claim: settings.groups_claim.clone(),
+            provider_name: settings.provider_name.clone(),
+            role_map: settings.role_map.clone(),
+            default_role: settings.default_role,
+        }
+    }
+
+    /// Everyone, on one page.
+    fn everyone() -> PeopleQuery {
+        PeopleQuery {
+            search: String::new(),
+            offset: 0,
+            limit: 1000,
+        }
     }
 
     #[tokio::test]
@@ -1882,7 +2266,7 @@ mod tests {
             .expect("alice signs in");
         let by_password = users.issue_cookie(&alice).await.expect("a cookie");
         let binding = users
-            .provider()
+            .provider("okta")
             .await
             .expect("reads")
             .expect("a provider")
@@ -1895,6 +2279,7 @@ mod tests {
                 binding.clone(),
                 None,
                 Vec::new(),
+                Some("okta"),
             )
             .await
             .expect("a cookie");
@@ -1902,7 +2287,7 @@ mod tests {
         // Act
         users
             .sessions
-            .end_sessions_opened_by(Mode::Oidc)
+            .end_sessions_opened_by_provider("okta")
             .await
             .expect("ends");
 
@@ -1934,6 +2319,7 @@ mod tests {
                 String::new(),
                 None,
                 Vec::new(),
+                Some("okta"),
             )
             .await
             .expect("a cookie");
@@ -2065,15 +2451,15 @@ mod tests {
         let auth = users_auth_over(&[("alice", Role::Admin, "pw")], vec![7_u8; 32]);
 
         // Act
-        auth.add_user("bob", Role::Uploader, "a long enough password")
+        auth.add_user("bob", Role::Uploader, None, "a long enough password")
             .await
             .expect("adds");
-        let short = auth.add_user("carol", Role::Viewer, "short").await;
+        let short = auth.add_user("carol", Role::Viewer, None, "short").await;
         let duplicate = auth
-            .add_user("bob", Role::Viewer, "another long password")
+            .add_user("bob", Role::Viewer, None, "another long password")
             .await;
         let bad_name = auth
-            .add_user("al ice", Role::Viewer, "a long enough password")
+            .add_user("al ice", Role::Viewer, None, "a long enough password")
             .await;
         auth.set_role("bob", Role::Editor).await.expect("promotes");
         auth.set_password("bob", "a different long password")
@@ -2086,11 +2472,12 @@ mod tests {
         // Assert
         assert!(short.is_err() && duplicate.is_err() && bad_name.is_err());
         assert_eq!(
-            auth.list().await.expect("lists"),
+            auth.people(&everyone()).await.expect("lists").people,
             vec![UserSummary {
                 name: "bob".to_owned(),
                 role: Role::Editor,
-                has_password: true,
+                display: None,
+                provider: None,
             }]
         );
         assert!(
@@ -2181,10 +2568,7 @@ mod tests {
         // Arrange: a person whose stored hash is not a PHC string at all.
         let store = UserStore::memory([(
             "alice".to_owned(),
-            UserRecord {
-                role: Role::Viewer,
-                hash: Some("not-a-hash".to_owned()),
-            },
+            UserRecord::with_password(Role::Viewer, "not-a-hash"),
         )]);
         let sessions = Sessions::new(vec![7_u8; 32], 3600, false)
             .expect("valid")

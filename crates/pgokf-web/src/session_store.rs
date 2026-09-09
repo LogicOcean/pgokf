@@ -37,6 +37,8 @@ pub(crate) enum SessionStore {
 pub(crate) struct MemorySession {
     pub subject: String,
     pub mode: String,
+    /// The identity provider set up on the Admin page that opened it.
+    pub provider: Option<String>,
     pub expires: u64,
 }
 
@@ -95,6 +97,7 @@ impl SessionStore {
         nonce: &str,
         subject: &str,
         mode: &str,
+        provider: Option<&str>,
         expires: u64,
     ) -> Result<()> {
         match self {
@@ -107,9 +110,9 @@ impl SessionStore {
                 .await
                 .context("pruning expired sessions")?;
                 db.execute(
-                    "INSERT INTO pgokf_web.sessions (nonce, subject, mode, expires_at)
-                     VALUES ($1, $2, $3, to_timestamp($4::bigint))",
-                    &[&nonce, &subject, &mode, &expires_at],
+                    "INSERT INTO pgokf_web.sessions (nonce, subject, mode, provider, expires_at)
+                     VALUES ($1, $2, $3, $4, to_timestamp($5::bigint))",
+                    &[&nonce, &subject, &mode, &provider, &expires_at],
                 )
                 .await
                 .context("recording a session")?;
@@ -125,6 +128,7 @@ impl SessionStore {
                     MemorySession {
                         subject: subject.to_owned(),
                         mode: mode.to_owned(),
+                        provider: provider.map(str::to_owned),
                         expires,
                     },
                 );
@@ -181,24 +185,28 @@ impl SessionStore {
         }
     }
 
-    /// Forget every session `mode` opened.
+    /// Forget every session the identity provider `provider` opened - when
+    /// it is switched off, removed, or re-registered.
     ///
     /// # Errors
     ///
     /// The catalog cannot be written.
-    pub(crate) async fn remove_mode(&self, mode: &str) -> Result<()> {
+    pub(crate) async fn remove_provider(&self, provider: &str) -> Result<()> {
         match self {
             Self::Pg(db) => {
-                db.execute("DELETE FROM pgokf_web.sessions WHERE mode = $1", &[&mode])
-                    .await
-                    .context("ending every session a mode opened")?;
+                db.execute(
+                    "DELETE FROM pgokf_web.sessions WHERE provider = $1",
+                    &[&provider],
+                )
+                .await
+                .context("ending every session a provider opened")?;
                 Ok(())
             }
             #[cfg(test)]
             Self::Memory(live) => {
                 live.lock()
                     .expect("session lock")
-                    .retain(|_, s| s.mode != mode);
+                    .retain(|_, s| s.provider.as_deref() != Some(provider));
                 Ok(())
             }
         }
@@ -305,7 +313,7 @@ mod tests {
         // Act
         let before = store.is_live("n1", "alice", "users").await.expect("asks");
         store
-            .add("n1", "alice", "users", LATER)
+            .add("n1", "alice", "users", None, LATER)
             .await
             .expect("adds");
         let after_add = store.is_live("n1", "alice", "users").await.expect("asks");
@@ -328,7 +336,7 @@ mod tests {
         let store = SessionStore::memory();
         for (nonce, subject) in [("a1", "alice"), ("a2", "alice"), ("b1", "bob")] {
             store
-                .add(nonce, subject, "users", LATER)
+                .add(nonce, subject, "users", None, LATER)
                 .await
                 .expect("adds");
         }
@@ -356,14 +364,14 @@ mod tests {
         // Arrange: a session whose expiry has already passed.
         let store = SessionStore::memory();
         store
-            .add("old", "alice", "users", EARLIER)
+            .add("old", "alice", "users", None, EARLIER)
             .await
             .expect("adds");
 
         // Act
         let stale = store.is_live("old", "alice", "users").await.expect("asks");
         store
-            .add("new", "carol", "users", LATER)
+            .add("new", "carol", "users", None, LATER)
             .await
             .expect("adds");
         let subjects = store.subjects().await.expect("lists");

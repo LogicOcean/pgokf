@@ -250,6 +250,10 @@ pub(crate) enum UserCommand {
         /// The role: viewer, uploader, editor, approver, or admin.
         #[arg(long, default_value = "viewer")]
         role: String,
+        /// What to call the person, when that is more than their sign-in
+        /// name (shown wherever they are; their OKF actor stays the name).
+        #[arg(long)]
+        display: Option<String>,
     },
     /// Replace a person's password with one read from standard input, and
     /// end every session they hold - the way back in when an admin is

@@ -130,21 +130,32 @@ PKCE, which is what the OAuth 2.1 draft asks of a server-side client. It
 works with any OpenID Connect provider: Entra ID, Okta, Keycloak, Auth0,
 Google, a GitLab instance.
 
-There are two ways to set one up. **From the Admin page**, in `users` mode:
-an admin enters the issuer, client id and secret, the callback URL, the
+There are two ways to set one up. **From the Admin page**, in `users` mode,
+under *Identity providers*: an admin adds any number of them, each with a
+name (what its button on the sign-in page says), the issuer, client id and
+secret, the callback URL (`<site>/auth/callback`, shared by all), the
 claims and the group-to-role map, and *Save and test* reaches the provider
-before anything is stored; the sign-in page then offers "Sign in with …"
-beside the password form, people who sign in that way get the role their
-groups map to, switching the provider off or removing it ends the sessions
-it opened, and every instance of the UI picks a change up on its next
-sign-in. A person the provider signs in appears under **People** at their
-first sign-in, without a password and at the bottom of the ladder: an
+before anything is stored. The sign-in page then offers one "Sign in
+with …" button per enabled provider below the password form; a provider is
+known by a short slug made from its name when it was added (`okta`,
+`github`), which its sign-in link, its sessions, and the people it brought
+carry, so switching it off, removing it, or re-registering it as another
+provider ends the sessions *it* opened and no other, and every instance of
+the UI picks a change up on its next sign-in. A person a provider signs in
+appears under **People** at their first sign-in, with the name the
+provider reports, without a password, and at the bottom of the ladder: an
 admin sees them there and can set their role, and the higher of that role
 and the one their groups map to applies on every request, so a group taken
-away at the provider takes its role away here. Removing them ends their
-sessions but is not a ban (they get a fresh row at their next sign-in), a
-password cannot be set for them, and a name that signs in here with a
-password is never signed in through the provider. The provider may also be **GitHub** (github.com or a GitHub
+away at the provider takes its role away here. A name belongs to exactly
+one way in: a provider never signs in a password person's name, nor a name
+another provider brought (the sign-in is refused), and no password can be
+set for a provider person. Removing them ends their sessions but is not a
+ban (they get a fresh row at their next sign-in); re-registering a
+provider as another one puts the people it brought back at the bottom of
+the ladder. *People* searches by name or sign-in name and pages (25 to 200
+to a page), so a site with hundreds of people stays usable; a password
+person may be given a name to show as well (`pgokf-web user add --display`,
+or the form). The provider may also be **GitHub** (github.com or a GitHub
 Enterprise Server), which speaks OAuth but not OpenID Connect: register an
 *OAuth App* with the callback URL, ask for the scopes `read:user user:email
 read:org` (what GitHub actually granted decides what is read), and the
@@ -158,14 +169,14 @@ access appears once it has approved the app), so a role map reads
 a secretless (public) GitHub app is refused at *Save and test*. The
 callback URL may be plain `http://` only on the loopback interface or a
 private address, where the site is already served that way. The settings
-live in the catalog (`pgokf_web.identity_provider`, writer-only), and the
+live in the catalog (`pgokf_web.identity_providers`, writer-only), and the
 client secret only sealed under a key derived from
 `OKF_WEB_SESSION_SECRET` - so set that first; without it the UI keeps no
 client secret, and only a public client (PKCE alone) can be used, which
 some providers (Google, Entra ID's web registrations) refuse. Rotating the
-session secret retires the sealed client secret: the password sign-in goes
-on, the provider is not offered until an admin enters the secret again, and
-the Admin page says so. People the provider identifies share one namespace
+session secret retires the sealed client secrets: the password sign-in goes
+on, a provider with a sealed secret is not offered until an admin enters
+it again, and the Admin page says so. People the provider identifies share one namespace
 with the local people - `human:<subject>` is the same actor whether the
 subject came from a password or a claim - so keep the identity claim `sub`
 unless the provider's user names are the local ones on purpose. **From the

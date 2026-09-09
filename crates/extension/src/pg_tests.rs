@@ -5830,12 +5830,32 @@ Steps for deploying widgets with the marmoset rollout strategy.\n";
              VALUES ('probe', 'viewer', 'h')",
         );
         let provider_person = probe(
-            "INSERT INTO pgokf_web.users (name, role, password_hash)
-             VALUES ('carol-at-idp', 'viewer', NULL)",
+            "INSERT INTO pgokf_web.users (name, role, password_hash, display_name, provider)
+             VALUES ('carol-at-idp', 'viewer', NULL, 'Carol Provider', 'okta')",
+        );
+        let nobody_s_way_in = probe(
+            "INSERT INTO pgokf_web.users (name, role, password_hash, provider)
+             VALUES ('drifter', 'viewer', NULL, NULL)",
+        );
+        let two_ways_in = probe(
+            "INSERT INTO pgokf_web.users (name, role, password_hash, provider)
+             VALUES ('twice', 'viewer', 'h', 'okta')",
+        );
+        let control_in_display = probe(
+            "INSERT INTO pgokf_web.users (name, role, password_hash, display_name)
+             VALUES ('ctl', 'viewer', 'h', E'Bad\\nName')",
         );
         let writer_opens_session = probe(
             "INSERT INTO pgokf_web.sessions (nonce, subject, mode, expires_at)
              VALUES ('n1', 'probe', 'users', now() + interval '1 hour')",
+        );
+        let provider_session = probe(
+            "INSERT INTO pgokf_web.sessions (nonce, subject, mode, provider, expires_at)
+             VALUES ('n2', 'carol-at-idp', 'oidc', 'okta', now() + interval '1 hour')",
+        );
+        let password_session_with_provider = probe(
+            "INSERT INTO pgokf_web.sessions (nonce, subject, mode, provider, expires_at)
+             VALUES ('n3', 'probe', 'users', 'okta', now() + interval '1 hour')",
         );
         let writer_reads = probe("SELECT count(*) FROM pgokf_web.sessions");
         let bad_role = probe(
@@ -5856,9 +5876,17 @@ Steps for deploying widgets with the marmoset rollout strategy.\n";
         assert_eq!(duplicate, "23505", "a name is taken once");
         assert_eq!(
             provider_person, "ok",
-            "a person the provider signed in has no password"
+            "a person a provider signed in has no password, a name, and their provider"
         );
+        assert_eq!(nobody_s_way_in, "23514", "a person has exactly one way in");
+        assert_eq!(two_ways_in, "23514", "never both");
+        assert_eq!(control_in_display, "23514", "a display name is printable");
         assert_eq!(writer_opens_session, "ok");
+        assert_eq!(provider_session, "ok", "a provider's session names it");
+        assert_eq!(
+            password_session_with_provider, "23514",
+            "a password session names no provider"
+        );
         assert_eq!(writer_reads, "ok");
         assert_eq!(bad_role, "23514", "the role ladder is a CHECK constraint");
         assert_eq!(bad_name, "23514", "a name is one plain token");
@@ -6002,13 +6030,14 @@ Steps for deploying widgets with the marmoset rollout strategy.\n";
     }
 
     #[pg_test]
-    fn the_identity_provider_is_one_writer_only_row_that_never_holds_a_plain_secret() {
+    fn identity_providers_are_writer_only_rows_by_slug_that_never_hold_a_plain_secret() {
         // Arrange
         let probe = install_web_probe();
         let row = |values: &str| {
             probe(&format!(
-                "INSERT INTO pgokf_web.identity_provider
-                     (kind, issuer, client_id, client_secret, redirect_url, updated_by)
+                "INSERT INTO pgokf_web.identity_providers
+                     (id, kind, issuer, client_id, client_secret, redirect_url, provider_name,
+                      updated_by)
                  VALUES ({values})"
             ))
         };
@@ -6018,46 +6047,64 @@ Steps for deploying widgets with the marmoset rollout strategy.\n";
 
         // Act
         let saved = row(&format!(
-            "'oidc', 'https://id.example', 'catalog', {sealed}, {callback}, 'root'"
+            "'okta', 'oidc', 'https://id.example', 'catalog', {sealed}, {callback}, 'Okta', 'root'"
         ));
-        let second_row = row(&format!(
-            "'oidc', 'https://other.example', 'x', NULL, {callback}, 'root'"
-        ));
-        let changed =
-            probe("UPDATE pgokf_web.identity_provider SET enabled = false, updated_at = now()");
-        let removed = probe("DELETE FROM pgokf_web.identity_provider");
         let github = row(&format!(
-            "'github', 'https://github.com', 'Iv1.abc', {sealed}, {callback}, 'root'"
+            "'github', 'github', 'https://github.com', 'Iv1.abc', {sealed}, {callback}, 'GitHub', \
+             'root'"
         ));
-        let cleared = probe("DELETE FROM pgokf_web.identity_provider");
+        let same_slug = row(&format!(
+            "'okta', 'oidc', 'https://other.example', 'x', NULL, {callback}, 'Other', 'root'"
+        ));
+        let same_name_other_case = row(&format!(
+            "'okta-2', 'oidc', 'https://other.example', 'x', NULL, {callback}, 'OKTA', 'root'"
+        ));
+        let bad_slug = row(&format!(
+            "'Okta!', 'oidc', 'https://other.example', 'x', NULL, {callback}, 'Elsewhere', 'root'"
+        ));
+        let changed = probe(
+            "UPDATE pgokf_web.identity_providers SET enabled = false, updated_at = now()
+             WHERE id = 'okta'",
+        );
+        let removed = probe("DELETE FROM pgokf_web.identity_providers WHERE id = 'github'");
         let bad_kind = row(&format!(
-            "'saml', 'https://id.example', 'catalog', NULL, {callback}, 'root'"
+            "'saml', 'saml', 'https://id.example', 'catalog', NULL, {callback}, 'SAML', 'root'"
         ));
         let plain_secret = row(&format!(
-            "'oidc', 'https://id.example', 'catalog', 'hunter2-not-sealed', {callback}, 'root'"
+            "'plain', 'oidc', 'https://id.example', 'catalog', 'hunter2-not-sealed', {callback}, \
+             'Plain', 'root'"
         ));
         let plain_issuer = row(&format!(
-            "'oidc', 'id.example', 'catalog', {sealed}, {callback}, 'root'"
+            "'bare', 'oidc', 'id.example', 'catalog', {sealed}, {callback}, 'Bare', 'root'"
         ));
         let bad_role = probe(
-            "INSERT INTO pgokf_web.identity_provider (issuer, client_id, redirect_url, default_role, updated_by)
-             VALUES ('https://id.example', 'catalog', 'https://catalog.example/auth/callback', 'owner', 'root')",
+            "INSERT INTO pgokf_web.identity_providers
+                 (id, issuer, client_id, redirect_url, provider_name, default_role, updated_by)
+             VALUES ('owner', 'https://id.example', 'catalog',
+                     'https://catalog.example/auth/callback', 'Owner', 'owner', 'root')",
         );
         let public_client = row(&format!(
-            "'oidc', 'https://id.example', 'catalog', NULL, {callback}, 'root'"
+            "'public', 'oidc', 'https://id.example', 'catalog', NULL, {callback}, 'Public', 'root'"
         ));
         Spi::run("RESET ROLE").expect("role resets");
         Spi::run("SET ROLE pgokf_web_probe_reader").expect("reader role is assumable");
-        let reader_reads = probe("SELECT client_id FROM pgokf_web.identity_provider");
+        let reader_reads = probe("SELECT client_id FROM pgokf_web.identity_providers");
         Spi::run("RESET ROLE").expect("role resets");
 
         // Assert
         assert_eq!(saved, "ok");
-        assert_eq!(second_row, "23505", "one provider at most");
+        assert_eq!(
+            github, "ok",
+            "GitHub is a kind of its own, beside the other"
+        );
+        assert_eq!(same_slug, "23505", "a slug names one provider");
+        assert_eq!(same_name_other_case, "23505", "so does a name, case aside");
+        assert_eq!(
+            bad_slug, "23514",
+            "a slug is lowercase letters, digits, dashes"
+        );
         assert_eq!(changed, "ok");
         assert_eq!(removed, "ok");
-        assert_eq!(github, "ok", "GitHub is a kind of its own");
-        assert_eq!(cleared, "ok");
         assert_eq!(bad_kind, "23514", "only the kinds this build speaks");
         assert_eq!(plain_secret, "23514", "only a sealed secret can be stored");
         assert_eq!(plain_issuer, "23514", "an issuer is a URL");

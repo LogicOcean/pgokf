@@ -40,7 +40,7 @@ use crate::auth::{Authenticator, Cidr, HeaderAuth, Role, RoleMapping, Sessions, 
 use crate::config::{Cli, Command, McpTokenCommand, UserCommand};
 use crate::db::{Db, DbConfig};
 use crate::mcp_tokens::{McpTokenStore, McpTokens, Minted};
-use crate::provider::ProviderSlot;
+use crate::provider::ProviderRegistry;
 use crate::provider_settings::{ProviderKind, ProviderSettingsStore};
 use crate::routes::App;
 use crate::seal::Sealer;
@@ -184,7 +184,7 @@ const IDENTITY_STATEMENT_MS: u64 = 5_000;
 const IDENTITY_TABLES: &[&str] = &[
     "pgokf_web.users",
     "pgokf_web.sessions",
-    "pgokf_web.identity_provider",
+    "pgokf_web.identity_providers",
 ];
 const MCP_TOKEN_TABLES: &[&str] = &["pgokf_web.mcp_tokens"];
 
@@ -322,6 +322,7 @@ fn build_authenticator(cli: &Cli, identity: Option<&Db>) -> Result<Authenticator
                 .map(str::to_owned)
                 .collect();
             let config = oidc::OidcConfig {
+                id: None,
                 kind: ProviderKind::Oidc,
                 issuer: required(&cli.oidc_issuer, "--oidc-issuer")?,
                 client_id: required(&cli.oidc_client_id, "--oidc-client-id")?,
@@ -376,7 +377,7 @@ fn build_authenticator(cli: &Cli, identity: Option<&Db>) -> Result<Authenticator
                 .as_deref()
                 .map(|secret| Sealer::from_secret(secret.as_bytes()))
                 .transpose()?;
-            let provider = ProviderSlot::new(
+            let provider = ProviderRegistry::new(
                 ProviderSettingsStore::Pg(identity.clone()),
                 sealer,
                 Arc::clone(&sessions),
@@ -415,9 +416,15 @@ async fn run_user_command(cli: &Cli, identity: Db, command: &UserCommand) -> Res
     let users = UsersAuth::new(UserStore::Pg(identity), sessions);
     let password = read_password()?;
     match command {
-        UserCommand::Add { name, role } => {
+        UserCommand::Add {
+            name,
+            role,
+            display,
+        } => {
             let role = Role::parse(role).with_context(|| format!("unknown role {role:?}"))?;
-            users.add_user(name, role, &password).await?;
+            users
+                .add_user(name, role, display.as_deref(), &password)
+                .await?;
             eprintln!("pgokf-web: added {name} as {}", role.id());
         }
         UserCommand::SetPassword { name } => {

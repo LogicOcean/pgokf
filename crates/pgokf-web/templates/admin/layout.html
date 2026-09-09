@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero">
+  <div>
+    <h1>Administration</h1>
+    <p class="lede">{{ admin.lede }}</p>
+  </div>
+</section>
+<nav class="subtabs" aria-label="Administration">
+  {% for t in admin.tabs %}<a href="{{ t.href }}"{% if t.active %} aria-current="page"{% endif %}>{{ t.label }}</a>{% endfor %}
+</nav>
+{% if let Some(n) = admin.notice %}<p class="notice ok">{{ n }}</p>{% endif %}
+{% if let Some(e) = admin.error %}<p class="notice bad">{{ e }}</p>{% endif %}
+{% block admin %}{% endblock %}
+{% endblock %}

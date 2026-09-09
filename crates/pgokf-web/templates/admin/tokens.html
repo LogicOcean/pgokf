@@ -1,0 +1,46 @@
+{% extends "admin/layout.html" %}
+{% block admin %}
+<section class="panel">
+  <div class="panel-head"><h2>MCP tokens{% if mcp_tokens_managed_here %} <span class="muted">({{ mcp_tokens.len() }})</span>{% endif %}</h2></div>
+  <p class="muted small">An agent that cannot launch <code>pgokf-mcp</code> itself calls it over HTTP, and every such request carries a bearer token. A token is shown once, when it is minted; only its digest is kept, so it can be revoked here but never read back. A <code>reader</code> token searches and reads the catalog; a <code>builder</code> token may also build workspace plugins. A token is minted for the tenant this site serves, an MCP endpoint accepts only tokens minted for its own, and this page shows that tenant's tokens alone. Revoking takes effect with the next request.</p>
+  {% if !mcp_tokens_managed_here %}
+  <p class="muted">Minting needs the writer connection (<code>OKF_PG_WRITER_URL</code>).</p>
+  {% else %}
+  {% if let Some(m) = minted %}
+  <div class="notice ok token-reveal" id="pgokf-minted-token">
+    <p><strong>Token <code>{{ m.name }}</code> ({{ m.role }})</strong> - copy it now; it is not shown again.</p>
+    <p class="token-line"><code>{{ m.token }}</code> <button type="button" class="btn js-only" data-copy="{{ m.token }}">Copy</button></p>
+    <p class="hint">The client sends it as <code>Authorization: Bearer …</code> to the MCP endpoint (<code>POST /mcp</code>); a plugin built on the <a href="/plugins">Plugins</a> page expects it as <code>OKF_MCP_TOKEN</code>.</p>
+  </div>
+  {% endif %}
+  {% if mcp_tokens.is_empty() %}
+  <p class="muted">No token has been minted, so the HTTP endpoint refuses every request.</p>
+  {% else %}
+  <div class="table-wrap">
+  <table class="table" id="pgokf-mcp-tokens">
+    <thead><tr><th>Name</th><th>Role</th><th>Minted by</th><th>Minted</th><th>Change</th></tr></thead>
+    <tbody>
+    {% for t in mcp_tokens %}
+      <tr>
+        <td><code>{{ t.name }}</code></td>
+        <td>{{ t.role }}</td>
+        <td>{{ t.created_by }}</td>
+        <td class="when">{{ t.created_at|datetime }}</td>
+        <td class="row-actions"><form method="post" action="/admin/mcp-tokens"><input type="hidden" name="action" value="revoke"><input type="hidden" name="name" value="{{ t.name }}">
+          <button type="submit" class="btn danger" data-confirm="Revoke {{ t.name }}? Every request it makes is refused from now on.">Revoke</button></form></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+  <h3>Mint a token{% if let Some(tenant) = mcp_tenant %} <span class="muted">for tenant {{ tenant }}</span>{% endif %}</h3>
+  <form method="post" action="/admin/mcp-tokens" class="form-row fields-2" data-once>
+    <input type="hidden" name="action" value="mint">
+    <div class="field"><label for="mt-name">Name <span class="muted">(what the MCP log calls it)</span></label><input id="mt-name" type="text" name="name" required pattern="[A-Za-z0-9._@+-]{1,128}" placeholder="fleet" spellcheck="false" autocomplete="off"></div>
+    <div class="field"><label for="mt-role">Role</label><select id="mt-role" name="role">{% for r in mcp_roles %}<option value="{{ r }}">{{ r }}</option>{% endfor %}</select></div>
+    <div><button type="submit" class="btn primary">Mint</button></div>
+  </form>
+  {% endif %}
+</section>
+{% endblock %}

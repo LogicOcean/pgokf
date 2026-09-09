@@ -32,7 +32,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tower::limit::ConcurrencyLimitLayer;
 
-use crate::auth::{Authenticator, Mode, Principal, Role, Session, cookie_header};
+use crate::auth::{Admission, Authenticator, Mode, Principal, Role, Session, cookie_header};
 use crate::db::{
     AdminBundle, BundleFile, BundleInfo, BundleLogEntry, BundleStat, ConceptDetail, ConceptSummary,
     Cursor, Db, DuplicateGroup, Facet, Failure, Graph, Hit, Link, Neighbor, PackageInfo,
@@ -45,8 +45,9 @@ use crate::links::Resolver;
 use crate::mcp_tokens::{McpToken, McpTokens, Minted};
 use crate::oidc::OidcAuth;
 use crate::provider::{ProviderDraft, SecretChange};
-use crate::provider_settings::ProviderKind;
+use crate::provider_settings::{ProviderKind, ProviderSettings};
 use crate::store::DocumentStore;
+use crate::user_store::PeopleQuery;
 use crate::{graph, markdown};
 use pgokf_workspace::drop_packaged_resources;
 
@@ -136,12 +137,23 @@ pub(crate) fn router(app: Shared) -> Router {
         .route("/profile", get(profile_page))
         .route("/profile/password", post(profile_password))
         .route("/profile/sessions", post(profile_sessions_end))
-        .route("/admin", get(admin_page))
+        .route("/admin", get(admin_home))
+        .route("/admin/people", get(admin_people_page))
         .route("/admin/users", post(admin_users))
         .route("/admin/sessions", post(admin_sessions_end))
+        .route("/admin/tokens", get(admin_tokens_page))
         .route("/admin/mcp-tokens", post(admin_mcp_tokens))
-        .route("/admin/provider", post(admin_provider))
-        .route("/admin/bundles", post(admin_bundles))
+        .route(
+            "/admin/providers",
+            get(admin_providers_page).post(admin_provider),
+        )
+        .route("/admin/providers/new", get(admin_provider_new_page))
+        .route("/admin/providers/{id}", get(admin_provider_edit_page))
+        .route(
+            "/admin/bundles",
+            get(admin_bundles_page).post(admin_bundles),
+        )
+        .route("/admin/settings", get(admin_settings_page))
         .route("/review", get(review_page))
         .route("/review/{bundle_id}/{*concept_id}", post(concept_review))
         .merge(
@@ -1254,12 +1266,20 @@ struct LoginPage {
     shell: Shell,
     next: String,
     error: Option<String>,
-    /// What the identity provider is called, when there is one: the page
-    /// then offers a button to it - beside the password form in `users`
-    /// mode, instead of it on a provider-only site.
-    provider: Option<String>,
+    /// The identity providers offered, each by a button of its own - below
+    /// the password form in `users` mode, instead of it on a provider-only
+    /// site.
+    providers: Vec<ProviderButton>,
     /// Whether a user name and password are taken here (`users` mode).
     password_form: bool,
+}
+
+/// One identity provider's button on the sign-in page.
+#[derive(Clone)]
+pub(crate) struct ProviderButton {
+    /// The slug the sign-in link names; empty for the `oidc` mode's own.
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Template)]
@@ -1331,25 +1351,255 @@ pub(crate) struct PermissionView {
     pub held: bool,
 }
 
+/// Which tab of the Admin page a request is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdminTab {
+    People,
+    Providers,
+    Tokens,
+    Bundles,
+    Settings,
+}
+
+impl AdminTab {
+    const ALL: [AdminTab; 5] = [
+        AdminTab::People,
+        AdminTab::Providers,
+        AdminTab::Tokens,
+        AdminTab::Bundles,
+        AdminTab::Settings,
+    ];
+
+    const fn href(self) -> &'static str {
+        match self {
+            AdminTab::People => "/admin/people",
+            AdminTab::Providers => "/admin/providers",
+            AdminTab::Tokens => "/admin/tokens",
+            AdminTab::Bundles => "/admin/bundles",
+            AdminTab::Settings => "/admin/settings",
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            AdminTab::People => "People",
+            AdminTab::Providers => "Identity providers",
+            AdminTab::Tokens => "MCP tokens",
+            AdminTab::Bundles => "Bundles",
+            AdminTab::Settings => "Catalog settings",
+        }
+    }
+
+    /// What the tab is for, under the heading.
+    const fn lede(self) -> &'static str {
+        match self {
+            AdminTab::People => {
+                "Everyone who can sign in here and the role each holds. Every action runs \
+                 through the writer role under your name."
+            }
+            AdminTab::Providers => {
+                "The identity providers people may sign in with beside this site's own \
+                 passwords: any number of OpenID Connect providers, or GitHub."
+            }
+            AdminTab::Tokens => {
+                "The bearer tokens that let agents reach the MCP endpoint over HTTP."
+            }
+            AdminTab::Bundles => "The bundles the catalog holds, and what to do with them.",
+            AdminTab::Settings => {
+                "The catalog's own settings, read from pgokf.get_config(); a database admin \
+                 changes them."
+            }
+        }
+    }
+
+    /// The heading of the browser tab.
+    fn title(self) -> String {
+        format!("Administration · {}", self.label())
+    }
+
+    fn shell(self, outcome: AdminOutcome) -> AdminShell {
+        AdminShell {
+            tabs: Self::ALL
+                .iter()
+                .map(|tab| AdminTabView {
+                    href: tab.href(),
+                    label: tab.label(),
+                    active: *tab == self,
+                })
+                .collect(),
+            lede: self.lede(),
+            notice: outcome.notice,
+            error: outcome.error,
+        }
+    }
+
+    /// Back to this tab, with a notice.
+    fn redirect_with(self, notice: &str) -> Response {
+        redirect(&format!(
+            "{}?notice={}",
+            self.href(),
+            filters::percent_encode(notice)
+        ))
+    }
+}
+
+/// What every tab of the Admin page shares: the tab strip, what the tab is
+/// for, and what the last action had to say.
+pub(crate) struct AdminShell {
+    pub tabs: Vec<AdminTabView>,
+    pub lede: &'static str,
+    pub notice: Option<String>,
+    pub error: Option<String>,
+}
+
+pub(crate) struct AdminTabView {
+    pub href: &'static str,
+    pub label: &'static str,
+    pub active: bool,
+}
+
+/// What the Admin page has to say about the action that led to it.
+#[derive(Default)]
+struct AdminOutcome {
+    notice: Option<String>,
+    error: Option<String>,
+}
+
 #[derive(Template)]
-#[template(path = "admin.html")]
-// Each flag is an independent switch the template reads; a page model is
-// the one place they belong together.
-#[allow(clippy::struct_excessive_bools)]
-struct AdminPage {
+#[template(path = "admin/people.html")]
+struct AdminPeoplePage {
     shell: Shell,
-    users: Vec<AdminUserView>,
+    admin: AdminShell,
     /// Whether people are managed here (`users` mode: the catalog's
     /// `pgokf_web.users`).
     users_managed_here: bool,
     /// Whether sessions can be ended here (a session store is attached),
     /// in any mode that issues them.
     sessions_revocable: bool,
+    people: Vec<AdminUserView>,
+    /// The page's place in the whole: search, page size, page number.
+    nav: PeopleNav,
+    roles: Vec<String>,
     /// Everyone currently holding a live session, with how many - so an
     /// admin can see whom there is to sign out where no users table lists
     /// people (`oidc` mode).
     live_sessions: Vec<LiveSubject>,
+}
+
+/// Where a page of people sits: what was searched, how many to a page,
+/// which page, and the links around it - worked out here so the template
+/// only prints.
+pub(crate) struct PeopleNav {
+    pub search: String,
+    pub per: usize,
+    pub page: usize,
+    pub pages: usize,
+    pub total: usize,
+    /// The rows shown, counted from one; `0..0` when there are none.
+    pub first: usize,
+    pub last: usize,
+    pub prev_href: Option<String>,
+    pub next_href: Option<String>,
+    /// Every page size offered: the size, its link, whether it is the one.
+    pub per_links: Vec<(usize, String, bool)>,
+}
+
+/// The page sizes the People tab offers.
+const PEOPLE_PER_PAGE: [usize; 4] = [25, 50, 100, 200];
+const PEOPLE_PER_PAGE_DEFAULT: usize = 50;
+
+impl PeopleNav {
+    fn href(search: &str, per: usize, page: usize) -> String {
+        format!(
+            "/admin/people?q={}&per={per}&page={page}",
+            filters::percent_encode(search)
+        )
+    }
+
+    fn new(search: String, per: usize, page: usize, total: usize) -> Self {
+        let pages = total.div_ceil(per).max(1);
+        let page = page.clamp(1, pages);
+        // Saturating, because `total` is `usize::MAX` on the first read
+        // (before the real count is known) and `page` comes from the query
+        // string: the products must not overflow.
+        let first = if total == 0 {
+            0
+        } else {
+            (page - 1).saturating_mul(per).saturating_add(1)
+        };
+        let last = page.saturating_mul(per).min(total);
+        Self {
+            prev_href: (page > 1).then(|| Self::href(&search, per, page - 1)),
+            next_href: (page < pages).then(|| Self::href(&search, per, page + 1)),
+            per_links: PEOPLE_PER_PAGE
+                .iter()
+                .map(|&size| (size, Self::href(&search, size, 1), size == per))
+                .collect(),
+            search,
+            per,
+            page,
+            pages,
+            total,
+            first,
+            last,
+        }
+    }
+
+    /// The query, as the store takes it.
+    fn query(&self) -> PeopleQuery {
+        PeopleQuery {
+            search: self.search.clone(),
+            offset: (self.page - 1).saturating_mul(self.per),
+            limit: self.per,
+        }
+    }
+}
+
+#[derive(Template)]
+#[template(path = "admin/providers.html")]
+struct AdminProvidersPage {
+    shell: Shell,
+    admin: AdminShell,
+    /// Whether providers can be set up here (`users` mode).
+    providers_managed_here: bool,
+    providers: Vec<ProviderRow>,
+    /// Whether a client secret could be kept (a session secret is set).
+    can_seal: bool,
+}
+
+/// One identity provider as the list shows it.
+pub(crate) struct ProviderRow {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub issuer: String,
+    pub enabled: bool,
+    pub has_secret: bool,
+    pub updated_at: String,
+    pub updated_by: String,
+    /// Why this instance cannot use it, if so.
+    pub trouble: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "admin/provider.html")]
+struct AdminProviderPage {
+    shell: Shell,
+    admin: AdminShell,
+    /// The provider's settings as the form shows them (defaults for a new
+    /// one).
+    provider: ProviderView,
+    can_seal: bool,
+    /// Why this instance cannot use the stored settings, if so.
+    trouble: Option<String>,
     roles: Vec<String>,
+}
+
+#[derive(Template)]
+#[template(path = "admin/tokens.html")]
+struct AdminTokensPage {
+    shell: Shell,
+    admin: AdminShell,
     /// The MCP bearer tokens (everything but the tokens), newest first.
     mcp_tokens: Vec<McpToken>,
     /// Whether tokens can be minted here (a writer connection is on).
@@ -1357,26 +1607,31 @@ struct AdminPage {
     /// The tenant every token minted here is for, when this UI serves one.
     mcp_tenant: Option<String>,
     mcp_roles: Vec<String>,
-    /// Whether an identity provider can be set up here (`users` mode).
-    provider_managed_here: bool,
-    /// Whether a client secret could be kept (a session secret is set).
-    provider_can_seal: bool,
-    /// Why the stored settings cannot be used by this instance, if so.
-    provider_trouble: Option<String>,
-    /// The provider's settings as the form shows them (defaults when none
-    /// is set up).
-    provider: ProviderView,
-    bundles: Vec<AdminBundle>,
-    config_json: String,
-    notice: Option<String>,
-    error: Option<String>,
     /// A token minted by the request this page answers: shown here, once.
     minted: Option<MintedToken>,
 }
 
-/// The identity provider's settings as the Admin page's form shows them:
+#[derive(Template)]
+#[template(path = "admin/bundles.html")]
+struct AdminBundlesPage {
+    shell: Shell,
+    admin: AdminShell,
+    bundles: Vec<AdminBundle>,
+}
+
+#[derive(Template)]
+#[template(path = "admin/settings.html")]
+struct AdminSettingsPage {
+    shell: Shell,
+    admin: AdminShell,
+    config_json: String,
+}
+
+/// An identity provider's settings as the Admin page's form shows them:
 /// everything but the client secret, which is never shown.
 pub(crate) struct ProviderView {
+    /// The slug; empty for a provider not yet added.
+    pub id: String,
     pub configured: bool,
     pub enabled: bool,
     /// The kind's id, and every kind the form may choose from.
@@ -1404,9 +1659,10 @@ impl ProviderView {
             .collect()
     }
 
-    /// The form for a site with no provider yet.
+    /// The form for a provider not yet added.
     fn blank() -> Self {
         Self {
+            id: String::new(),
             configured: false,
             enabled: true,
             kind: ProviderKind::Oidc.id().to_owned(),
@@ -1426,8 +1682,9 @@ impl ProviderView {
         }
     }
 
-    fn from_settings(s: &crate::provider_settings::ProviderSettings) -> Self {
+    fn from_settings(s: &ProviderSettings) -> Self {
         Self {
+            id: s.id.clone(),
             configured: true,
             enabled: s.enabled,
             kind: s.kind.id().to_owned(),
@@ -1455,21 +1712,16 @@ pub(crate) struct MintedToken {
     pub token: String,
 }
 
-/// What the Admin page has to say about the action that led to it.
-#[derive(Default)]
-struct AdminOutcome {
-    notice: Option<String>,
-    error: Option<String>,
-    minted: Option<MintedToken>,
-}
-
 pub(crate) struct AdminUserView {
     pub name: String,
+    /// What to call them, when that is more than their name.
+    pub display: Option<String>,
     pub role: String,
     pub is_me: bool,
-    /// Whether they sign in with a password here; otherwise the identity
-    /// provider brought them, and only their role is managed here.
-    pub has_password: bool,
+    /// The identity provider that brought them (its name, or its slug
+    /// when it is gone); `None` for someone who signs in with a password
+    /// here, whose password can be reset on this page.
+    pub provider: Option<String>,
 }
 
 /// One person holding live sessions, for the admin page.
@@ -2741,10 +2993,21 @@ struct NextParams {
     next: String,
 }
 
+/// The buttons for `providers`, in their order.
+fn provider_buttons(providers: &[Arc<OidcAuth>]) -> Vec<ProviderButton> {
+    providers
+        .iter()
+        .map(|provider| ProviderButton {
+            id: provider.stored_id().unwrap_or_default().to_owned(),
+            name: provider.provider_name().to_owned(),
+        })
+        .collect()
+}
+
 /// The sign-in page: a user name and password in `users` mode, with a
-/// button to the identity provider beside them when an admin has set one
-/// up; on a provider-only site there is nothing to type, and the person
-/// goes straight to the provider.
+/// button to every identity provider an admin has set up below them; on a
+/// provider-only site there is nothing to type, and the person goes
+/// straight to the provider.
 async fn login_page(
     State(app): State<Shared>,
     session: Session,
@@ -2757,10 +3020,10 @@ async fn login_page(
     if session.principal.is_some() {
         return Ok(redirect(&next));
     }
-    let provider = app.auth.provider().await?;
+    let providers = app.auth.providers().await?;
     if matches!(session.mode, Mode::Oidc) {
-        return match provider {
-            Some(provider) => start_provider(&app, &session, &provider, &next).await,
+        return match providers.first() {
+            Some(provider) => start_provider(&app, &session, provider, &next).await,
             None => Err(AppError::not_found("This page")),
         };
     }
@@ -2768,17 +3031,26 @@ async fn login_page(
         shell: Shell::new(&app, &session, "Sign in", "login"),
         next,
         error: None,
-        provider: provider.map(|p| p.provider_name().to_owned()),
+        providers: provider_buttons(&providers),
         password_form: true,
     })
 }
 
-/// The identity provider's sign-in, from the button beside the password
+#[derive(Debug, Default, Deserialize)]
+struct ProviderParams {
+    /// The provider's slug; empty for the `oidc` mode's own.
+    #[serde(default)]
+    with: String,
+    #[serde(default)]
+    next: String,
+}
+
+/// An identity provider's sign-in, from its button below the password
 /// form - or the only way in, on a provider-only site.
 async fn login_provider(
     State(app): State<Shared>,
     session: Session,
-    Query(params): Query<NextParams>,
+    Query(params): Query<ProviderParams>,
 ) -> PageResult {
     if !session.mode.is_local_session() {
         return Err(AppError::not_found("This page"));
@@ -2787,7 +3059,8 @@ async fn login_provider(
     if session.principal.is_some() {
         return Ok(redirect(&next));
     }
-    let Some(provider) = app.auth.provider().await? else {
+    let wanted = non_empty(&params.with);
+    let Some(provider) = app.auth.provider(wanted.as_deref()).await? else {
         return Err(AppError::not_found("This page"));
     };
     start_provider(&app, &session, &provider, &next).await
@@ -2811,7 +3084,11 @@ async fn start_provider(
             Ok(response)
         }
         Err(error) => {
-            eprintln!("pgokf-web: the sign-in could not be started: {error:#}");
+            eprintln!(
+                "pgokf-web: the sign-in through {} could not be started: {error:#}",
+                provider.provider_name()
+            );
+            let providers = app.auth.providers().await.unwrap_or_default();
             let mut response = html(&LoginPage {
                 shell: Shell::new(app, session, "Sign in", "login"),
                 next: next.to_owned(),
@@ -2819,7 +3096,7 @@ async fn start_provider(
                     "{} could not be reached just now.",
                     provider.provider_name()
                 )),
-                provider: Some(provider.provider_name().to_owned()),
+                providers: provider_buttons(&providers),
                 password_form: matches!(session.mode, Mode::Users),
             })?;
             *response.status_mut() = StatusCode::BAD_GATEWAY;
@@ -2839,35 +3116,9 @@ struct CallbackParams {
     error: String,
 }
 
-/// The provider's answer: check it, open a session, and go on to the page
-/// the person was heading for.
-async fn auth_callback(
-    State(app): State<Shared>,
-    session: Session,
-    headers: HeaderMap,
-    Query(params): Query<CallbackParams>,
-) -> PageResult {
-    let oidc = app
-        .auth
-        .provider()
-        .await?
-        .ok_or_else(|| AppError::not_found("This page"))?;
-    // Whatever happens, this attempt is over: the cookie goes.
-    let drop_flow = oidc.sessions().clear_flow();
-    let refused = |message: String, status: StatusCode| -> PageResult {
-        let mut response = html(&LoginPage {
-            shell: Shell::new(&app, &session, "Sign in", "login"),
-            next: "/".to_owned(),
-            error: Some(message),
-            provider: Some(oidc.provider_name().to_owned()),
-            password_form: matches!(session.mode, Mode::Users),
-        })?;
-        *response.status_mut() = status;
-        if let Some(value) = cookie_header(&drop_flow) {
-            response.headers_mut().append(header::SET_COOKIE, value);
-        }
-        Ok(response)
-    };
+/// What the provider's answer says before any code is exchanged: what to
+/// tell the person, and with which status, when it is a refusal.
+fn callback_refusal(params: &CallbackParams, provider_name: &str) -> Option<(String, StatusCode)> {
     if !params.error.trim().is_empty() {
         // The provider's error code is a fixed token; nothing else it sent
         // is repeated back to the browser.
@@ -2877,55 +3128,120 @@ async fn auth_callback(
             .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
             .take(64)
             .collect();
-        eprintln!("pgokf-web: the provider refused a sign-in ({code})");
-        return refused(
-            format!("{} did not sign you in ({code}).", oidc.provider_name()),
+        eprintln!("pgokf-web: {provider_name} refused a sign-in ({code})");
+        return Some((
+            format!("{provider_name} did not sign you in ({code})."),
             StatusCode::UNAUTHORIZED,
-        );
+        ));
     }
     if params.code.trim().is_empty() {
-        return refused(
+        return Some((
             "That sign-in carried no code.".to_owned(),
             StatusCode::BAD_REQUEST,
+        ));
+    }
+    None
+}
+
+/// The person's row on the People table, in the `users` mode, so an admin
+/// sees them and can set their role: `Some(why)` when the name is somebody
+/// else's and the sign-in must be refused.
+async fn admit_to_people(
+    app: &App,
+    person: &Principal,
+    oidc: &OidcAuth,
+) -> Result<Option<String>, AppError> {
+    let Some(users) = app.auth.users() else {
+        return Ok(None);
+    };
+    match users.admit(person, oidc).await? {
+        Admission::New => {
+            eprintln!(
+                "pgokf-web: {} ({}) is a new person here, through {}",
+                person.display,
+                person.actor(),
+                oidc.provider_name()
+            );
+            Ok(None)
+        }
+        Admission::Known => Ok(None),
+        Admission::Refused(why) => {
+            eprintln!(
+                "pgokf-web: refused a sign-in through {} as {} ({}): {why}",
+                oidc.provider_name(),
+                person.display,
+                person.actor()
+            );
+            Ok(Some(why))
+        }
+    }
+}
+
+/// The provider's answer: find which provider this sign-in started at,
+/// check the answer, open a session, and go on to the page the person was
+/// heading for.
+async fn auth_callback(
+    State(app): State<Shared>,
+    session: Session,
+    headers: HeaderMap,
+    Query(params): Query<CallbackParams>,
+) -> PageResult {
+    let sessions = app
+        .auth
+        .sessions()
+        .ok_or_else(|| AppError::not_found("This page"))?;
+    // Whatever happens, this attempt is over: the cookie goes.
+    let drop_flow = sessions.clear_flow();
+    let buttons = provider_buttons(&app.auth.providers().await?);
+    let refused = |message: String, status: StatusCode| -> PageResult {
+        let mut response = html(&LoginPage {
+            shell: Shell::new(&app, &session, "Sign in", "login"),
+            next: "/".to_owned(),
+            error: Some(message),
+            providers: buttons.clone(),
+            password_form: matches!(session.mode, Mode::Users),
+        })?;
+        *response.status_mut() = status;
+        if let Some(value) = cookie_header(&drop_flow) {
+            response.headers_mut().append(header::SET_COOKIE, value);
+        }
+        Ok(response)
+    };
+    // The flow cookie names the provider this sign-in started at; only
+    // that one, as set up now, may finish it.
+    let Some(started_at) = crate::oidc::flow_provider(sessions, &headers) else {
+        return refused(
+            "This sign-in did not start here, or it took too long. Start again.".to_owned(),
+            StatusCode::UNAUTHORIZED,
         );
+    };
+    let Some(oidc) = app.auth.provider(started_at.id()).await? else {
+        return refused(
+            "That identity provider is no longer offered here.".to_owned(),
+            StatusCode::UNAUTHORIZED,
+        );
+    };
+    if let Some((message, status)) = callback_refusal(&params, oidc.provider_name()) {
+        return refused(message, status);
     }
     match oidc.complete(&headers, &params.code, &params.state).await {
         Ok((person, groups, next)) => {
-            if let Some(users) = app.auth.users() {
-                // A name that signs in here with a password is somebody
-                // else's: the provider's account does not get their row,
-                // their role, or a session under their name.
-                if users.has_password(&person.subject).await? {
-                    eprintln!(
-                        "pgokf-web: refused a provider sign-in as {}, who signs in here with \
-                         a password",
-                        person.actor()
-                    );
-                    return refused(
-                        "That account's name belongs to someone who signs in here with a \
-                         password."
-                            .to_owned(),
-                        StatusCode::FORBIDDEN,
-                    );
-                }
-                // Their row on the People table, so an admin sees them and
-                // can set their role; a row already there is left as it is.
-                if users.provision(&person).await? {
-                    eprintln!("pgokf-web: {} is a new person here", person.actor());
-                }
+            if let Some(why) = admit_to_people(&app, &person, &oidc).await? {
+                return refused(why, StatusCode::FORBIDDEN);
             }
-            let cookie = oidc
-                .sessions()
+            let cookie = sessions
                 .open_session_with(
                     &person.subject,
                     Mode::Oidc,
                     oidc.binding(),
                     Some(person.display.clone()),
                     groups,
+                    oidc.stored_id(),
                 )
                 .await?;
             eprintln!(
-                "pgokf-web: {} signed in through {}",
+                "pgokf-web: {} ({}) signed in through {}",
+                person.display,
                 person.actor(),
                 oidc.provider_name()
             );
@@ -2939,7 +3255,10 @@ async fn auth_callback(
             Ok(response)
         }
         Err(error) => {
-            eprintln!("pgokf-web: a sign-in did not complete: {error:#}");
+            eprintln!(
+                "pgokf-web: a sign-in through {} did not complete: {error:#}",
+                oidc.provider_name()
+            );
             refused(
                 "That sign-in could not be completed. Start again.".to_owned(),
                 StatusCode::UNAUTHORIZED,
@@ -3001,11 +3320,7 @@ async fn login_submit(
         shell: Shell::new(&app, &session, "Sign in", "login"),
         next: safe_next(&form.next),
         error: Some(error),
-        provider: app
-            .auth
-            .provider()
-            .await?
-            .map(|p| p.provider_name().to_owned()),
+        providers: provider_buttons(&app.auth.providers().await?),
         password_form: true,
     })?;
     *response.status_mut() = StatusCode::UNAUTHORIZED;
@@ -3030,13 +3345,17 @@ async fn logout(State(app): State<Shared>, headers: axum::http::HeaderMap) -> Pa
             // The provider's own sign-out, when it was the provider that
             // signed the person in and it offers one.
             let onward = match mode {
-                Mode::Oidc => app
-                    .auth
-                    .provider()
-                    .await
-                    .ok()
-                    .flatten()
-                    .and_then(|provider| provider.end_session_url()),
+                Mode::Oidc => {
+                    let opened_by = sessions
+                        .presented_claims(&headers)
+                        .and_then(|claims| claims.provider);
+                    app.auth
+                        .provider(opened_by.as_deref())
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|provider| provider.end_session_url())
+                }
                 _ => None,
             };
             redirect(&onward.unwrap_or_else(|| "/".to_owned()))
@@ -3542,6 +3861,25 @@ async fn render_profile(
     error: Option<String>,
 ) -> PageResult {
     let actor = person.actor();
+    // Their row, in the users mode: whether a password or a provider signs
+    // them in.
+    let record = match app.auth.users() {
+        Some(users) => users.record(&person.subject).await?,
+        None => None,
+    };
+    let brought_by = match (
+        app.auth.users(),
+        record.as_ref().and_then(|r| r.provider.clone()),
+    ) {
+        (Some(users), Some(id)) => match users.provider_registry() {
+            Some(registry) => registry
+                .setting(&id)
+                .await?
+                .map_or(id, |settings| settings.provider_name),
+            None => id,
+        },
+        _ => String::new(),
+    };
     html(&ProfilePage {
         shell: Shell::new(app, session, "Your profile", "profile"),
         display: person.display.clone(),
@@ -3549,13 +3887,14 @@ async fn render_profile(
         role: person.role.id().to_owned(),
         actor: actor.clone(),
         how: match session.mode {
-            Mode::Users => "this site's own sign-in (a password kept in the catalog, or the \
-                            identity provider set up on the Admin page)"
-                .to_owned(),
+            Mode::Users if brought_by.is_empty() => {
+                "this site's own sign-in (a password kept in the catalog)".to_owned()
+            }
+            Mode::Users => format!("{brought_by}, an identity provider set up on the Admin page"),
             Mode::Header => "the identity provider in front of this site".to_owned(),
             Mode::Oidc => app
                 .auth
-                .provider()
+                .provider(None)
                 .await
                 .ok()
                 .flatten()
@@ -3563,10 +3902,7 @@ async fn render_profile(
             Mode::None => String::new(),
         },
         permissions: permission_views(person.role),
-        can_change_password: match app.auth.users() {
-            Some(users) => users.has_password(&person.subject).await?,
-            None => false,
-        },
+        can_change_password: record.as_ref().is_some_and(|r| r.hash.is_some()),
         sessions_revocable: app
             .auth
             .sessions()
@@ -3690,100 +4026,6 @@ fn admin(session: &Session) -> Result<Principal, AppError> {
     }
 }
 
-async fn render_admin(
-    app: &App,
-    session: &Session,
-    person: &Principal,
-    outcome: AdminOutcome,
-) -> PageResult {
-    html(&admin_page_data(app, session, person, outcome).await?)
-}
-
-/// Everything the Admin page shows, read from the catalog.
-async fn admin_page_data(
-    app: &App,
-    session: &Session,
-    person: &Principal,
-    outcome: AdminOutcome,
-) -> Result<AdminPage, AppError> {
-    let provider_slot = app
-        .auth
-        .users()
-        .and_then(crate::auth::UsersAuth::provider_slot);
-    let users = match app.auth.users() {
-        Some(u) => u
-            .list()
-            .await?
-            .into_iter()
-            .map(|u| AdminUserView {
-                is_me: u.name == person.subject,
-                name: u.name,
-                role: u.role.id().to_owned(),
-                has_password: u.has_password,
-            })
-            .collect(),
-        None => Vec::new(),
-    };
-    let live_sessions: Vec<LiveSubject> = match app.auth.sessions() {
-        Some(sessions) => sessions
-            .live_subjects()
-            .await?
-            .into_iter()
-            .map(|(subject, count)| LiveSubject {
-                is_me: subject == person.subject,
-                subject,
-                count,
-            })
-            .collect(),
-        None => Vec::new(),
-    };
-    Ok(AdminPage {
-        shell: Shell::new(app, session, "Administration", "admin"),
-        users,
-        users_managed_here: app.auth.users().is_some(),
-        sessions_revocable: app
-            .auth
-            .sessions()
-            .is_some_and(crate::auth::Sessions::revocable),
-        live_sessions,
-        roles: Role::all().iter().map(|r| r.id().to_owned()).collect(),
-        mcp_tokens: match &app.mcp_tokens {
-            Some(tokens) => tokens.list().await?,
-            None => Vec::new(),
-        },
-        mcp_tokens_managed_here: app.mcp_tokens.is_some(),
-        mcp_tenant: app
-            .mcp_tokens
-            .as_ref()
-            .and_then(|tokens| tokens.tenant().map(str::to_owned)),
-        mcp_roles: McpRole::all().iter().map(|r| r.id().to_owned()).collect(),
-        provider_managed_here: provider_slot.is_some(),
-        provider_can_seal: provider_slot.is_some_and(crate::provider::ProviderSlot::can_seal),
-        provider_trouble: match provider_slot {
-            // Read afresh, so the notice is about the settings as they
-            // stand now, not as this instance last saw them.
-            Some(slot) => {
-                slot.current().await?;
-                slot.trouble()
-            }
-            None => None,
-        },
-        provider: match provider_slot {
-            Some(slot) => slot
-                .settings()
-                .await?
-                .as_ref()
-                .map_or_else(ProviderView::blank, ProviderView::from_settings),
-            None => ProviderView::blank(),
-        },
-        bundles: app.db.admin_bundles().await?,
-        config_json: serde_json::to_string_pretty(&app.db.config().await?).unwrap_or_default(),
-        notice: outcome.notice,
-        error: outcome.error,
-        minted: outcome.minted,
-    })
-}
-
 /// A response that carries a secret shown once: no cache - the browser's,
 /// a proxy's - may keep it.
 fn shown_once(mut response: Response) -> Response {
@@ -3793,42 +4035,161 @@ fn shown_once(mut response: Response) -> Response {
     response
 }
 
-/// The Admin page again, saying what was wrong with the last action, as a
-/// 400.
-async fn admin_refused(
-    app: &App,
-    session: &Session,
-    person: &Principal,
-    error: String,
-) -> PageResult {
-    let page = admin_page_data(app, session, person, AdminOutcome::default()).await?;
-    refused_page(page, error)
-}
-
-/// A page already read, rendered as the refusal of the last action.
-fn refused_page(mut page: AdminPage, error: String) -> PageResult {
-    page.error = Some(error);
-    let mut response = html(&page)?;
+/// A page rendered as the refusal of the last action: a 400 carrying it.
+fn as_refusal<T: Template>(page: &T) -> PageResult {
+    let mut response = html(page)?;
     *response.status_mut() = StatusCode::BAD_REQUEST;
     Ok(response)
 }
 
-async fn admin_page(
+/// `/admin` is the first tab.
+async fn admin_home(session: Session) -> PageResult {
+    admin(&session)?;
+    Ok(redirect(AdminTab::People.href()))
+}
+
+// ---- People ---------------------------------------------------------------
+
+/// What the People tab is asked for: a search, a page size, a page - and a
+/// notice from the action that led here.
+#[derive(Debug, Default, Deserialize)]
+struct PeopleParams {
+    #[serde(default)]
+    q: String,
+    #[serde(default)]
+    per: String,
+    #[serde(default)]
+    page: String,
+    #[serde(default)]
+    notice: String,
+}
+
+impl PeopleParams {
+    /// The page these parameters name, once the total is known.
+    fn nav(&self, total: usize) -> PeopleNav {
+        let per = self
+            .per
+            .trim()
+            .parse()
+            .ok()
+            .filter(|per| PEOPLE_PER_PAGE.contains(per))
+            .unwrap_or(PEOPLE_PER_PAGE_DEFAULT);
+        let page = self.page.trim().parse().unwrap_or(1);
+        // A search longer than any name is cut, not refused.
+        let search: String = self.q.trim().chars().take(128).collect();
+        PeopleNav::new(search, per, page, total)
+    }
+}
+
+/// The People tab, read from the catalog.
+async fn render_people(
+    app: &App,
+    session: &Session,
+    person: &Principal,
+    params: &PeopleParams,
+    outcome: AdminOutcome,
+) -> Result<AdminPeoplePage, AppError> {
+    let (people, nav) = match app.auth.users() {
+        Some(users) => {
+            // The page asked for, against the total: a page past the end
+            // is the last one, read again.
+            let asked = params.nav(usize::MAX);
+            let mut page = users.people(&asked.query()).await?;
+            let mut nav = params.nav(page.total);
+            if nav.page != asked.page {
+                page = users.people(&nav.query()).await?;
+                nav = params.nav(page.total);
+            }
+            // Provider slugs read as the providers' names.
+            let names: HashMap<String, String> = match users.provider_registry() {
+                Some(registry) => registry
+                    .settings()
+                    .await?
+                    .into_iter()
+                    .map(|s| (s.id, s.provider_name))
+                    .collect(),
+                None => HashMap::new(),
+            };
+            let people = page
+                .people
+                .into_iter()
+                .map(|u| AdminUserView {
+                    is_me: u.name == person.subject,
+                    provider: u.provider.map(|id| names.get(&id).cloned().unwrap_or(id)),
+                    role: u.role.id().to_owned(),
+                    display: u.display,
+                    name: u.name,
+                })
+                .collect();
+            (people, nav)
+        }
+        None => (Vec::new(), params.nav(0)),
+    };
+    let live_sessions: Vec<LiveSubject> = match app.auth.sessions() {
+        Some(sessions) if app.auth.users().is_none() => sessions
+            .live_subjects()
+            .await?
+            .into_iter()
+            .map(|(subject, count)| LiveSubject {
+                is_me: subject == person.subject,
+                subject,
+                count,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    Ok(AdminPeoplePage {
+        shell: Shell::new(app, session, &AdminTab::People.title(), "admin"),
+        admin: AdminTab::People.shell(outcome),
+        users_managed_here: app.auth.users().is_some(),
+        sessions_revocable: app
+            .auth
+            .sessions()
+            .is_some_and(crate::auth::Sessions::revocable),
+        people,
+        nav,
+        roles: Role::all().iter().map(|r| r.id().to_owned()).collect(),
+        live_sessions,
+    })
+}
+
+async fn admin_people_page(
     State(app): State<Shared>,
     session: Session,
-    Query(params): Query<NoticeParams>,
+    Query(params): Query<PeopleParams>,
 ) -> PageResult {
     let person = admin(&session)?;
-    render_admin(
-        &app,
-        &session,
-        &person,
-        AdminOutcome {
-            notice: non_empty(&params.notice),
-            ..AdminOutcome::default()
-        },
-    )
-    .await
+    let outcome = AdminOutcome {
+        notice: non_empty(&params.notice),
+        error: None,
+    };
+    html(&render_people(&app, &session, &person, &params, outcome).await?)
+}
+
+/// The People tab again, saying what was wrong with the last action, as a
+/// 400 - on the page the action came from.
+async fn people_refused(
+    app: &App,
+    session: &Session,
+    person: &Principal,
+    params: &PeopleParams,
+    error: String,
+) -> PageResult {
+    let outcome = AdminOutcome {
+        notice: None,
+        error: Some(error),
+    };
+    as_refusal(&render_people(app, session, person, params, outcome).await?)
+}
+
+/// Back to the People tab, at the place the action came from.
+fn people_redirect(params: &PeopleParams, notice: &str) -> Response {
+    let nav = params.nav(usize::MAX);
+    redirect(&format!(
+        "{}&notice={}",
+        PeopleNav::href(&nav.search, nav.per, nav.page),
+        filters::percent_encode(notice)
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -3838,9 +4199,29 @@ struct AdminUserForm {
     #[serde(default)]
     name: String,
     #[serde(default)]
+    display: String,
+    #[serde(default)]
     role: String,
     #[serde(default)]
     password: String,
+    /// Where on the People tab the form was, to go back there.
+    #[serde(default)]
+    q: String,
+    #[serde(default)]
+    per: String,
+    #[serde(default)]
+    page: String,
+}
+
+impl AdminUserForm {
+    fn place(&self) -> PeopleParams {
+        PeopleParams {
+            q: self.q.clone(),
+            per: self.per.clone(),
+            page: self.page.clone(),
+            notice: String::new(),
+        }
+    }
 }
 
 /// One change to the people in the catalog, as the admin form asks for it.
@@ -3853,7 +4234,14 @@ async fn change_user(
     match form.action.as_str() {
         "add" => {
             let role = Role::parse(&form.role).ok_or_else(|| anyhow::anyhow!("choose a role"))?;
-            users.add_user(name, role, &form.password).await?;
+            users
+                .add_user(
+                    name,
+                    role,
+                    non_empty(&form.display).as_deref(),
+                    &form.password,
+                )
+                .await?;
             Ok(format!("Added {name}."))
         }
         "role" => {
@@ -3883,6 +4271,24 @@ async fn change_user(
 struct AdminSessionsForm {
     #[serde(default)]
     name: String,
+    /// Where on the People tab the form was, to go back there.
+    #[serde(default)]
+    q: String,
+    #[serde(default)]
+    per: String,
+    #[serde(default)]
+    page: String,
+}
+
+impl AdminSessionsForm {
+    fn place(&self) -> PeopleParams {
+        PeopleParams {
+            q: self.q.clone(),
+            per: self.per.clone(),
+            page: self.page.clone(),
+            notice: String::new(),
+        }
+    }
 }
 
 /// End every session one person holds, whichever mode identified them:
@@ -3900,19 +4306,24 @@ async fn admin_sessions_end(
     })?;
     let name = form.name.trim();
     if !crate::auth::valid_subject(name) {
-        return Err(AppError::bad_request(
-            "Name the person to sign out, as their subject (one plain token).",
-        ));
+        return people_refused(
+            &app,
+            &session,
+            &person,
+            &form.place(),
+            "Name the person to sign out, as their subject (one plain token).".to_owned(),
+        )
+        .await;
     }
     sessions.end_all_sessions_of(name).await?;
     eprintln!(
         "pgokf-web: {} ended every session of {name}",
         person.actor()
     );
-    Ok(redirect(&format!(
-        "/admin?notice={}",
-        filters::percent_encode(&format!("Ended every session of {name}."))
-    )))
+    Ok(people_redirect(
+        &form.place(),
+        &format!("Ended every session of {name}."),
+    ))
 }
 
 async fn admin_users(
@@ -3932,13 +4343,125 @@ async fn admin_users(
                 form.action,
                 form.name.trim()
             );
-            Ok(redirect(&format!(
-                "/admin?notice={}",
-                filters::percent_encode(&notice)
-            )))
+            Ok(people_redirect(&form.place(), &notice))
         }
-        Err(error) => admin_refused(&app, &session, &person, error.to_string()).await,
+        Err(error) => {
+            people_refused(&app, &session, &person, &form.place(), error.to_string()).await
+        }
     }
+}
+
+// ---- Identity providers ---------------------------------------------------
+
+/// The registry, in the mode that has one.
+fn provider_registry(app: &App) -> Option<&crate::provider::ProviderRegistry> {
+    app.auth
+        .users()
+        .and_then(crate::auth::UsersAuth::provider_registry)
+}
+
+/// The list of providers, read from the catalog; each is built here as it
+/// would be for a sign-in, so one this instance cannot use says so.
+async fn render_providers(
+    app: &App,
+    session: &Session,
+    outcome: AdminOutcome,
+) -> Result<AdminProvidersPage, AppError> {
+    let registry = provider_registry(app);
+    let providers = match registry {
+        Some(registry) => {
+            let all = registry.settings().await?;
+            registry.all_current().await?;
+            all.into_iter()
+                .map(|s| ProviderRow {
+                    trouble: registry.trouble(&s.id),
+                    id: s.id,
+                    name: s.provider_name,
+                    kind: s.kind.label().to_owned(),
+                    issuer: s.issuer,
+                    enabled: s.enabled,
+                    has_secret: s.client_secret.is_some(),
+                    updated_at: s.updated_at,
+                    updated_by: s.updated_by,
+                })
+                .collect()
+        }
+        None => Vec::new(),
+    };
+    Ok(AdminProvidersPage {
+        shell: Shell::new(app, session, &AdminTab::Providers.title(), "admin"),
+        admin: AdminTab::Providers.shell(outcome),
+        providers_managed_here: registry.is_some(),
+        providers,
+        can_seal: registry.is_some_and(crate::provider::ProviderRegistry::can_seal),
+    })
+}
+
+async fn admin_providers_page(
+    State(app): State<Shared>,
+    session: Session,
+    Query(params): Query<NoticeParams>,
+) -> PageResult {
+    admin(&session)?;
+    let outcome = AdminOutcome {
+        notice: non_empty(&params.notice),
+        error: None,
+    };
+    html(&render_providers(&app, &session, outcome).await?)
+}
+
+/// The form for one provider: as stored, or blank for a new one.
+async fn render_provider(
+    app: &App,
+    session: &Session,
+    id: Option<&str>,
+    outcome: AdminOutcome,
+) -> Result<AdminProviderPage, AppError> {
+    let registry = provider_registry(app).ok_or_else(|| {
+        AppError::bad_request("Identity providers are set up here in the users mode only.")
+    })?;
+    let (provider, trouble) = match id {
+        Some(id) => {
+            let settings = registry
+                .setting(id)
+                .await?
+                .ok_or_else(|| AppError::not_found("That identity provider"))?;
+            // Read afresh, so the notice is about the settings as they
+            // stand now, not as this instance last saw them.
+            registry.current(id).await?;
+            (ProviderView::from_settings(&settings), registry.trouble(id))
+        }
+        None => (ProviderView::blank(), None),
+    };
+    let title = match id {
+        Some(_) => format!("Administration · {}", provider.provider_name),
+        None => "Administration · Add an identity provider".to_owned(),
+    };
+    Ok(AdminProviderPage {
+        shell: Shell::new(app, session, &title, "admin"),
+        admin: AdminTab::Providers.shell(outcome),
+        provider,
+        can_seal: registry.can_seal(),
+        trouble,
+        roles: Role::all().iter().map(|r| r.id().to_owned()).collect(),
+    })
+}
+
+async fn admin_provider_new_page(State(app): State<Shared>, session: Session) -> PageResult {
+    admin(&session)?;
+    html(&render_provider(&app, &session, None, AdminOutcome::default()).await?)
+}
+
+async fn admin_provider_edit_page(
+    State(app): State<Shared>,
+    session: Session,
+    Path(id): Path<String>,
+) -> PageResult {
+    admin(&session)?;
+    if !crate::provider_settings::valid_slug(&id) {
+        return Err(AppError::not_found("That identity provider"));
+    }
+    html(&render_provider(&app, &session, Some(&id), AdminOutcome::default()).await?)
 }
 
 // No `Debug`: the form carries a client secret.
@@ -3946,6 +4469,9 @@ async fn admin_users(
 struct ProviderForm {
     #[serde(default)]
     action: String,
+    /// The slug of the provider being changed; empty for a new one.
+    #[serde(default)]
+    id: String,
     #[serde(default)]
     enabled: String,
     #[serde(default)]
@@ -3974,109 +4500,154 @@ struct ProviderForm {
     default_role: String,
 }
 
-/// Set up, change, or remove the identity provider people may sign in
-/// with. Saving reaches the provider's discovery document first, so what
-/// is stored is known to name a provider that answers; switching it off or
-/// removing it ends the sessions it opened.
+/// Add, change, or remove an identity provider people may sign in with.
+/// Saving reaches the provider first (its discovery document, or GitHub's
+/// API), so what is stored is known to name a provider that answers;
+/// switching one off or removing it ends the sessions it opened, and
+/// re-registering it as another provider also puts the people it brought
+/// back at the bottom of the ladder.
 async fn admin_provider(
     State(app): State<Shared>,
     session: Session,
     Form(form): Form<ProviderForm>,
 ) -> PageResult {
     let person = admin(&session)?;
-    let slot = app
+    let registry = provider_registry(&app).ok_or_else(|| {
+        AppError::bad_request("Identity providers are set up here in the users mode only.")
+    })?;
+    let users = app
         .auth
         .users()
-        .and_then(crate::auth::UsersAuth::provider_slot)
-        .ok_or_else(|| {
-            AppError::bad_request("An identity provider is set up here in the users mode only.")
-        })?;
+        .ok_or_else(|| AppError::bad_request("This site keeps no people."))?;
     let sessions = app
         .auth
         .sessions()
         .ok_or_else(|| AppError::bad_request("This site holds no sessions."))?;
+    let id = non_empty(&form.id);
+    if id
+        .as_deref()
+        .is_some_and(|id| !crate::provider_settings::valid_slug(id))
+    {
+        return Err(AppError::not_found("That identity provider"));
+    }
+    // The form again, saying what was wrong.
+    let refused = async |error: String| -> PageResult {
+        let outcome = AdminOutcome {
+            notice: None,
+            error: Some(error),
+        };
+        as_refusal(&render_provider(&app, &session, id.as_deref(), outcome).await?)
+    };
     let notice = match form.action.as_str() {
         "save" => {
-            let draft = match provider_draft(&form) {
-                Ok(draft) => draft,
-                Err(why) => return admin_refused(&app, &session, &person, why.to_owned()).await,
-            };
-            let stored = slot.settings().await?;
-            let (settings, provider) = match slot.prepare(&draft, stored.as_ref(), &person.subject)
-            {
-                Ok(prepared) => prepared,
-                Err(error) => {
-                    return admin_refused(&app, &session, &person, format!("{error:#}.")).await;
-                }
-            };
-            if let Err(error) = provider.probe().await {
-                eprintln!(
-                    "pgokf-web: the identity provider at {} did not answer: {error:#}",
-                    provider.issuer()
-                );
-                return admin_refused(
-                    &app,
-                    &session,
-                    &person,
-                    format!(
-                        "{} did not answer at {}: {error:#}. Nothing was saved.",
-                        provider.provider_name(),
-                        provider.issuer()
-                    ),
-                )
-                .await;
+            match save_provider(&person, registry, users, sessions, &form, id.as_deref()).await? {
+                Ok(notice) => notice,
+                Err(why) => return refused(why).await,
             }
-            // Another provider, or this one re-registered, is not the one
-            // that signed anyone in: those sessions end now, everywhere.
-            let changed_provider = stored.as_ref().is_some_and(|before| {
-                before.kind != settings.kind
-                    || before.issuer.trim_end_matches('/') != settings.issuer.trim_end_matches('/')
-                    || before.client_id != settings.client_id
-            });
-            let saved = slot.store(&settings, provider).await?;
-            if !saved.enabled || changed_provider {
-                sessions.end_sessions_opened_by(Mode::Oidc).await?;
-            }
-            eprintln!(
-                "pgokf-web: {} set the identity provider to {} at {} ({})",
-                person.actor(),
-                saved.provider_name,
-                saved.issuer,
-                if saved.enabled { "on" } else { "off" }
-            );
-            format!(
-                "Saved: {} answers at {}.{}",
-                saved.provider_name,
-                saved.issuer,
-                if saved.enabled {
-                    " People can sign in with it now."
-                } else {
-                    " It is off until you enable it; sessions it had opened are ended."
-                }
-            )
         }
         "remove" => {
-            if !slot.remove().await? {
-                return admin_refused(
-                    &app,
-                    &session,
-                    &person,
-                    "No identity provider is set up.".to_owned(),
-                )
-                .await;
-            }
-            sessions.end_sessions_opened_by(Mode::Oidc).await?;
+            let Some(id) = id.as_deref() else {
+                return Err(AppError::bad_request("Name the provider to remove."));
+            };
+            let Some(removed) = registry.setting(id).await? else {
+                return Err(AppError::not_found("That identity provider"));
+            };
+            registry.remove(id).await?;
+            sessions.end_sessions_opened_by_provider(id).await?;
             eprintln!(
-                "pgokf-web: {} removed the identity provider",
-                person.actor()
+                "pgokf-web: {} removed the identity provider {id} ({})",
+                person.actor(),
+                removed.provider_name
             );
-            "Removed the identity provider; the sessions it had opened are ended.".to_owned()
+            format!(
+                "Removed {}; the sessions it had opened are ended. The people it brought keep \
+                 their rows, and sign in again once it is set up again.",
+                removed.provider_name
+            )
         }
         other => return Err(AppError::bad_request(format!("Unknown action {other:?}."))),
     };
-    Ok(redirect(&format!(
-        "/admin?notice={}",
-        filters::percent_encode(&notice)
+    Ok(AdminTab::Providers.redirect_with(&notice))
+}
+
+/// Save a provider from the form: the notice to show, or - as the inner
+/// `Err` - what was wrong, for the form to show again.
+async fn save_provider(
+    person: &Principal,
+    registry: &crate::provider::ProviderRegistry,
+    users: &crate::auth::UsersAuth,
+    sessions: &crate::auth::Sessions,
+    form: &ProviderForm,
+    id: Option<&str>,
+) -> Result<Result<String, String>, AppError> {
+    let draft = match provider_draft(form) {
+        Ok(draft) => draft,
+        Err(why) => return Ok(Err(why.to_owned())),
+    };
+    let all = registry.settings().await?;
+    let stored = id.and_then(|id| all.iter().find(|s| s.id == id)).cloned();
+    let (settings, provider) = match registry.prepare(&draft, &all, &person.subject) {
+        Ok(prepared) => prepared,
+        Err(error) => return Ok(Err(format!("{error:#}."))),
+    };
+    if let Err(error) = provider.probe().await {
+        eprintln!(
+            "pgokf-web: the identity provider at {} did not answer: {error:#}",
+            provider.issuer()
+        );
+        return Ok(Err(format!(
+            "{} did not answer at {}: {error:#}. Nothing was saved.",
+            provider.provider_name(),
+            provider.issuer()
+        )));
+    }
+    // Another provider, or this one re-registered, is not the one that
+    // signed anyone in: those sessions end now, everywhere, and a role
+    // granted to its people is not lent on to whoever the new one calls by
+    // the same names.
+    let changed_provider = stored.as_ref().is_some_and(|before| {
+        before.kind != settings.kind
+            || before.issuer.trim_end_matches('/') != settings.issuer.trim_end_matches('/')
+            || before.client_id != settings.client_id
+    });
+    let is_new = stored.is_none();
+    let saved = registry.store(&settings, provider, is_new).await?;
+    if !saved.enabled || changed_provider {
+        sessions.end_sessions_opened_by_provider(&saved.id).await?;
+    }
+    // A new provider never inherits a role: rows left under this handle by
+    // a provider that once had it (removed, then this one added under the
+    // same slug) go back to the bottom of the ladder, as does everyone when
+    // an existing provider is re-registered as another.
+    if is_new || changed_provider {
+        let demoted = users.demote_people_of(&saved.id).await?;
+        if demoted > 0 {
+            eprintln!(
+                "pgokf-web: {demoted} people under the handle {} are viewers again: it now \
+                 belongs to a different provider registration",
+                saved.id
+            );
+        }
+    }
+    eprintln!(
+        "pgokf-web: {} {} the identity provider {} ({}, {} at {}, {})",
+        person.actor(),
+        if stored.is_some() { "changed" } else { "added" },
+        saved.id,
+        saved.provider_name,
+        saved.kind.id(),
+        saved.issuer,
+        if saved.enabled { "on" } else { "off" }
+    );
+    Ok(Ok(format!(
+        "Saved: {} answers at {}.{}",
+        saved.provider_name,
+        saved.issuer,
+        if saved.enabled {
+            " People can sign in with it now."
+        } else {
+            " It is off until you enable it; sessions it had opened are ended."
+        }
     )))
 }
 
@@ -4093,6 +4664,7 @@ fn provider_draft(form: &ProviderForm) -> Result<ProviderDraft, &'static str> {
         SecretChange::Set(form.client_secret.clone())
     };
     Ok(ProviderDraft {
+        id: non_empty(&form.id),
         enabled: form.enabled == "1",
         kind,
         issuer: form.issuer.clone(),
@@ -4105,6 +4677,71 @@ fn provider_draft(form: &ProviderForm) -> Result<ProviderDraft, &'static str> {
         provider_name: form.provider_name.clone(),
         role_map: form.role_map.clone(),
         default_role,
+    })
+}
+
+// ---- MCP tokens -----------------------------------------------------------
+
+/// The MCP tokens tab, read from the catalog.
+async fn render_tokens(
+    app: &App,
+    session: &Session,
+    outcome: AdminOutcome,
+) -> Result<AdminTokensPage, AppError> {
+    Ok(AdminTokensPage {
+        shell: Shell::new(app, session, &AdminTab::Tokens.title(), "admin"),
+        admin: AdminTab::Tokens.shell(outcome),
+        mcp_tokens: match &app.mcp_tokens {
+            Some(tokens) => tokens.list().await?,
+            None => Vec::new(),
+        },
+        mcp_tokens_managed_here: app.mcp_tokens.is_some(),
+        mcp_tenant: app
+            .mcp_tokens
+            .as_ref()
+            .and_then(|tokens| tokens.tenant().map(str::to_owned)),
+        mcp_roles: McpRole::all().iter().map(|r| r.id().to_owned()).collect(),
+        minted: None,
+    })
+}
+
+async fn admin_tokens_page(
+    State(app): State<Shared>,
+    session: Session,
+    Query(params): Query<NoticeParams>,
+) -> PageResult {
+    admin(&session)?;
+    let outcome = AdminOutcome {
+        notice: non_empty(&params.notice),
+        error: None,
+    };
+    html(&render_tokens(&app, &session, outcome).await?)
+}
+
+// ---- Bundles and settings -------------------------------------------------
+
+async fn admin_bundles_page(
+    State(app): State<Shared>,
+    session: Session,
+    Query(params): Query<NoticeParams>,
+) -> PageResult {
+    admin(&session)?;
+    html(&AdminBundlesPage {
+        shell: Shell::new(&app, &session, &AdminTab::Bundles.title(), "admin"),
+        admin: AdminTab::Bundles.shell(AdminOutcome {
+            notice: non_empty(&params.notice),
+            error: None,
+        }),
+        bundles: app.db.admin_bundles().await?,
+    })
+}
+
+async fn admin_settings_page(State(app): State<Shared>, session: Session) -> PageResult {
+    admin(&session)?;
+    html(&AdminSettingsPage {
+        shell: Shell::new(&app, &session, &AdminTab::Settings.title(), "admin"),
+        admin: AdminTab::Settings.shell(AdminOutcome::default()),
+        config_json: serde_json::to_string_pretty(&app.db.config().await?).unwrap_or_default(),
     })
 }
 
@@ -4131,23 +4768,21 @@ async fn admin_mcp_tokens(
     let tokens = app.mcp_tokens.as_ref().ok_or_else(|| {
         AppError::bad_request("MCP tokens need the writer connection (OKF_PG_WRITER_URL).")
     })?;
+    let refused = async |error: String| -> PageResult {
+        let outcome = AdminOutcome {
+            notice: None,
+            error: Some(error),
+        };
+        as_refusal(&render_tokens(&app, &session, outcome).await?)
+    };
     let name = form.name.trim();
     match form.action.as_str() {
         "mint" => {
             let Some(role) = McpRole::parse(&form.role) else {
-                return admin_refused(
-                    &app,
-                    &session,
-                    &person,
-                    "Choose a role: reader or builder.".to_owned(),
-                )
-                .await;
+                return refused("Choose a role: reader or builder.".to_owned()).await;
             };
             if valid_token_name(name).is_err() {
-                return admin_refused(
-                    &app,
-                    &session,
-                    &person,
+                return refused(
                     "Name the token: letters, digits, and . _ - @ + (at most 128).".to_owned(),
                 )
                 .await;
@@ -4155,17 +4790,14 @@ async fn admin_mcp_tokens(
             // Everything the page needs is read *before* the token is
             // minted, so a catalog that fails afterwards cannot leave a
             // token minted and never shown; the new row is added by hand.
-            let mut page =
-                admin_page_data(&app, &session, &person, AdminOutcome::default()).await?;
+            let mut page = render_tokens(&app, &session, AdminOutcome::default()).await?;
             let (token, record) = match tokens.mint(name, role, &person.subject).await? {
                 Minted::Token { token, record } => (token, record),
                 Minted::NameTaken => {
-                    return refused_page(
-                        page,
-                        format!(
-                            "A token named {name} already exists; revoke it first, or choose another name."
-                        ),
-                    );
+                    page.admin.error = Some(format!(
+                        "A token named {name} already exists; revoke it first, or choose another name."
+                    ));
+                    return as_refusal(&page);
                 }
                 // Checked above; the service checks again on its own account.
                 Minted::InvalidName(why) => return Err(AppError::bad_request(why)),
@@ -4184,29 +4816,14 @@ async fn admin_mcp_tokens(
         }
         "revoke" => {
             if valid_token_name(name).is_err() {
-                return admin_refused(
-                    &app,
-                    &session,
-                    &person,
-                    "Name the token to revoke.".to_owned(),
-                )
-                .await;
+                return refused("Name the token to revoke.".to_owned()).await;
             }
             if !tokens.revoke(name).await? {
-                return admin_refused(
-                    &app,
-                    &session,
-                    &person,
-                    format!("No token is named {name}."),
-                )
-                .await;
+                return refused(format!("No token is named {name}.")).await;
             }
             eprintln!("pgokf-web: {} revoked MCP token {name}", person.actor());
-            Ok(redirect(&format!(
-                "/admin?notice={}",
-                filters::percent_encode(&format!(
-                    "Revoked the MCP token {name}; every request it makes is refused from now on."
-                ))
+            Ok(AdminTab::Tokens.redirect_with(&format!(
+                "Revoked the MCP token {name}; every request it makes is refused from now on."
             )))
         }
         other => Err(AppError::bad_request(format!("Unknown action {other:?}."))),
@@ -4299,10 +4916,7 @@ async fn admin_bundles(
             format!(" at {}", form.path.trim())
         }
     );
-    Ok(redirect(&format!(
-        "/admin?notice={}",
-        filters::percent_encode(&notice)
-    )))
+    Ok(AdminTab::Bundles.redirect_with(&notice))
 }
 
 // ---------------------------------------------------------------------------
