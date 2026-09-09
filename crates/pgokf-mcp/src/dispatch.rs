@@ -100,6 +100,17 @@ impl Caller {
         ))
     }
 
+    /// The OKF actor a write by this caller is recorded under: the token
+    /// that made it, so the catalog names what wrote a document as plainly
+    /// as the log does. A local caller launched this process and is not
+    /// named by a token, so it is the server itself.
+    fn actor(&self) -> String {
+        match self {
+            Caller::Local => "agent:pgokf-mcp".to_owned(),
+            Caller::Remote(bearer) => format!("agent:{}", bearer.name),
+        }
+    }
+
     /// How this caller is named in the log. Stdio is silent — its output is
     /// the client's — so this is only ever a remote one.
     fn note(&self, happened: &str, tool: &str) {
@@ -172,7 +183,7 @@ async fn tools_call(catalog: &Catalog, caller: &Caller, params: &Value, id: Valu
     }
     caller.note("called", name);
 
-    match catalog.call_tool(name, arguments).await {
+    match catalog.call_tool(name, arguments, &caller.actor()).await {
         Ok(data) => Response::success(id, tool_result(&data, false)),
         Err(error) => Response::success(id, tool_result(&json!(format!("{error:#}")), true)),
     }
@@ -284,13 +295,24 @@ mod tests {
         let local = names(&Caller::Local.tools());
         let reader = names(&remote(Role::Reader).tools());
         let builder = names(&remote(Role::Builder).tools());
+        let writer = names(&remote(Role::Writer).tools());
+        let admin = names(&remote(Role::Admin).tools());
 
         // Assert
         assert!(reader.contains(&"concept_search".to_owned()));
         assert!(!reader.contains(&"build_workspace_plugin".to_owned()));
         assert!(builder.contains(&"build_workspace_plugin".to_owned()));
-        assert!(builder.len() > reader.len());
-        assert_eq!(local, builder, "stdio sees every tool a builder does");
+        assert!(!builder.contains(&"put_document".to_owned()));
+        assert!(writer.contains(&"put_document".to_owned()));
+        assert!(
+            !writer.contains(&"set_bundle_state".to_owned()),
+            "managing bundles is the admin's"
+        );
+        assert!(admin.contains(&"set_bundle_state".to_owned()));
+        assert!(reader.len() < builder.len());
+        assert!(builder.len() < writer.len());
+        assert!(writer.len() < admin.len());
+        assert_eq!(local, admin, "stdio sees every tool there is");
     }
 
     #[test]

@@ -142,7 +142,7 @@ your first real bundle - start with [Getting started](getting-started.md).
 | Page | What it covers |
 | ---- | -------------- |
 | [Architecture](architecture.md) | Parser, sync engine, projection seams, and the search path. |
-| [Benchmarks](benchmarks.md) | Measured recall and full-text scaling to tens of millions of concepts. |
+| [Benchmarks](benchmarks.md) | A measured 12,000-concept run: ingestion, filters, search, graph traversal, and export. |
 | [Packaging](packaging.md) | Building and distributing the extension across PostgreSQL 15–19. |
 | [API stability](api-stability.md) | What the SQL surface guarantees and how it will evolve. |
 | [Release checklist](release-checklist.md) | The gate a release must pass, including the in-database API-surface audit. |

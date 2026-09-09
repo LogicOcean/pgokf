@@ -272,8 +272,10 @@ Measured on this project:
   **sub-millisecond to roughly 10-15 ms** even at ~10M concepts, because they
   ride B-tree / GIN indexes.
 - **Broad "rank everything" full-text queries** scale **linearly** with corpus
-  size: about **322 ms at 1M**, **2.4 s at 10M**, and **29 s at 50M** concepts,
-  because `ts_rank_cd` must score every match.
+  size, because `ts_rank_cd` must score every match. Extrapolating the
+  measured 12,000-concept run puts that near **0.3 s at 1M**, **2 s at 10M**,
+  and **30 s at 50M** concepts - projections, not measurements, so measure
+  your own corpus before planning around them.
 
 For broad top-k queries over very large corpora, the optional `bm25` backend
 (`search_backend=bm25`, backed by Tiger Data `pg_textsearch` or ParadeDB

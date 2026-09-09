@@ -26,6 +26,7 @@ mod dispatch;
 mod http;
 mod rpc;
 mod tokens;
+mod write;
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -65,6 +66,13 @@ struct Cli {
     #[arg(long, hide_env_values = true)]
     database_url: Option<String>,
 
+    /// PostgreSQL connection string for a `pgokf_writer`-capable role,
+    /// which the `writer` and `admin` token roles need: without it this
+    /// server only reads, and their tools say so. Also read as
+    /// `OKF_PG_WRITER_URL` from the `--env-file`, then from the environment.
+    #[arg(long, hide_env_values = true)]
+    writer_url: Option<String>,
+
     /// Optional multi-tenant scope applied as `pgokf.tenant` for the session
     /// (`OKF_TENANT` in the env file or the environment).
     #[arg(long)]
@@ -89,6 +97,7 @@ struct Cli {
 #[derive(Debug, PartialEq, Eq)]
 struct Settings {
     database_url: String,
+    writer_url: Option<String>,
     tenant: Option<String>,
     tls: bool,
 }
@@ -109,6 +118,7 @@ fn resolve_settings(
     let database_url = pick(cli.database_url.as_deref(), "OKF_PG_URL").context(
         "no connection string: pass --database-url, set OKF_PG_URL, or name an --env-file that sets it",
     )?;
+    let writer_url = pick(cli.writer_url.as_deref(), "OKF_PG_WRITER_URL");
     let tenant = pick(cli.tenant.as_deref(), "OKF_TENANT");
     let tls = match cli.tls {
         Some(flag) => flag,
@@ -116,6 +126,7 @@ fn resolve_settings(
     };
     Ok(Settings {
         database_url,
+        writer_url,
         tenant,
         tls,
     })
@@ -124,10 +135,15 @@ fn resolve_settings(
 /// The variables this server consults, as the process environment holds
 /// them.
 fn ambient_settings() -> BTreeMap<String, String> {
-    ["OKF_PG_URL", "OKF_TENANT", "OKF_PG_TLS"]
-        .into_iter()
-        .filter_map(|key| std::env::var(key).ok().map(|v| (key.to_owned(), v)))
-        .collect()
+    [
+        "OKF_PG_URL",
+        "OKF_PG_WRITER_URL",
+        "OKF_TENANT",
+        "OKF_PG_TLS",
+    ]
+    .into_iter()
+    .filter_map(|key| std::env::var(key).ok().map(|v| (key.to_owned(), v)))
+    .collect()
 }
 
 /// Parse `KEY=VALUE` lines (blank lines and `#` comments skipped, an
@@ -179,6 +195,13 @@ async fn main() -> Result<()> {
     )
     .await
     .context("failed to connect to the catalog")?;
+    let catalog = match &settings.writer_url {
+        Some(url) => catalog
+            .with_writer(url, settings.tls)
+            .await
+            .context("failed to connect to the catalog as the writer")?,
+        None => catalog,
+    };
     match cli.http {
         Some(bind) => {
             // Token lookups get a connection of their own (see `tokens`), on
@@ -284,6 +307,7 @@ mod tests {
             http: None,
             allowed_origins: String::new(),
             database_url: None,
+            writer_url: None,
             tenant: None,
             tls: None,
             env_file: None,
@@ -323,6 +347,7 @@ mod tests {
             from_file,
             Settings {
                 database_url: "postgresql://file".to_owned(),
+                writer_url: None,
                 tenant: Some("acme".to_owned()),
                 tls: true,
             }

@@ -12,7 +12,6 @@
 mod auth;
 mod config;
 mod db;
-mod documents;
 mod graph;
 mod links;
 mod markdown;

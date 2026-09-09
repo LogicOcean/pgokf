@@ -39,7 +39,6 @@ use crate::db::{
     PersonalItem, ResourceInfo, ReviewItem, SearchQuery, StaleConcept, SyncLogEntry, SyncOutcome,
     Version,
 };
-use crate::documents::{Document, now_iso};
 use crate::graph::{GraphEdge, GraphNode};
 use crate::links::Resolver;
 use crate::mcp_tokens::{McpToken, McpTokens, Minted};
@@ -49,6 +48,7 @@ use crate::provider_settings::{ProviderKind, ProviderSettings};
 use crate::store::DocumentStore;
 use crate::user_store::PeopleQuery;
 use crate::{graph, markdown};
+use pgokf_companion::documents::{Document, now_iso};
 use pgokf_workspace::drop_packaged_resources;
 
 /// Shared application state.
@@ -3531,9 +3531,8 @@ async fn upload_documents(app: &App, access: &Access<'_>, multipart: Multipart) 
             .map_err(|_| AppError::bad_request(format!("{name} is not UTF-8 text.")))?;
         let mut document =
             Document::parse(text).map_err(|e| AppError::bad_request(format!("{name}: {e}")))?;
-        document.stamp_origin(&actor, &now);
         // A verification is granted by an approver here, never uploaded.
-        document.quarantine_verifications(&actor, &now, "uploaded");
+        document.contribute_new(&actor, &now);
         document
             .validate(&path)
             .map_err(|e| AppError::bad_request(format!("{name}: {e}")))?;
@@ -3658,10 +3657,7 @@ async fn edit_submit(
     let checked = Document::parse(&submitted).and_then(|mut document| {
         // The stored verifications are carried over and set aside with any
         // the editor typed: an edit always goes back to review.
-        if let Some(stored) = &stored {
-            document.inherit_verifications(stored);
-        }
-        document.supersede_verifications(&access.who.actor(), &now_iso());
+        document.contribute_edit(&access.who.actor(), &now_iso(), stored.as_ref());
         document.validate(&concept.path).map(|()| document)
     });
     let document = match checked {

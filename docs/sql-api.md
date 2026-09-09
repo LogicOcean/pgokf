@@ -1470,7 +1470,7 @@ token.
 | Column | Type | Notes |
 | ------ | ---- | ----- |
 | `name` | `text` | What the MCP server's log calls it, one plain token (`^[A-Za-z0-9._@+-]{1,128}$`); unique within its tenant (`UNIQUE NULLS NOT DISTINCT (tenant, name)`). |
-| `role` | `text` | `reader` (search and read the catalog) or `builder` (also build workspace plugins) - a `CHECK`. |
+| `role` | `text` | A ladder, each holding everything below it (a `CHECK`): `reader` (search and read the catalog), `builder` (also build workspace plugins), `writer` (also write documents into a content bundle), `admin` (also create, refresh, enable, disable, and retire bundles). What a `writer` contributes arrives unverified whatever the document claims, so a person still reviews it; the two writing roles need the MCP server to hold a `pgokf_writer` connection of its own. |
 | `tenant` | `text` | The tenant it was minted for (the minting UI's or command's `pgokf.tenant` scope), or `NULL` for a catalog served without one; one to 128 printable characters (a `CHECK`). An MCP endpoint admits only tokens minted for its own tenant, and a UI lists and revokes its own tenant's tokens alone - a label the companions check, not a policy the database enforces. |
 | `digest` | `text` | Primary key: the SHA-256 of the token as 64 lower-case hex characters (a `CHECK`). The token itself is never stored. |
 | `created_by` | `text` | Who minted it: the admin's subject, or `cli`. |

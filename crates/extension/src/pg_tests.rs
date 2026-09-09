@@ -5932,9 +5932,17 @@ Steps for deploying widgets with the marmoset rollout strategy.\n";
             &probe,
             &format!("'w', 'reader', E'ac\\nme', '{}', 'root'", "89".repeat(32)),
         );
+        let writing_role = mint_probe(
+            &probe,
+            &format!("'scribe', 'writer', NULL, '{}', 'root'", "1a".repeat(32)),
+        );
+        let admin_role = mint_probe(
+            &probe,
+            &format!("'steward', 'admin', NULL, '{}', 'root'", "2b".repeat(32)),
+        );
         let bad_role = mint_probe(
             &probe,
-            &format!("'x', 'admin', NULL, '{}', 'root'", "ef".repeat(32)),
+            &format!("'x', 'owner', NULL, '{}', 'root'", "ef".repeat(32)),
         );
         let bad_digest = mint_probe(&probe, "'y', 'reader', NULL, 'not-a-digest', 'root'");
         let bad_name = mint_probe(
@@ -5958,7 +5966,12 @@ Steps for deploying widgets with the marmoset rollout strategy.\n";
             "another tenant may use the same name"
         );
         assert_eq!(control_tenant, "23514", "a tenant label is printable");
-        assert_eq!(bad_role, "23514", "only reader and builder exist");
+        assert_eq!(writing_role, "ok", "a token may write");
+        assert_eq!(admin_role, "ok", "and a token may administer");
+        assert_eq!(
+            bad_role, "23514",
+            "reader, builder, writer and admin are the ladder"
+        );
         assert_eq!(bad_digest, "23514", "a digest is 64 hex characters");
         assert_eq!(bad_name, "23514", "a name is one plain token");
         assert_eq!(

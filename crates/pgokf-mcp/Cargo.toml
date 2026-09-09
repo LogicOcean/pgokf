@@ -27,7 +27,10 @@ axum = { version = "0.8", default-features = false, features = [
     "tokio",
 ] }
 clap = { version = "4.5", features = ["derive", "env"] }
-pgokf-companion = { version = "=0.2.0", path = "../pgokf-companion", features = ["mcp-token"] }
+pgokf-companion = { version = "=0.2.0", path = "../pgokf-companion", features = [
+    "documents",
+    "mcp-token",
+] }
 pgokf-pgconn = { version = "=0.2.0", path = "../pgokf-pgconn" }
 pgokf-workspace = { version = "=0.2.0", path = "../pgokf-workspace" }
 serde.workspace = true

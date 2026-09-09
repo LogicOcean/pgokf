@@ -460,7 +460,8 @@ COMMENT ON COLUMN pgokf_web.sessions.created_at IS 'When the person signed in.';
 CREATE TABLE pgokf_web.mcp_tokens (
     name       text        NOT NULL,
     role       text        NOT NULL
-        CONSTRAINT mcp_tokens_role_check CHECK (role IN ('reader', 'builder')),
+        CONSTRAINT mcp_tokens_role_check
+        CHECK (role IN ('reader', 'builder', 'writer', 'admin')),
     tenant     text
         CONSTRAINT mcp_tokens_tenant_check CHECK (tenant ~ '^[^[:cntrl:]]{1,128}$'),
     digest     text        NOT NULL
@@ -479,7 +480,7 @@ COMMENT ON TABLE pgokf_web.mcp_tokens IS
 COMMENT ON COLUMN pgokf_web.mcp_tokens.name IS
     'What the token is called in the log beside every call it makes: one plain token of letters, digits, and . _ @ + - (at most 128), unique within its tenant.';
 COMMENT ON COLUMN pgokf_web.mcp_tokens.role IS
-    'What the token may do: reader (search and read the catalog) or builder (also build workspace plugins). The MCP server decides per tool from this.';
+    'What the token may do, as a ladder where each role holds everything below it: reader (search and read the catalog), builder (also build workspace plugins), writer (also write documents into a content bundle - what an agent writes arrives unverified whatever it claims, so a person still reviews it), admin (also register, refresh, enable, disable, retire, and unregister bundles). The MCP server decides per tool from this, and the two writing roles need it to hold a writer connection of its own.';
 COMMENT ON COLUMN pgokf_web.mcp_tokens.tenant IS
     'The tenant the token was minted for - the pgokf.tenant scope of the UI or command that minted it - or NULL for a catalog served without one; one to 128 printable characters. An MCP endpoint accepts only tokens minted for its own tenant, so one process serves one tenant with tokens of its own; this is a label the server checks, not a policy the database enforces.';
 COMMENT ON COLUMN pgokf_web.mcp_tokens.digest IS

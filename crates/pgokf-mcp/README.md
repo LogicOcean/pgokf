@@ -46,6 +46,7 @@ package.
 | Flag | Env | Meaning |
 | --- | --- | --- |
 | `--database-url` | `OKF_PG_URL` | PostgreSQL URL for a `pgokf_reader`-capable role (required) |
+| `--writer-url` | `OKF_PG_WRITER_URL` | PostgreSQL URL for a `pgokf_writer`-capable role, which the `writer` and `admin` token roles need. Without it this server only reads, and their tools say so |
 | `--tenant` | `OKF_TENANT` | Apply a `pgokf.tenant` scope for the session (multi-tenant isolation; required once the catalog's `require_tenant` policy is on) |
 | `--tls` | `OKF_PG_TLS` | Require a TLS-encrypted link to PostgreSQL (default off) |
 | `--http` | `OKF_MCP_HTTP_BIND` | Serve MCP over HTTP on this address instead of over stdio; every request then carries a bearer token minted on the catalog's Admin page |
@@ -192,11 +193,39 @@ outage even during a quiet period with no other traffic.
 | --- | --- |
 | `reader` | `concept_search`, `find_similar`, `concept_neighbors`, `get_concept`, `get_skill` |
 | `builder` | everything a reader may, and `list_plugin_targets`, `build_workspace_plugin` |
+| `writer` | everything a builder may, and `list_bundles`, `put_document`, `delete_document` |
+| `admin` | everything a writer may, and `create_content_bundle`, `refresh_bundle`, `set_bundle_state` |
 
-Roles are a ladder, least first. Both are read-only against the catalog (the
-server holds a `pgokf_reader` connection). The distinction is that building a
-plugin reads every selected source through the audited readers and returns the
-whole tree, so it leaves a much longer trail than a search.
+Roles are a ladder, least first, and `tools/list` shows a token only the tools
+its role may call. `reader` and `builder` are read-only against the catalog;
+the distinction between them is that building a plugin reads every selected
+source through the audited readers and returns the whole tree, so it leaves a
+much longer trail than a search.
+
+`writer` and `admin` change the catalog, and need this server to hold a
+`pgokf_writer` connection of its own (`--writer-url`). Without one their tools
+are still listed - so an agent discovers them and is told plainly that this
+endpoint does not write - and every call answers with that. Two rules hold
+whatever writes:
+
+- **A contribution arrives unverified.** Whatever a document claims under
+  `verified` is set aside under `superseded_verifications`, with who set it
+  aside and why, and `generated` names the token as `agent:<token name>`. A
+  verification is granted by an approver reviewing the document in the web UI;
+  it is never something a contributor - a person or an agent - can type into
+  one. This is the same code the web UI's own upload and edit paths run.
+- **A write is a full snapshot.** `put_document` and `delete_document` read the
+  content bundle, change the one entry, and write all of it back through
+  `pgokf.register_bundle_content`. That read-modify-write is serialized in this
+  process, and refused outright when the catalog does not keep document sources
+  (`store_source`), because the rest of the bundle could not be read back to
+  send.
+
+Two things are deliberately **not** exposed here, and stay with a person at the
+web UI or at `psql`: `unregister_bundle`, which deletes every concept of a
+bundle irreversibly, and registering a filesystem bundle, whose path is read by
+the database server and is an operator's to choose. `set_bundle_state` covers
+the reversible half (enable, disable, retire, bring back).
 
 ### Wiring an HTTP client to it
 

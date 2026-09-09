@@ -19,6 +19,8 @@ use tokio::task::JoinHandle;
 use tokio_postgres::Client;
 use tokio_postgres::types::ToSql;
 
+use crate::write::{self, WriterConn};
+
 /// Default `limit` for `concept_search` when the caller omits it.
 const DEFAULT_SEARCH_LIMIT: i32 = 20;
 /// Default `limit` for `find_similar` when the caller omits it.
@@ -39,6 +41,12 @@ pub const HOST_ONLY: &str = "x-okf-host-only";
 /// A live catalog connection, optionally scoped to one tenant.
 pub struct Catalog {
     client: Client,
+    /// A `pgokf_writer` connection, when the operator gave one: what the
+    /// `writer` and `admin` roles need, and what this server does without
+    /// entirely when it is not set.
+    writer: Option<WriterConn>,
+    /// The writer connection's driver, waited on beside the reader's.
+    writer_driver: Option<JoinHandle<()>>,
     /// The database name, shown in plugin indexes as the catalog name.
     database_name: String,
     /// The session's tenant, carried into generated MCP configurations.
@@ -81,10 +89,39 @@ impl Catalog {
 
         Ok(Self {
             client,
+            writer: None,
+            writer_driver: None,
             database_name,
             tenant: tenant.map(str::to_owned),
             driver: Some(driver),
         })
+    }
+
+    /// Add the writer connection the `writer` and `admin` roles need, on
+    /// `writer_url` - a `pgokf_writer`-capable role - scoped to the same
+    /// tenant as the reader.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connection or the tenant scoping fails.
+    pub async fn with_writer(mut self, writer_url: &str, force_tls: bool) -> Result<Self> {
+        let (client, driver) = pgokf_pgconn::connect(writer_url, force_tls)
+            .await
+            .context("connecting to PostgreSQL as the writer")?;
+        if let Some(tenant) = &self.tenant {
+            pgokf_pgconn::set_tenant(&client, tenant).await?;
+        }
+        self.writer = Some(WriterConn::new(client));
+        self.writer_driver = Some(driver);
+        Ok(self)
+    }
+
+    /// The writer connection, or why there is none to use.
+    fn writer(&self) -> Result<&WriterConn> {
+        self.writer.as_ref().context(
+            "this MCP server has no writer connection, so it cannot change the catalog: start \
+             it with --writer-url (OKF_PG_WRITER_URL) naming a pgokf_writer-capable role",
+        )
     }
 
     /// Take the connection driver, to wait on it.
@@ -95,6 +132,12 @@ impl Catalog {
     /// the same failure. A second call returns `None`.
     pub fn take_driver(&mut self) -> Option<JoinHandle<()>> {
         self.driver.take()
+    }
+
+    /// Take the writer connection's driver, to wait on it beside the
+    /// reader's. A second call returns `None`.
+    pub fn take_writer_driver(&mut self) -> Option<JoinHandle<()>> {
+        self.writer_driver.take()
     }
 
     /// Bound every statement this session runs.
@@ -141,10 +184,12 @@ impl Catalog {
     #[must_use]
     pub fn tool_definitions() -> Value {
         let mut tools = Self::catalog_tool_definitions();
-        if let Value::Array(items) = &mut tools
-            && let Value::Array(more) = Self::plugin_tool_definitions()
-        {
-            items.extend(more);
+        if let Value::Array(items) = &mut tools {
+            for more in [Self::plugin_tool_definitions(), write::tool_definitions()] {
+                if let Value::Array(more) = more {
+                    items.extend(more);
+                }
+            }
         }
         tools
     }
@@ -271,7 +316,10 @@ impl Catalog {
     /// Returns an error for an unknown tool, an argument that is missing or the
     /// wrong type, or a database failure. The caller renders the error as an
     /// MCP `isError` tool result.
-    pub async fn call_tool(&self, name: &str, arguments: &Value) -> Result<Value> {
+    pub async fn call_tool(&self, name: &str, arguments: &Value, actor: &str) -> Result<Value> {
+        if write::is_write_tool(name) {
+            return write::call(self.writer()?, name, arguments, actor).await;
+        }
         match name {
             "concept_search" => self.concept_search(arguments).await,
             "find_similar" => self.find_similar(arguments).await,
@@ -840,7 +888,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_definitions_lists_the_catalog_and_plugin_tools() {
+    fn tool_definitions_lists_the_catalog_plugin_and_writing_tools() {
         // Arrange & Act
         let tools = Catalog::tool_definitions();
 
@@ -861,6 +909,12 @@ mod tests {
                 "get_skill",
                 "list_plugin_targets",
                 "build_workspace_plugin",
+                "list_bundles",
+                "put_document",
+                "delete_document",
+                "create_content_bundle",
+                "refresh_bundle",
+                "set_bundle_state",
             ],
         );
     }

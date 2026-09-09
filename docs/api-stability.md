@@ -21,7 +21,7 @@ the database. Complete comment coverage is a release gate (see
 
 ## The stable surface
 
-### Functions (43)
+### Functions (44)
 
 | Function | Role required | Purpose |
 | -------- | ------------- | ------- |
@@ -68,6 +68,7 @@ the database. Complete comment coverage is a release gate (see
 | `pgokf.unschedule_refresh(bigint)` | `pgokf_admin` | Remove a bundle's scheduled refresh |
 | `pgokf.version()` | `pgokf_reader` | Loaded shared-library version |
 | `pgokf.tenant_required()` | any role with `USAGE` on `pgokf` | Whether the `require_tenant` policy is on (consulted by every RLS policy) |
+| `pgokf.mcp_token_bearer(text)` | `pgokf_reader` | The name, role, and tenant of the MCP bearer token with this SHA-256 digest, or no row (`SECURITY DEFINER` over `pgokf_web.mcp_tokens`, which no reader may see) |
 
 The function **name, schema, argument types, argument order, and result shape**
 are all part of the contract. Default values that let callers omit trailing
@@ -124,10 +125,11 @@ configuration and run the file-writing exports. Each tier inherits the one
 below (`pgokf_admin` → `pgokf_writer` → `pgokf_reader`). These are cluster-wide
 roles and survive `DROP EXTENSION`.
 
-### GUC names (6)
+### GUC names (7)
 
-`pgokf.max_file_bytes`, `pgokf.max_bundle_files`, `pgokf.max_frontmatter_bytes`,
-`pgokf.max_graph_hops`, `pgokf.log_level`, and `pgokf.tenant` (the `USERSET`
+`pgokf.max_file_bytes`, `pgokf.max_bundle_files`, `pgokf.max_bundle_bytes`,
+`pgokf.max_frontmatter_bytes`, `pgokf.max_graph_hops`, `pgokf.log_level`, and
+`pgokf.tenant` (the `USERSET`
 multi-tenant policy selector; empty by default, which preserves the
 pre-multi-tenancy see-all behavior). The **names** and their meaning are
 stable; default values are tuning knobs and may be adjusted in a minor release

@@ -258,7 +258,7 @@ impl McpTokens {
             role,
             tenant: self.tenant.clone(),
             created_by: by.to_owned(),
-            created_at: crate::documents::now_iso(),
+            created_at: pgokf_companion::documents::now_iso(),
         };
         let token = new_token()?;
         Ok(

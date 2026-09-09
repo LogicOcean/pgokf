@@ -19,12 +19,20 @@
 //!   also come from the environment: an empty value means "not set".
 //! - [`mcp_token`] (feature `mcp-token`), the bearer tokens `pgokf-web` mints
 //!   and `pgokf-mcp` checks: their shape, their stored form, and their roles.
+//! - [`documents`] (feature `documents`), OKF document text and the
+//!   provenance rules every writer into the catalog applies - so a person
+//!   uploading through the web UI and an agent writing through MCP are held
+//!   to the same one: a verification is granted by an approver, never typed
+//!   into a contribution.
 //!
 //! The loop is generic over the pass and the shutdown future, which is what
 //! makes it unit-testable with paused time and a hand-triggered shutdown.
 
 #[cfg(feature = "embeddings")]
 pub mod embeddings;
+
+#[cfg(feature = "documents")]
+pub mod documents;
 
 #[cfg(feature = "mcp-token")]
 pub mod mcp_token;

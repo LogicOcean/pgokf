@@ -215,7 +215,8 @@ leaving a plain document.
   than written per request; and `GET /healthz` answers 503 while either
   catalog connection, neither of which is re-established, is unwell. The token's
   role is the single decision point for what it may reach — `reader`
-  searches and reads, `builder` may also build workspace plugins — and
+  searches and reads, `builder` may also build workspace plugins, `writer`
+  may also write documents, `admin` may also manage bundles — and
   `tools/list` filters by the same answer `tools/call` enforces, showing
   neither a tool (`-32001` if called) nor an argument the caller may not
   use; a tool that does not exist is reported as unknown rather than as a
@@ -229,6 +230,31 @@ leaving a plain document.
   are all bounded; TLS belongs in front of it, and the server says so if it
   binds an address reachable from elsewhere. New compose profile `mcp-http`
   with `PGOKF_MCP_BIND`, `PGOKF_MCP_PORT`, and `OKF_MCP_ALLOWED_ORIGINS`.
+- **An agent can contribute, under the same rule a person contributes
+  under: `writer` and `admin` MCP tokens.** The role ladder gains two rungs
+  above `builder`. A `writer` token may `list_bundles`, `put_document` (add
+  or replace one Markdown document in a content bundle) and
+  `delete_document`; an `admin` token may also `create_content_bundle`,
+  `refresh_bundle`, and `set_bundle_state` (enable, disable, retire, bring
+  back). They need the server to hold a `pgokf_writer` connection of its own
+  (`--writer-url` / `OKF_PG_WRITER_URL`); without one their tools are still
+  listed - so an agent discovers them and is told plainly that this endpoint
+  does not write - and every call says so. **What an agent writes arrives
+  unverified.** Whatever the document claims under `verified` is set aside
+  under `superseded_verifications`, with who set it aside and why, and
+  `generated` names the token as `agent:<token name>`, so the trust tier the
+  extension derives is never `human-reviewed` on an agent's say-so and the
+  document lands in the web UI's review queue for a person. That is not a
+  second implementation of the rule: the frontmatter operations moved into
+  `pgokf-companion` (feature `documents`), and the web UI's upload and edit
+  paths and this tool now run the same `contribute_new` / `contribute_edit`.
+  A write is a full snapshot of the bundle, so it is serialized in the
+  process and refused when the catalog does not keep document sources
+  (`store_source`), rather than silently dropping what it could not read
+  back. Two things are deliberately not exposed and stay with a person:
+  `unregister_bundle`, which deletes a bundle's concepts irreversibly, and
+  registering a filesystem bundle, whose path is the database server's and an
+  operator's to choose.
 - **Built plugins can point at that endpoint.** The workspace injector's
   `mcp` component takes an `mcp_url` (the MCP tool's `build_workspace_plugin`
   argument, and a field on the web **Plugins** page beside the MCP command,

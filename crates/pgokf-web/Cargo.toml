@@ -41,7 +41,11 @@ hmac = "0.13"
 # token adds no second cryptographic implementation.
 jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs"] }
 okf-parser = { version = "=0.2.0", path = "../okf-parser" }
-pgokf-companion = { version = "=0.2.0", path = "../pgokf-companion", features = ["embeddings", "mcp-token"] }
+pgokf-companion = { version = "=0.2.0", path = "../pgokf-companion", features = [
+    "documents",
+    "embeddings",
+    "mcp-token",
+] }
 pgokf-pgconn = { version = "=0.2.0", path = "../pgokf-pgconn" }
 pgokf-workspace = { version = "=0.2.0", path = "../pgokf-workspace" }
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }

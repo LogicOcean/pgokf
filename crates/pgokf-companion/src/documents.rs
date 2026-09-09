@@ -13,20 +13,25 @@ use serde_yaml::{Mapping, Value};
 
 /// A document split into its two halves.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Document {
+pub struct Document {
     pub frontmatter: Mapping,
     pub body: String,
 }
 
 /// The status a document takes when a reviewer sends it back.
-pub(crate) const STATUS_DRAFT: &str = "draft";
+pub const STATUS_DRAFT: &str = "draft";
 /// The status an approved draft takes.
-pub(crate) const STATUS_ACTIVE: &str = "active";
+pub const STATUS_ACTIVE: &str = "active";
 
 impl Document {
     /// Split a document: a `---` frontmatter block (a YAML mapping, possibly
     /// empty) and the body after it.
-    pub(crate) fn parse(text: &str) -> Result<Self, String> {
+    ///
+    /// # Errors
+    ///
+    /// The frontmatter is not a YAML mapping, is longer than the parser's
+    /// ceiling, or the block is not closed.
+    pub fn parse(text: &str) -> Result<Self, String> {
         let limits = ParserLimits::default();
         let (yaml, body) = frontmatter::split(text, "document.md", limits.max_frontmatter_bytes)
             .map_err(|e| e.to_string())?;
@@ -46,7 +51,8 @@ impl Document {
     }
 
     /// The document as text, frontmatter first.
-    pub(crate) fn render(&self) -> String {
+    #[must_use]
+    pub fn render(&self) -> String {
         let yaml = if self.frontmatter.is_empty() {
             String::new()
         } else {
@@ -64,13 +70,18 @@ impl Document {
     }
 
     /// Whether the catalog would accept the document at `path`.
-    pub(crate) fn validate(&self, path: &str) -> Result<(), String> {
+    ///
+    /// # Errors
+    ///
+    /// What the catalog's own parser would refuse: a missing `type` or
+    /// `title`, a field of the wrong shape, or a document past a ceiling.
+    pub fn validate(&self, path: &str) -> Result<(), String> {
         parse_concept(self.render().as_bytes(), path, ParserLimits::default())
             .map(|_| ())
             .map_err(|e| e.to_string())
     }
 
-    pub(crate) fn text(&self, key: &str) -> Option<&str> {
+    pub fn text(&self, key: &str) -> Option<&str> {
         self.frontmatter.get(key).and_then(Value::as_str)
     }
 
@@ -93,7 +104,7 @@ impl Document {
     /// Record who supplied the document, when the author did not: `generated`
     /// (who produced the current content) and `author` (who publishes it),
     /// both as the person's OKF actor. Returns whether anything was added.
-    pub(crate) fn stamp_origin(&mut self, actor: &str, at: &str) -> bool {
+    pub fn stamp_origin(&mut self, actor: &str, at: &str) -> bool {
         let mut changed = false;
         if !self.frontmatter.contains_key("generated") {
             self.set("generated", event(actor, at, None));
@@ -108,7 +119,7 @@ impl Document {
 
     /// Record a human verification: the event the trust tier derives from.
     /// A draft becomes active at the same time.
-    pub(crate) fn record_verification(&mut self, actor: &str, at: &str, note: Option<&str>) {
+    pub fn record_verification(&mut self, actor: &str, at: &str, note: Option<&str>) {
         self.list_mut("verified").push(event(actor, at, note));
         if self.text("status").is_none_or(|s| s == STATUS_DRAFT) {
             self.set("status", Value::String(STATUS_ACTIVE.to_owned()));
@@ -117,7 +128,7 @@ impl Document {
 
     /// Send a document back: it becomes a draft, and the review is kept
     /// under `reviews` so the author sees why.
-    pub(crate) fn send_back(&mut self, actor: &str, at: &str, note: Option<&str>) {
+    pub fn send_back(&mut self, actor: &str, at: &str, note: Option<&str>) {
         self.set("status", Value::String(STATUS_DRAFT.to_owned()));
         let mut review = mapping(&[("by", actor), ("at", at), ("outcome", "sent-back")]);
         if let Some(note) = note.map(str::trim).filter(|n| !n.is_empty()) {
@@ -135,12 +146,7 @@ impl Document {
     /// both go through here, which is what keeps a verification something
     /// only an approver can grant: a `verified` list typed into a document
     /// never counts. Returns how many events were set aside.
-    pub(crate) fn quarantine_verifications(
-        &mut self,
-        actor: &str,
-        at: &str,
-        reason: &str,
-    ) -> usize {
+    pub fn quarantine_verifications(&mut self, actor: &str, at: &str, reason: &str) -> usize {
         let Some(Value::Sequence(previous)) = self.frontmatter.remove("verified") else {
             return 0;
         };
@@ -171,7 +177,7 @@ impl Document {
     /// removed the block cannot make them vanish (they are set aside next,
     /// visibly), and the already set-aside ones, so the trail survives a
     /// full-document edit.
-    pub(crate) fn inherit_verifications(&mut self, stored: &Document) {
+    pub fn inherit_verifications(&mut self, stored: &Document) {
         for key in ["verified", "superseded_verifications"] {
             let Some(Value::Sequence(previous)) = stored.frontmatter.get(key) else {
                 continue;
@@ -185,17 +191,41 @@ impl Document {
         }
     }
 
-    /// After an edit the previous verifications no longer describe the
-    /// content: they are set aside (see [`Self::quarantine_verifications`])
-    /// and `generated` names the editor as the producer of the current
-    /// content.
-    pub(crate) fn supersede_verifications(&mut self, actor: &str, at: &str) {
-        self.quarantine_verifications(actor, at, "edited");
+    /// Take a document new to the catalog under `actor`: `generated` and
+    /// `author` are stamped when it declares neither (a contribution may
+    /// legitimately record the pipeline that produced it), and whatever it
+    /// claims under `verified` is set aside, visibly.
+    ///
+    /// This is the rule that keeps a verification something an approver
+    /// grants rather than something a contributor types. Returns how many
+    /// claimed verifications were set aside.
+    pub fn contribute_new(&mut self, actor: &str, at: &str) -> usize {
+        self.stamp_origin(actor, at);
+        self.quarantine_verifications(actor, at, "uploaded")
+    }
+
+    /// Take a document replacing one already in the catalog under `actor`.
+    ///
+    /// The stored version's verification record (live and already set aside)
+    /// is carried over first, so an edit that dropped the block cannot make
+    /// the trail vanish; everything live is then set aside, because the
+    /// verifications no longer describe this content; and `generated` names
+    /// `actor` as the producer of the content as it now stands. `stored` is
+    /// `None` when the version in the catalog cannot be parsed, which
+    /// changes nothing about the rule.
+    ///
+    /// Returns how many verifications were set aside.
+    pub fn contribute_edit(&mut self, actor: &str, at: &str, stored: Option<&Document>) -> usize {
+        if let Some(stored) = stored {
+            self.inherit_verifications(stored);
+        }
+        let set_aside = self.quarantine_verifications(actor, at, "edited");
         self.set("generated", event(actor, at, None));
+        set_aside
     }
 
     /// Whether a `human:` actor has verified the document.
-    pub(crate) fn has_human_verification(&self) -> bool {
+    pub fn has_human_verification(&self) -> bool {
         self.frontmatter
             .get("verified")
             .and_then(Value::as_sequence)
@@ -233,7 +263,8 @@ fn event(actor: &str, at: &str, note: Option<&str>) -> Value {
 }
 
 /// The current instant as an RFC 3339 UTC timestamp with second precision.
-pub(crate) fn now_iso() -> String {
+#[must_use]
+pub fn now_iso() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -243,7 +274,8 @@ pub(crate) fn now_iso() -> String {
 
 /// `YYYY-MM-DDTHH:MM:SSZ` for a Unix timestamp (proleptic Gregorian, the
 /// civil-from-days algorithm).
-pub(crate) fn iso_from_unix(secs: u64) -> String {
+#[must_use]
+pub fn iso_from_unix(secs: u64) -> String {
     let days = i64::try_from(secs / 86_400).unwrap_or(i64::MAX);
     let rem = secs % 86_400;
     let z = days + 719_468;
@@ -345,7 +377,7 @@ mod tests {
         .expect("parses");
 
         // Act
-        doc.supersede_verifications("human:bob", "2026-09-07T10:00:00Z");
+        doc.contribute_edit("human:bob", "2026-09-07T10:00:00Z", None);
 
         // Assert
         assert!(!doc.has_human_verification());
@@ -376,10 +408,8 @@ mod tests {
         .expect("parses");
 
         // Act
-        let set_aside =
-            uploaded.quarantine_verifications("human:bob", "2026-09-07T10:00:00Z", "uploaded");
-        edited.inherit_verifications(&stored);
-        edited.supersede_verifications("human:carol", "2026-09-07T10:00:00Z");
+        let set_aside = uploaded.contribute_new("human:bob", "2026-09-07T10:00:00Z");
+        edited.contribute_edit("human:carol", "2026-09-07T10:00:00Z", Some(&stored));
 
         // Assert
         assert_eq!(set_aside, 1);

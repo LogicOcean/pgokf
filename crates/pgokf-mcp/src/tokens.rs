@@ -70,6 +70,8 @@ impl ToolAccess for Role {
             "concept_search" | "find_similar" | "concept_neighbors" | "get_concept"
             | "get_skill" => true,
             "list_plugin_targets" | "build_workspace_plugin" => self >= Role::Builder,
+            "list_bundles" | "put_document" | "delete_document" => self >= Role::Writer,
+            "create_content_bundle" | "refresh_bundle" | "set_bundle_state" => self >= Role::Admin,
             // A tool no role names is refused here and reported as unknown
             // by the catalog, never silently allowed.
             _ => false,
@@ -226,7 +228,26 @@ mod tests {
             assert!(!Role::Reader.allows_tool(tool), "{tool}");
             assert!(Role::Builder.allows_tool(tool), "{tool}");
         }
-        assert!(!Role::Builder.allows_tool("drop_everything"));
+        // Writing needs the writer role, and managing bundles the admin's;
+        // each holds everything below it.
+        for tool in ["list_bundles", "put_document", "delete_document"] {
+            assert!(!Role::Builder.allows_tool(tool), "{tool}");
+            assert!(Role::Writer.allows_tool(tool), "{tool}");
+            assert!(Role::Admin.allows_tool(tool), "{tool}");
+        }
+        for tool in [
+            "create_content_bundle",
+            "refresh_bundle",
+            "set_bundle_state",
+        ] {
+            assert!(!Role::Writer.allows_tool(tool), "{tool}");
+            assert!(Role::Admin.allows_tool(tool), "{tool}");
+        }
+        assert!(
+            Role::Admin.allows_tool("concept_search") && Role::Writer.allows_tool("get_skill"),
+            "a ladder: the higher roles read too"
+        );
+        assert!(!Role::Admin.allows_tool("drop_everything"));
         assert!(!Role::any_allows("drop_everything"));
         assert!(Role::any_allows("build_workspace_plugin"));
     }

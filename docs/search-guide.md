@@ -312,17 +312,20 @@ This is the single most important thing to understand about search at scale.
   row so it can return the global top-k. `ts_rank_cd` is evaluated **per row**,
   so its cost **scales linearly** with the size of the match set.
 
-Measured on this project (see [benchmarks](benchmarks.md) and
-[the FAQ](faq.md#when-does-native-fts-become-a-problem-and-what-does-bm25-buy)),
-a broad ranked query over a common term costs about:
+The [benchmarks](benchmarks.md) measure this shape at 12,000 concepts. Because
+the cost is per matched row, it extrapolates linearly, which puts a broad
+ranked query over a common term at roughly:
 
 | Corpus size | Broad `ts_rank_cd` query |
 | -----------:| ------------------------ |
-| 1M concepts | ~322 ms |
-| 10M concepts | ~2.4 s |
-| 50M concepts | ~29 s |
+| 1M concepts | ~0.3 s (projected) |
+| 10M concepts | ~2 s (projected) |
+| 50M concepts | ~30 s (projected) |
 
-That is the honest cost of ranking a match set that grows with the corpus. It
+These three rows are **projections from the measured run, not measurements**:
+treat them as the shape of the curve, and measure your own corpus before
+planning around a number. That is the honest cost of ranking a match set that
+grows with the corpus. It
 is fine for moderate corpora and interactive top-k over selective terms; it is
 **not** fine when a single common term matches millions of rows.
 

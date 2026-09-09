@@ -38,20 +38,31 @@ pub const NAME_MAX: usize = 128;
 ///
 /// **The declaration order is the privilege order**: a role holds everything
 /// the roles before it hold, which is what `pgokf-mcp` relies on when it
-/// decides a tool. The catalog's `mcp_tokens_role_check` names the same two.
+/// decides a tool. The catalog's `mcp_tokens_role_check` names the same four.
+///
+/// The two writing roles need the MCP server to hold a writer connection of
+/// its own; without one their tools answer that they are not configured
+/// here, and a token minted for them can still read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Role {
     /// Search the catalog and read concepts and skills.
     Reader,
     /// Everything a reader may do, and build workspace plugins.
     Builder,
+    /// Everything a builder may do, and write documents into a content
+    /// bundle. What it writes arrives unverified whatever it claims, so a
+    /// contribution is something a person still reviews.
+    Writer,
+    /// Everything a writer may do, and manage the bundles themselves:
+    /// register, refresh, enable, disable, retire, and unregister them.
+    Admin,
 }
 
 impl Role {
     /// Every role, least privileged first.
     #[must_use]
     pub const fn all() -> &'static [Role] {
-        &[Role::Reader, Role::Builder]
+        &[Role::Reader, Role::Builder, Role::Writer, Role::Admin]
     }
 
     /// The role as the catalog stores it and the operator names it.
@@ -60,6 +71,8 @@ impl Role {
         match self {
             Role::Reader => "reader",
             Role::Builder => "builder",
+            Role::Writer => "writer",
+            Role::Admin => "admin",
         }
     }
 
@@ -155,7 +168,17 @@ mod tests {
             assert_eq!(role.to_string(), role.id());
         }
         assert_eq!(Role::parse(" builder "), Some(Role::Builder), "trimmed");
-        assert_eq!(Role::parse("admin"), None);
+        assert!(
+            Role::Reader < Role::Builder
+                && Role::Builder < Role::Writer
+                && Role::Writer < Role::Admin,
+            "reader < builder < writer < admin"
+        );
+        assert_eq!(
+            Role::parse("owner"),
+            None,
+            "a role this build does not know"
+        );
     }
 
     #[test]

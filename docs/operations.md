@@ -569,7 +569,7 @@ size hardware and set expectations; do not extrapolate other numbers from them.
 | Query shape | Behavior |
 | ----------- | -------- |
 | Selective / point / tag / type recall | Sub-millisecond to roughly ~10 ms, holding up to ~10M concepts (index-backed). |
-| Broad "rank everything" FTS | Scales **linearly** with corpus size: ≈322 ms @ 1M → ≈2.4 s @ 10M → ≈29 s @ 50M. |
+| Broad "rank everything" FTS | Scales **linearly** with corpus size. Extrapolating the measured run: ≈0.3 s @ 1M → ≈2 s @ 10M → ≈30 s @ 50M (projections, not measurements). |
 | Broad query on the optional `bm25` backend | BM25 top-k pruning keeps broad queries roughly flat instead of scaling linearly; requires a provider extension (Tiger Data `pg_textsearch` or ParadeDB `pg_search`) installed by the operator. |
 
 Reading these:

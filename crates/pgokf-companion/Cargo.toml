@@ -25,16 +25,22 @@ embeddings = ["dep:reqwest", "dep:serde"]
 # The MCP bearer tokens two companions must agree on: pgokf-web mints and
 # stores them, pgokf-mcp recognizes and hashes them.
 mcp-token = ["dep:base64", "dep:getrandom", "dep:sha2"]
+# OKF document text and its provenance rules, which every writer into the
+# catalog applies: pgokf-web's upload, edit and review, pgokf-mcp's
+# put_document.
+documents = ["dep:okf-parser", "dep:serde_yaml"]
 
 [dependencies]
 anyhow = "1.0"
 base64 = { version = "0.23", optional = true }
 getrandom = { version = "0.4", optional = true }
+okf-parser = { version = "=0.2.0", path = "../okf-parser", optional = true }
 reqwest = { version = "0.13", default-features = false, features = [
     "json",
     "rustls",
 ], optional = true }
 serde = { workspace = true, optional = true }
+serde_yaml = { workspace = true, optional = true }
 sha2 = { version = "0.11", optional = true }
 tokio = { version = "1.40", features = ["macros", "signal", "time"] }
 

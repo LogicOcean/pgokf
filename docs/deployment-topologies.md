@@ -295,7 +295,9 @@ outside the database and talks to the catalog through the public SQL surface.
   same tools over HTTP for clients that cannot launch a subprocess; that
   endpoint is reachable, so every request carries a bearer token - minted on
   `pgokf-web`'s Admin page and kept in the catalog as a digest - and the
-  token's role (`reader` or `builder`) decides which tools it may call.
+  token's role (`reader`, `builder`, `writer`, or `admin`) decides which tools
+  it may call; the two writing roles also need the server to hold a
+  `pgokf_writer` connection (`OKF_PG_WRITER_URL`).
 
 - **[`pgokf-web`](https://github.com/LogicOcean/pgokf/tree/main/crates/pgokf-web)** is the web UI and JSON API over the
   same catalog: search, browsing, concept pages, the link graph, and the agent

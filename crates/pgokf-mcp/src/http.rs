@@ -346,6 +346,7 @@ pub async fn serve(mut server: Server, bind: SocketAddr) -> Result<()> {
     // Nothing re-establishes either link, so when a driver ends the server
     // stops rather than answering every later call with the same failure.
     let driver = server.catalog.take_driver();
+    let writer_driver = server.catalog.take_writer_driver();
     let lookups_driver = server.admission.take_driver();
     // A socket is opened on the strength of the catalog's token lookup, so
     // a catalog that cannot answer it is a startup error, not a 503 later.
@@ -400,7 +401,7 @@ pub async fn serve(mut server: Server, bind: SocketAddr) -> Result<()> {
                     eprintln!("pgokf-mcp: shutdown signal error: {error}");
                 }
             }
-            () = catalog_lost(driver, lookups_driver) => {
+            () = catalog_lost([driver, writer_driver, lookups_driver]) => {
                 noticed.store(true, Ordering::Relaxed);
             }
         }
@@ -413,11 +414,13 @@ pub async fn serve(mut server: Server, bind: SocketAddr) -> Result<()> {
     Ok(())
 }
 
-/// Resolve when either catalog connection's driver ends, or never when
-/// there is none to wait on.
-async fn catalog_lost(work: Option<JoinHandle<()>>, lookups: Option<JoinHandle<()>>) {
+/// Resolve when any catalog connection's driver ends - the reader, the
+/// writer, or the token lookups - or never when there is none to wait on.
+async fn catalog_lost(drivers: [Option<JoinHandle<()>>; 3]) {
+    let [work, writer, lookups] = drivers;
     tokio::select! {
         () = driver_ended(work) => {}
+        () = driver_ended(writer) => {}
         () = driver_ended(lookups) => {}
     }
 }
