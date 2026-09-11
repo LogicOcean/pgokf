@@ -68,6 +68,7 @@ const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
     ("concept_search_semantic", "real[], bigint, integer"),
     ("concept_search_hybrid", "text, real[], bigint, integer"),
     ("set_concept_embedding", "bigint, text, real[]"),
+    ("set_concept_embedding", "bigint, text, real[], text"),
     ("rebuild_embedding_index", ""),
     ("concept_neighbors", "text, integer, bigint"),
     ("concept_history", "bigint, text, integer"),
