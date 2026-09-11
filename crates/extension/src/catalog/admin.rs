@@ -36,6 +36,15 @@
 //! deliberately does not either. Surfacing the bundle-level `index.md`
 //! metadata that would fill it is left to the configuration wave (see the
 //! seam note in [`crate::catalog::sync`]).
+//!
+//! # Change events and freshness
+//!
+//! Since 0.3.0 every state mutation here additionally increments the bundle's
+//! `catalog_generation`, commits one durable outbox event
+//! ([`crate::catalog::change_event`]), drives the bundle's freshness state
+//! transition, and evaluates the freshness dependencies sourced at the bundle
+//! ([`crate::catalog::freshness`]) - all inside the same transaction and under
+//! the same advisory lock as the mutation itself.
 
 use std::path::Path;
 
@@ -169,6 +178,50 @@ fn select_bundle_path(bundle_id: i64) -> Result<Option<String>, CatalogError> {
     })
 }
 
+/// The bundle's current catalog generation (post-mutation, under the advisory
+/// lock), for the outbox event a state mutation commits.
+fn catalog_generation_of(bundle_id: i64) -> Result<i64, CatalogError> {
+    Spi::get_one_with_args::<i64>(
+        "SELECT catalog_generation FROM pgokf.bundles WHERE id = $1",
+        &[bundle_id.into()],
+    )
+    .map_err(|error| spi_error("failed to read bundle catalog generation", &error))?
+    .ok_or_else(|| unknown_bundle_error(bundle_id))
+}
+
+/// Commit the durable outbox event for a bundle state mutation and evaluate
+/// the enabled freshness dependencies sourced at this bundle against it, in
+/// this transaction (the caller holds the bundle advisory lock).
+///
+/// A lifecycle event carries no concept change detail, so only bundle-scope
+/// selectors match it; a narrowed selector is unprovable against it and marks
+/// the source bundle itself stale (the unknown-scope rule in
+/// [`crate::catalog::freshness`]) rather than guessing a target.
+fn emit_state_change_event(
+    bundle_id: i64,
+    operation: &'static str,
+    catalog_generation: i64,
+) -> Result<i64, CatalogError> {
+    let event_id = crate::catalog::change_event::record(
+        bundle_id,
+        operation,
+        catalog_generation,
+        &[],
+        &crate::catalog::change_event::ChangeContext::default(),
+        None,
+    )?;
+    crate::catalog::freshness::evaluate_dependencies(
+        bundle_id,
+        event_id,
+        catalog_generation,
+        true,
+        &[],
+        false,
+        None,
+    )?;
+    Ok(event_id)
+}
+
 /// Acquire the transaction-scoped bundle advisory lock for a canonical path,
 /// mirroring the sync engine's serialization so administration cannot race a
 /// concurrent register/refresh of the same bundle.
@@ -243,6 +296,19 @@ fn unregister_bundle_impl(bundle_id: i64) -> Result<BundleInfo, CatalogError> {
     // Serialize with a concurrent register/refresh/unregister of the same
     // bundle on its stored canonical path before mutating catalog state.
     acquire_bundle_lock(&stored_path)?;
+    // Commit the outbox event BEFORE the delete: the event snapshots the
+    // bundle's identity, and its ON DELETE SET NULL reference then detaches
+    // (never cascades) when the bundle row goes. The dependencies sourced at
+    // this bundle cascade away with it, so there is nothing to evaluate.
+    let generation = catalog_generation_of(bundle_id)?;
+    let event_id = crate::catalog::change_event::record(
+        bundle_id,
+        "unregister_bundle",
+        generation,
+        &[],
+        &crate::catalog::change_event::ChangeContext::default(),
+        None,
+    )?;
     let removed = delete_bundle(bundle_id)?.ok_or_else(|| unknown_bundle_error(bundle_id))?;
 
     // Audit trail: record the unregister in the same transaction as the delete,
@@ -257,6 +323,7 @@ fn unregister_bundle_impl(bundle_id: i64) -> Result<BundleInfo, CatalogError> {
         None,
         None,
         retention_days,
+        Some(event_id),
     )?;
     Ok(removed)
 }
@@ -280,9 +347,11 @@ fn set_bundle_enabled_impl(bundle_id: i64, enabled: bool) -> Result<BundleInfo, 
 
     acquire_bundle_lock(&stored_path)?;
     let statement = format!(
-        "UPDATE pgokf.bundles SET enabled = $2 WHERE id = $1 RETURNING {BUNDLE_INFO_COLUMNS}"
+        "UPDATE pgokf.bundles
+         SET enabled = $2, catalog_generation = catalog_generation + 1
+         WHERE id = $1 RETURNING {BUNDLE_INFO_COLUMNS}"
     );
-    Spi::connect_mut(|client| {
+    let info = Spi::connect_mut(|client| {
         let mut table = client
             .update(
                 statement.as_str(),
@@ -292,7 +361,27 @@ fn set_bundle_enabled_impl(bundle_id: i64, enabled: bool) -> Result<BundleInfo, 
             .map_err(|error| spi_error("failed to set bundle enabled flag", &error))?;
         table.next().map(|row| read_bundle_info(&row)).transpose()
     })?
-    .ok_or_else(|| unknown_bundle_error(bundle_id))
+    .ok_or_else(|| unknown_bundle_error(bundle_id))?;
+
+    // Freshness: disabling is conservatively stale-marking (currency must be
+    // re-established by a producer compare-and-set after re-enable); enabling
+    // is not a content-currency transition and clears nothing on its own.
+    if !enabled {
+        crate::catalog::freshness::transition_bundle(
+            bundle_id,
+            crate::catalog::freshness::BundleTransition::Disable,
+        )?;
+    }
+    // One durable event per state mutation, then dependency evaluation, in
+    // this transaction.
+    let generation = catalog_generation_of(bundle_id)?;
+    let operation = if enabled {
+        "enable_bundle"
+    } else {
+        "disable_bundle"
+    };
+    let _ = emit_state_change_event(bundle_id, operation, generation)?;
+    Ok(info)
 }
 
 /// Authorize, lock on the stored canonical path, and set the bundle's
@@ -320,16 +409,28 @@ fn retire_bundle_impl(bundle_id: i64) -> Result<BundleInfo, CatalogError> {
     acquire_bundle_lock(&stored_path)?;
     let statement = format!(
         "UPDATE pgokf.bundles
-         SET retired_at = COALESCE(retired_at, pg_catalog.now())
+         SET retired_at = COALESCE(retired_at, pg_catalog.now()),
+             catalog_generation = catalog_generation + 1
          WHERE id = $1 RETURNING {BUNDLE_INFO_COLUMNS}"
     );
-    Spi::connect_mut(|client| {
+    let info = Spi::connect_mut(|client| {
         let mut table = client
             .update(statement.as_str(), None, &[bundle_id.into()])
             .map_err(|error| spi_error("failed to retire bundle", &error))?;
         table.next().map(|row| read_bundle_info(&row)).transpose()
     })?
-    .ok_or_else(|| unknown_bundle_error(bundle_id))
+    .ok_or_else(|| unknown_bundle_error(bundle_id))?;
+
+    // Freshness: the bundle is retired (its state row follows, so the
+    // effective surface reports retired); then the durable event and
+    // dependency evaluation, in this transaction.
+    crate::catalog::freshness::transition_bundle(
+        bundle_id,
+        crate::catalog::freshness::BundleTransition::Retire,
+    )?;
+    let generation = catalog_generation_of(bundle_id)?;
+    let _ = emit_state_change_event(bundle_id, "retire_bundle", generation)?;
+    Ok(info)
 }
 
 /// Authorize, lock on the stored canonical path, and clear the bundle's
@@ -347,15 +448,28 @@ fn unretire_bundle_impl(bundle_id: i64) -> Result<BundleInfo, CatalogError> {
 
     acquire_bundle_lock(&stored_path)?;
     let statement = format!(
-        "UPDATE pgokf.bundles SET retired_at = NULL WHERE id = $1 RETURNING {BUNDLE_INFO_COLUMNS}"
+        "UPDATE pgokf.bundles
+         SET retired_at = NULL, catalog_generation = catalog_generation + 1
+         WHERE id = $1 RETURNING {BUNDLE_INFO_COLUMNS}"
     );
-    Spi::connect_mut(|client| {
+    let info = Spi::connect_mut(|client| {
         let mut table = client
             .update(statement.as_str(), None, &[bundle_id.into()])
             .map_err(|error| spi_error("failed to unretire bundle", &error))?;
         table.next().map(|row| read_bundle_info(&row)).transpose()
     })?
-    .ok_or_else(|| unknown_bundle_error(bundle_id))
+    .ok_or_else(|| unknown_bundle_error(bundle_id))?;
+
+    // Freshness: the restored bundle is stale (reason bundle_restored) until a
+    // producer compare-and-set re-establishes currency; then the durable event
+    // and dependency evaluation, in this transaction.
+    crate::catalog::freshness::transition_bundle(
+        bundle_id,
+        crate::catalog::freshness::BundleTransition::Unretire,
+    )?;
+    let generation = catalog_generation_of(bundle_id)?;
+    let _ = emit_state_change_event(bundle_id, "unretire_bundle", generation)?;
+    Ok(info)
 }
 
 /// Read the (id, path) of every bundle retired longer than `older_than`, scoped
@@ -456,6 +570,41 @@ fn purge_retired_impl(older_than: Interval) -> Result<i64, CatalogError> {
         // bundle a concurrent unretire_bundle restored between the snapshot and
         // this iteration is skipped rather than silently hard-deleted.
         acquire_bundle_lock(&stored_path)?;
+        // Re-check eligibility under this lock before emitting anything: a
+        // concurrent unretire_bundle (which takes the same lock) commits either
+        // before this point (the row reads as no longer purgeable, and no event
+        // is written for a purge that does not happen) or after the delete.
+        // connect + is_empty: Spi::get_one errors on an empty result instead
+        // of returning None, and a restored bundle reads as zero rows here.
+        let still_eligible = Spi::connect(|client| {
+            let table = client
+                .select(
+                    "SELECT 1 FROM pgokf.bundles
+                     WHERE id = $1
+                       AND retired_at IS NOT NULL
+                       AND retired_at < pg_catalog.now() - $2",
+                    Some(1),
+                    &[bundle_id.into(), older_than.into()],
+                )
+                .map_err(|error| spi_error("failed to re-check purge eligibility", &error))?;
+            Ok(!table.is_empty())
+        })?;
+        if !still_eligible {
+            continue;
+        }
+        // Commit the outbox event BEFORE the delete (same shape as a manual
+        // unregister; operation purge_bundle): it snapshots the bundle's
+        // identity, and its ON DELETE SET NULL reference detaches rather than
+        // cascading.
+        let generation = catalog_generation_of(bundle_id)?;
+        let event_id = crate::catalog::change_event::record(
+            bundle_id,
+            "purge_bundle",
+            generation,
+            &[],
+            &crate::catalog::change_event::ChangeContext::default(),
+            None,
+        )?;
         if delete_bundle_row_if_eligible(bundle_id, older_than)? {
             // Same FK-free unregister audit row a manual unregister writes; the
             // returned sync id is unused (a purge has no per-concept manifest).
@@ -466,6 +615,7 @@ fn purge_retired_impl(older_than: Interval) -> Result<i64, CatalogError> {
                 None,
                 None,
                 retention_days,
+                Some(event_id),
             )?;
             purged += 1;
         }

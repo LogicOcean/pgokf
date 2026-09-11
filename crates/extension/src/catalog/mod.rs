@@ -77,18 +77,29 @@
 //!   engine's `ContentSource` and runs the identical shared pipeline, so a
 //!   companion process can stream an object store into the catalog without the
 //!   extension performing any network or filesystem I/O.
+//! - [`change_event`] - the durable catalog-change outbox
+//!   (`pgokf.catalog_change_event`): one event per committed catalog mutation,
+//!   written in the mutation's own transaction, with dispatcher claim/ack and
+//!   acknowledged-only retention pruning.
+//! - [`freshness`] - freshness state and dependency evaluation
+//!   (`pgokf.bundle_freshness`, `pgokf.concept_freshness`,
+//!   `pgokf.freshness_dependency`, the `pgokf.effective_freshness` reader
+//!   projection, the `mark_*` writer APIs), publication fences
+//!   (`pgokf.publication_fence`), and the `pgokf.capabilities()` declaration.
 
 pub mod access;
 pub mod admin;
 pub mod audit;
 mod batch;
 pub mod bundle_log;
+pub mod change_event;
 pub mod config;
 pub mod content;
 pub mod dedup;
 pub mod embedding;
 pub mod export;
 pub mod facets;
+pub mod freshness;
 pub mod history;
 mod iso8601;
 pub mod links;

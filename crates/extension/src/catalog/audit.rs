@@ -14,6 +14,12 @@
 //!   [`crate::catalog::admin`] when a bundle is removed, capturing the bundle's
 //!   path (the counts and hash are `NULL` - an unregister has no diff).
 //!
+//! Since 0.3.0 each row also links to the durable outbox event the operation
+//! committed (`change_event_id`, nullable for rows written before 0.3.0). The
+//! link was chosen over duplicating origin/causation columns: the event row
+//! already carries them, so a single foreign value keeps the audit trail and
+//! the outbox consistent by construction.
+//!
 //! # v1 transactional semantics
 //!
 //! The audit row is inserted inside the very transaction that performs the
@@ -77,7 +83,12 @@ CREATE TABLE pgokf_private.sync_log (
     total       integer,
     sync_hash   text,
     tenant_id   text NOT NULL DEFAULT 'default',
-    CONSTRAINT sync_log_op_chk CHECK (op IN ('register', 'refresh', 'content', 'unregister'))
+    -- change_event_id is appended last so a fresh install matches,
+    -- column-for-column, an existing install upgraded via ADD COLUMN (see
+    -- sql/pgokf--0.2.0--0.3.0-dev.sql).
+    change_event_id bigint,
+    CONSTRAINT sync_log_op_chk CHECK (op IN ('register', 'refresh', 'content', 'unregister',
+                                             'dependency_register', 'dependency_remove'))
 );
 
 CREATE INDEX sync_log_bundle_id_idx ON pgokf_private.sync_log (bundle_id);
@@ -96,7 +107,7 @@ COMMENT ON COLUMN pgokf_private.sync_log.tenant_id IS
 COMMENT ON COLUMN pgokf_private.sync_log.bundle_path IS
     'Canonical path (filesystem root or the content:<name> synthetic key) of the affected bundle, captured at operation time.';
 COMMENT ON COLUMN pgokf_private.sync_log.op IS
-    'The operation: register / refresh / content (register_bundle_content) / unregister.';
+    'The operation: register / refresh / content (register_bundle_content) / unregister; dependency_register / dependency_remove for freshness-dependency registration and removal (counts and hash NULL, bundle_path carrying the target bundle path plus the dependency id).';
 COMMENT ON COLUMN pgokf_private.sync_log.actor IS
     'The session_user that performed the operation, captured by column default.';
 COMMENT ON COLUMN pgokf_private.sync_log.synced_at IS
@@ -113,6 +124,8 @@ COMMENT ON COLUMN pgokf_private.sync_log.total IS
     'Total files considered by the sync (added + updated + removed + unchanged); NULL for an unregister row.';
 COMMENT ON COLUMN pgokf_private.sync_log.sync_hash IS
     'Aggregate BLAKE3 digest of the synced snapshot (matches pgokf.bundles.sync_hash); NULL for an unregister row.';
+COMMENT ON COLUMN pgokf_private.sync_log.change_event_id IS
+    'The durable outbox event (pgokf.catalog_change_event.event_id) this operation committed, linking the audit row to the delivery/claim record; NULL for rows written before 0.3.0. The audit row and the event commit in the same transaction, so the link is always exact.';
 ",
     name = "sync_log_table",
     requires = ["catalog_tables", "config_table"]
@@ -195,6 +208,7 @@ pub(crate) fn record(
     report: Option<&SyncReport>,
     sync_hash: Option<&str>,
     retention_days: i32,
+    change_event_id: Option<i64>,
 ) -> Result<i64, CatalogError> {
     let (added, updated, removed, unchanged, total) = match report {
         Some(report) => (
@@ -210,8 +224,8 @@ pub(crate) fn record(
     let sync_id = Spi::get_one_with_args::<i64>(
         "INSERT INTO pgokf_private.sync_log
              (bundle_id, tenant_id, bundle_path, op,
-              added, updated, removed, unchanged, total, sync_hash)
-         VALUES ($1, pgokf_private.effective_tenant(), $2, $3, $4, $5, $6, $7, $8, $9)
+              added, updated, removed, unchanged, total, sync_hash, change_event_id)
+         VALUES ($1, pgokf_private.effective_tenant(), $2, $3, $4, $5, $6, $7, $8, $9, $10)
          RETURNING id",
         &[
             bundle_id.into(),
@@ -223,6 +237,7 @@ pub(crate) fn record(
             unchanged.into(),
             total.into(),
             sync_hash.into(),
+            change_event_id.into(),
         ],
     )
     .map_err(|error| spi_error("failed to append sync-log row", &error))?

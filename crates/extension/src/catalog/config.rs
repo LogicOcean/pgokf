@@ -28,8 +28,10 @@
 //! `search_backend`, `bm25_provider` (`auto`/`pg_textsearch`/`pg_search`),
 //! a boolean for `require_tenant` (deny an unscoped session instead of the
 //! see-all default),
-//! `notify_channel` (a `LISTEN`/`NOTIFY` channel, or empty to disable), and
-//! `okf_version_policy` (`warn`/`reject`). Every value is
+//! `notify_channel` (a `LISTEN`/`NOTIFY` channel, or empty to disable),
+//! `okf_version_policy` (`warn`/`reject`), and `change_event_retention_days`
+//! (retention of acknowledged outbox events; unacknowledged events are never
+//! pruned). Every value is
 //! validated and coerced per key ([`coerce`]); an unknown key or a value of the
 //! wrong shape or domain is rejected with SQLSTATE `22023`. `pgokf.get_config()`
 //! is a reader-level projection returning the effective policy as `jsonb`.
@@ -89,6 +91,9 @@ enum ConfigKey {
     /// Whether a session must set `pgokf.tenant` to see or write anything
     /// (`true`), or an unset session is cross-tenant (`false`, the default).
     RequireTenant,
+    /// Retention window, in days, for acknowledged `pgokf.catalog_change_event`
+    /// rows; unacknowledged events are never pruned.
+    ChangeEventRetentionDays,
 }
 
 impl ConfigKey {
@@ -109,6 +114,7 @@ impl ConfigKey {
             Self::HistoryRetentionDays => "history_retention_days",
             Self::Bm25Provider => "bm25_provider",
             Self::RequireTenant => "require_tenant",
+            Self::ChangeEventRetentionDays => "change_event_retention_days",
         }
     }
 
@@ -130,6 +136,7 @@ impl ConfigKey {
             "history_retention_days" => Ok(Self::HistoryRetentionDays),
             "bm25_provider" => Ok(Self::Bm25Provider),
             "require_tenant" => Ok(Self::RequireTenant),
+            "change_event_retention_days" => Ok(Self::ChangeEventRetentionDays),
             other => Err(CatalogError::invalid_parameter(
                 format!("unknown configuration key: {other}"),
                 Path::new(""),
@@ -155,6 +162,7 @@ enum ConfigValue {
     HistoryRetentionDays(i32),
     Bm25Provider(String),
     RequireTenant(bool),
+    ChangeEventRetentionDays(i32),
 }
 
 /// The two accepted values of the `okf_version_policy` key.
@@ -445,6 +453,19 @@ fn coerce_history_retention_days(
     )?))
 }
 
+/// Coerce the `change_event_retention_days` integer key.
+fn coerce_change_event_retention_days(
+    value: pgrx::JsonB,
+    key: ConfigKey,
+) -> Result<ConfigValue, CatalogError> {
+    let json = value.0;
+    let raw = json.as_i64().ok_or_else(|| type_error(key, "an integer"))?;
+    Ok(ConfigValue::ChangeEventRetentionDays(validate_nonneg_days(
+        raw,
+        "change_event_retention_days",
+    )?))
+}
+
 /// Coerce and validate a `jsonb` value for `key` into a typed [`ConfigValue`].
 ///
 /// A thin per-shape dispatch: each key owns its coercion by naming its own
@@ -502,6 +523,7 @@ fn coerce(key: ConfigKey, value: pgrx::JsonB) -> Result<ConfigValue, CatalogErro
             ConfigValue::Bm25Provider,
         ),
         ConfigKey::RequireTenant => coerce_bool(value, key, ConfigValue::RequireTenant),
+        ConfigKey::ChangeEventRetentionDays => coerce_change_event_retention_days(value, key),
     }
 }
 
@@ -609,6 +631,10 @@ fn persist(value: &ConfigValue) -> Result<(), CatalogError> {
             "UPDATE pgokf_private.config SET require_tenant = $1 WHERE singleton",
             &[(*flag).into()],
         ),
+        ConfigValue::ChangeEventRetentionDays(days) => Spi::run_with_args(
+            "UPDATE pgokf_private.config SET change_event_retention_days = $1 WHERE singleton",
+            &[(*days).into()],
+        ),
     }
     .map_err(|error| spi_error("failed to persist configuration", &error))
 }
@@ -658,6 +684,9 @@ fn reset_key(key: ConfigKey) -> Result<(), CatalogError> {
         ConfigKey::RequireTenant => {
             "UPDATE pgokf_private.config SET require_tenant = DEFAULT WHERE singleton"
         }
+        ConfigKey::ChangeEventRetentionDays => {
+            "UPDATE pgokf_private.config SET change_event_retention_days = DEFAULT WHERE singleton"
+        }
     };
     Spi::run(statement).map_err(|error| spi_error("failed to reset configuration key", &error))
 }
@@ -679,7 +708,8 @@ fn reset_all() -> Result<(), CatalogError> {
              track_history = DEFAULT, \
              history_retention_days = DEFAULT, \
              bm25_provider = DEFAULT, \
-             require_tenant = DEFAULT \
+             require_tenant = DEFAULT, \
+             change_event_retention_days = DEFAULT \
          WHERE singleton",
     )
     .map_err(|error| spi_error("failed to reset configuration", &error))
@@ -720,7 +750,8 @@ fn get_config_impl() -> Result<pgrx::JsonB, CatalogError> {
              'track_history', pg_catalog.to_jsonb(track_history),
              'history_retention_days', pg_catalog.to_jsonb(history_retention_days),
              'bm25_provider', pg_catalog.to_jsonb(bm25_provider),
-             'require_tenant', pg_catalog.to_jsonb(require_tenant))
+             'require_tenant', pg_catalog.to_jsonb(require_tenant),
+             'change_event_retention_days', pg_catalog.to_jsonb(change_event_retention_days))
          FROM pgokf_private.config
          WHERE singleton",
     )
@@ -800,6 +831,25 @@ pub fn embedding_dim() -> Result<i32, CatalogError> {
     Spi::get_one::<i32>("SELECT embedding_dim FROM pgokf_private.config WHERE singleton")
         .map_err(|error| spi_error("failed to read embedding_dim", &error))?
         .ok_or_else(|| CatalogError::internal("embedding_dim is missing", Path::new("")))
+}
+
+/// The durable acknowledged-event retention window, in days.
+///
+/// Read from the singleton config row by the outbox prune that runs at the
+/// tail of a successful sync (the `SECURITY DEFINER` sync path holds privileges
+/// on the admin-only config table). `0` keeps acknowledged events indefinitely.
+/// Unacknowledged events are never pruned regardless of this value.
+///
+/// # Errors
+///
+/// Returns a [`CatalogError`] when the configuration row cannot be read or is
+/// missing.
+pub fn change_event_retention_days() -> Result<i32, CatalogError> {
+    Spi::get_one::<i32>(
+        "SELECT change_event_retention_days FROM pgokf_private.config WHERE singleton",
+    )
+    .map_err(|error| spi_error("failed to read change_event_retention_days", &error))?
+    .ok_or_else(|| CatalogError::internal("change_event_retention_days is missing", Path::new("")))
 }
 
 /// The durable, sync-time defaults consumed by the register/refresh engine.
@@ -951,13 +1001,17 @@ CREATE TABLE pgokf_private.config (
     -- require_tenant is appended last for the same reason (see
     -- sql/pgokf--0.1.15--0.1.16.sql).
     require_tenant             boolean NOT NULL DEFAULT false,
+    -- change_event_retention_days is appended last for the same reason (see
+    -- sql/pgokf--0.2.0--0.3.0-dev.sql).
+    change_event_retention_days integer NOT NULL DEFAULT 30,
     CONSTRAINT config_singleton_chk CHECK (singleton),
     CONSTRAINT config_retention_nonneg_chk CHECK (sync_log_retention_days >= 0),
     CONSTRAINT config_search_backend_chk CHECK (search_backend IN ('native', 'bm25')),
     CONSTRAINT config_okf_version_policy_chk CHECK (okf_version_policy IN ('warn', 'reject')),
     CONSTRAINT config_embedding_dim_chk CHECK (embedding_dim BETWEEN 1 AND 16000),
     CONSTRAINT config_history_retention_nonneg_chk CHECK (history_retention_days >= 0),
-    CONSTRAINT config_bm25_provider_chk CHECK (bm25_provider IN ('auto', 'pg_search', 'pg_textsearch'))
+    CONSTRAINT config_bm25_provider_chk CHECK (bm25_provider IN ('auto', 'pg_search', 'pg_textsearch')),
+    CONSTRAINT config_change_event_retention_nonneg_chk CHECK (change_event_retention_days >= 0)
 );
 
 INSERT INTO pgokf_private.config DEFAULT VALUES;
@@ -1035,6 +1089,8 @@ COMMENT ON COLUMN pgokf_private.config.bm25_provider IS
     'Which BM25 provider extension the bm25 search backend uses: ''auto'' (the default: pg_textsearch when installed, else pg_search), ''pg_textsearch'' (Tiger Data, PostgreSQL license, PostgreSQL 17 and 18), or ''pg_search'' (ParadeDB, AGPL-3.0). Both providers name their index access method bm25 and cannot coexist in one database. A named provider that is not installed makes bm25 search fall back to native with a warning; rebuild_search_index builds the resolved provider''s index.';
 COMMENT ON COLUMN pgokf_private.config.history_retention_days IS
     'Retention window in days for CLOSED pgokf.concept_history versions (valid_to IS NOT NULL): closed versions whose valid_to predates now() - this many days are pruned in the same transaction after each successful sync appends its history, when track_history is on. The single current open version of a concept (valid_to IS NULL) is never pruned. 0 (the default) keeps history indefinitely; must be >= 0.';
+COMMENT ON COLUMN pgokf_private.config.change_event_retention_days IS
+    'Retention window in days for ACKNOWLEDGED pgokf.catalog_change_event rows: an acknowledged event whose acknowledged_at predates now() - this many days is pruned in the same transaction after a successful sync appends new events. Pending or claimed-but-unacknowledged events are NEVER pruned (delivery is at-least-once; an unacknowledged event stays retryable). 0 keeps acknowledged events indefinitely; must be >= 0. Default 30.';
 ",
     name = "config_table",
     requires = ["catalog_tables"]
@@ -1060,7 +1116,9 @@ mod pgokf {
     /// `LISTEN`/`NOTIFY` identifier, or empty to disable),
     /// `okf_version_policy` (`warn` or `reject`), a boolean for
     /// `track_history`, and an integer for `sync_log_retention_days`,
-    /// `history_retention_days`, and `embedding_dim` (1..=16000). Unknown keys
+    /// `history_retention_days`, `change_event_retention_days` (acknowledged
+    /// outbox events only; unacknowledged events are never pruned), and
+    /// `embedding_dim` (1..=16000). Unknown keys
     /// and wrong-shaped or out-of-domain values raise SQLSTATE `22023`.
     #[pg_extern(requires = ["config_table"])]
     fn set_config(key: &str, value: pgrx::JsonB) {
@@ -1146,6 +1204,10 @@ mod tests {
             ("embedding_dim", ConfigKey::EmbeddingDim),
             ("track_history", ConfigKey::TrackHistory),
             ("history_retention_days", ConfigKey::HistoryRetentionDays),
+            (
+                "change_event_retention_days",
+                ConfigKey::ChangeEventRetentionDays,
+            ),
         ];
 
         for (name, key) in expected {
