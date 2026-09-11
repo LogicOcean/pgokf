@@ -75,6 +75,25 @@ exercised against a live PostgreSQL 18 cluster.
 | `get_skill(bundle_id, concept_id)` | `skill_result` | STABLE | DEFINER | `pgokf_reader` |
 | `get_script(bundle_id, concept_id)` | `script_result` | STABLE | DEFINER | `pgokf_reader` |
 | `get_reference(bundle_id, concept_id, include_bytes)` | `reference_result` | STABLE | DEFINER | `pgokf_reader` |
+| `register_bundle_content_with_context(name, paths, contents, options, context)` | `bundle_sync_result` | VOLATILE | DEFINER | `pgokf_writer` |
+| `capabilities()` | `jsonb` | IMMUTABLE | invoker | `pgokf_reader` |
+| `concept_search_fresh(query, bundle_id, limit_count, freshness, concept_type, tags, status, trust_tier, after_cursor)` | `SETOF concept_search_fresh_result` | STABLE | invoker | `pgokf_reader` |
+| `register_freshness_dependency(producer, source_bundle_id, selector_kind, target_bundle_id, selector_value, target_scope_kind, target_scope_key, causation_key)` | `bigint` | VOLATILE | DEFINER | `pgokf_writer` |
+| `disable_freshness_dependency(dependency_id)` | `void` | VOLATILE | DEFINER | `pgokf_writer` |
+| `remove_freshness_dependency(dependency_id)` | `void` | VOLATILE | DEFINER | `pgokf_writer` |
+| `mark_stale(bundle_id, reason_codes, producer, observed_source_generation)` | `void` | VOLATILE | DEFINER | `pgokf_writer` |
+| `mark_reconciling(bundle_id, producer)` | `void` | VOLATILE | DEFINER | `pgokf_writer` |
+| `mark_blocked(bundle_id, reason_codes, producer)` | `void` | VOLATILE | DEFINER | `pgokf_writer` |
+| `mark_fresh(bundle_id, expected_catalog_generation, expected_observed_source_generation, manifest_hash, embedding_contract, producer)` | `boolean` | VOLATILE | DEFINER | `pgokf_writer` |
+| `mark_scope_stale(bundle_id, scope_kind, scope_key, reason_codes, producer)` | `void` | VOLATILE | DEFINER | `pgokf_writer` |
+| `clear_freshness_scope(bundle_id, scope_kind, scope_key)` | `void` | VOLATILE | DEFINER | `pgokf_writer` |
+| `list_freshness_dependencies(max_rows)` | `SETOF freshness_dependency_info` | VOLATILE | DEFINER | `pgokf_admin` |
+| `repair_bundle_freshness(bundle_id, state, reason_codes)` | `void` | VOLATILE | DEFINER | `pgokf_admin` |
+| `issue_publication_fence(bundle_id, producer, target_generation, expected_catalog_generation, manifest_hash, lease_seconds)` | `publication_fence_info` | VOLATILE | DEFINER | `pgokf_writer` |
+| `release_publication_fence(bundle_id, producer, fencing_token)` | `void` | VOLATILE | DEFINER | `pgokf_writer` |
+| `claim_catalog_change_events(producer, limit, lease_seconds)` | `SETOF claimed_change_event` | VOLATILE | DEFINER | `pgokf_dispatcher` |
+| `ack_catalog_change_event(event_id, producer, acceptance_key)` | `boolean` | VOLATILE | DEFINER | `pgokf_dispatcher` |
+| `list_catalog_change_events(bundle_id, max_rows)` | `SETOF catalog_change_event_info` | VOLATILE | DEFINER | `pgokf_admin` |
 
 `register_bundle`, `concept_search`, `search_facets`, `find_similar`,
 `concept_search_semantic`, `concept_search_hybrid`, `concept_neighbors`,
@@ -780,6 +799,116 @@ FROM pgokf.concept_as_of(1, 'runbooks/database-failover', TIMESTAMPTZ '2026-08-2
 -- ---------+------------------------+---------------------
 --        2 | Database Failover (v2) | Revised failover ...
 ```
+
+---
+
+## Producer capabilities: generations, freshness, and change events
+
+Since 0.3.0 the catalog exposes the generic producer contract surface. Every
+catalog mutation - a register/refresh/content sync and every bundle state
+mutation - increments the bundle's monotonic `pgokf.bundles.catalog_generation`
+and commits exactly one durable `pgokf.catalog_change_event` row **in the same
+transaction**, then evaluates the enabled `pgokf.freshness_dependency`
+registrations whose source is the changed bundle and marks matched targets
+stale - all atomically, so no committed change can exist without its event and
+its freshness consequences.
+
+**Producer identity.** Every `producer` argument and column on this surface is
+a **caller-supplied opaque label, not authorization**. Authorization is always
+the `session_user`'s membership in the role ladder (`pgokf_writer` /
+`pgokf_admin`, or `pgokf_dispatcher` for outbox delivery), checked exactly as
+in [security.md](security.md), plus the usual tenant confinement. A future
+release may bind labels to an authenticated principal registry; the wire shape
+already carries `created_by`/`producer` pairs so that binding can be added
+without breaking changes.
+
+**Capability declaration.** `pgokf.capabilities() → jsonb` (IMMUTABLE, invoker
+rights, `pgokf_reader`) returns the capability names and interface versions
+this release implements:
+
+```sql
+SELECT jsonb_pretty(pgokf.capabilities());
+-- {
+--   "catalog_generation": 1,   "publication_fence": 1,
+--   "freshness_dependency": 1, "effective_freshness": 1,
+--   "catalog_change_event": 1, "search_freshness": 1
+-- }
+```
+
+**Provenance context.** A producer sets `SET [LOCAL] pgokf.sync_context =
+'{"origin": ..., "causation_key": ..., "reconciliation_key": ...,
+"producer": ..., "manifest_hash": ..., "observed_source_generation": ...}'`
+before calling `register_bundle` / `refresh_bundle` /
+`register_bundle_content`; the committed event carries those opaque values
+verbatim. A `causation_key` equal to a dependency's own key suppresses
+re-triggering that dependency, so a producer-driven refresh cannot recurse.
+`pgokf.register_bundle_content_with_context(name, paths, contents, options,
+context jsonb)` takes the same object as an explicit argument, additionally
+accepting an `operation` override (`refresh_bundle` / `put_document` /
+`delete_document` / `concept_change`) so a companion's one-document edit keeps
+its precise operation.
+
+**Freshness.** `pgokf.bundle_freshness` (one row per bundle) and
+`pgokf.concept_freshness` (sparse `concept`/`path`/`group` scope overrides)
+hold the generic state (`fresh` / `stale` / `reconciling` / `blocked` /
+`retired`), reason codes, and the producer's opaque revisions. Readers use the
+tenant-scoped `pgokf.effective_freshness` view; the raw tables are granted to
+no role. Bundles registered before 0.3.0 are backfilled `stale` (reason
+`legacy_pre_0.3.0`) and stay stale until reconciled; bundles registered
+afterward are born `fresh`. Writers transition state with `mark_stale` /
+`mark_scope_stale` / `mark_reconciling` / `mark_blocked`, and complete a
+reconciliation with the compare-and-set `mark_fresh`, which refuses (returns
+`false`) when the observed source revision or the catalog generation has moved
+meanwhile - a superseded attempt can never clear staleness. Admins inspect the
+registry with `list_freshness_dependencies` and repair with
+`repair_bundle_freshness`.
+
+**Dependencies.** `register_freshness_dependency(producer, source_bundle_id,
+selector_kind, target_bundle_id, selector_value, target_scope_kind,
+target_scope_key, causation_key) → bigint` maps a source selector onto a
+target bundle/scope. The selector grammar is exact and case-sensitive (no glob
+or regex): `selector_kind` is `bundle` (empty `selector_value`), `concept`
+(exact concept id), `path` (exact bundle-relative path), or `path_prefix`.
+Evaluation is idempotent by source catalog generation (each dependency tracks
+its watermark, starting from the source's generation at registration). When a
+change's scope cannot be proved against a narrowed selector - a lifecycle
+event carries no concept detail, or a change summary exceeded its bound - the
+*source* bundle itself is marked stale (`change_scope_unknown`) and no target
+is guessed.
+
+**Outbox delivery.** A dispatcher claims with
+`pgokf.claim_catalog_change_events(producer, limit, lease_seconds) → SETOF
+pgokf.claimed_change_event` (`FOR UPDATE SKIP LOCKED`, oldest first, attempt
+counter) and acknowledges with `pgokf.ack_catalog_change_event(event_id,
+producer, acceptance_key) → boolean` (idempotent, bound to the claiming
+producer label). Both require the dedicated **`pgokf_dispatcher`** role, which
+is deliberately outside the reader < writer < admin ladder - an event consumer
+holds no search or ingestion rights. Unacknowledged events stay retryable and
+are never pruned; acknowledged events age out under the
+`change_event_retention_days` policy (default 30). Admins inspect with
+`list_catalog_change_events`; no role may `SELECT` the raw table. The existing
+`notify_channel` `LISTEN`/`NOTIFY` announcement remains as a non-durable
+wake-up hint whose payload points at the event id.
+
+**Publication fences.** `issue_publication_fence(bundle_id, producer,
+target_generation, expected_catalog_generation, manifest_hash, lease_seconds)
+→ pgokf.publication_fence_info` compare-and-sets the producer's fence slot
+under the bundle advisory lock: the expected catalog generation must be
+current and the target generation must advance (`22023` otherwise), and each
+issuance hands out the next `fencing_token`.
+`release_publication_fence(bundle_id, producer, fencing_token)` releases only
+the live token.
+
+**Search surfacing.** `pgokf.concept_search_fresh(query, bundle_id,
+limit_count, freshness, ...) → SETOF pgokf.concept_search_fresh_result` is the
+additive freshness-aware variant of `concept_search` (the existing signature
+and result type are unchanged): `freshness` is `any` (default) / `fresh` /
+`stale`, applied before pagination, and every hit is annotated with its
+effective freshness (state, reasons, scope, opaque revisions, catalog
+generation) with concept > path > bundle override precedence. Lexical results
+may include stale concepts, always labeled. This variant ranks with the native
+FTS pipeline (BM25 composition is deferred), and no semantic/embedding gating
+is applied yet.
 
 ---
 

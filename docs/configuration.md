@@ -83,6 +83,30 @@ RESET pgokf.tenant;                            -- back to see-all (or deny, with
 See [multi-tenancy.md](multi-tenancy.md) for the full model, including the
 strict-isolation contract (pin the tenant, connect as a non-superuser reader).
 
+### Change-provenance context - `pgokf.sync_context`
+
+Also `USERSET` and not a safety limit: a JSON object a producer session sets
+before invoking `register_bundle` / `refresh_bundle` /
+`register_bundle_content`, so the durable `pgokf.catalog_change_event` the sync
+commits carries its provenance. Recognized keys (all optional, all opaque -
+stored and replayed verbatim, never interpreted): `origin`, `causation_key`,
+`reconciliation_key`, `producer`, `manifest_hash`,
+`observed_source_generation`. A `causation_key` equal to a freshness
+dependency's own key suppresses re-triggering that dependency (loop safety).
+Empty (the default) records no provenance. A malformed (non-object) value fails
+the sync with `22023`.
+
+```sql
+SET LOCAL pgokf.sync_context = '{"causation_key": "reconcile-42", "producer": "my-pipeline"}';
+SELECT pgokf.refresh_bundle(7);
+RESET pgokf.sync_context;
+```
+
+See [sql-api.md](sql-api.md#producer-capabilities-generations-freshness-and-change-events)
+for the full producer surface, including
+`register_bundle_content_with_context`, which takes the same object as an
+explicit argument.
+
 ---
 
 ## Durable policy (`pgokf_private.config`)
@@ -110,6 +134,7 @@ admin-only).
 | `embedding_dim` | integer | `1536` | between `1` and `16000` |
 | `track_history` | boolean | `false` | must be a boolean |
 | `history_retention_days` | integer | `0` | `>= 0` and fits `integer` |
+| `change_event_retention_days` | integer | `30` | `>= 0` and fits `integer` |
 
 ### Which keys the current engine consults
 
@@ -118,7 +143,8 @@ it **enforces `allowed_roots`**, **applies `default_text_search_config`** to
 both indexing and querying, **honors `store_source`**, `search_backend`,
 `bm25_provider`, `require_tenant`, `default_strict`, and `default_exclude`, and **activates
 `sync_log_retention_days`**, `notify_channel`, `okf_version_policy`,
-`embedding_dim`, `track_history`, and `history_retention_days`:
+`embedding_dim`, `track_history`, `history_retention_days`, and
+`change_event_retention_days`:
 
 | Key | Status in the current engine |
 | --- | ---------------------------- |
@@ -134,6 +160,7 @@ both indexing and querying, **honors `store_source`**, `search_backend`,
 | `embedding_dim` | **Applied (new in 0.1.6).** The expected length of caller-supplied embeddings: `pgokf.set_concept_embedding` rejects any `real[]` whose length differs, and `pgokf.rebuild_embedding_index` builds its pgvector HNSW index with the `vector(embedding_dim)` typmod. See the embeddings section below. |
 | `track_history` | **Applied (new in 0.1.11).** When `true`, each sync records an SCD-2 version trail of every changed concept into `pgokf.concept_history` (read via `pgokf.concept_history` / `pgokf.concept_as_of`); when `false` (default) it records nothing, with zero storage/behavior change. See the version-history section below and [Version History](version-history.md). |
 | `history_retention_days` | **Applied (new in 0.1.11).** When `track_history` is on and this is positive, closed history versions older than `now() - this many days` are pruned in the same transaction after each sync; the current open version is never pruned. `0` (default) keeps history indefinitely. See the version-history section below. |
+| `change_event_retention_days` | **Applied (new in 0.3.0).** After each successful sync commits its durable outbox events, ACKNOWLEDGED `pgokf.catalog_change_event` rows whose `acknowledged_at` is older than `now() - this many days` are pruned in the same transaction. Pending or claimed-but-unacknowledged events are NEVER pruned (delivery is at-least-once). `0` keeps acknowledged events indefinitely. Default `30`. |
 | `default_strict` | **Applied.** When `true` (default), the first malformed concept file aborts the sync with `22023` and the surrounding transaction rolls back, so a partial projection is never committed. When `false`, a malformed file is logged as a `WARNING` and passed over (it counts toward no bucket in the returned report), so the rest of the bundle still registers. A file that cannot be *read* (an I/O failure, not a parse failure) remains a hard error in both modes. |
 | `default_exclude` | **Applied.** Bundle-relative glob patterns excluded from filesystem discovery at sync time, combined with the built-in exclusions. Content-sourced bundles (`register_bundle_content`) have no filesystem discovery, so the globs do not apply to them. |
 
