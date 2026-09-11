@@ -32,8 +32,8 @@ pg_test = []
 
 [dependencies]
 arrow.workspace = true
-okf-parser = { version = "=0.2.0", path = "../okf-parser" }
-okf-sync = { version = "=0.2.0", path = "../okf-sync" }
+okf-parser = { version = "=0.3.0-dev", path = "../okf-parser" }
+okf-sync = { version = "=0.3.0-dev", path = "../okf-sync" }
 parquet.workspace = true
 pgrx.workspace = true
 
