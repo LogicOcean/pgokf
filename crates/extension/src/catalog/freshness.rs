@@ -685,7 +685,7 @@ COMMENT ON COLUMN pgokf.bundle_freshness.producer IS
 COMMENT ON COLUMN pgokf.bundle_freshness.manifest_hash IS
     'Hash of the publication manifest the current materialization was produced from (producer-supplied evidence; initialized to the registration sync hash).';
 COMMENT ON COLUMN pgokf.bundle_freshness.embedding_contract IS
-    'The embedding contract (model/dimension/render version) the producer reconciled against, as opaque jsonb evidence; semantic gating on it arrives with the embedding freshness capability.';
+    'The embedding contract (model/dimension/render version) the producer reconciled against, as opaque jsonb evidence recorded by pgokf.mark_fresh. Semantic ranking does not read this evidence: it enforces the live embedding_model / embedding_dim / embedding_contract policy against each embedding row''s own provenance.';
 COMMENT ON COLUMN pgokf.bundle_freshness.updated_at IS
     'When this row last changed.';
 
@@ -854,12 +854,13 @@ CREATE FUNCTION pgokf.capabilities() RETURNS jsonb
             'freshness_dependency', 1,
             'effective_freshness', 1,
             'catalog_change_event', 1,
-            'search_freshness', 1)
+            'search_freshness', 1,
+            'embedding_freshness', 1)
     $fn$;
 REVOKE ALL ON FUNCTION pgokf.capabilities() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pgokf.capabilities() TO pgokf_reader;
 COMMENT ON FUNCTION pgokf.capabilities() IS
-    'The catalog capabilities this pgokf release implements, as a jsonb object of capability name to interface version: catalog_generation, publication_fence, freshness_dependency, effective_freshness, catalog_change_event, and search_freshness (all version 1). Immutable; a producer declares the capabilities it requires and checks them here. Later releases only add entries or raise versions.';
+    'The catalog capabilities this pgokf release implements, as a jsonb object of capability name to interface version: catalog_generation, publication_fence, freshness_dependency, effective_freshness, catalog_change_event, search_freshness, and embedding_freshness (all version 1). Immutable; a producer declares the capabilities it requires and checks them here. Later releases only add entries or raise versions.';
 ",
     name = "effective_freshness_view",
     requires = ["freshness_tables"]

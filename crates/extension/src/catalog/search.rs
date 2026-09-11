@@ -285,6 +285,11 @@ struct FreshSearchHit {
     published_revision: Option<String>,
     catalog_generation: i64,
     last_reconciled_at: Option<pgrx::datum::TimestampWithTimeZone>,
+    embedding_state: String,
+    embedding_model: Option<String>,
+    embedding_dim: Option<i32>,
+    embedding_input_hash: Option<String>,
+    embedded_at: Option<pgrx::datum::TimestampWithTimeZone>,
 }
 
 /// Authorize, validate, and run the freshness-aware search.
@@ -297,6 +302,15 @@ struct FreshSearchHit {
 /// The `freshness` filter applies inside the query - before the keyset
 /// predicate and `LIMIT` - so a filtered page is a true page of the filtered
 /// set, never a truncated unfiltered one.
+///
+/// Every hit also carries its embedding provenance, annotated in an outer
+/// projection over the (already limited) ranked rows: `embedding_state` is
+/// `missing` (no embedding row), `current` (the row satisfies the semantic
+/// eligibility predicate of [`crate::catalog::embedding`] - physical contract
+/// match plus an effectively fresh concept), or `stale` (a physical row that
+/// is not eligible); model, dimension, input hash, and `embedded_at` (the
+/// row's `updated_at`) are the stored provenance values, NULL when no row
+/// exists.
 ///
 /// The function runs with invoker rights like [`concept_search`]: the
 /// `effective_freshness` view is the one reader-granted freshness surface and
@@ -316,9 +330,35 @@ fn concept_search_fresh_impl(
     let limit = validate_limit_count(limit_count)?;
     let freshness = validate_freshness_filter(freshness)?;
     let text_search_config = effective_text_search_config()?;
+    let embedding_policy = crate::catalog::embedding::effective_embedding_policy()?;
+    let contract_match = crate::catalog::embedding::contract_match_sql(13, 14, 15);
 
     let statement = format!(
         "
+    SELECT ranked.bundle_id,
+           ranked.concept_id,
+           ranked.path,
+           ranked.title,
+           ranked.type,
+           ranked.rank,
+           ranked.headline,
+           ranked.freshness_state,
+           ranked.freshness_reasons,
+           ranked.freshness_scope,
+           ranked.stale_since,
+           ranked.observed_revision,
+           ranked.indexed_revision,
+           ranked.published_revision,
+           ranked.catalog_generation,
+           ranked.last_reconciled_at,
+           CASE WHEN e.concept_id IS NULL THEN 'missing'
+                WHEN ranked.freshness_state = 'fresh' AND {contract_match} THEN 'current'
+                ELSE 'stale' END AS embedding_state,
+           e.model AS embedding_model,
+           e.dim AS embedding_dim,
+           e.input_hash AS embedding_input_hash,
+           e.updated_at AS embedded_at
+    FROM (
     SELECT hits.bundle_id,
            hits.concept_id,
            hits.path,
@@ -355,7 +395,12 @@ fn concept_search_fresh_impl(
            OR COALESCE(fc.state, fp.state, fb.state, 'fresh') = $12)
       AND {keyset}
     ORDER BY hits.rank DESC, hits.bundle_id ASC, hits.concept_id ASC
-    LIMIT $3",
+    LIMIT $3
+    ) AS ranked
+    JOIN pgokf.concepts c ON c.bundle_id = ranked.bundle_id AND c.id = ranked.concept_id
+    LEFT JOIN pgokf.concept_embedding e
+           ON e.bundle_id = ranked.bundle_id AND e.concept_id = ranked.concept_id
+    ORDER BY ranked.rank DESC, ranked.bundle_id ASC, ranked.concept_id ASC",
         hits = search_backend::NATIVE_HITS_QUERY,
         keyset = search_backend::KEYSET_PREDICATE,
     );
@@ -378,6 +423,9 @@ fn concept_search_fresh_impl(
                     after.map(|cursor| cursor.bundle_id).into(),
                     after.map(|cursor| cursor.concept_id.as_str()).into(),
                     freshness.into(),
+                    embedding_policy.model.clone().into(),
+                    embedding_policy.dim.into(),
+                    embedding_policy.contract.clone().into(),
                 ],
             )
             .map_err(spi_error("freshness-aware search query failed"))?;
@@ -407,6 +455,11 @@ fn concept_search_fresh_impl(
                 published_revision: reader.optional(14)?,
                 catalog_generation: reader.required(15, "catalog_generation")?,
                 last_reconciled_at: reader.optional(16)?,
+                embedding_state: reader.required(17, "embedding_state")?,
+                embedding_model: reader.optional(18)?,
+                embedding_dim: reader.optional(19)?,
+                embedding_input_hash: reader.optional(20)?,
+                embedded_at: reader.optional(21)?,
             });
         }
         Ok(hits)
@@ -475,6 +528,21 @@ fn fresh_search_result(
         .map_err(fresh_composite_error)?;
     tuple
         .set_by_name("last_reconciled_at", hit.last_reconciled_at)
+        .map_err(fresh_composite_error)?;
+    tuple
+        .set_by_name("embedding_state", hit.embedding_state.clone())
+        .map_err(fresh_composite_error)?;
+    tuple
+        .set_by_name("embedding_model", hit.embedding_model.clone())
+        .map_err(fresh_composite_error)?;
+    tuple
+        .set_by_name("embedding_dim", hit.embedding_dim)
+        .map_err(fresh_composite_error)?;
+    tuple
+        .set_by_name("embedding_input_hash", hit.embedding_input_hash.clone())
+        .map_err(fresh_composite_error)?;
+    tuple
+        .set_by_name("embedded_at", hit.embedded_at)
         .map_err(fresh_composite_error)?;
     Ok(tuple)
 }
@@ -578,11 +646,19 @@ CREATE TYPE pgokf.concept_search_fresh_result AS (
     indexed_revision   text,
     published_revision text,
     catalog_generation bigint,
-    last_reconciled_at timestamptz
+    last_reconciled_at timestamptz,
+    -- The embedding provenance columns are appended last so a fresh install
+    -- matches, attribute-for-attribute, an existing install upgraded via
+    -- ALTER TYPE ... ADD ATTRIBUTE (see sql/pgokf--0.2.0--0.3.0-dev.sql).
+    embedding_state    text,
+    embedding_model    text,
+    embedding_dim      integer,
+    embedding_input_hash text,
+    embedded_at        timestamptz
 );
 
 COMMENT ON TYPE pgokf.concept_search_fresh_result IS
-    'One ranked hit from pgokf.concept_search_fresh: the concept_search_result columns plus the concept''s effective freshness annotation - state, reason codes, the scope the state was recorded at, stale_since, the producer''s opaque observed/indexed revisions, the catalog generation the materialization covers (published_revision), the bundle''s live catalog_generation, and last_reconciled_at. Embedding provenance columns arrive with the embedding freshness capability.';
+    'One ranked hit from pgokf.concept_search_fresh: the concept_search_result columns plus the concept''s effective freshness annotation - state, reason codes, the scope the state was recorded at, stale_since, the producer''s opaque observed/indexed revisions, the catalog generation the materialization covers (published_revision), the bundle''s live catalog_generation, and last_reconciled_at - plus the embedding provenance: embedding_state (missing / current / stale, where current means the stored vector satisfies the semantic eligibility predicate: source file hash equal to the concept''s current file_hash, model/dimension/contract matching the embedding policy, and the concept effectively fresh), embedding_model, embedding_dim, embedding_input_hash, and embedded_at (NULL when no embedding row exists).';
 ",
         name = "search_fresh_type",
         requires = ["catalog_tables", "effective_freshness_view"]
@@ -596,7 +672,11 @@ COMMENT ON TYPE pgokf.concept_search_fresh_result IS
     /// FTS pipeline), plus a `freshness` filter - `any` (the default),
     /// `fresh`, or `stale` - and a freshness annotation on every hit:
     /// lexical results may include stale concepts, always labeled. A concept
-    /// with no recorded freshness row reports `fresh`.
+    /// with no recorded freshness row reports `fresh`. Every hit also carries
+    /// its embedding provenance: `embedding_state` (`missing` / `current` /
+    /// `stale`, where `current` is the semantic eligibility predicate of
+    /// `concept_search_semantic`), `embedding_model`, `embedding_dim`,
+    /// `embedding_input_hash`, and `embedded_at`.
     #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
     #[pg_extern(stable, parallel_restricted, requires = ["search_fresh_type"])]
     fn concept_search_fresh(
@@ -634,7 +714,7 @@ COMMENT ON TYPE pgokf.concept_search_fresh_result IS
 REVOKE ALL ON FUNCTION pgokf.concept_search_fresh(text, bigint, integer, text, text, text[], text, text, jsonb) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pgokf.concept_search_fresh(text, bigint, integer, text, text, text[], text, text, jsonb) TO pgokf_reader;
 COMMENT ON FUNCTION pgokf.concept_search_fresh(text, bigint, integer, text, text, text[], text, text, jsonb) IS
-    'Rank catalog concepts with effective freshness: the concept_search contract plus a freshness filter (any - the default - fresh, or stale; 22023 otherwise) and a per-hit freshness annotation (state, reasons, scope, stale_since, opaque observed/indexed revisions, published_revision, catalog_generation, last_reconciled_at) with concept > path > bundle override precedence; a concept with no recorded row is fresh. Lexical results may include stale concepts, always labeled; the filter applies before pagination. Reader-level and tenant-scoped like concept_search. This variant always ranks with the native FTS pipeline; composition with the optional BM25 backend is deferred. Semantic/embedding freshness gating is a later capability and is not applied here.';
+    'Rank catalog concepts with effective freshness: the concept_search contract plus a freshness filter (any - the default - fresh, or stale; 22023 otherwise) and a per-hit freshness annotation (state, reasons, scope, stale_since, opaque observed/indexed revisions, published_revision, catalog_generation, last_reconciled_at) with concept > path > bundle override precedence; a concept with no recorded row is fresh. Every hit also carries its embedding provenance (embedding_state missing/current/stale under the semantic eligibility predicate, plus model, dimension, input hash, and embedded_at). Lexical results may include stale concepts, always labeled; the filter applies before pagination. Reader-level and tenant-scoped like concept_search. This variant always ranks with the native FTS pipeline; composition with the optional BM25 backend is deferred. Semantic ranking itself (concept_search_semantic / concept_search_hybrid) excludes ineligible embeddings rather than labeling them.';
 ",
         name = "search_fresh_function_hardening",
         requires = [concept_search_fresh]
