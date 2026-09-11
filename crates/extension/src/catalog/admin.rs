@@ -44,7 +44,14 @@
 //! ([`crate::catalog::change_event`]), drives the bundle's freshness state
 //! transition, and evaluates the freshness dependencies sourced at the bundle
 //! ([`crate::catalog::freshness`]) - all inside the same transaction and under
-//! the same advisory lock as the mutation itself.
+//! the same advisory lock as the mutation itself. Relationship visibility
+//! follows without extra writes: `pgokf.current_relationships` exposes only
+//! publications whose source bundle is active (`enabled AND retired_at IS
+//! NULL`), so retiring or disabling a bundle removes its current relationship
+//! visibility (unretire/re-enable restores it), and unregistering/purging
+//! detaches the publication's live bundle reference (`ON DELETE SET NULL`),
+//! which drops its rows from the projection while the publication audit row is
+//! retained ([`crate::catalog::relationships`]).
 
 use std::path::Path;
 

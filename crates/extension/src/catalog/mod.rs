@@ -90,6 +90,13 @@
 //!   `pgokf.freshness_dependency`, the `pgokf.effective_freshness` reader
 //!   projection, the `mark_*` writer APIs), publication fences
 //!   (`pgokf.publication_fence`), and the `pgokf.capabilities()` declaration.
+//! - [`relationships`] - generation-bound typed relationships
+//!   (`pgokf.relationship_publication` + `pgokf.relationship`, the
+//!   `pgokf.current_relationships` reader projection, the compare-and-set
+//!   `pgokf.replace_relationships` writer API, and the
+//!   `pgokf.concept_relationship_neighbors` typed traversal). The sync engine
+//!   activates the staged publication matching an accepted catalog generation
+//!   in the sync transaction.
 
 pub mod access;
 pub mod admin;
@@ -110,6 +117,7 @@ pub mod links;
 pub mod neighbors;
 pub mod packages;
 pub mod provenance;
+pub mod relationships;
 pub mod schedule;
 pub mod schema;
 pub mod search;

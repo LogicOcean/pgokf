@@ -28,12 +28,16 @@
 //!    staged concepts;
 //! 8. update the bundle row (file count, `last_synced_at`, aggregate
 //!    `sync_hash`, and the monotonic `catalog_generation`) last;
-//! 9. commit the durable outbox event ([`crate::catalog::change_event`]) and
-//!    the audit row linked to it, initialize the bundle's freshness row on
-//!    first registration, evaluate the enabled freshness dependencies whose
-//!    source is this bundle ([`crate::catalog::freshness`]), and prune
-//!    acknowledged events past the `change_event_retention_days` window - all
-//!    in the same transaction.
+//! 9. activate the staged relationship publication expecting exactly the
+//!    accepted generation and supersede the prior generation's publications
+//!    ([`crate::catalog::relationships`]), marking the bundle stale when its
+//!    relationship coverage disappeared;
+//! 10. commit the durable outbox event ([`crate::catalog::change_event`]) and
+//!     the audit row linked to it, initialize the bundle's freshness row on
+//!     first registration, evaluate the enabled freshness dependencies whose
+//!     source is this bundle ([`crate::catalog::freshness`]), and prune
+//!     acknowledged events past the `change_event_retention_days` window - all
+//!     in the same transaction.
 //!
 //! Because `pgrx` functions execute inside the caller's transaction and every
 //! failure is raised as a `PostgreSQL` error, a failed sync rolls back
@@ -1550,6 +1554,15 @@ pub(crate) fn run_bundle_sync<S: ByteSource>(
     let sync_hash = bundle_sync_hash(&current);
     let catalog_generation = update_bundle_row(bundle_id, &sync_hash, okf_version.as_deref())?;
 
+    // Relationship generation activation, in this transaction and after the
+    // new catalog generation exists: the staged publication expecting exactly
+    // this generation becomes the bundle's visible relationship set, the prior
+    // generation's publications are superseded, and a bundle whose coverage
+    // disappeared stays stale - new concepts never combine with old-generation
+    // relationships. See crate::catalog::relationships.
+    let coverage_missing =
+        crate::catalog::relationships::activate_staged(bundle_id, catalog_generation)?;
+
     let event_id = record_event_and_evaluate(
         bundle_id,
         &projection,
@@ -1558,6 +1571,7 @@ pub(crate) fn run_bundle_sync<S: ByteSource>(
         context,
         catalog_generation,
         &sync_hash,
+        coverage_missing,
     )?;
 
     // Audit trail: append exactly one row for this operation (linked to the
@@ -1604,6 +1618,7 @@ fn record_event_and_evaluate(
     context: &crate::catalog::change_event::ChangeContext,
     catalog_generation: i64,
     sync_hash: &str,
+    relationship_coverage_missing: bool,
 ) -> Result<i64, CatalogError> {
     // Durable outbox event: exactly one row per accepted sync, carrying the new
     // catalog generation, a bounded change summary, and the producer's
@@ -1635,6 +1650,15 @@ fn record_event_and_evaluate(
         sync_hash,
         context,
     )?;
+
+    // Required relationship coverage: a refresh that superseded the bundle's
+    // active relationship publications without activating a matching staged
+    // replacement keeps the bundle stale (reason relationship_coverage_missing)
+    // until the producer publishes the matching generation; the CAS mark_fresh
+    // refuses while that reason stands.
+    if relationship_coverage_missing {
+        crate::catalog::freshness::mark_relationship_coverage_missing(bundle_id)?;
+    }
 
     // Dependency evaluation: every enabled freshness dependency whose source
     // is this bundle is evaluated against this event, in this transaction, so

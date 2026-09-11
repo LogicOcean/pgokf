@@ -110,6 +110,14 @@ const REASON_SOURCE_CHANGED: &str = "dependency_source_changed";
 /// narrowed selector ("unknown scope is stale scope").
 const REASON_SCOPE_UNKNOWN: &str = "change_scope_unknown";
 
+/// Reason code recorded when a refresh superseded a bundle's relationship
+/// coverage (its active [`crate::catalog::relationships`] publications) and no
+/// staged publication matched the accepted generation. While it stands, the
+/// compare-and-set [`mark_fresh`](pgokf::mark_fresh) refuses: the producer
+/// must publish a matching replacement (which clears the reason) before its
+/// reconciliation can complete.
+pub(crate) const REASON_RELATIONSHIP_COVERAGE_MISSING: &str = "relationship_coverage_missing";
+
 fn spi_error(context: &str, error: &pgrx::spi::Error) -> CatalogError {
     CatalogError::internal(format!("{context}: {error}"), Path::new(""))
 }
@@ -126,7 +134,7 @@ fn unknown_bundle_error(bundle_id: i64) -> CatalogError {
 /// The stored canonical path of a registered bundle (owner-rights read: the
 /// callers are `SECURITY DEFINER` bodies already tenant-confined by
 /// [`security::enforce_bundle_tenant`]).
-fn bundle_path(bundle_id: i64) -> Result<String, CatalogError> {
+pub(crate) fn bundle_path(bundle_id: i64) -> Result<String, CatalogError> {
     Spi::get_one_with_args::<String>(
         "SELECT path FROM pgokf.bundles WHERE id = $1",
         &[bundle_id.into()],
@@ -282,6 +290,46 @@ pub(crate) enum BundleTransition {
     /// `set_bundle_enabled(false)`: conservative `stale` with reason
     /// `bundle_disabled`; enabling does not clear it.
     Disable,
+}
+
+/// Mark a bundle stale because a refresh superseded its relationship coverage
+/// without a matching replacement (the `relationship_coverage_missing`
+/// reason). Called by the sync tail when
+/// [`crate::catalog::relationships::activate_staged`] reports the loss.
+///
+/// # Errors
+///
+/// Returns a [`CatalogError`] on any SPI failure.
+pub(crate) fn mark_relationship_coverage_missing(bundle_id: i64) -> Result<(), CatalogError> {
+    set_bundle_state(
+        bundle_id,
+        "stale",
+        &[REASON_RELATIONSHIP_COVERAGE_MISSING],
+        None,
+        None,
+    )
+}
+
+/// Clear a standing `relationship_coverage_missing` reason, leaving the state
+/// and every other reason untouched. Called when relationship coverage is
+/// re-established (a publication activates, immediately or at sync time) so
+/// the compare-and-set [`mark_fresh`](pgokf::mark_fresh) can complete again.
+///
+/// # Errors
+///
+/// Returns a [`CatalogError`] on any SPI failure.
+pub(crate) fn clear_relationship_coverage_missing(bundle_id: i64) -> Result<(), CatalogError> {
+    Spi::run_with_args(
+        "UPDATE pgokf.bundle_freshness
+         SET reason_codes = pg_catalog.array_remove(reason_codes, $2),
+             updated_at = pg_catalog.now()
+         WHERE bundle_id = $1 AND reason_codes @> ARRAY[$2]::text[]",
+        &[
+            bundle_id.into(),
+            REASON_RELATIONSHIP_COVERAGE_MISSING.into(),
+        ],
+    )
+    .map_err(|error| spi_error("failed to clear the relationship coverage reason", &error))
 }
 
 /// Upsert a scope override's freshness state (used by dependency evaluation
@@ -669,7 +717,7 @@ COMMENT ON COLUMN pgokf.bundle_freshness.tenant_id IS
 COMMENT ON COLUMN pgokf.bundle_freshness.state IS
     'Effective bundle freshness: fresh, stale, reconciling (a reconciliation attempt owns the newest target; still effectively stale), blocked (a nonretryable failure; prior data stays labeled), or retired (the bundle is retired). Only registration and the compare-and-set pgokf.mark_fresh establish fresh.';
 COMMENT ON COLUMN pgokf.bundle_freshness.reason_codes IS
-    'Machine-readable, producer-supplied reason codes explaining the current non-fresh state (merged, deduplicated). Catalog-defined codes: legacy_pre_0.3.0, dependency_source_changed, change_scope_unknown, bundle_retired, bundle_restored, bundle_disabled; producers may add their own opaque codes.';
+    'Machine-readable, producer-supplied reason codes explaining the current non-fresh state (merged, deduplicated). Catalog-defined codes: legacy_pre_0.3.0, dependency_source_changed, change_scope_unknown, bundle_retired, bundle_restored, bundle_disabled, relationship_coverage_missing; producers may add their own opaque codes.';
 COMMENT ON COLUMN pgokf.bundle_freshness.observed_source_generation IS
     'The newest source revision the producer has observed for this bundle, as opaque producer-supplied text; the catalog never interprets it. pgokf.mark_fresh compares against it (compare-and-set).';
 COMMENT ON COLUMN pgokf.bundle_freshness.materialized_source_generation IS
@@ -855,12 +903,13 @@ CREATE FUNCTION pgokf.capabilities() RETURNS jsonb
             'effective_freshness', 1,
             'catalog_change_event', 1,
             'search_freshness', 1,
-            'embedding_freshness', 1)
+            'embedding_freshness', 1,
+            'typed_relationships', 1)
     $fn$;
 REVOKE ALL ON FUNCTION pgokf.capabilities() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pgokf.capabilities() TO pgokf_reader;
 COMMENT ON FUNCTION pgokf.capabilities() IS
-    'The catalog capabilities this pgokf release implements, as a jsonb object of capability name to interface version: catalog_generation, publication_fence, freshness_dependency, effective_freshness, catalog_change_event, search_freshness, and embedding_freshness (all version 1). Immutable; a producer declares the capabilities it requires and checks them here. Later releases only add entries or raise versions.';
+    'The catalog capabilities this pgokf release implements, as a jsonb object of capability name to interface version: catalog_generation, publication_fence, freshness_dependency, effective_freshness, catalog_change_event, search_freshness, embedding_freshness, and typed_relationships (all version 1). Immutable; a producer declares the capabilities it requires and checks them here. Later releases only add entries or raise versions.';
 ",
     name = "effective_freshness_view",
     requires = ["freshness_tables"]
@@ -1166,7 +1215,10 @@ fn mark_blocked_impl(
 /// The compare-and-set completion statement of [`mark_fresh_impl`]: refuses
 /// (updates zero rows) unless the observed source revision, the live catalog
 /// generation, and the materialized generation all still match the producer's
-/// evidence and the bundle is not retired.
+/// evidence, the bundle is not retired, and no `relationship_coverage_missing`
+/// reason stands (a refresh that superseded the bundle's relationship coverage
+/// without a matching replacement must be answered with a new publication
+/// first - see [`crate::catalog::relationships`]).
 const MARK_FRESH_CAS: &str = "UPDATE pgokf.bundle_freshness f
          SET state = 'fresh',
              reason_codes = '{}'::text[],
@@ -1186,6 +1238,7 @@ const MARK_FRESH_CAS: &str = "UPDATE pgokf.bundle_freshness f
            AND b.catalog_generation = $3
            AND (f.materialized_catalog_generation IS NULL
                 OR f.materialized_catalog_generation <= $3)
+           AND NOT (f.reason_codes @> ARRAY['relationship_coverage_missing']::text[])
          RETURNING f.bundle_id";
 
 /// Compare-and-set `mark_fresh`: completes a reconciliation only when the
@@ -1201,6 +1254,8 @@ const MARK_FRESH_CAS: &str = "UPDATE pgokf.bundle_freshness f
 ///   current catalog state);
 /// - the recorded materialized generation does not exceed the expected one
 ///   (an older attempt never clears a newer one);
+/// - no `relationship_coverage_missing` reason stands (the producer must
+///   re-establish relationship coverage first);
 /// - the bundle is not retired.
 ///
 /// On success the bundle becomes `fresh`: reasons cleared, `stale_since`
@@ -2131,7 +2186,7 @@ COMMENT ON FUNCTION pgokf.mark_reconciling(bigint, text) IS
 COMMENT ON FUNCTION pgokf.mark_blocked(bigint, text[], text) IS
     'Mark a bundle blocked (a nonretryable failure) with reason codes; the prior data stays available, labeled stale/blocked. Writer-tier; tenant-confined.';
 COMMENT ON FUNCTION pgokf.mark_fresh(bigint, bigint, text, text, jsonb, text) IS
-    'Compare-and-set reconciliation completion: mark the bundle fresh only if its observed source revision still equals expected_observed_source_generation AND its live catalog generation equals expected_catalog_generation AND no newer materialized generation exists AND it is not retired; returns false (changing nothing) otherwise, so a superseded attempt can never clear staleness. On success records the manifest hash and embedding contract evidence and sets last_reconciled_at. Writer-tier; tenant-confined.';
+    'Compare-and-set reconciliation completion: mark the bundle fresh only if its observed source revision still equals expected_observed_source_generation AND its live catalog generation equals expected_catalog_generation AND no newer materialized generation exists AND no relationship_coverage_missing reason stands (a refresh that superseded the bundle''s relationship coverage must be answered with a matching pgokf.replace_relationships publication first) AND it is not retired; returns false (changing nothing) otherwise, so a superseded attempt can never clear staleness. On success records the manifest hash and embedding contract evidence and sets last_reconciled_at. Writer-tier; tenant-confined.';
 COMMENT ON FUNCTION pgokf.mark_scope_stale(bigint, text, text, text[], text) IS
     'Mark one scope within a bundle (scope_kind concept/path/group with an exact, case-sensitive scope_key) stale with reason codes. Writer-tier; tenant-confined. The override shadows the bundle state for that scope in pgokf.effective_freshness until cleared.';
 COMMENT ON FUNCTION pgokf.clear_freshness_scope(bigint, text, text) IS
