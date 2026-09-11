@@ -80,11 +80,14 @@
 //!
 //! **Bounded superseded retention.** Superseded publications are audit, but
 //! not unbounded: every activation (immediate or refresh-time) hard-deletes
-//! the bundle's superseded publications whose supersession (`updated_at`) is
-//! more than 30 days old, their rows cascading with them (the acknowledged
-//! change-event outbox precedent). The immediately previous superseded set is
-//! by construction younger than the window, so its rows and activation
-//! evidence always survive.
+//! superseded publications whose supersession (`updated_at`) is more than 30
+//! days old - the activating bundle's own and the detached ledger's
+//! (`source_bundle_id IS NULL` after an unregister/purge) alike - their rows
+//! cascading with them (the acknowledged change-event outbox precedent), and
+//! every unregister/purge sweeps the aged detached rows it leaves behind, so
+//! detached history never outlives the retention window. The immediately
+//! previous superseded set is by construction younger than the window, so its
+//! rows and activation evidence always survive.
 //!
 //! **Required coverage.** A bundle that had relationship coverage (at least
 //! one active publication) before a refresh and activates none at the new
@@ -843,7 +846,7 @@ REVOKE ALL ON pgokf.relationship_publication FROM PUBLIC;
 REVOKE ALL ON pgokf.relationship FROM PUBLIC;
 
 COMMENT ON TABLE pgokf.relationship_publication IS
-    'Relationship publication ledger: one immutable attempt/result record per (tenant_id, producer, source_bundle_id, publication_generation), bound to a live pgokf.publication_fence slot (fencing_token) and to the catalog generation the set was computed against (expected_catalog_generation; activated_catalog_generation once active). State staged (invisible until the matching catalog generation is accepted by a refresh) / active / superseded. relationship_set_hash is the BLAKE3 digest of the canonicalized row set and doubles as the idempotency key: an identical retried replace_relationships is a no-op, a differing one under the same key is a 23505 conflict. The bundle reference detaches (ON DELETE SET NULL) so a hard deletion never erases the audit row; source_bundle_path is the durable identity snapshot. Live-key uniqueness is a partial index over attached rows only, so detached ledger rows never collide. When competing staged attempts of one producer scope expect the accepted generation, only the newest publication_generation activates. Superseded retention is bounded: an activation hard-deletes superseded publications of the bundle whose updated_at is more than 30 days old (their rows cascade), while the immediately previous superseded set is always retained with its rows and activation evidence. Granted to no API role.';
+    'Relationship publication ledger: one immutable attempt/result record per (tenant_id, producer, source_bundle_id, publication_generation), bound to a live pgokf.publication_fence slot (fencing_token) and to the catalog generation the set was computed against (expected_catalog_generation; activated_catalog_generation once active). State staged (invisible until the matching catalog generation is accepted by a refresh) / active / superseded. relationship_set_hash is the BLAKE3 digest of the canonicalized row set and doubles as the idempotency key: an identical retried replace_relationships is a no-op, a differing one under the same key is a 23505 conflict. The bundle reference detaches (ON DELETE SET NULL) so a hard deletion never erases the audit row; source_bundle_path is the durable identity snapshot. Live-key uniqueness is a partial index over attached rows only, so detached ledger rows never collide. When competing staged attempts of one producer scope expect the accepted generation, only the newest publication_generation activates. Superseded retention is bounded: an activation hard-deletes superseded publications whose updated_at is more than 30 days old - the activating bundle''s own and the detached ledger''s alike (their rows cascade) - and an unregister/purge sweeps the aged detached rows it leaves behind, so detached history never outlives the window, while the immediately previous superseded set is always retained with its rows and activation evidence. Granted to no API role.';
 COMMENT ON COLUMN pgokf.relationship_publication.publication_id IS
     'Surrogate identity of the publication (GENERATED ALWAYS AS IDENTITY), the foreign-key target of pgokf.relationship.';
 COMMENT ON COLUMN pgokf.relationship_publication.tenant_id IS
@@ -879,7 +882,7 @@ COMMENT ON COLUMN pgokf.relationship_publication.created_at IS
 COMMENT ON COLUMN pgokf.relationship_publication.activated_at IS
     'When the publication became active; retained as a historical record after supersession; NULL only while staged.';
 COMMENT ON COLUMN pgokf.relationship_publication.updated_at IS
-    'When this row last changed (activation or supersession); the supersession timestamp starts the 30-day window after which the bundle''s next activation prunes the superseded publication.';
+    'When this row last changed (activation or supersession); the supersession timestamp starts the 30-day window after which the next activation - or, for a detached row, the unregister/purge that detached it - prunes the superseded publication.';
 
 COMMENT ON TABLE pgokf.relationship IS
     'The typed relationship rows of one publication (fk pgokf.relationship_publication): source concept, producer-defined namespaced relation_type (opaque text; the catalog never enumerates or interprets it), direction, the optional resolved target (target_bundle_id, target_concept_id), an optional opaque external target identifier, opaque source_location/provenance jsonb, confidence, the unresolved/cross_bundle flags, and the canonical ordinal/row hash. Rows are written once with their publication and never mutated except by activation-time target re-resolution; the one removal path is activation-time source validation, which quarantines (deletes) a staged row whose source concept does not exist in the accepted catalog generation, so a nonexistent source can never become a graph node or appear in pgokf.current_relationships. Publications are retained as audit, so rows are too, for as long as the publication itself is retained. Granted to no API role; readers use pgokf.current_relationships.';
@@ -1001,10 +1004,11 @@ GRANT SELECT ON pgokf.current_relationships TO pgokf_reader;
 ///    `unresolved`), and every row whose source concept is absent from the
 ///    accepted set is quarantined (deleted) - a nonexistent source must never
 ///    surface as a graph node or in `current_relationships`;
-/// 6. the bundle's superseded publications whose supersession (`updated_at`)
-///    is more than 30 days old are pruned (their rows cascade); the
-///    immediately previous superseded set is always younger than the window
-///    and is retained with its rows and activation evidence.
+/// 6. superseded publications whose supersession (`updated_at`) is more than
+///    30 days old are pruned (their rows cascade) - the bundle's own and the
+///    detached ledger's alike; the immediately previous superseded set is
+///    always younger than the window and is retained with its rows and
+///    activation evidence.
 ///
 /// Returns whether required relationship coverage is now missing - the bundle
 /// HAD coverage and none activated - so the caller marks the bundle stale with
@@ -1259,20 +1263,49 @@ fn supersede_active(
     .map_err(|error| spi_error("failed to supersede prior publications", &error))
 }
 
-/// Bound superseded retention: hard-delete the bundle's superseded
-/// publications whose supersession (`updated_at`) is more than 30 days old -
-/// the acknowledged change-event outbox precedent - cascading their rows.
-/// Runs at every activation (immediate or refresh-time). The immediately
-/// previous superseded set is by construction younger than the window, so its
-/// rows and activation evidence always survive.
+/// Bound superseded retention: hard-delete superseded publications whose
+/// supersession (`updated_at`) is more than 30 days old - the acknowledged
+/// change-event outbox precedent - cascading their rows. Runs at every
+/// activation (immediate or refresh-time) and sweeps both the activating
+/// bundle's aged superseded rows and the detached ledger (`source_bundle_id
+/// IS NULL` after an unregister/purge), so aged history stays reachable by
+/// retention even after its bundle leaves the catalog. The sweep is global
+/// retention, not visibility: it is deliberately not tenant-predicated (the
+/// change-event retention prune precedent). The immediately previous
+/// superseded set is by construction younger than the window, so its rows
+/// and activation evidence always survive.
 fn prune_aged_superseded(source_bundle_id: i64) -> Result<(), CatalogError> {
     Spi::run_with_args(
         "DELETE FROM pgokf.relationship_publication
-         WHERE source_bundle_id = $1 AND state = 'superseded'
+         WHERE (source_bundle_id = $1 OR source_bundle_id IS NULL)
+           AND state = 'superseded'
            AND updated_at < pg_catalog.now() - pg_catalog.make_interval(days => 30)",
         &[source_bundle_id.into()],
     )
     .map_err(|error| spi_error("failed to prune aged superseded publications", &error))
+}
+
+/// The detach-time half of superseded retention: hard-delete aged superseded
+/// publications whose bundle reference was detached (`source_bundle_id IS
+/// NULL` by an unregister/purge in this transaction), cascading their rows.
+/// Called by `unregister_bundle`/`purge_retired` after the delete detaches
+/// the ledger, so aged superseded history is pruned even if no activation
+/// ever runs again. Only aged `superseded` rows are touched: detached
+/// `active` rows are the retained audit ledger, and recently superseded
+/// rows stay inside the 30-day evidence window. Global retention, not
+/// visibility: deliberately not tenant-predicated.
+///
+/// # Errors
+///
+/// Returns a [`CatalogError`] on any SPI failure.
+pub(crate) fn prune_aged_detached_superseded() -> Result<(), CatalogError> {
+    Spi::run_with_args(
+        "DELETE FROM pgokf.relationship_publication
+         WHERE source_bundle_id IS NULL AND state = 'superseded'
+           AND updated_at < pg_catalog.now() - pg_catalog.make_interval(days => 30)",
+        &[],
+    )
+    .map_err(|error| spi_error("failed to prune aged detached publications", &error))
 }
 
 /// Insert the publication row, returning its surrogate identity.

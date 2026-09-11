@@ -81,9 +81,9 @@ or disappear in any release.
 | `pgokf.disable_freshness_dependency(bigint)` | `pgokf_writer` | Disable a registered freshness dependency |
 | `pgokf.remove_freshness_dependency(bigint)` | `pgokf_writer` | Remove a registered freshness dependency |
 | `pgokf.mark_stale(bigint, text[], text, text)` | `pgokf_writer` | Mark a bundle stale with reason codes and the observed source revision |
-| `pgokf.mark_reconciling(bigint, text)` | `pgokf_writer` | Mark a bundle as reconciling |
+| `pgokf.mark_reconciling(bigint, text)` | `pgokf_writer` | Mark a bundle as reconciling and claim the standing dependency invalidation epoch (returns the attempt's claim token) |
 | `pgokf.mark_blocked(bigint, text[], text)` | `pgokf_writer` | Mark a bundle blocked with reason codes |
-| `pgokf.mark_fresh(bigint, bigint, text, text, jsonb, text)` | `pgokf_writer` | Compare-and-set reconciliation completion: refuses (returns `false`) when the catalog generation or observed source revision moved meanwhile |
+| `pgokf.mark_fresh(bigint, bigint, bigint, text, text, jsonb, text)` | `pgokf_writer` | Compare-and-set reconciliation completion: refuses (returns `false`) when the catalog generation, observed source revision, or the attempt's claim token moved meanwhile |
 | `pgokf.mark_scope_stale(bigint, text, text, text[], text)` | `pgokf_writer` | Mark one scope (concept/path/group) of a bundle stale |
 | `pgokf.clear_freshness_scope(bigint, text, text)` | `pgokf_writer` | Clear a scoped freshness override |
 | `pgokf.list_freshness_dependencies(integer)` | `pgokf_admin` | Inspect the freshness-dependency registry |

@@ -326,6 +326,10 @@ fn unregister_bundle_impl(bundle_id: i64) -> Result<BundleInfo, CatalogError> {
     let dependents = crate::catalog::freshness::departing_dependents(bundle_id)?;
     let removed = delete_bundle(bundle_id)?.ok_or_else(|| unknown_bundle_error(bundle_id))?;
     crate::catalog::freshness::invalidate_departing_dependents(&dependents)?;
+    // Retention follows the detach: aged superseded relationship publications
+    // this delete detached (and any aged detached ledger earlier removals left
+    // behind) are pruned now, so they never outlive every future activation.
+    crate::catalog::relationships::prune_aged_detached_superseded()?;
 
     // Audit trail: record the unregister in the same transaction as the delete,
     // so a logged row always means the bundle was actually removed. The counts
@@ -627,6 +631,10 @@ fn purge_retired_impl(older_than: Interval) -> Result<i64, CatalogError> {
         let dependents = crate::catalog::freshness::departing_dependents(bundle_id)?;
         if delete_bundle_row_if_eligible(bundle_id, older_than)? {
             crate::catalog::freshness::invalidate_departing_dependents(&dependents)?;
+            // Retention follows the detach, exactly as in a manual
+            // unregister: aged superseded relationship publications detached
+            // by this delete (or left detached earlier) are pruned now.
+            crate::catalog::relationships::prune_aged_detached_superseded()?;
             // Same FK-free unregister audit row a manual unregister writes; the
             // returned sync id is unused (a purge has no per-concept manifest).
             let _ = crate::catalog::audit::record(

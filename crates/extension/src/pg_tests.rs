@@ -7478,9 +7478,10 @@ Use the solo skill on its own.\n";
 
         // A completion based on pre-invalidation evidence refuses: the
         // dependency invalidation bumped the target's epoch past the attempt's
-        // (empty) claim, so the CAS cannot erase the newer staleness.
+        // claim token (0, never claimed), so the CAS cannot erase the newer
+        // staleness.
         let refused = Spi::get_one_with_args::<bool>(
-            "SELECT pgokf.mark_fresh($1, $2, NULL, 'manifest-1', NULL, 'producer-a')",
+            "SELECT pgokf.mark_fresh($1, $2, 0, NULL, 'manifest-1', NULL, 'producer-a')",
             &[target_id.into(), generation_of(target_id).into()],
         )
         .expect("mark_fresh executes")
@@ -7492,15 +7493,21 @@ Use the solo skill on its own.\n";
         );
 
         // The producer reconciles: claim the newest epoch, then
-        // compare-and-set the target fresh against its current generation.
-        Spi::run_with_args(
+        // compare-and-set the target fresh against its current generation,
+        // presenting the claim token the attempt's mark_reconciling returned.
+        let claim = Spi::get_one_with_args::<i64>(
             "SELECT pgokf.mark_reconciling($1, 'producer-a')",
             &[target_id.into()],
         )
-        .expect("mark_reconciling executes");
+        .expect("mark_reconciling executes")
+        .expect("the claim token is returned");
         let reconciled = Spi::get_one_with_args::<bool>(
-            "SELECT pgokf.mark_fresh($1, $2, NULL, 'manifest-1', NULL, 'producer-a')",
-            &[target_id.into(), generation_of(target_id).into()],
+            "SELECT pgokf.mark_fresh($1, $2, $3, NULL, 'manifest-1', NULL, 'producer-a')",
+            &[
+                target_id.into(),
+                generation_of(target_id).into(),
+                claim.into(),
+            ],
         )
         .expect("mark_fresh executes")
         .expect("a verdict is returned");
@@ -7674,7 +7681,7 @@ Use the solo skill on its own.\n";
 
         // Assert: a CAS naming the wrong observed revision refuses.
         let wrong_revision = Spi::get_one_with_args::<bool>(
-            "SELECT pgokf.mark_fresh($1, 1, 'r1')",
+            "SELECT pgokf.mark_fresh($1, 1, 0, 'r1')",
             &[bundle_id.into()],
         )
         .expect("mark_fresh executes")
@@ -7683,7 +7690,7 @@ Use the solo skill on its own.\n";
 
         // Assert: a CAS naming an old catalog generation refuses.
         let wrong_generation = Spi::get_one_with_args::<bool>(
-            "SELECT pgokf.mark_fresh($1, 99, 'r2')",
+            "SELECT pgokf.mark_fresh($1, 99, 0, 'r2')",
             &[bundle_id.into()],
         )
         .expect("mark_fresh executes")
@@ -7696,7 +7703,7 @@ Use the solo skill on its own.\n";
 
         // Act: the matching CAS clears.
         let reconciled = Spi::get_one_with_args::<bool>(
-            "SELECT pgokf.mark_fresh($1, 1, 'r2')",
+            "SELECT pgokf.mark_fresh($1, 1, 0, 'r2')",
             &[bundle_id.into()],
         )
         .expect("mark_fresh executes")
@@ -7709,7 +7716,7 @@ Use the solo skill on its own.\n";
         fs::write(bundle.root.join("alpha.md"), ALPHA_EDITED).expect("edit is writable");
         let _ = refresh_counts(bundle_id);
         let retried = Spi::get_one_with_args::<bool>(
-            "SELECT pgokf.mark_fresh($1, 1, 'r2')",
+            "SELECT pgokf.mark_fresh($1, 1, 0, 'r2')",
             &[bundle_id.into()],
         )
         .expect("mark_fresh executes")
@@ -7739,9 +7746,9 @@ Use the solo skill on its own.\n";
 
         // Assert: the completion with saved (pre-invalidation) evidence
         // refuses - the invalidation bumped the target's epoch past the
-        // attempt's (empty) claim - and the staleness is not erased.
+        // attempt's (empty) claim token 0 - and the staleness is not erased.
         let stale_completion = Spi::get_one_with_args::<bool>(
-            "SELECT pgokf.mark_fresh($1, $2)",
+            "SELECT pgokf.mark_fresh($1, $2, 0)",
             &[target_id.into(), saved_generation.into()],
         )
         .expect("mark_fresh executes")
@@ -7757,11 +7764,13 @@ Use the solo skill on its own.\n";
 
         // Act: the producer claims the newest epoch, but another source change
         // lands after the claim, before the completion.
-        Spi::run_with_args(
+        let claim = Spi::get_one_with_args::<i64>(
             "SELECT pgokf.mark_reconciling($1, 'producer-a')",
             &[target_id.into()],
         )
-        .expect("mark_reconciling executes");
+        .expect("mark_reconciling executes")
+        .expect("the claim token is returned");
+        assert_eq!(claim, 1, "the claim covers the first invalidation");
         fs::write(
             source.root.join("beta.md"),
             BETA_CONCEPT.replace("Beta", "Betamax"),
@@ -7771,26 +7780,108 @@ Use the solo skill on its own.\n";
 
         // Assert: the invalidation after the claim refuses the completion too.
         let refused = Spi::get_one_with_args::<bool>(
-            "SELECT pgokf.mark_fresh($1, $2)",
-            &[target_id.into(), saved_generation.into()],
+            "SELECT pgokf.mark_fresh($1, $2, $3)",
+            &[target_id.into(), saved_generation.into(), claim.into()],
         )
         .expect("mark_fresh executes")
         .expect("a verdict is returned");
         assert!(!refused, "an invalidation after the claim refuses");
 
         // Act/Assert: re-claiming the newest epoch lets the completion clear.
-        Spi::run_with_args(
+        let reclaim = Spi::get_one_with_args::<i64>(
             "SELECT pgokf.mark_reconciling($1, 'producer-a')",
             &[target_id.into()],
         )
-        .expect("mark_reconciling executes");
+        .expect("mark_reconciling executes")
+        .expect("the claim token is returned");
         let reconciled = Spi::get_one_with_args::<bool>(
-            "SELECT pgokf.mark_fresh($1, $2)",
-            &[target_id.into(), saved_generation.into()],
+            "SELECT pgokf.mark_fresh($1, $2, $3)",
+            &[target_id.into(), saved_generation.into(), reclaim.into()],
         )
         .expect("mark_fresh executes")
         .expect("a verdict is returned");
         assert!(reconciled, "the claimed completion clears");
+        assert_eq!(freshness_state(target_id), "fresh{}");
+    }
+
+    #[pg_test]
+    fn mark_fresh_refuses_an_attempt_validated_only_by_a_newer_claim() {
+        // The reviewer's same-producer two-attempt interleaving: attempt A
+        // claims epoch 0; a dependency invalidation lands (epoch 1); attempt
+        // B (same producer label) claims epoch 1; A resubmits its ORIGINAL
+        // generation/revision evidence. Before the claim token was bound to
+        // the attempt, A's completion compared two live row values and
+        // succeeded on B's claim; now A must present its own token, which no
+        // longer covers the standing epoch. The pg_test harness runs one
+        // transaction, so the two "attempts" are driven sequentially in one
+        // session - faithful to the interleaving because the CAS compares
+        // attempt-supplied evidence, not session state.
+        let source = FixtureBundle::create();
+        let target = FixtureBundle::create();
+        let source_id = register_fixture(&source);
+        let target_id = register_fixture(&target);
+        let _ = register_dependency("producer-a", source_id, "bundle", "", target_id, None);
+        let saved_generation = generation_of(target_id);
+
+        // Attempt A claims the standing epoch (0).
+        let token_a = Spi::get_one_with_args::<i64>(
+            "SELECT pgokf.mark_reconciling($1, 'producer-a')",
+            &[target_id.into()],
+        )
+        .expect("mark_reconciling executes")
+        .expect("the claim token is returned");
+        assert_eq!(token_a, 0);
+
+        // The dependency source changes: the target's epoch advances to 1.
+        fs::write(source.root.join("alpha.md"), ALPHA_EDITED).expect("source edit is writable");
+        let _ = refresh_counts(source_id);
+        assert_eq!(
+            freshness_state(target_id),
+            "stale{dependency_source_changed}"
+        );
+
+        // Attempt A's completion refuses (its token predates the
+        // invalidation)...
+        let refused = Spi::get_one_with_args::<bool>(
+            "SELECT pgokf.mark_fresh($1, $2, $3, NULL, NULL, NULL, 'producer-a')",
+            &[target_id.into(), saved_generation.into(), token_a.into()],
+        )
+        .expect("mark_fresh executes")
+        .expect("a verdict is returned");
+        assert!(!refused);
+
+        // ...attempt B re-claims (observing epoch 1)...
+        let token_b = Spi::get_one_with_args::<i64>(
+            "SELECT pgokf.mark_reconciling($1, 'producer-a')",
+            &[target_id.into()],
+        )
+        .expect("mark_reconciling executes")
+        .expect("the claim token is returned");
+        assert_eq!(token_b, 1);
+
+        // ...and attempt A resubmits its ORIGINAL evidence with the SAME
+        // producer label: it must still refuse, because A's own token - not
+        // the row's now-advanced claim - is what the CAS checks.
+        let replayed = Spi::get_one_with_args::<bool>(
+            "SELECT pgokf.mark_fresh($1, $2, $3, NULL, NULL, NULL, 'producer-a')",
+            &[target_id.into(), saved_generation.into(), token_a.into()],
+        )
+        .expect("mark_fresh executes")
+        .expect("a verdict is returned");
+        assert!(
+            !replayed,
+            "a newer attempt's claim can never validate an older attempt's evidence"
+        );
+        assert_eq!(freshness_state(target_id), "reconciling{}");
+
+        // Attempt B's own completion, with its own token, clears.
+        let completed = Spi::get_one_with_args::<bool>(
+            "SELECT pgokf.mark_fresh($1, $2, $3, NULL, NULL, NULL, 'producer-a')",
+            &[target_id.into(), saved_generation.into(), token_b.into()],
+        )
+        .expect("mark_fresh executes")
+        .expect("a verdict is returned");
+        assert!(completed, "the attempt that claimed the newest epoch clears");
         assert_eq!(freshness_state(target_id), "fresh{}");
     }
 
@@ -7822,7 +7913,7 @@ Use the solo skill on its own.\n";
             "the repeat keeps sane state and reasons"
         );
         let reconciled = Spi::get_one_with_args::<bool>(
-            "SELECT pgokf.mark_fresh($1, $2)",
+            "SELECT pgokf.mark_fresh($1, $2, 0)",
             &[bundle_id.into(), generation_of(bundle_id).into()],
         )
         .expect("mark_fresh executes")
@@ -7993,6 +8084,95 @@ Use the solo skill on its own.\n";
     }
 
     #[pg_test]
+    fn an_over_cap_transitive_walk_never_commits_a_falsely_fresh_remainder() {
+        // The reviewer's 1,027-node chain probe: the walk's 1,024-visited cap
+        // used to break silently, committing nodes 1..=1024 stale while
+        // 1025..=1027 stayed fresh with epoch 0. The cap now triggers a
+        // conservative blanket invalidation, so the refresh commits with NO
+        // falsely fresh dependent. The chain is fabricated directly in the
+        // catalog tables (registering 1,027 real bundles through the
+        // filesystem would dominate the test's runtime); the walk under test
+        // reads only these tables.
+        Spi::run(
+            "INSERT INTO pgokf.bundles (path, name)
+             SELECT '/tmp/pgokf-test-overcap-' || n, 'overcap-' || n
+             FROM pg_catalog.generate_series(0, 1026) n",
+        )
+        .expect("chain nodes insert");
+        Spi::run(
+            "INSERT INTO pgokf.bundle_freshness (bundle_id)
+             SELECT id FROM pgokf.bundles WHERE name LIKE 'overcap-%'",
+        )
+        .expect("chain freshness rows insert");
+        Spi::run(
+            "INSERT INTO pgokf.freshness_dependency
+                 (producer, source_bundle_id, selector_kind, target_bundle_id)
+             SELECT 'producer-a', s.id, 'bundle', t.id
+             FROM pgokf.bundles s
+             JOIN pgokf.bundles t
+               ON t.name = 'overcap-' || (pg_catalog.substr(s.name, 9)::int + 1)
+             WHERE s.name LIKE 'overcap-%' AND s.name <> 'overcap-1026'",
+        )
+        .expect("chain edges insert");
+
+        // Arrange: one real source bundle feeding the chain head.
+        let source = FixtureBundle::create();
+        let source_id = register_fixture(&source);
+        let head = Spi::get_one::<i64>(
+            "SELECT id FROM pgokf.bundles WHERE name = 'overcap-0'",
+        )
+        .expect("head query executes")
+        .expect("the chain head exists");
+        let _ = register_dependency("producer-a", source_id, "bundle", "", head, None);
+
+        // Act: change the source; the invalidation walks the 1,027-node chain
+        // and hits the cap.
+        fs::write(source.root.join("alpha.md"), ALPHA_EDITED).expect("edit is writable");
+        let _ = refresh_counts(source_id);
+
+        // Assert: the refresh committed and NO chain node stayed falsely
+        // fresh - the walked prefix via the walk, the remainder via the
+        // blanket escalation, every node epoch-bumped exactly once.
+        let count_by_state = |state: &str| {
+            Spi::get_one_with_args::<i64>(
+                "SELECT count(*)
+                 FROM pgokf.bundle_freshness f
+                 JOIN pgokf.bundles b ON b.id = f.bundle_id
+                 WHERE b.name LIKE 'overcap-%' AND f.state = $1",
+                &[state.into()],
+            )
+            .expect("chain state query executes")
+            .expect("the count is not NULL")
+        };
+        assert_eq!(count_by_state("stale"), 1027, "every chain node is stale");
+        assert_eq!(count_by_state("fresh"), 0, "no falsely fresh remainder");
+        let min_epoch = Spi::get_one::<i64>(
+            "SELECT min(f.dependency_invalidation_epoch)
+             FROM pgokf.bundle_freshness f
+             JOIN pgokf.bundles b ON b.id = f.bundle_id
+             WHERE b.name LIKE 'overcap-%'",
+        )
+        .expect("epoch query executes")
+        .expect("the chain has freshness rows");
+        let max_epoch = Spi::get_one::<i64>(
+            "SELECT max(f.dependency_invalidation_epoch)
+             FROM pgokf.bundle_freshness f
+             JOIN pgokf.bundles b ON b.id = f.bundle_id
+             WHERE b.name LIKE 'overcap-%'",
+        )
+        .expect("epoch query executes")
+        .expect("the chain has freshness rows");
+        assert_eq!(min_epoch, 1, "every node was epoch-bumped");
+        assert_eq!(max_epoch, 1, "no node was double-bumped");
+        let tail = freshness_state(
+            Spi::get_one::<i64>("SELECT id FROM pgokf.bundles WHERE name = 'overcap-1026'")
+                .expect("tail query executes")
+                .expect("the chain tail exists"),
+        );
+        assert_eq!(tail, "stale{dependency_source_changed}");
+    }
+
+    #[pg_test]
     fn coverage_missing_evidence_survives_mark_reconciling() {
         // The reviewer's coverage-superseded-then-reconciling probe: the
         // coverage evidence must keep blocking mark_fresh until coverage is
@@ -8023,7 +8203,7 @@ Use the solo skill on its own.\n";
 
         // Assert: the completion refuses while the evidence stands.
         let refused = Spi::get_one_with_args::<bool>(
-            "SELECT pgokf.mark_fresh($1, $2)",
+            "SELECT pgokf.mark_fresh($1, $2, 0)",
             &[bundle_id.into(), generation.into()],
         )
         .expect("mark_fresh executes")
@@ -8041,7 +8221,7 @@ Use the solo skill on its own.\n";
         // Assert: ...but the same completion STILL refuses, with zero current
         // edges - the dedicated evidence column survived the state transition.
         let still_refused = Spi::get_one_with_args::<bool>(
-            "SELECT pgokf.mark_fresh($1, $2)",
+            "SELECT pgokf.mark_fresh($1, $2, 0)",
             &[bundle_id.into(), generation.into()],
         )
         .expect("mark_fresh executes")
@@ -8066,7 +8246,7 @@ Use the solo skill on its own.\n";
         );
         assert_eq!(state, "active");
         let reconciled = Spi::get_one_with_args::<bool>(
-            "SELECT pgokf.mark_fresh($1, $2)",
+            "SELECT pgokf.mark_fresh($1, $2, 0)",
             &[bundle_id.into(), generation.into()],
         )
         .expect("mark_fresh executes")
@@ -8102,7 +8282,7 @@ Use the solo skill on its own.\n";
         // the post-wait committed generation no longer matches - and the final
         // state is not falsely fresh.
         let completed = Spi::get_one_with_args::<bool>(
-            "SELECT pgokf.mark_fresh($1, $2)",
+            "SELECT pgokf.mark_fresh($1, $2, 0)",
             &[bundle_id.into(), saved_generation.into()],
         )
         .expect("mark_fresh executes")
@@ -9032,7 +9212,7 @@ Use the solo skill on its own.\n";
 
         // Act: the compare-and-set completion re-establishes currency.
         let marked = Spi::get_one_with_args::<bool>(
-            "SELECT pgokf.mark_fresh($1, $2, 'rev-2')",
+            "SELECT pgokf.mark_fresh($1, $2, 0, 'rev-2')",
             &[bundle_id.into(), generation_of(bundle_id).into()],
         )
         .expect("mark_fresh executes")
@@ -9055,7 +9235,7 @@ Use the solo skill on its own.\n";
         assert_eq!(freshness_state(bundle_id), "fresh{}");
         let mark_fresh = |bundle_id: i64| {
             let marked = Spi::get_one_with_args::<bool>(
-                "SELECT pgokf.mark_fresh($1, $2)",
+                "SELECT pgokf.mark_fresh($1, $2, 0)",
                 &[bundle_id.into(), generation_of(bundle_id).into()],
             )
             .expect("mark_fresh executes")
@@ -9545,7 +9725,7 @@ Use the solo skill on its own.\n";
         // Assert: the compare-and-set completion refuses while the coverage
         // reason stands.
         let refused = Spi::get_one_with_args::<bool>(
-            "SELECT pgokf.mark_fresh($1, $2)",
+            "SELECT pgokf.mark_fresh($1, $2, 0)",
             &[bundle_id.into(), generation_of(bundle_id).into()],
         )
         .expect("mark_fresh executes")
@@ -9572,7 +9752,7 @@ Use the solo skill on its own.\n";
 
         // Assert: the CAS now completes.
         let reconciled = Spi::get_one_with_args::<bool>(
-            "SELECT pgokf.mark_fresh($1, $2)",
+            "SELECT pgokf.mark_fresh($1, $2, 0)",
             &[bundle_id.into(), generation_of(bundle_id).into()],
         )
         .expect("mark_fresh executes")
@@ -10278,5 +10458,96 @@ Use the solo skill on its own.\n";
             evidence, "1/2/true",
             "the freshly superseded set keeps its rows and activation evidence"
         );
+    }
+
+    #[pg_test]
+    fn detached_aged_superseded_history_is_pruned_after_unregister() {
+        // The reviewer's detached-history probe: superseded publications
+        // detached by an unregister (source_bundle_id SET NULL) used to be
+        // unreachable by retention - the activation-time prune only matched
+        // the activating bundle's own id - so aged detached history lived
+        // forever. The detach-time sweep now prunes it, while recent detached
+        // audit evidence is preserved.
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        let rows = r#"[{"source_concept_id": "alpha", "relation_type": "ns:r",
+                        "target_concept_id": "beta"}]"#;
+        for generation in 1..=4 {
+            let token = issue_fence(bundle_id, "producer-a", generation);
+            let (state, _) = replace_rows(bundle_id, "producer-a", generation, 1, token, rows);
+            assert_eq!(state, "active");
+        }
+        assert_eq!(
+            publication_states(bundle_id),
+            "superseded:1,superseded:1,superseded:1,active:1"
+        );
+
+        // Arrange: age generations 1 and 2 beyond the 30-day retention
+        // window; generation 3 stays recently superseded.
+        Spi::run_with_args(
+            "UPDATE pgokf.relationship_publication
+             SET updated_at = pg_catalog.now() - pg_catalog.make_interval(days => 31)
+             WHERE source_bundle_id = $1 AND publication_generation IN (1, 2)",
+            &[bundle_id.into()],
+        )
+        .expect("updated_at is backdatable");
+
+        // Act: unregister the bundle, detaching its publication ledger.
+        Spi::run_with_args("SELECT pgokf.unregister_bundle($1)", &[bundle_id.into()])
+            .expect("unregister executes");
+
+        // Assert: the aged detached superseded publications - and their edge
+        // rows - are pruned by the detach-time sweep, before any further
+        // activation ever runs.
+        let surviving = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgokf.relationship_publication
+             WHERE producer = 'producer-a' AND publication_generation IN (1, 2)",
+        )
+        .expect("survivor query executes")
+        .expect("count is not NULL");
+        assert_eq!(surviving, 0, "aged detached superseded history is pruned");
+        let orphans = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgokf.relationship r
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM pgokf.relationship_publication p
+                 WHERE p.publication_id = r.publication_id)",
+        )
+        .expect("orphan query executes")
+        .expect("count is not NULL");
+        assert_eq!(orphans, 0, "the pruned publications' rows cascaded");
+
+        // Assert: the recently superseded detached publication and the active
+        // one are retained as audit evidence, with their rows.
+        let retained = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgokf.relationship_publication
+             WHERE producer = 'producer-a' AND source_bundle_id IS NULL
+               AND publication_generation IN (3, 4) AND state IN ('superseded', 'active')",
+        )
+        .expect("retained query executes")
+        .expect("count is not NULL");
+        assert_eq!(retained, 2, "recent detached audit evidence is preserved");
+        let retained_rows = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgokf.relationship r
+             JOIN pgokf.relationship_publication p USING (publication_id)
+             WHERE p.producer = 'producer-a' AND p.publication_generation IN (3, 4)",
+        )
+        .expect("retained rows query executes")
+        .expect("count is not NULL");
+        assert_eq!(retained_rows, 2, "the retained evidence keeps its rows");
+
+        // Act/Assert: an unrelated bundle's activation (the reviewer's
+        // trigger) still runs cleanly over the swept ledger.
+        let other = FixtureBundle::create();
+        let other_id = register_fixture(&other);
+        let token = issue_fence(other_id, "producer-b", 1);
+        let (state, _) = replace_rows(other_id, "producer-b", 1, 1, token, "[]");
+        assert_eq!(state, "active");
+        let surviving = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgokf.relationship_publication
+             WHERE producer = 'producer-a' AND publication_generation IN (1, 2)",
+        )
+        .expect("survivor query executes")
+        .expect("count is not NULL");
+        assert_eq!(surviving, 0, "the aged detached history stays pruned");
     }
 }
