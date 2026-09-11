@@ -292,48 +292,14 @@ struct FreshSearchHit {
     embedded_at: Option<pgrx::datum::TimestampWithTimeZone>,
 }
 
-/// Authorize, validate, and run the freshness-aware search.
-///
-/// The ranked candidate set is the **native FTS pipeline's** hit subquery
-/// ([`search_backend::NATIVE_HITS_QUERY`], shared verbatim so the match/rank/
-/// filter semantics never fork); each hit is then annotated from
-/// `pgokf.effective_freshness` with the precedence concept override, then path
-/// override, then bundle state (a concept with no recorded row is `fresh`).
-/// The `freshness` filter applies inside the query - before the keyset
-/// predicate and `LIMIT` - so a filtered page is a true page of the filtered
-/// set, never a truncated unfiltered one.
-///
-/// Every hit also carries its embedding provenance, annotated in an outer
-/// projection over the (already limited) ranked rows: `embedding_state` is
-/// `missing` (no embedding row), `current` (the row satisfies the semantic
-/// eligibility predicate of [`crate::catalog::embedding`] - physical contract
-/// match plus an effectively fresh concept), or `stale` (a physical row that
-/// is not eligible); model, dimension, input hash, and `embedded_at` (the
-/// row's `updated_at`) are the stored provenance values, NULL when no row
-/// exists.
-///
-/// The function runs with invoker rights like [`concept_search`]: the
-/// `effective_freshness` view is the one reader-granted freshness surface and
-/// applies the opt-in tenant predicate inline, so a reader sees exactly its
-/// own tenant's states. Composition with the optional BM25 backend is
-/// deferred; this variant always ranks with the native FTS pipeline.
-fn concept_search_fresh_impl(
-    query: &str,
-    bundle_id: Option<i64>,
-    limit_count: i32,
-    freshness: &str,
-    filters: Filters,
-    after: Option<&Cursor>,
-) -> Result<Vec<FreshSearchHit>, CatalogError> {
-    security::authorize_current_user(security::Operation::Search, Path::new(""))?;
-    validate_query(query)?;
-    let limit = validate_limit_count(limit_count)?;
-    let freshness = validate_freshness_filter(freshness)?;
-    let text_search_config = effective_text_search_config()?;
-    let embedding_policy = crate::catalog::embedding::effective_embedding_policy()?;
-    let contract_match = crate::catalog::embedding::contract_match_sql(13, 14, 15);
-
-    let statement = format!(
+/// The freshness-aware search statement: the native FTS hit subquery,
+/// annotated with the effective freshness (concept > path > bundle override
+/// precedence) inside, filtered and limited there, then annotated with the
+/// embedding provenance in the outer projection. `contract_match` is
+/// [`crate::catalog::embedding::contract_match_sql`] with the policy bound as
+/// `$13` (model), `$14` (dimension), and `$15` (contract).
+fn fresh_search_statement(contract_match: &str) -> String {
+    format!(
         "
     SELECT ranked.bundle_id,
            ranked.concept_id,
@@ -403,7 +369,84 @@ fn concept_search_fresh_impl(
     ORDER BY ranked.rank DESC, ranked.bundle_id ASC, ranked.concept_id ASC",
         hits = search_backend::NATIVE_HITS_QUERY,
         keyset = search_backend::KEYSET_PREDICATE,
+    )
+}
+
+/// Read one `pgokf.concept_search_fresh_result`-shaped row.
+fn read_fresh_hit(row: &pgrx::spi::SpiHeapTupleData<'_>) -> Result<FreshSearchHit, CatalogError> {
+    let reader = crate::catalog::spi_read::RowReader::new(
+        row,
+        "failed to read freshness-aware search row",
+        "concept_search_fresh_result",
     );
+    Ok(FreshSearchHit {
+        hit: SearchHit {
+            bundle_id: reader.required(1, "bundle_id")?,
+            concept_id: reader.required(2, "concept_id")?,
+            path: reader.required(3, "path")?,
+            title: reader.optional(4)?,
+            concept_type: reader.optional(5)?,
+            rank: reader.required(6, "rank")?,
+            headline: reader.optional(7)?,
+        },
+        freshness_state: reader.required(8, "freshness_state")?,
+        freshness_reasons: reader.required(9, "freshness_reasons")?,
+        freshness_scope: reader.required(10, "freshness_scope")?,
+        stale_since: reader.optional(11)?,
+        observed_revision: reader.optional(12)?,
+        indexed_revision: reader.optional(13)?,
+        published_revision: reader.optional(14)?,
+        catalog_generation: reader.required(15, "catalog_generation")?,
+        last_reconciled_at: reader.optional(16)?,
+        embedding_state: reader.required(17, "embedding_state")?,
+        embedding_model: reader.optional(18)?,
+        embedding_dim: reader.optional(19)?,
+        embedding_input_hash: reader.optional(20)?,
+        embedded_at: reader.optional(21)?,
+    })
+}
+
+/// Authorize, validate, and run the freshness-aware search.
+///
+/// The ranked candidate set is the **native FTS pipeline's** hit subquery
+/// ([`search_backend::NATIVE_HITS_QUERY`], shared verbatim so the match/rank/
+/// filter semantics never fork); each hit is then annotated from
+/// `pgokf.effective_freshness` with the precedence concept override, then path
+/// override, then bundle state (a concept with no recorded row is `fresh`).
+/// The `freshness` filter applies inside the query - before the keyset
+/// predicate and `LIMIT` - so a filtered page is a true page of the filtered
+/// set, never a truncated unfiltered one.
+///
+/// Every hit also carries its embedding provenance, annotated in an outer
+/// projection over the (already limited) ranked rows: `embedding_state` is
+/// `missing` (no embedding row), `current` (the row satisfies the semantic
+/// eligibility predicate of [`crate::catalog::embedding`] - physical contract
+/// match plus an effectively fresh concept), or `stale` (a physical row that
+/// is not eligible); model, dimension, input hash, and `embedded_at` (the
+/// row's `updated_at`) are the stored provenance values, NULL when no row
+/// exists.
+///
+/// The function runs with invoker rights like [`concept_search`]: the
+/// `effective_freshness` view is the one reader-granted freshness surface and
+/// applies the opt-in tenant predicate inline, so a reader sees exactly its
+/// own tenant's states. Composition with the optional BM25 backend is
+/// deferred; this variant always ranks with the native FTS pipeline.
+fn concept_search_fresh_impl(
+    query: &str,
+    bundle_id: Option<i64>,
+    limit_count: i32,
+    freshness: &str,
+    filters: Filters,
+    after: Option<&Cursor>,
+) -> Result<Vec<FreshSearchHit>, CatalogError> {
+    security::authorize_current_user(security::Operation::Search, Path::new(""))?;
+    validate_query(query)?;
+    let limit = validate_limit_count(limit_count)?;
+    let freshness = validate_freshness_filter(freshness)?;
+    let text_search_config = effective_text_search_config()?;
+    let embedding_policy = crate::catalog::embedding::effective_embedding_policy()?;
+    let statement =
+        fresh_search_statement(&crate::catalog::embedding::contract_match_sql(13, 14, 15));
 
     Spi::connect(|client| {
         let table = client
@@ -431,36 +474,7 @@ fn concept_search_fresh_impl(
             .map_err(spi_error("freshness-aware search query failed"))?;
         let mut hits = Vec::with_capacity(table.len());
         for row in table {
-            let reader = crate::catalog::spi_read::RowReader::new(
-                &row,
-                "failed to read freshness-aware search row",
-                "concept_search_fresh_result",
-            );
-            hits.push(FreshSearchHit {
-                hit: SearchHit {
-                    bundle_id: reader.required(1, "bundle_id")?,
-                    concept_id: reader.required(2, "concept_id")?,
-                    path: reader.required(3, "path")?,
-                    title: reader.optional(4)?,
-                    concept_type: reader.optional(5)?,
-                    rank: reader.required(6, "rank")?,
-                    headline: reader.optional(7)?,
-                },
-                freshness_state: reader.required(8, "freshness_state")?,
-                freshness_reasons: reader.required(9, "freshness_reasons")?,
-                freshness_scope: reader.required(10, "freshness_scope")?,
-                stale_since: reader.optional(11)?,
-                observed_revision: reader.optional(12)?,
-                indexed_revision: reader.optional(13)?,
-                published_revision: reader.optional(14)?,
-                catalog_generation: reader.required(15, "catalog_generation")?,
-                last_reconciled_at: reader.optional(16)?,
-                embedding_state: reader.required(17, "embedding_state")?,
-                embedding_model: reader.optional(18)?,
-                embedding_dim: reader.optional(19)?,
-                embedding_input_hash: reader.optional(20)?,
-                embedded_at: reader.optional(21)?,
-            });
+            hits.push(read_fresh_hit(&row)?);
         }
         Ok(hits)
     })

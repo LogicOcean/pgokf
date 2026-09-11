@@ -228,7 +228,9 @@ pub(crate) fn effective_embedding_policy() -> Result<EmbeddingPolicy, CatalogErr
                 Some(1),
                 &[],
             )
-            .map_err(spi_error("failed to read the embedding policy configuration"))?;
+            .map_err(spi_error(
+                "failed to read the embedding policy configuration",
+            ))?;
         let Some(row) = table.into_iter().next() else {
             return Err(CatalogError::internal(
                 "the embedding policy configuration is missing",
@@ -257,7 +259,11 @@ pub(crate) fn effective_embedding_policy() -> Result<EmbeddingPolicy, CatalogErr
 /// ranking path reads the reader-granted `pgokf.effective_freshness`
 /// projection because the raw freshness tables are granted to no API role).
 /// Keep every site of this predicate in sync.
-pub(crate) fn contract_match_sql(model_param: usize, dim_param: usize, contract_param: usize) -> String {
+pub(crate) fn contract_match_sql(
+    model_param: usize,
+    dim_param: usize,
+    contract_param: usize,
+) -> String {
     format!(
         "e.source_file_hash IS NOT NULL AND e.source_file_hash = c.file_hash \
          AND e.model IS NOT NULL AND (${model_param} = '' OR e.model = ${model_param}) \
@@ -554,7 +560,9 @@ fn set_concept_embedding_cas_impl(
                 Some(1),
                 &[bundle_id.into(), concept_id.into()],
             )
-            .map_err(spi_error("failed to lock the concept for the embedding write"))?;
+            .map_err(spi_error(
+                "failed to lock the concept for the embedding write",
+            ))?;
         table
             .next()
             .map(|row| {
@@ -627,7 +635,9 @@ pub(crate) fn invalidate_synced_concepts(
              WHERE bundle_id = $1 AND concept_id = ANY($2)",
             &[bundle_id.into(), chunk.to_vec().into()],
         )
-        .map_err(spi_error("failed to invalidate embeddings of synced concepts"))?;
+        .map_err(spi_error(
+            "failed to invalidate embeddings of synced concepts",
+        ))?;
     }
     Ok(())
 }
@@ -849,9 +859,10 @@ mod pgokf {
     /// `42501` for a caller outside `pgokf_writer`.
     ///
     /// This is the 0.2.0 compatibility signature: it carries no provenance
-    /// arguments, so the row it writes is a legacy row (model, source_file_hash,
-    /// input_hash, and contract all NULL - an overwrite clears them) that is
-    /// stored but never eligible for semantic ranking. New writers should use
+    /// arguments, so the row it writes is a legacy row (`model`,
+    /// `source_file_hash`, `input_hash`, and `contract` all NULL - an
+    /// overwrite clears them) that is stored but never eligible for semantic
+    /// ranking. New writers should use
     /// `pgokf.set_concept_embedding_cas`, which proves the vector matches the
     /// current concept.
     #[pg_extern(requires = ["embedding_table"])]
@@ -1084,7 +1095,8 @@ mod tests {
     }
 
     #[test]
-    fn missing_pgvector_error_is_invalid_parameter_and_names_the_dependency() {        // Arrange / Act
+    fn missing_pgvector_error_is_invalid_parameter_and_names_the_dependency() {
+        // Arrange / Act
         let error = missing_pgvector_error();
 
         // Assert
