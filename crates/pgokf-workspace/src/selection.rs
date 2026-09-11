@@ -1151,10 +1151,13 @@ async fn apply_closure<C: GenericClient>(
         .into());
     }
     if !missing.is_empty() {
+        // The trust filter gates picks in the one resolution statement, so
+        // it gates the closure's additions the same way.
         let mut fetched = resolve(
             client,
             &Selection {
                 picks: missing,
+                verified_only: selection.verified_only,
                 ..Selection::default()
             },
         )
