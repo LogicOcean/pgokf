@@ -701,17 +701,34 @@ fn read_batch(
 }
 
 /// `open(2)` flag that refuses to traverse a symbolic link at the final path
-/// component (`O_NOFOLLOW`). On Linux this is the fixed constant `0x2_0000`;
-/// declaring it locally keeps the crate free of a `libc` dependency, and it is
-/// applied through the safe [`OpenOptionsExt::custom_flags`] so no `unsafe` is
-/// required. Its effect: if the target already exists and is a symlink, the
+/// component (`O_NOFOLLOW`). Linux uses `0x2_0000`; macOS uses `0x0000_0100`
+/// (macOS SDK `usr/include/sys/fcntl.h`). Declaring it locally keeps the crate
+/// free of a `libc` dependency. It is applied through the safe
+/// [`OpenOptionsExt::custom_flags`] so no `unsafe` is required.
+/// Its effect: if the target already exists and is a symlink, the
 /// open fails with `ELOOP` instead of following the link to write elsewhere.
+#[cfg(target_os = "linux")]
 const O_NOFOLLOW: i32 = 0x2_0000;
 
-/// Linux `errno` value returned by an `O_NOFOLLOW` open whose final component
-/// is a symbolic link (`ELOOP`). Used to translate that specific failure into
+/// macOS `O_NOFOLLOW` from SDK `usr/include/sys/fcntl.h`: refuse to follow
+/// a symlink at the final path component without a `libc` dependency.
+#[cfg(target_os = "macos")]
+const O_NOFOLLOW: i32 = 0x0000_0100;
+
+/// Platform `errno` returned by an `O_NOFOLLOW` open whose final component
+/// is a symbolic link (`ELOOP`): Linux uses 40; macOS uses 62 (macOS SDK
+/// `usr/include/sys/errno.h`). Used to translate that specific failure into
 /// a caller-facing `22023` refusal rather than an opaque internal error.
+#[cfg(target_os = "linux")]
 const ELOOP: i32 = 40;
+
+/// macOS `ELOOP` from SDK `usr/include/sys/errno.h`, mapped to SQLSTATE `22023`.
+#[cfg(target_os = "macos")]
+const ELOOP: i32 = 62;
+
+// A deliberate port must verify both constants before enabling export writes.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+compile_error!("pgokf export requires verified O_NOFOLLOW and ELOOP constants for this platform");
 
 /// Create (truncating) a fresh output file **without following a symlink** at
 /// the final path component.
@@ -1301,7 +1318,8 @@ mod tests {
         // Assert: the create is refused, the symlink target is byte-for-byte
         // untouched (no write and, crucially, no O_TRUNC escaped through it),
         // and the planted link itself is left in place rather than followed.
-        assert!(result.is_err(), "a symlinked output path must be refused");
+        let error = result.expect_err("a symlinked output path must be refused");
+        assert_eq!(error.sqlstate(), "22023", "ELOOP must map to a refusal");
         let after = std::fs::read(&target).expect("target still readable");
         assert_eq!(
             after, b"original",
