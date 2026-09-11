@@ -163,9 +163,70 @@ pub fn is_stale_input_rejection(error: &(dyn std::error::Error + 'static)) -> bo
     false
 }
 
+/// Decode a real PostgreSQL ErrorResponse without requiring a running server.
+/// `tokio_postgres::Error` deliberately has no public constructor.
+#[cfg(test)]
+pub(crate) async fn test_database_error(code: &str) -> tokio_postgres::Error {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let fields = format!("SERROR\0C{code}\0Mtest rejection\0\0").into_bytes();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut length = [0; 4];
+        stream.read_exact(&mut length).unwrap();
+        let mut startup = vec![0; usize::try_from(u32::from_be_bytes(length)).unwrap() - 4];
+        stream.read_exact(&mut startup).unwrap();
+        stream.write_all(b"E").unwrap();
+        stream
+            .write_all(&u32::try_from(fields.len() + 4).unwrap().to_be_bytes())
+            .unwrap();
+        stream.write_all(&fields).unwrap();
+    });
+    let error = tokio_postgres::Config::new()
+        .host("127.0.0.1")
+        .port(address.port())
+        .user("test")
+        .ssl_mode(tokio_postgres::config::SslMode::Disable)
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .connect(tokio_postgres::NoTls)
+        .await
+        .err()
+        .expect("server sent ErrorResponse");
+    server.join().unwrap();
+    assert_eq!(error.as_db_error().unwrap().code().code(), code);
+    error
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stale_input_classifier_walks_context_chain_and_checks_sqlstate() {
+        let error = test_database_error("40001").await;
+        assert!(is_stale_input_rejection(&error));
+        let wrapped = anyhow::Error::new(error)
+            .context("storing concept")
+            .context("embedding batch");
+        assert!(is_stale_input_rejection(wrapped.as_ref()));
+
+        for code in ["23505", "42501"] {
+            let error = test_database_error(code).await;
+            assert!(!is_stale_input_rejection(&error));
+            let wrapped = anyhow::Error::new(error)
+                .context("SQLSTATE 40001 in context is not a database code")
+                .context("embedding batch");
+            assert!(!is_stale_input_rejection(wrapped.as_ref()));
+        }
+        let plain = anyhow::anyhow!("40001").context("not a database error");
+        assert!(!is_stale_input_rejection(plain.as_ref()));
+    }
 
     fn concept(title: Option<&str>, description: Option<&str>, body: &str) -> PendingConcept {
         PendingConcept {
