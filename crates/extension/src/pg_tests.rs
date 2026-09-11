@@ -2352,9 +2352,9 @@ An added concept for the resync diff.\n";
     // ---------------------------------------------------------------------
     // Stale-embedding fix: a sync that re-writes a concept deletes its
     // embedding row in the same transaction (so the missing-row poll re-embeds
-    // it and no stale vector can rank), and the four-argument
-    // set_concept_embedding overload guards the write against a concurrent
-    // sync by compare-and-set on the concept's file_hash.
+    // it and no stale vector can rank), and set_concept_embedding_cas
+    // guards the write against a concurrent sync by compare-and-set on the
+    // concept's file_hash.
     // ---------------------------------------------------------------------
 
     /// Embed one fixture concept through the guarded setter, reading its
@@ -2366,13 +2366,16 @@ An added concept for the resync diff.\n";
         )
         .expect("file_hash query executes")
         .expect("the fixture concept exists");
-        Spi::run_with_args(
+        let stored = Spi::get_one_with_args::<bool>(
             &format!(
-                "SELECT pgokf.set_concept_embedding($1, '{concept_id}', ARRAY{vector}::real[], $2)"
+                "SELECT pgokf.set_concept_embedding_cas(
+                     $1, $2, ARRAY{vector}::real[], $3,
+                     'test-input-hash', 'test-model', 'test-contract/v1')"
             ),
-            &[bundle_id.into(), file_hash.into()],
+            &[bundle_id.into(), concept_id.into(), file_hash.into()],
         )
         .unwrap_or_else(|error| panic!("{concept_id} embedding is settable: {error}"));
+        assert_eq!(stored, Some(true), "the current file hash passes the guard");
     }
 
     /// How many embedding rows a concept currently has (0 or 1).
@@ -2432,7 +2435,7 @@ An added concept for the resync diff.\n";
     }
 
     #[pg_test]
-    fn set_concept_embedding_if_current_compares_the_file_hash() {
+    fn set_concept_embedding_cas_compares_the_file_hash() {
         // Arrange: embedding_dim lowered to 4; a real bundle for a valid concept.
         Spi::run("SELECT pgokf.set_config('embedding_dim', '4'::jsonb)")
             .expect("embedding_dim is configurable");
@@ -2444,8 +2447,9 @@ An added concept for the resync diff.\n";
              LANGUAGE plpgsql
              AS $probe$
              BEGIN
-                 PERFORM pgokf.set_concept_embedding(bid, cid, ARRAY[1,0,0,0]::real[], expected);
-                 RETURN 'ok';
+                 RETURN pgokf.set_concept_embedding_cas(
+                     bid, cid, ARRAY[1,0,0,0]::real[], expected,
+                     'test-input-hash', 'test-model', 'test-contract/v1')::text;
              EXCEPTION WHEN OTHERS THEN
                  RETURN SQLSTATE;
              END
@@ -2462,11 +2466,11 @@ An added concept for the resync diff.\n";
         };
 
         // Act / Assert: a hash the concept never carried is refused with the
-        // retryable 40001, and no row is written.
+        // retryable false result, and no row is written.
         assert_eq!(
             probe("alpha", "not-the-current-hash"),
-            "40001",
-            "a stale expected file hash is rejected with 40001"
+            "false",
+            "a stale expected file hash returns false"
         );
         assert_eq!(
             embedding_row_count(bundle_id, "alpha"),
@@ -2490,7 +2494,7 @@ An added concept for the resync diff.\n";
         .expect("alpha exists");
         assert_eq!(
             probe("alpha", &current),
-            "ok",
+            "true",
             "the current file hash passes the guard"
         );
         assert_eq!(embedding_row_count(bundle_id, "alpha"), 1);
@@ -2502,13 +2506,13 @@ An added concept for the resync diff.\n";
             .expect("refresh_bundle executes");
         assert_eq!(
             probe("alpha", &current),
-            "40001",
+            "false",
             "a pre-sync hash is rejected after the concept changed"
         );
     }
 
     #[pg_test]
-    fn set_concept_embedding_if_current_denies_a_reader_role() {
+    fn set_concept_embedding_cas_denies_a_reader_role() {
         // Arrange: a role granted only pgokf_reader.
         Spi::run("SELECT pgokf.set_config('embedding_dim', '4'::jsonb)")
             .expect("embedding_dim is configurable");
@@ -2523,8 +2527,9 @@ An added concept for the resync diff.\n";
              SET role TO pgokf_embed_guarded_reader
              AS $probe$
              BEGIN
-                 PERFORM pgokf.set_concept_embedding(
-                     bid, 'alpha', ARRAY[1,0,0,0]::real[], 'any-hash');
+                 PERFORM pgokf.set_concept_embedding_cas(
+                     bid, 'alpha', ARRAY[1,0,0,0]::real[], 'any-hash',
+                     'test-input-hash', 'test-model', 'test-contract/v1');
                  RETURN 'not-denied';
              EXCEPTION WHEN insufficient_privilege THEN
                  RETURN SQLSTATE;
@@ -2544,7 +2549,7 @@ An added concept for the resync diff.\n";
         // Assert: a plain reader is denied the guarded writer-tier setter too.
         assert_eq!(
             sqlstate, "42501",
-            "a reader role must be denied the guarded set_concept_embedding with 42501",
+            "a reader role must be denied the set_concept_embedding_cas with 42501",
         );
     }
 

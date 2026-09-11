@@ -48,7 +48,6 @@ or disappear in any release.
 | `pgokf.concept_search_semantic(real[], bigint, integer)` | `pgokf_reader` | Vector nearest-neighbor search by a caller-supplied query embedding (requires pgvector) |
 | `pgokf.concept_search_hybrid(text, real[], bigint, integer)` | `pgokf_reader` | RRF fusion of lexical + semantic (degrades to lexical when pgvector absent) |
 | `pgokf.set_concept_embedding(bigint, text, real[])` | `pgokf_writer` | Store a caller-computed embedding for a concept (no bundled model) |
-| `pgokf.set_concept_embedding(bigint, text, real[], text)` | `pgokf_writer` | Store an embedding only if the expected `file_hash` still matches; rejects stale input with SQLSTATE `40001` |
 | `pgokf.rebuild_embedding_index()` | `pgokf_admin` | (Re)build the optional pgvector HNSW index; a no-op with a notice when pgvector is not installed |
 | `pgokf.concept_neighbors(text, integer, bigint)` | `pgokf_reader` | Walk the resolved link graph |
 | `pgokf.concept_history(bigint, text, integer)` | `pgokf_reader` | Version timeline of a concept (opt-in `track_history`) |
