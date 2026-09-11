@@ -3,16 +3,21 @@
 //!
 //! This standalone async binary is the embedder half of the shipped semantic
 //! search feature. The `pgokf` extension stores caller-computed embedding
-//! vectors (via `pgokf.set_concept_embedding`) and ranks concepts against a
-//! query vector (via `pgokf.concept_search_semantic`), but it never computes an
+//! vectors (via `pgokf.set_concept_embedding_cas`, a compare-and-set against
+//! the concept's current `file_hash`) and ranks concepts against a query
+//! vector (via `pgokf.concept_search_semantic`), but it never computes an
 //! embedding and never performs network I/O. This companion closes that loop:
-//! it finds concepts that lack an embedding, computes one for each against a
-//! configurable OpenAI-compatible embeddings endpoint, and streams the vectors
-//! back through the setter.
+//! it finds concepts whose embedding is missing or stale, computes one for
+//! each against a configurable OpenAI-compatible embeddings endpoint, and
+//! streams the vectors back through the compare-and-set setter with full
+//! provenance (source file hash, input hash, model, render contract). A
+//! compare-and-set refusal - the concept changed while inference ran - is
+//! retryable: the concept is skipped and re-polled on the next pass.
 //!
 //! It runs once by default, or as a daemon with `--watch`: every `--interval`
-//! seconds it looks again for concepts without a vector (newly registered or
-//! refreshed content) and embeds them, until SIGINT / SIGTERM.
+//! seconds it looks again for concepts without a current vector (newly
+//! registered, refreshed, or invalidated content) and embeds them, until
+//! SIGINT / SIGTERM.
 //!
 //! Credentials live here - the endpoint URL, model name, and bearer API key all
 //! come from the CLI or environment and are **never** hard-coded or written to
@@ -205,14 +210,12 @@ async fn embed_all(cli: &Cli, pg_client: &tokio_postgres::Client) -> Result<usiz
         pgokf_pgconn::set_tenant(pg_client, tenant).await?;
     }
 
-    let dim = match cli.dim {
-        Some(dim) => dim,
-        None => db::embedding_dim(pg_client)
-            .await
-            .context("resolving embedding_dim (pass --dim to override)")?,
-    };
+    let policy = db::embedding_policy(pg_client)
+        .await
+        .context("resolving the embedding policy")?;
+    let dim = cli.dim.unwrap_or(policy.dim);
 
-    let pending = db::pending_concepts(pg_client, cli.bundle).await?;
+    let pending = db::pending_concepts(pg_client, cli.bundle, &policy).await?;
     if pending.is_empty() {
         return Ok(0);
     }
@@ -240,8 +243,12 @@ async fn embed_all(cli: &Cli, pg_client: &tokio_postgres::Client) -> Result<usiz
     Ok(embedded)
 }
 
-/// Embed one batch of concepts and store each returned vector. Returns the
-/// number of vectors stored.
+/// Embed one batch of concepts and store each returned vector through the
+/// compare-and-set setter. Returns the number of vectors stored.
+///
+/// A vector whose compare-and-set is refused (the concept changed while
+/// inference ran) is not an error: it is logged and skipped, and the next
+/// pass re-polls the concept against its new hash.
 async fn embed_batch(
     cli: &Cli,
     pg_client: &tokio_postgres::Client,
@@ -249,6 +256,7 @@ async fn embed_batch(
     dim: i32,
     batch: &[PendingConcept],
 ) -> Result<usize> {
+    let contract = db::render_contract(cli.max_chars);
     let inputs: Vec<String> = batch
         .iter()
         .map(|concept| concept.embedding_input(cli.max_chars))
@@ -259,7 +267,8 @@ async fn embed_batch(
         .await
         .context("calling the embeddings endpoint")?;
 
-    for (concept, vector) in batch.iter().zip(vectors) {
+    let mut stored = 0_usize;
+    for ((concept, input), vector) in batch.iter().zip(&inputs).zip(vectors) {
         let actual = i32::try_from(vector.len()).unwrap_or(i32::MAX);
         if actual != dim {
             bail!(
@@ -267,10 +276,21 @@ async fn embed_batch(
                 concept.concept_id,
             );
         }
-        db::store_embedding(pg_client, concept.bundle_id, &concept.concept_id, &vector).await?;
+        // The hash of the exact bounded input bytes that produced this vector.
+        let input_hash = db::input_hash(input);
+        if db::store_embedding(pg_client, concept, &vector, &input_hash, &cli.model, &contract)
+            .await?
+        {
+            stored += 1;
+        } else {
+            eprintln!(
+                "pgokf-embed: concept '{}' changed while embedding; skipping (retried on the next pass)",
+                concept.concept_id,
+            );
+        }
     }
 
-    Ok(batch.len())
+    Ok(stored)
 }
 
 #[cfg(test)]
