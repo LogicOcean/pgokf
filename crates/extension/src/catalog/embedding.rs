@@ -42,6 +42,27 @@
 //! mirroring `rebuild_search_index`: it builds a `pgvector` HNSW (cosine) index
 //! over the embeddings for the configured dimension, and is a logged no-op when
 //! `pgvector` is absent.
+//!
+//! # Staleness: no vector may outlive the text it was computed from
+//!
+//! An embedding is only meaningful while the concept text it was computed from
+//! is current. Two mechanisms keep that invariant:
+//!
+//! - **Transactional invalidation.** The shared sync engine calls
+//!   [`invalidate_synced`] in the same transaction that upserts changed
+//!   concepts, deleting their embedding rows (removed or re-identified concepts
+//!   already cascade through the foreign key). On commit a changed concept
+//!   simply has *no* vector, so semantic/hybrid ranking excludes it by
+//!   construction - the nearest-neighbor query joins `concept_embedding`, and a
+//!   row that does not exist cannot rank. The companion embedder's missing-row
+//!   poll then picks the concept up for re-embedding, unchanged.
+//! - **A compare-and-set ingest guard.** Inference is slow and concurrent with
+//!   syncs: a companion that read a concept *before* a sync could otherwise
+//!   re-insert a vector computed from the old text *after* the sync deleted it.
+//!   The four-argument `pgokf.set_concept_embedding` overload locks the concept
+//!   row and rejects the write with SQLSTATE `40001` (retryable) unless the
+//!   caller's `expected_file_hash` still equals the concept's current
+//!   `file_hash`. The three-argument form is kept unchanged for compatibility.
 
 use std::path::Path;
 
@@ -102,7 +123,7 @@ CREATE POLICY concept_embedding_tenant_isolation ON pgokf.concept_embedding
         OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true));
 
 COMMENT ON TABLE pgokf.concept_embedding IS
-    'Opt-in per-concept embedding vectors, streamed in by a companion embedder via pgokf.set_concept_embedding (the extension never computes embeddings or performs network I/O). The vector is stored as the builtin real[] - NOT a pgvector ''vector'' column - so CREATE EXTENSION pgokf succeeds without pgvector installed; it is cast to vector(dim) at query time and in the HNSW index only when pgvector is present. Rows cascade from pgokf.concepts, so removing a concept or unregistering a bundle drops its embedding automatically.';
+    'Opt-in per-concept embedding vectors, streamed in by a companion embedder via pgokf.set_concept_embedding (the extension never computes embeddings or performs network I/O). The vector is stored as the builtin real[] - NOT a pgvector ''vector'' column - so CREATE EXTENSION pgokf succeeds without pgvector installed; it is cast to vector(dim) at query time and in the HNSW index only when pgvector is present. Rows cascade from pgokf.concepts, so removing a concept or unregistering a bundle drops its embedding automatically, and a sync that re-writes a concept deletes its embedding row in the same transaction, so a stored vector always matches the concept''s current text.';
 COMMENT ON COLUMN pgokf.concept_embedding.embedding IS
     'The caller-computed embedding as real[]. Its length must equal the durable embedding_dim configuration key at ingest time (enforced by pgokf.set_concept_embedding); dim records that length redundantly for a size-only read.';
 COMMENT ON COLUMN pgokf.concept_embedding.dim IS
@@ -310,36 +331,47 @@ fn concept_exists(bundle_id: i64, concept_id: &str) -> Result<bool, CatalogError
     .ok_or_else(|| CatalogError::internal("concept existence probe returned no row", Path::new("")))
 }
 
-/// Authorize (writer), validate, and upsert one concept embedding.
-fn set_concept_embedding_impl(
+/// Lock a concept row (`FOR UPDATE`) and return its current `file_hash`, or
+/// `None` when the concept does not exist.
+///
+/// The row lock is held to the end of the caller's transaction, so a sync that
+/// is concurrently re-writing this concept either already committed (and the
+/// hash read reflects its new text) or blocks until the caller commits - in
+/// which case the sync's own invalidation deletes the row this write produces.
+/// Either way no vector computed from superseded text can survive.
+fn concept_file_hash_for_update(
+    bundle_id: i64,
+    concept_id: &str,
+) -> Result<Option<String>, CatalogError> {
+    Spi::connect(|client| {
+        let table = client
+            .select(
+                "SELECT file_hash FROM pgokf.concepts
+                 WHERE bundle_id = $1 AND id = $2
+                 FOR UPDATE",
+                Some(1),
+                &[bundle_id.into(), concept_id.into()],
+            )
+            .map_err(spi_error("failed to lock the concept for an embedding write"))?;
+        if table.is_empty() {
+            return Ok(None);
+        }
+        table
+            .first()
+            .get_one::<String>()
+            .map_err(spi_error("failed to read the concept's file hash"))
+    })
+}
+
+/// The shared upsert behind both setter forms. `tenant_id` is derived from the
+/// bundle (single-tenant) and left untouched on conflict, so re-embedding a
+/// concept never rewrites its tenant.
+fn upsert_embedding(
     bundle_id: i64,
     concept_id: &str,
     embedding: Vec<f32>,
+    dim: i32,
 ) -> Result<(), CatalogError> {
-    security::authorize_current_user(security::Operation::Ingest, Path::new(""))?;
-    // Write-side tenant confinement: a scoped session may only embed into its own
-    // tenant's bundle. Checked first (before the dimension/concept validation) so
-    // a cross-tenant bundle_id is rejected as an unknown bundle without revealing
-    // anything about that bundle's concepts.
-    security::enforce_bundle_tenant(bundle_id)?;
-
-    let dim = config::embedding_dim()?;
-    validate_embedding_length(embedding.len(), dim)?;
-    // Reject NaN/Infinity before the upsert: real[] would store them silently,
-    // but pgvector rejects a non-finite component when the array is cast to
-    // vector(dim) on every read/index path, so one bad write would otherwise
-    // poison semantic/hybrid search and rebuild_embedding_index catalog-wide.
-    validate_embedding_finite(&embedding)?;
-
-    if !concept_exists(bundle_id, concept_id)? {
-        return Err(CatalogError::invalid_parameter(
-            format!("no such concept {concept_id} in bundle {bundle_id}"),
-            Path::new(""),
-        ));
-    }
-
-    // tenant_id is derived from the bundle (single-tenant) and left untouched on
-    // conflict, so re-embedding a concept never rewrites its tenant.
     Spi::run_with_args(
         "INSERT INTO pgokf.concept_embedding
              (bundle_id, tenant_id, concept_id, embedding, dim, updated_at)
@@ -358,6 +390,118 @@ fn set_concept_embedding_impl(
         ],
     )
     .map_err(spi_error("failed to upsert concept embedding"))
+}
+
+/// Authorize (writer), confine to the session tenant, and validate the vector
+/// against the durable dimension and the finiteness rule - the checks both
+/// setter forms share before their write path diverges.
+fn validate_embedding_write(bundle_id: i64, embedding: &[f32]) -> Result<i32, CatalogError> {
+    security::authorize_current_user(security::Operation::Ingest, Path::new(""))?;
+    // Write-side tenant confinement: a scoped session may only embed into its own
+    // tenant's bundle. Checked first (before the dimension/concept validation) so
+    // a cross-tenant bundle_id is rejected as an unknown bundle without revealing
+    // anything about that bundle's concepts.
+    security::enforce_bundle_tenant(bundle_id)?;
+
+    let dim = config::embedding_dim()?;
+    validate_embedding_length(embedding.len(), dim)?;
+    // Reject NaN/Infinity before the upsert: real[] would store them silently,
+    // but pgvector rejects a non-finite component when the array is cast to
+    // vector(dim) on every read/index path, so one bad write would otherwise
+    // poison semantic/hybrid search and rebuild_embedding_index catalog-wide.
+    validate_embedding_finite(embedding)?;
+    Ok(dim)
+}
+
+/// The `22023` both setter forms raise for an unknown concept.
+fn unknown_concept_error(bundle_id: i64, concept_id: &str) -> CatalogError {
+    CatalogError::invalid_parameter(
+        format!("no such concept {concept_id} in bundle {bundle_id}"),
+        Path::new(""),
+    )
+}
+
+/// Authorize (writer), validate, and upsert one concept embedding.
+fn set_concept_embedding_impl(
+    bundle_id: i64,
+    concept_id: &str,
+    embedding: Vec<f32>,
+) -> Result<(), CatalogError> {
+    let dim = validate_embedding_write(bundle_id, &embedding)?;
+
+    if !concept_exists(bundle_id, concept_id)? {
+        return Err(unknown_concept_error(bundle_id, concept_id));
+    }
+
+    upsert_embedding(bundle_id, concept_id, embedding, dim)
+}
+
+/// Authorize (writer), validate, and upsert one concept embedding, but only
+/// while the concept's current `file_hash` still equals `expected_file_hash`
+/// (compare-and-set against the text the caller embedded).
+///
+/// A companion embedder reads a concept, computes a vector over its text - slow,
+/// and concurrent with syncs - and then writes. Without this guard a sync that
+/// committed in between (deleting the old embedding row via
+/// [`invalidate_synced`]) would be followed by the companion re-inserting a
+/// vector computed from the *old* text. Locking the concept row and comparing
+/// hashes makes the write atomic with the currency check: on a mismatch the
+/// write is rejected with SQLSTATE `40001`, a retryable signal - the row stays
+/// absent, so the companion's next pass re-reads the new text and re-embeds.
+fn set_concept_embedding_if_current_impl(
+    bundle_id: i64,
+    concept_id: &str,
+    embedding: Vec<f32>,
+    expected_file_hash: &str,
+) -> Result<(), CatalogError> {
+    let dim = validate_embedding_write(bundle_id, &embedding)?;
+
+    let Some(current_hash) = concept_file_hash_for_update(bundle_id, concept_id)? else {
+        return Err(unknown_concept_error(bundle_id, concept_id));
+    };
+    if current_hash != expected_file_hash {
+        return Err(CatalogError::concurrent_modification(
+            format!(
+                "concept {concept_id} in bundle {bundle_id} changed while its embedding was \
+                 being computed (expected file hash {expected_file_hash}, now {current_hash}); \
+                 the embedding row stays absent - re-read the concept and retry"
+            ),
+            Path::new(""),
+        ));
+    }
+
+    upsert_embedding(bundle_id, concept_id, embedding, dim)
+}
+
+/// Delete the stored embeddings of every concept a sync just re-wrote, in the
+/// sync's own transaction.
+///
+/// Called by the shared sync engine immediately around the concept upsert: a
+/// staged concept's text may differ from what any stored vector was computed
+/// from, so its embedding row is deleted here and the commit publishes both
+/// together - no old vector can ever coexist with new concept text. Concepts a
+/// sync *removes* (or re-identifies) need no handling: their rows cascade
+/// through the foreign key. After the commit the changed concepts are simply
+/// missing, which is exactly what the companion embedder's poll selects, so
+/// re-embedding needs no separate stale marker.
+///
+/// Invalidating on *any* re-write (rather than diffing the rendered embedding
+/// input field-by-field) is deliberately conservative: a byte change that
+/// leaves the rendered input identical costs one redundant re-embedding, and
+/// the reverse mistake - keeping a vector whose input changed - is impossible.
+pub(crate) fn invalidate_synced(
+    bundle_id: i64,
+    concept_ids: &[String],
+) -> Result<(), CatalogError> {
+    for chunk in concept_ids.chunks(crate::catalog::batch::BATCH_SIZE) {
+        Spi::run_with_args(
+            "DELETE FROM pgokf.concept_embedding
+             WHERE bundle_id = $1 AND concept_id = ANY($2)",
+            &[bundle_id.into(), chunk.to_vec().into()],
+        )
+        .map_err(spi_error("failed to invalidate embeddings of synced concepts"))?;
+    }
+    Ok(())
 }
 
 /// Authorize (reader), validate, require `pgvector`, and run the semantic query.
@@ -558,7 +702,7 @@ mod pgokf {
 
     use super::{
         concept_search_hybrid_impl, concept_search_semantic_impl, rebuild,
-        set_concept_embedding_impl,
+        set_concept_embedding_if_current_impl, set_concept_embedding_impl,
     };
     use crate::catalog::types;
 
@@ -571,10 +715,40 @@ mod pgokf {
     /// in - the extension never computes embeddings and performs no network I/O.
     /// Raises SQLSTATE `22023` on a wrong length or an unknown concept, and
     /// `42501` for a caller outside `pgokf_writer`.
+    ///
+    /// This form performs no currency check; the four-argument overload
+    /// guards the write against a concurrent sync.
     #[pg_extern(requires = ["embedding_table"])]
     fn set_concept_embedding(bundle_id: i64, concept_id: &str, embedding: Vec<f32>) {
         set_concept_embedding_impl(bundle_id, concept_id, embedding)
             .unwrap_or_else(|error| error.raise());
+    }
+
+    /// Store (or replace) a concept's embedding vector, guarded against a
+    /// concurrent sync (compare-and-set on the concept's `file_hash`).
+    ///
+    /// Identical to the three-argument form, plus `expected_file_hash`: the
+    /// `file_hash` the concept carried when the caller read its text and
+    /// computed this vector. The concept row is locked and the write is
+    /// refused with SQLSTATE `40001` (retryable) when the hash no longer
+    /// matches - the concept changed while inference ran, so this vector was
+    /// computed from superseded text and the row stays absent for the next
+    /// embedder pass. Raises `22023` on a wrong length or an unknown concept,
+    /// and `42501` for a caller outside `pgokf_writer`.
+    #[pg_extern(name = "set_concept_embedding", requires = ["embedding_table"])]
+    fn set_concept_embedding_if_current(
+        bundle_id: i64,
+        concept_id: &str,
+        embedding: Vec<f32>,
+        expected_file_hash: &str,
+    ) {
+        set_concept_embedding_if_current_impl(
+            bundle_id,
+            concept_id,
+            embedding,
+            expected_file_hash,
+        )
+        .unwrap_or_else(|error| error.raise());
     }
 
     /// Rank concepts by semantic similarity to a query embedding.
@@ -656,18 +830,24 @@ mod pgokf {
         r"
 ALTER FUNCTION pgokf.set_concept_embedding(bigint, text, real[])
     SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
+ALTER FUNCTION pgokf.set_concept_embedding(bigint, text, real[], text)
+    SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
 ALTER FUNCTION pgokf.rebuild_embedding_index()
     SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
 REVOKE ALL ON FUNCTION pgokf.set_concept_embedding(bigint, text, real[]) FROM PUBLIC;
+REVOKE ALL ON FUNCTION pgokf.set_concept_embedding(bigint, text, real[], text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION pgokf.rebuild_embedding_index() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pgokf.set_concept_embedding(bigint, text, real[]) TO pgokf_writer;
+GRANT EXECUTE ON FUNCTION pgokf.set_concept_embedding(bigint, text, real[], text) TO pgokf_writer;
 GRANT EXECUTE ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer) TO pgokf_reader;
 GRANT EXECUTE ON FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer) TO pgokf_reader;
 GRANT EXECUTE ON FUNCTION pgokf.rebuild_embedding_index() TO pgokf_admin;
 COMMENT ON FUNCTION pgokf.set_concept_embedding(bigint, text, real[]) IS
     'Store or replace one concept''s embedding (real[]) streamed in by a companion embedder; the extension never computes embeddings. Writer-tier (pgokf_writer; admin inherits it), SECURITY DEFINER. Validates the concept exists and len(embedding)=embedding_dim (else 22023) and upserts. The vector is stored as real[] so pgokf needs no static pgvector dependency.';
+COMMENT ON FUNCTION pgokf.set_concept_embedding(bigint, text, real[], text) IS
+    'Store or replace one concept''s embedding (real[]), guarded against a concurrent sync: the concept row is locked and the write is refused with 40001 (retryable - re-read the concept and re-embed) unless expected_file_hash still equals the concept''s current file_hash, so a vector computed from superseded text can never be stored. Writer-tier (pgokf_writer; admin inherits it), SECURITY DEFINER. Validates the concept exists and len(embedding)=embedding_dim (else 22023) and upserts.';
 COMMENT ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer) IS
     'Semantic nearest-neighbor search: rank concepts by pgvector cosine distance to query_embedding (rank = normalized cosine similarity). Reader-level, invoker rights; enabled bundles only. query_embedding must have embedding_dim dimensions; limit_count in 1..=500. Requires pgvector: raises 22023 naming the missing dependency when it is not installed (no lexical fallback).';
 COMMENT ON FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer) IS
@@ -678,6 +858,7 @@ COMMENT ON FUNCTION pgokf.rebuild_embedding_index() IS
         name = "embedding_function_hardening",
         requires = [
             set_concept_embedding,
+            set_concept_embedding_if_current,
             concept_search_semantic,
             concept_search_hybrid,
             rebuild_embedding_index
