@@ -989,6 +989,18 @@ pub(crate) struct PluginForm {
     pub ids: String,
     /// One `bundle_id:concept_id` per line.
     pub picks: String,
+    /// `warn` or `exclude`, as the form echoes it.
+    pub stale_policy: String,
+    /// One `bundle_id:concept_id` per line.
+    pub seeds: String,
+    /// Comma-separated namespaced relationship types.
+    pub relation_types: String,
+    /// `outbound`, `inbound`, or `both`.
+    pub direction: String,
+    pub hops: String,
+    pub require_closure: bool,
+    /// A malformed seeds line, shown with the preview; the download refuses it.
+    pub seed_problem: Option<String>,
     pub q: String,
     pub verified: bool,
     pub limit: String,
@@ -1010,12 +1022,13 @@ pub(crate) struct PluginForm {
 
 impl PluginForm {
     /// The first thing wrong with the form that the page shows and the
-    /// download refuses: an agent that cannot be built for, then a
-    /// malformed ticked-files line.
+    /// download refuses: an agent that cannot be built for, then a malformed
+    /// ticked-files or seeds line.
     fn problems(&self) -> Option<String> {
         self.agent_problem
             .clone()
             .or_else(|| self.pick_problem.clone())
+            .or_else(|| self.seed_problem.clone())
     }
 }
 
@@ -1024,6 +1037,10 @@ pub(crate) struct PluginPreview {
     pub description: String,
     pub concepts: Vec<ConceptRecord>,
     pub truncated: bool,
+    /// How many concepts the catalog reports as not fresh (kept and
+    /// labelled), and how many the `exclude` policy dropped.
+    pub stale_count: usize,
+    pub excluded_count: usize,
     pub root: String,
     pub index_file: String,
     pub file_paths: Vec<String>,
@@ -5268,6 +5285,24 @@ struct PluginParams {
     /// Specific files, one `bundle_id:concept_id` per line.
     #[serde(default)]
     picks: String,
+    /// `warn` (default) or `exclude`: what the build does with concepts the
+    /// catalog reports as not fresh.
+    #[serde(default)]
+    stale_policy: String,
+    /// Closure seeds, one `bundle_id:concept_id` per line.
+    #[serde(default)]
+    seeds: String,
+    /// The namespaced relationship types the closure follows (comma-separated).
+    #[serde(default)]
+    relation_types: String,
+    /// `outbound` (default), `inbound`, or `both`.
+    #[serde(default)]
+    direction: String,
+    #[serde(default)]
+    hops: String,
+    /// `1` when the closure must complete or the build refuses.
+    #[serde(default)]
+    require_closure: String,
     #[serde(default)]
     q: String,
     #[serde(default)]
@@ -5453,6 +5488,7 @@ fn split_list(raw: &str) -> Vec<String> {
 
 impl PluginParams {
     /// Validate into the builder's inputs plus the echoed form state.
+    #[allow(clippy::too_many_lines)]
     fn normalize(&self) -> Result<(PluginForm, Chosen, Selection, Option<String>), AppError> {
         let chosen = resolve_agent(&self.kind, &self.agent, &self.skills_dir, &self.target)?;
         let bundle_id = match non_empty(&self.bundle) {
@@ -5481,6 +5517,33 @@ impl PluginParams {
         let all = on(&self.all);
         let components = self.components();
         let (picks, pick_problem) = parse_picks(&self.picks);
+        let (seeds, seed_problem) = parse_picks(&self.seeds);
+        let stale_policy = match non_empty(&self.stale_policy) {
+            None => pgokf_workspace::StalePolicy::Warn,
+            Some(id) => pgokf_workspace::StalePolicy::parse(&id)
+                .ok_or_else(|| AppError::bad_request("stale_policy must be warn or exclude"))?,
+        };
+        let direction = match non_empty(&self.direction) {
+            None => pgokf_workspace::Direction::Outbound,
+            Some(id) => pgokf_workspace::Direction::parse(&id).ok_or_else(|| {
+                AppError::bad_request("direction must be outbound, inbound, or both")
+            })?,
+        };
+        let hops = match non_empty(&self.hops) {
+            None => None,
+            Some(raw) => Some(
+                raw.parse::<usize>()
+                    .ok()
+                    .filter(|n| (1..=pgokf_workspace::MAX_HOPS).contains(n))
+                    .ok_or_else(|| {
+                        AppError::bad_request(format!(
+                            "hops must be between 1 and {}",
+                            pgokf_workspace::MAX_HOPS
+                        ))
+                    })?,
+            ),
+        };
+        let require_closure = on(&self.require_closure);
         // The rule (everything in scope, narrowed) applies only when the
         // user took everything; otherwise the bundle is just where they
         // browse and the narrowing fields wait, echoed but inert.
@@ -5506,6 +5569,12 @@ impl PluginParams {
             verified_only: verified,
             limit,
             picks,
+            stale_policy,
+            seeds,
+            relation_types: split_list(&self.relation_types),
+            direction,
+            hops,
+            require_closure,
         };
         let name = non_empty(&self.name).unwrap_or_else(|| DEFAULT_PLUGIN_NAME.to_owned());
         let query_string =
@@ -5531,6 +5600,18 @@ impl PluginParams {
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join("\n"),
+            stale_policy: selection.stale_policy.id().to_owned(),
+            seeds: selection
+                .seeds
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+            relation_types: split_list(&self.relation_types).join(", "),
+            direction: selection.direction.id().to_owned(),
+            hops: selection.hops.map(|n| n.to_string()).unwrap_or_default(),
+            require_closure,
+            seed_problem,
             q: self.q.trim().to_owned(),
             verified,
             limit: limit.map(|n| n.to_string()).unwrap_or_default(),
@@ -5587,6 +5668,40 @@ impl PluginParams {
                     .collect::<Vec<_>>()
                     .join("\n"),
             ),
+            (
+                "stale_policy",
+                if selection.stale_policy == pgokf_workspace::StalePolicy::Exclude {
+                    "exclude".to_owned()
+                } else {
+                    String::new()
+                },
+            ),
+            (
+                "seeds",
+                selection
+                    .seeds
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            (
+                "relation_types",
+                split_list(&self.relation_types).join(", "),
+            ),
+            (
+                "direction",
+                if selection.direction == pgokf_workspace::Direction::Outbound {
+                    String::new()
+                } else {
+                    selection.direction.id().to_owned()
+                },
+            ),
+            (
+                "hops",
+                selection.hops.map(|n| n.to_string()).unwrap_or_default(),
+            ),
+            ("require_closure", flag(selection.require_closure)),
             ("q", self.q.trim().to_owned()),
             ("verified", flag(verified)),
             ("limit", limit.map(|n| n.to_string()).unwrap_or_default()),
@@ -5727,7 +5842,9 @@ fn mcp_note(profile: &Profile, name: &str, remote: bool) -> String {
 }
 
 /// Resolve the selection (no sources read) and describe the tree it would
-/// produce.
+/// produce. The resolution runs under the same one-snapshot, freshness-aware
+/// policy as the download, so the preview shows exactly what a build would
+/// do - including its refusals.
 async fn plugin_preview(
     app: &App,
     form: &PluginForm,
@@ -5736,9 +5853,10 @@ async fn plugin_preview(
     base_model: Option<String>,
 ) -> Result<PluginPreview, AppError> {
     let mut client = app.db.checkout().await?;
-    let mut concepts = pgokf_workspace::resolve(client.client(), selection)
-        .await
-        .map_err(workspace_error)?;
+    let (mut concepts, snapshot, report) =
+        pgokf_workspace::resolve_in_transaction(client.client_mut(), selection)
+            .await
+            .map_err(workspace_error)?;
     client.finish();
     let truncated = concepts.len() >= selection.effective_limit();
     // The build drops a resource whose package is selected; the preview
@@ -5747,23 +5865,20 @@ async fn plugin_preview(
     placeholder_contents(app, &mut concepts).await?;
     let options = build_options(app, form, chosen, base_model);
     let profile = options.profile().map_err(workspace_error)?;
-    let snapshot = pgokf_workspace::Snapshot {
-        version: app.version.clone(),
-        sql_version: String::new(),
-        bundles: Vec::new(),
-    };
     let plugin = if concepts.is_empty() {
         None
     } else {
         Some(
-            pgokf_workspace::assemble(&options, selection, &snapshot, &concepts)
-                .map_err(workspace_error)?,
+            pgokf_workspace::assemble_with_report(
+                &options, selection, &snapshot, &concepts, &report,
+            )
+            .map_err(workspace_error)?,
         )
     };
     for c in &mut concepts {
         c.bytes.clear();
     }
-    let mcp_args = serde_json::json!({
+    let mut mcp_args = serde_json::json!({
         "target": chosen.target.id(),
         "harness": chosen.harness,
         "name": pgokf_workspace::slug(&form.name),
@@ -5773,6 +5888,9 @@ async fn plugin_preview(
         "tags": selection.tags,
         "concept_ids": selection.concept_ids,
         "picks": selection.picks.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "seeds": selection.seeds.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "relation_types": selection.relation_types,
+        "require_closure": selection.require_closure,
         "query": selection.query,
         "verified_only": selection.verified_only,
         "limit": selection.effective_limit(),
@@ -5782,6 +5900,13 @@ async fn plugin_preview(
         "web_url": options.web_url,
         "output_dir": "/path/to/your/workspace",
     });
+    if selection.stale_policy == pgokf_workspace::StalePolicy::Exclude {
+        mcp_args["stale_policy"] = Value::String("exclude".to_owned());
+    }
+    if !selection.seeds.is_empty() {
+        mcp_args["direction"] = Value::String(selection.direction.id().to_owned());
+        mcp_args["hops"] = serde_json::json!(selection.effective_hops());
+    }
     let mcp_note = form
         .with_mcp
         .then(|| mcp_note(&profile, &form.name, !form.mcp_url.is_empty()));
@@ -5800,6 +5925,8 @@ async fn plugin_preview(
     Ok(PluginPreview {
         description: selection.describe(),
         truncated,
+        stale_count: plugin.as_ref().map_or(0, |p| p.warnings.len()),
+        excluded_count: plugin.as_ref().map_or(0, |p| p.excluded.len()),
         root: plugin.as_ref().map(|p| p.root.clone()).unwrap_or_default(),
         index_file: plugin
             .as_ref()
@@ -6006,7 +6133,7 @@ async fn plugins_zip(State(app): State<Shared>, Query(params): Query<PluginParam
     })?;
     let mut client = app.db.checkout().await?;
     let options = build_options(&app, &form, &chosen, base_model);
-    let plugin = pgokf_workspace::build(client.client(), &options, &selection)
+    let plugin = pgokf_workspace::build_in_transaction(client.client_mut(), &options, &selection)
         .await
         .map_err(workspace_error)?;
     client.finish();
@@ -6627,6 +6754,90 @@ mod tests {
             .normalize()
             .is_err()
         );
+    }
+
+    #[test]
+    fn plugin_params_carry_the_stale_policy_and_closure() {
+        // Arrange
+        let params = PluginParams {
+            stale_policy: "exclude".to_owned(),
+            seeds: "1:runbooks/a\n2:b".to_owned(),
+            relation_types: "docs:references, ops:depends".to_owned(),
+            direction: "both".to_owned(),
+            hops: "3".to_owned(),
+            require_closure: "1".to_owned(),
+            ..PluginParams::default()
+        };
+
+        // Act
+        let (form, _, selection, _) = params.normalize().ok().expect("valid");
+
+        // Assert
+        assert_eq!(
+            selection.stale_policy,
+            pgokf_workspace::StalePolicy::Exclude
+        );
+        assert_eq!(
+            selection
+                .seeds
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            ["1:runbooks/a", "2:b"]
+        );
+        assert_eq!(selection.relation_types, ["docs:references", "ops:depends"]);
+        assert_eq!(selection.direction, pgokf_workspace::Direction::Both);
+        assert_eq!(selection.hops, Some(3));
+        assert!(selection.require_closure);
+        assert!(form.seed_problem.is_none());
+        for part in [
+            "stale_policy=exclude",
+            "seeds=1%3Arunbooks%2Fa%0A2%3Ab",
+            "direction=both",
+            "hops=3",
+            "require_closure=1",
+        ] {
+            assert!(
+                form.query_string.contains(part),
+                "{part} in {}",
+                form.query_string
+            );
+        }
+
+        // Bad values are refused; defaults stay the old behavior.
+        for bad in [
+            PluginParams {
+                stale_policy: "drop".to_owned(),
+                ..PluginParams::default()
+            },
+            PluginParams {
+                direction: "up".to_owned(),
+                ..PluginParams::default()
+            },
+            PluginParams {
+                hops: "99".to_owned(),
+                ..PluginParams::default()
+            },
+        ] {
+            assert!(bad.normalize().is_err());
+        }
+        let (form, _, selection, _) = PluginParams::default().normalize().ok().expect("valid");
+        assert_eq!(selection.stale_policy, pgokf_workspace::StalePolicy::Warn);
+        assert!(selection.seeds.is_empty() && !selection.require_closure);
+        assert!(!form.query_string.contains("stale_policy"));
+        assert!(!form.query_string.contains("seeds"));
+
+        // A malformed seeds line previews with a message and refuses the
+        // download through the form's problems.
+        let (form, _, selection, _) = PluginParams {
+            seeds: "1:a\nnope".to_owned(),
+            ..PluginParams::default()
+        }
+        .normalize()
+        .ok()
+        .expect("previews with the good seeds");
+        assert_eq!(selection.seeds.len(), 1);
+        assert!(form.problems().is_some(), "the download refuses it");
     }
 
     #[test]
