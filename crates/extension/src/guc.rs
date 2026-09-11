@@ -55,6 +55,14 @@ static LOG_LEVEL: GucSetting<Option<CString>> =
 /// that tenant through the row-level-security policies on the projection tables.
 static TENANT: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(Some(c""));
 
+/// The per-session change-provenance context: a JSON object a producer sets
+/// before calling `register_bundle` / `refresh_bundle` /
+/// `register_bundle_content` so the durable change event the sync commits
+/// carries its `origin`, `causation_key`, `reconciliation_key`, `producer`,
+/// `manifest_hash`, `observed_source_generation`, and (content path only)
+/// `operation`. Empty (the default) records no provenance.
+static SYNC_CONTEXT: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(Some(c""));
+
 /// Register every `pgokf.*` configuration variable with `PostgreSQL`.
 ///
 /// Must be called exactly once per shared-library load, from `_PG_init`.
@@ -137,6 +145,22 @@ pub fn register_gucs() {
         GucContext::Userset,
         GucFlags::default(),
     );
+    // The change-provenance context. `PGC_USERSET`, so a producer session sets
+    // it with `SET pgokf.sync_context = '{"origin": ..., "causation_key": ...}'`
+    // (or `SET LOCAL` for one transaction) before invoking a sync; the durable
+    // outbox event the sync commits then carries that provenance. Like
+    // `pgokf.tenant` it is a per-session selector, not a safety ceiling.
+    GucRegistry::define_string_guc(
+        c"pgokf.sync_context",
+        c"Producer provenance context for the next catalog change.",
+        c"Per-session JSON object (origin, causation_key, reconciliation_key, \
+          producer, manifest_hash, observed_source_generation, operation) that \
+          the next register/refresh/content sync records on its durable \
+          catalog-change event; empty (the default) records no provenance.",
+        &SYNC_CONTEXT,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
 }
 
 /// Convert a GUC integer to `usize` without sign-loss surprises.
@@ -187,6 +211,16 @@ pub fn log_level() -> String {
         || DEFAULT_LOG_LEVEL.to_owned(),
         |value| value.to_string_lossy().into_owned(),
     )
+}
+
+/// Effective `pgokf.sync_context`: the raw JSON text a producer session set as
+/// its change-provenance context, or an empty string (the default) when no
+/// provenance is declared. Parsed by [`crate::catalog::change_event`].
+#[must_use]
+pub fn sync_context() -> String {
+    SYNC_CONTEXT
+        .get()
+        .map_or_else(String::new, |value| value.to_string_lossy().into_owned())
 }
 
 #[cfg(test)]

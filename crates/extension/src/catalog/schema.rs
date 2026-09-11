@@ -43,6 +43,10 @@ CREATE TABLE pgokf.bundles (
     -- retired_at is appended after tenant_id for the same reason: a fresh install
     -- matches an existing install upgraded via ADD COLUMN (sql/pgokf--0.1.7--0.1.8.sql).
     retired_at     timestamptz DEFAULT NULL,
+    -- catalog_generation is appended last for the same reason: a fresh install
+    -- matches an existing install upgraded via ADD COLUMN
+    -- (sql/pgokf--0.2.0--0.3.0-dev.sql).
+    catalog_generation bigint NOT NULL DEFAULT 0,
     CONSTRAINT bundles_tenant_path_key UNIQUE (tenant_id, path),
     CONSTRAINT bundles_source_type_chk CHECK (source_type IN ('filesystem', 'content'))
 );
@@ -179,6 +183,8 @@ COMMENT ON COLUMN pgokf.bundles.source_type IS
     'How the bundle bytes reach the catalog: ''filesystem'' (registered from a canonical on-disk root via pgokf.register_bundle and refreshed from disk via pgokf.refresh_bundle) or ''content'' (streamed in memory via pgokf.register_bundle_content - a mountless object-store companion or any client - where path is the synthetic key ''content:''||name and refresh_bundle is rejected).';
 COMMENT ON COLUMN pgokf.bundles.tenant_id IS
     'Multi-tenant owner of this bundle, stamped at registration from pgokf.tenant (effective_tenant(); ''default'' for a session that set no tenant). A bundle is single-tenant and its tenant never changes on refresh/unregister/enable; combined with path it forms the per-tenant registration key UNIQUE (tenant_id, path), so two tenants may register the same filesystem or content:<name> path. The row-level-security policy shows it only to a matching or unset pgokf.tenant.';
+COMMENT ON COLUMN pgokf.bundles.catalog_generation IS
+    'Monotonic catalog generation of this bundle: 0 before the first successful sync, then incremented exactly once per accepted register/refresh/content resync (inside the same transaction as the concept writes) and once per state mutation (enable/disable/retire/unretire), always under the bundle advisory lock. Durable change events (pgokf.catalog_change_event) and freshness evidence (pgokf.bundle_freshness) are generation-bound to it. Producer-side source revisions are opaque text and never stored here.';
 COMMENT ON COLUMN pgokf.concepts.tenant_id IS
     'Multi-tenant owner, denormalized from the concept''s bundle so the row-level-security predicate is local and index-friendly; always equals pgokf.bundles.tenant_id for the concept''s bundle.';
 COMMENT ON COLUMN pgokf.concept_metadata.tenant_id IS

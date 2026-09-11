@@ -17,6 +17,10 @@ pub const PGOKF_ADMIN_ROLE: &str = "pgokf_admin";
 pub const PGOKF_WRITER_ROLE: &str = "pgokf_writer";
 /// Lowest tier: read-only search and catalog reads.
 pub const PGOKF_READER_ROLE: &str = "pgokf_reader";
+/// Outbox delivery tier: claims and acknowledges durable catalog-change
+/// events. Deliberately **not** part of the reader < writer < admin ladder:
+/// holding it grants no ingestion rights, and it inherits nothing.
+pub const PGOKF_DISPATCHER_ROLE: &str = "pgokf_dispatcher";
 
 /// Catalog operations subject to role-based authorization.
 ///
@@ -257,6 +261,9 @@ impl RoleMembership for PostgresRoleMembership {
             PGOKF_READER_ROLE => {
                 "SELECT pg_catalog.pg_has_role(session_user, 'pgokf_reader', 'MEMBER')"
             }
+            PGOKF_DISPATCHER_ROLE => {
+                "SELECT pg_catalog.pg_has_role(session_user, 'pgokf_dispatcher', 'MEMBER')"
+            }
             _ => {
                 return Err(CatalogError::internal(
                     format!("unknown authorization role: {role}"),
@@ -466,6 +473,31 @@ pub fn enforce_active_tenant() -> Result<(), CatalogError> {
     } else {
         Ok(())
     }
+}
+
+/// Authorize the current `PostgreSQL` user for outbox claim/ack operations.
+///
+/// The claim/ack tier is [`PGOKF_DISPATCHER_ROLE`], which is deliberately
+/// outside the reader/writer/admin ladder; `pgokf_admin` is accepted
+/// explicitly (it operates and inspects the outbox but does not inherit the
+/// dispatcher role). Membership is resolved for the `session_user`, exactly
+/// like [`authorize_current_user`].
+///
+/// # Errors
+///
+/// Returns an [`crate::errors::ErrorKind::InsufficientPrivilege`] error when
+/// the session user belongs to neither role.
+pub fn authorize_dispatcher_current_user() -> Result<(), CatalogError> {
+    let roles = PostgresRoleMembership;
+    for role in [PGOKF_DISPATCHER_ROLE, PGOKF_ADMIN_ROLE] {
+        if roles.is_member_of(role)? {
+            return Ok(());
+        }
+    }
+    Err(CatalogError::insufficient_privilege(
+        format!("operation requires membership in {PGOKF_DISPATCHER_ROLE}"),
+        Path::new(""),
+    ))
 }
 
 /// Confine a bundle-addressed mutation or export to the session's active tenant.
