@@ -278,8 +278,15 @@ async fn embed_batch(
         }
         // The hash of the exact bounded input bytes that produced this vector.
         let input_hash = db::input_hash(input);
-        if db::store_embedding(pg_client, concept, &vector, &input_hash, &cli.model, &contract)
-            .await?
+        if db::store_embedding(
+            pg_client,
+            concept,
+            &vector,
+            &input_hash,
+            &cli.model,
+            &contract,
+        )
+        .await?
         {
             stored += 1;
         } else {

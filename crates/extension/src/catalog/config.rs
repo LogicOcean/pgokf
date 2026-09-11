@@ -567,12 +567,18 @@ fn coerce(key: ConfigKey, value: pgrx::JsonB) -> Result<ConfigValue, CatalogErro
             ConfigValue::OkfVersionPolicy,
         ),
         ConfigKey::EmbeddingDim => coerce_embedding_dim(value, key),
-        ConfigKey::EmbeddingModel => coerce_string(value, key, |text| {
-            validate_embedding_label(text, "embedding_model")
-        }, ConfigValue::EmbeddingModel),
-        ConfigKey::EmbeddingContract => coerce_string(value, key, |text| {
-            validate_embedding_label(text, "embedding_contract")
-        }, ConfigValue::EmbeddingContract),
+        ConfigKey::EmbeddingModel => coerce_string(
+            value,
+            key,
+            |text| validate_embedding_label(text, "embedding_model"),
+            ConfigValue::EmbeddingModel,
+        ),
+        ConfigKey::EmbeddingContract => coerce_string(
+            value,
+            key,
+            |text| validate_embedding_label(text, "embedding_contract"),
+            ConfigValue::EmbeddingContract,
+        ),
         ConfigKey::TrackHistory => coerce_bool(value, key, ConfigValue::TrackHistory),
         ConfigKey::HistoryRetentionDays => coerce_history_retention_days(value, key),
         ConfigKey::Bm25Provider => coerce_string(
@@ -1660,7 +1666,9 @@ mod tests {
         // Arrange / Act / Assert: the unpinned default and ordinary identities.
         assert!(validate_embedding_label("", "embedding_model").is_ok());
         assert!(validate_embedding_label("text-embedding-3-small", "embedding_model").is_ok());
-        assert!(validate_embedding_label("pgokf-embed/v1/max-chars:8000", "embedding_contract").is_ok());
+        assert!(
+            validate_embedding_label("pgokf-embed/v1/max-chars:8000", "embedding_contract").is_ok()
+        );
     }
 
     #[test]
@@ -1669,8 +1677,9 @@ mod tests {
         let blank = validate_embedding_label("   ", "embedding_model")
             .expect_err("a whitespace-only pin must be rejected");
         assert_eq!(blank.sqlstate(), "22023");
-        let overlong = validate_embedding_label(&"m".repeat(MAX_EMBEDDING_LABEL_LEN + 1), "embedding_model")
-            .expect_err("an overlong pin must be rejected");
+        let overlong =
+            validate_embedding_label(&"m".repeat(MAX_EMBEDDING_LABEL_LEN + 1), "embedding_model")
+                .expect_err("an overlong pin must be rejected");
         assert_eq!(overlong.sqlstate(), "22023");
         let nul = validate_embedding_label("bad\0label", "embedding_contract")
             .expect_err("a NUL byte must be rejected");

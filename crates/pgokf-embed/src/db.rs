@@ -204,7 +204,12 @@ pub async fn store_embedding(
             ],
         )
         .await
-        .with_context(|| format!("failed to store embedding for concept '{}'", concept.concept_id))?;
+        .with_context(|| {
+            format!(
+                "failed to store embedding for concept '{}'",
+                concept.concept_id
+            )
+        })?;
     Ok(row.get("stored"))
 }
 
@@ -272,10 +277,7 @@ mod tests {
         let hash = input_hash("Title\n\nBody");
 
         // Assert: the BLAKE3 hex of the exact input bytes, stable across runs.
-        assert_eq!(
-            hash,
-            blake3::hash(b"Title\n\nBody").to_hex().to_string()
-        );
+        assert_eq!(hash, blake3::hash(b"Title\n\nBody").to_hex().to_string());
         assert_eq!(hash.len(), 64);
         // A one-byte difference is a different input.
         assert_ne!(hash, input_hash("Title\n\nBody!"));
