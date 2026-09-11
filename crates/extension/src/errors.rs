@@ -17,6 +17,9 @@ pub enum ErrorKind {
     InsufficientPrivilege,
     /// A path collides with an already-registered one (`23505`).
     DuplicatePath,
+    /// A compare-and-set guard observed a concurrent change; retrying with the
+    /// current state succeeds (`40001`).
+    ConcurrentModification,
     /// An unexpected internal failure (`XX000`).
     Internal,
 }
@@ -29,6 +32,7 @@ impl ErrorKind {
             Self::InvalidParameter => "22023",
             Self::InsufficientPrivilege => "42501",
             Self::DuplicatePath => "23505",
+            Self::ConcurrentModification => "40001",
             Self::Internal => "XX000",
         }
     }
@@ -41,6 +45,9 @@ impl ErrorKind {
             Self::InvalidParameter => pgrx::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
             Self::InsufficientPrivilege => pgrx::PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE,
             Self::DuplicatePath => pgrx::PgSqlErrorCode::ERRCODE_UNIQUE_VIOLATION,
+            Self::ConcurrentModification => {
+                pgrx::PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE
+            }
             Self::Internal => pgrx::PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
         }
     }
@@ -89,6 +96,15 @@ impl CatalogError {
     #[must_use]
     pub fn duplicate_path(message: impl Into<String>, bundle_path: impl AsRef<Path>) -> Self {
         Self::new(ErrorKind::DuplicatePath, message, bundle_path)
+    }
+
+    /// Build an [`ErrorKind::ConcurrentModification`] error (SQLSTATE `40001`).
+    #[must_use]
+    pub fn concurrent_modification(
+        message: impl Into<String>,
+        bundle_path: impl AsRef<Path>,
+    ) -> Self {
+        Self::new(ErrorKind::ConcurrentModification, message, bundle_path)
     }
 
     /// Build an [`ErrorKind::Internal`] error (SQLSTATE `XX000`).
@@ -177,6 +193,10 @@ mod tests {
         assert_eq!(
             CatalogError::duplicate_path("duplicate", "bundle.md").sqlstate(),
             "23505"
+        );
+        assert_eq!(
+            CatalogError::concurrent_modification("stale guard", "bundle.md").sqlstate(),
+            "40001"
         );
     }
 

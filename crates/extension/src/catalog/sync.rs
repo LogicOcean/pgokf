@@ -1480,6 +1480,16 @@ pub(crate) fn run_bundle_sync<S: ByteSource>(
     upsert_concepts(bundle_id, &staged, &defaults.text_search_config)?;
     replace_concept_metadata(bundle_id, &staged)?;
 
+    // Embedding invalidation, atomic with the concept writes: every staged
+    // concept may now carry text different from what a stored vector was
+    // computed from, so its embedding row is deleted here. On commit the new
+    // text and the row's absence publish together - no stale vector can rank -
+    // and the companion embedder's missing-row poll re-embeds the concept.
+    // Removed and re-identified concepts need no handling: their embedding
+    // rows cascade through the foreign key.
+    let staged_ids: Vec<String> = staged.iter().map(|entry| entry.concept.id.clone()).collect();
+    crate::catalog::embedding::invalidate_synced(bundle_id, &staged_ids)?;
+
     // Ordered projection seam: feature modules observe the staged concepts
     // here (link graph, skill packages and their edges, the bundle-wide
     // re-resolution, provenance, then opt-in source-byte storage).

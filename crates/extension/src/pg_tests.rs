@@ -2325,6 +2325,269 @@ An added concept for the resync diff.\n";
     }
 
     // ---------------------------------------------------------------------
+    // Stale-embedding fix: a sync that re-writes a concept deletes its
+    // embedding row in the same transaction (so the missing-row poll re-embeds
+    // it and no stale vector can rank), and the four-argument
+    // set_concept_embedding overload guards the write against a concurrent
+    // sync by compare-and-set on the concept's file_hash.
+    // ---------------------------------------------------------------------
+
+    /// Embed one fixture concept through the guarded setter, reading its
+    /// current `file_hash` first (the companion's exact flow).
+    fn embed_fixture_concept(bundle_id: i64, concept_id: &str, vector: &str) {
+        let file_hash = Spi::get_one_with_args::<String>(
+            "SELECT file_hash FROM pgokf.concepts WHERE bundle_id = $1 AND id = $2",
+            &[bundle_id.into(), concept_id.into()],
+        )
+        .expect("file_hash query executes")
+        .expect("the fixture concept exists");
+        Spi::run_with_args(
+            &format!(
+                "SELECT pgokf.set_concept_embedding($1, '{concept_id}', ARRAY{vector}::real[], $2)"
+            ),
+            &[bundle_id.into(), file_hash.into()],
+        )
+        .unwrap_or_else(|error| panic!("{concept_id} embedding is settable: {error}"));
+    }
+
+    /// How many embedding rows a concept currently has (0 or 1).
+    fn embedding_row_count(bundle_id: i64, concept_id: &str) -> i64 {
+        Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concept_embedding
+             WHERE bundle_id = $1 AND concept_id = $2",
+            &[bundle_id.into(), concept_id.into()],
+        )
+        .expect("embedding count query executes")
+        .expect("count is not NULL")
+    }
+
+    #[pg_test]
+    fn sync_invalidates_embeddings_of_changed_concepts() {
+        // Arrange: embedding_dim lowered to 4; both fixture concepts embedded.
+        Spi::run("SELECT pgokf.set_config('embedding_dim', '4'::jsonb)")
+            .expect("embedding_dim is configurable");
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        embed_fixture_concept(bundle_id, "alpha", "[1,0,0,0]");
+        embed_fixture_concept(bundle_id, "beta", "[0,1,0,0]");
+        assert_eq!(embedding_row_count(bundle_id, "alpha"), 1);
+        assert_eq!(embedding_row_count(bundle_id, "beta"), 1);
+
+        // Act: edit alpha's body text (its canonical embedding input changes)
+        // and re-synchronize.
+        fs::write(bundle.root.join("alpha.md"), ALPHA_EDITED).expect("alpha edit is writable");
+        Spi::run_with_args("SELECT pgokf.refresh_bundle($1)", &[bundle_id.into()])
+            .expect("refresh_bundle executes");
+
+        // Assert: alpha's vector was deleted transactionally (the concept row
+        // itself is still there, re-indexed), while untouched beta keeps its
+        // embedding - invalidation tracks the changed concepts exactly.
+        assert_eq!(
+            embedding_row_count(bundle_id, "alpha"),
+            0,
+            "a concept whose text changed loses its embedding row in the sync transaction"
+        );
+        assert_eq!(
+            embedding_row_count(bundle_id, "beta"),
+            1,
+            "an unchanged concept keeps its embedding row"
+        );
+
+        // Act: a refresh with no file changes at all.
+        Spi::run_with_args("SELECT pgokf.refresh_bundle($1)", &[bundle_id.into()])
+            .expect("a no-op refresh executes");
+
+        // Assert: nothing is staged, so nothing is invalidated - beta's row
+        // survives, and no already-missing row can be disturbed.
+        assert_eq!(
+            embedding_row_count(bundle_id, "beta"),
+            1,
+            "a no-change refresh invalidates nothing"
+        );
+    }
+
+    #[pg_test]
+    fn set_concept_embedding_if_current_compares_the_file_hash() {
+        // Arrange: embedding_dim lowered to 4; a real bundle for a valid concept.
+        Spi::run("SELECT pgokf.set_config('embedding_dim', '4'::jsonb)")
+            .expect("embedding_dim is configurable");
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        Spi::run(
+            "CREATE FUNCTION pg_temp.set_guarded_sqlstate(bid bigint, cid text, expected text)
+                 RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.set_concept_embedding(bid, cid, ARRAY[1,0,0,0]::real[], expected);
+                 RETURN 'ok';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("guarded embedding probe is creatable");
+        let probe = |concept_id: &str, expected: &str| {
+            Spi::get_one_with_args::<String>(
+                "SELECT pg_temp.set_guarded_sqlstate($1, $2, $3)",
+                &[bundle_id.into(), concept_id.into(), expected.into()],
+            )
+            .expect("guarded probe executes")
+            .expect("the probe reports an outcome")
+        };
+
+        // Act / Assert: a hash the concept never carried is refused with the
+        // retryable 40001, and no row is written.
+        assert_eq!(
+            probe("alpha", "not-the-current-hash"),
+            "40001",
+            "a stale expected file hash is rejected with 40001"
+        );
+        assert_eq!(
+            embedding_row_count(bundle_id, "alpha"),
+            0,
+            "a rejected guarded write stores no row"
+        );
+
+        // An unknown concept is still 22023, matching the unguarded form.
+        assert_eq!(
+            probe("ghost", "anything"),
+            "22023",
+            "an unknown concept is rejected with 22023"
+        );
+
+        // The current hash passes, and the row lands.
+        let current = Spi::get_one_with_args::<String>(
+            "SELECT file_hash FROM pgokf.concepts WHERE bundle_id = $1 AND id = 'alpha'",
+            &[bundle_id.into()],
+        )
+        .expect("file_hash query executes")
+        .expect("alpha exists");
+        assert_eq!(
+            probe("alpha", &current),
+            "ok",
+            "the current file hash passes the guard"
+        );
+        assert_eq!(embedding_row_count(bundle_id, "alpha"), 1);
+
+        // Once a sync changed the concept, the pre-sync hash no longer passes -
+        // the exact inference-race interleaving the guard exists for.
+        fs::write(bundle.root.join("alpha.md"), ALPHA_EDITED).expect("alpha edit is writable");
+        Spi::run_with_args("SELECT pgokf.refresh_bundle($1)", &[bundle_id.into()])
+            .expect("refresh_bundle executes");
+        assert_eq!(
+            probe("alpha", &current),
+            "40001",
+            "a pre-sync hash is rejected after the concept changed"
+        );
+    }
+
+    #[pg_test]
+    fn set_concept_embedding_if_current_denies_a_reader_role() {
+        // Arrange: a role granted only pgokf_reader.
+        Spi::run("SELECT pgokf.set_config('embedding_dim', '4'::jsonb)")
+            .expect("embedding_dim is configurable");
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        Spi::run("CREATE ROLE pgokf_embed_guarded_reader").expect("reader role is creatable");
+        Spi::run("GRANT pgokf_reader TO pgokf_embed_guarded_reader")
+            .expect("reader role is grantable");
+        Spi::run(
+            "CREATE FUNCTION pg_temp.embed_guarded_denied_sqlstate(bid bigint) RETURNS text
+             LANGUAGE plpgsql
+             SET role TO pgokf_embed_guarded_reader
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.set_concept_embedding(
+                     bid, 'alpha', ARRAY[1,0,0,0]::real[], 'any-hash');
+                 RETURN 'not-denied';
+             EXCEPTION WHEN insufficient_privilege THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("guarded authz probe is creatable");
+
+        // Act
+        let sqlstate = Spi::get_one_with_args::<String>(
+            "SELECT pg_temp.embed_guarded_denied_sqlstate($1)",
+            &[bundle_id.into()],
+        )
+        .expect("guarded authz probe executes")
+        .expect("the probe reports a SQLSTATE");
+
+        // Assert: a plain reader is denied the guarded writer-tier setter too.
+        assert_eq!(
+            sqlstate, "42501",
+            "a reader role must be denied the guarded set_concept_embedding with 42501",
+        );
+    }
+
+    #[pg_test]
+    fn semantic_search_excludes_a_concept_changed_since_embedding() {
+        // Arrange: only meaningful where pgvector is installable.
+        if !pgvector_available() {
+            return;
+        }
+        Spi::run("CREATE EXTENSION IF NOT EXISTS vector").expect("pgvector is creatable");
+        Spi::run("SELECT pgokf.set_config('embedding_dim', '4'::jsonb)")
+            .expect("embedding_dim is configurable");
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        embed_fixture_concept(bundle_id, "alpha", "[1,0,0,0]");
+        embed_fixture_concept(bundle_id, "beta", "[0,1,0,0]");
+
+        // Sanity: the axis-1 query ranks alpha first while its vector is current.
+        let nearest = Spi::get_one::<String>(
+            "SELECT concept_id FROM pgokf.concept_search_semantic(ARRAY[0.9,0.1,0,0]::real[])
+             LIMIT 1",
+        )
+        .expect("semantic search executes")
+        .expect("a nearest concept exists");
+        assert_eq!(nearest, "alpha", "alpha ranks while its vector is current");
+
+        // Act: change alpha's text and re-synchronize.
+        fs::write(bundle.root.join("alpha.md"), ALPHA_EDITED).expect("alpha edit is writable");
+        Spi::run_with_args("SELECT pgokf.refresh_bundle($1)", &[bundle_id.into()])
+            .expect("refresh_bundle executes");
+
+        // Assert: alpha is excluded from semantic ranking until re-embedded -
+        // its row is gone, so only beta can rank.
+        let survivors = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgokf.concept_search_semantic(ARRAY[0.9,0.1,0,0]::real[])
+             WHERE concept_id = 'alpha'",
+        )
+        .expect("post-sync semantic search executes")
+        .expect("count is not NULL");
+        assert_eq!(
+            survivors, 0,
+            "a concept whose text changed since embedding must not rank semantically"
+        );
+        let still_ranked = Spi::get_one::<String>(
+            "SELECT concept_id FROM pgokf.concept_search_semantic(ARRAY[0.9,0.1,0,0]::real[])
+             LIMIT 1",
+        )
+        .expect("post-sync semantic search executes")
+        .expect("beta still ranks");
+        assert_eq!(still_ranked, "beta", "the untouched concept still ranks");
+
+        // Act: the companion's missing-row flow re-embeds alpha with its new hash.
+        embed_fixture_concept(bundle_id, "alpha", "[1,0,0,0]");
+
+        // Assert: alpha ranks again once its vector matches its current text.
+        let restored = Spi::get_one::<String>(
+            "SELECT concept_id FROM pgokf.concept_search_semantic(ARRAY[0.9,0.1,0,0]::real[])
+             LIMIT 1",
+        )
+        .expect("post-re-embed semantic search executes")
+        .expect("a nearest concept exists");
+        assert_eq!(
+            restored, "alpha",
+            "alpha ranks again after re-embedding its current text"
+        );
+    }
+
+    // ---------------------------------------------------------------------
     // 0.1.7: opt-in multi-tenant isolation (session GUC + RLS).
     //
     // RLS is bypassed by superusers and the table owner, so the isolation

@@ -127,7 +127,7 @@ async fn run(cli: Cli) -> Result<()> {
     if cli.watch {
         run_watch(&cli).await
     } else {
-        let embedded = run_pass(&cli).await?;
+        let embedded = run_one_shot(async || run_pass(&cli).await).await?;
         if embedded == 0 {
             println!("pgokf-embed: no concepts need an embedding; nothing to do");
         } else {
@@ -135,6 +135,39 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Ok(())
     }
+}
+
+/// Results of a pass, including guarded writes that need fresh input.
+#[derive(Debug, Default)]
+struct PassResult {
+    stored: usize,
+    stale: usize,
+}
+
+/// Retry guard conflicts with a fresh query and newly computed vectors, just
+/// as watch mode does on its next interval. Bound one-shot work even if sync
+/// keeps changing the input; exhaustion must not look like success.
+async fn run_one_shot(mut pass: impl AsyncFnMut() -> Result<PassResult>) -> Result<usize> {
+    const MAX_PASSES: usize = 3;
+    let mut stored = 0;
+    for attempt in 1..=MAX_PASSES {
+        let result = pass().await?;
+        stored += result.stored;
+        if result.stale == 0 {
+            return Ok(stored);
+        }
+        if attempt == MAX_PASSES {
+            bail!(
+                "{} concept(s) still raced after {MAX_PASSES} embedding passes; stored {stored} embedding(s)",
+                result.stale,
+            );
+        }
+        eprintln!(
+            "pgokf-embed: retrying {} changed concept(s) with fresh input",
+            result.stale
+        );
+    }
+    unreachable!("the final pass returns an error on conflict")
 }
 
 /// Reject configurations that could only fail later or loop uselessly.
@@ -164,7 +197,7 @@ async fn run_watch(cli: &Cli) -> Result<()> {
     pgokf_companion::daemon::run(
         Duration::from_secs(cli.interval),
         async || {
-            let embedded = run_pass(cli).await?;
+            let embedded = run_pass(cli).await?.stored;
             if embedded > 0 {
                 eprintln!("pgokf-embed: watch pass stored {embedded} embedding(s)");
             }
@@ -181,8 +214,8 @@ async fn run_watch(cli: &Cli) -> Result<()> {
 
 /// One complete pass: connect, resolve the target dimension, find concepts
 /// that need an embedding, embed them in batches, and close the connection.
-/// Returns the number of embeddings stored.
-async fn run_pass(cli: &Cli) -> Result<usize> {
+/// Returns the stored and stale-input counts.
+async fn run_pass(cli: &Cli) -> Result<PassResult> {
     let (pg_client, connection_handle) = pgokf_pgconn::connect(&cli.database_url, cli.tls)
         .await
         .context("connecting to PostgreSQL")?;
@@ -199,8 +232,8 @@ async fn run_pass(cli: &Cli) -> Result<usize> {
 }
 
 /// The core embedding workflow, factored out so the connection lifecycle in
-/// [`run_pass`] stays linear. Returns the number of embeddings stored.
-async fn embed_all(cli: &Cli, pg_client: &tokio_postgres::Client) -> Result<usize> {
+/// [`run_pass`] stays linear. Returns the stored and stale-input counts.
+async fn embed_all(cli: &Cli, pg_client: &tokio_postgres::Client) -> Result<PassResult> {
     if let Some(tenant) = &cli.tenant {
         pgokf_pgconn::set_tenant(pg_client, tenant).await?;
     }
@@ -214,7 +247,7 @@ async fn embed_all(cli: &Cli, pg_client: &tokio_postgres::Client) -> Result<usiz
 
     let pending = db::pending_concepts(pg_client, cli.bundle).await?;
     if pending.is_empty() {
-        return Ok(0);
+        return Ok(PassResult::default());
     }
 
     eprintln!(
@@ -228,27 +261,36 @@ async fn embed_all(cli: &Cli, pg_client: &tokio_postgres::Client) -> Result<usiz
         EmbeddingsClient::new(&cli.endpoint, cli.model.clone(), cli.api_key.clone())
             .context("building the embeddings client")?;
 
-    let mut embedded = 0_usize;
+    let mut result = PassResult::default();
     for batch in pending.chunks(cli.batch_size) {
-        embedded += embed_batch(cli, pg_client, &embeddings_client, dim, batch).await?;
+        let batch_result = embed_batch(cli, pg_client, &embeddings_client, dim, batch).await?;
+        result.stored += batch_result.stored;
+        result.stale += batch_result.stale;
         eprintln!(
-            "pgokf-embed: embedded {embedded}/{} concept(s)",
+            "pgokf-embed: embedded {}/{} concept(s)",
+            result.stored,
             pending.len()
         );
     }
 
-    Ok(embedded)
+    Ok(result)
 }
 
 /// Embed one batch of concepts and store each returned vector. Returns the
-/// number of vectors stored.
+/// stored and stale-input counts.
+///
+/// A store rejected with the compare-and-set guard's SQLSTATE `40001` (the
+/// concept changed while its vector was being computed) is not a failure: the
+/// embedding row stays absent, the concept is skipped for this pass, and the
+/// bounded one-shot retry - or the next watch interval - re-reads the new text and
+/// re-embeds it. Every other store error aborts the batch as before.
 async fn embed_batch(
     cli: &Cli,
     pg_client: &tokio_postgres::Client,
     embeddings_client: &EmbeddingsClient,
     dim: i32,
     batch: &[PendingConcept],
-) -> Result<usize> {
+) -> Result<PassResult> {
     let inputs: Vec<String> = batch
         .iter()
         .map(|concept| concept.embedding_input(cli.max_chars))
@@ -259,6 +301,7 @@ async fn embed_batch(
         .await
         .context("calling the embeddings endpoint")?;
 
+    let mut result = PassResult::default();
     for (concept, vector) in batch.iter().zip(vectors) {
         let actual = i32::try_from(vector.len()).unwrap_or(i32::MAX);
         if actual != dim {
@@ -267,15 +310,125 @@ async fn embed_batch(
                 concept.concept_id,
             );
         }
-        db::store_embedding(pg_client, concept.bundle_id, &concept.concept_id, &vector).await?;
+        match db::store_embedding(
+            pg_client,
+            concept.bundle_id,
+            &concept.concept_id,
+            &vector,
+            &concept.file_hash,
+        )
+        .await
+        {
+            Ok(()) => result.stored += 1,
+            Err(error) if db::is_stale_input_rejection(error.as_ref()) => {
+                result.stale += 1;
+                eprintln!(
+                    "pgokf-embed: concept '{}' changed while its embedding was computed; \
+                     skipping it this pass (it will be re-embedded on the next pass)",
+                    concept.concept_id,
+                );
+            }
+            Err(error) => return Err(error),
+        }
     }
 
-    Ok(batch.len())
+    Ok(result)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn one_shot_retries_guard_conflicts_and_counts_successful_writes() {
+        let conflict =
+            anyhow::Error::new(db::test_database_error("40001").await).context("storing concept");
+        let mut passes = 0;
+        let stored = run_one_shot(async || {
+            passes += 1;
+            Ok(if passes == 1 {
+                PassResult {
+                    stored: 2,
+                    stale: usize::from(db::is_stale_input_rejection(conflict.as_ref())),
+                }
+            } else {
+                // The next pass re-queries pending rows; successful writes from
+                // the first pass no longer appear, only the raced concept does.
+                PassResult {
+                    stored: 1,
+                    stale: 0,
+                }
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(passes, 2);
+        assert_eq!(stored, 3);
+    }
+
+    #[tokio::test]
+    async fn one_shot_bounds_continuous_conflicts_and_reports_failure() {
+        let mut passes = 0;
+        let error = run_one_shot(async || {
+            passes += 1;
+            Ok(PassResult {
+                stored: 1,
+                stale: 1,
+            })
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(passes, 3);
+        assert!(
+            error
+                .to_string()
+                .contains("after 3 embedding passes; stored 3 embedding(s)")
+        );
+    }
+
+    #[tokio::test]
+    async fn one_shot_stops_when_raced_concept_is_no_longer_pending() {
+        let mut passes = 0;
+        let stored = run_one_shot(async || {
+            passes += 1;
+            Ok(PassResult {
+                stored: 0,
+                stale: usize::from(passes == 1),
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(passes, 2);
+        assert_eq!(stored, 0);
+    }
+
+    #[tokio::test]
+    async fn one_shot_does_not_retry_other_errors_or_successful_passes() {
+        let mut passes = 0;
+        let error = run_one_shot(async || {
+            passes += 1;
+            Err(anyhow::anyhow!("endpoint unavailable"))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(passes, 1);
+        assert_eq!(error.to_string(), "endpoint unavailable");
+
+        passes = 0;
+        assert_eq!(
+            run_one_shot(async || {
+                passes += 1;
+                Ok(PassResult {
+                    stored: 4,
+                    stale: 0,
+                })
+            })
+            .await
+            .unwrap(),
+            4
+        );
+        assert_eq!(passes, 1);
+    }
 
     /// Parse a command line the way `main` does, with the required options
     /// supplied so only the arguments under test vary.
