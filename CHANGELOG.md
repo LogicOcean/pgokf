@@ -40,18 +40,32 @@ semantically until the embedder rewrites them.
   consult without knowing any producer schema. Writer APIs
   `mark_stale` / `mark_scope_stale` / `mark_reconciling` / `mark_blocked`
   and the compare-and-set `mark_fresh` (which refuses superseded
-  generations) are hardened `SECURITY DEFINER` functions; no role holds
-  direct DML on the tables.
+  generations and any completion whose evidence predates the newest
+  dependency invalidation - `mark_reconciling` claims the invalidation
+  epoch the completion must cover) are hardened `SECURITY DEFINER`
+  functions; no role holds direct DML on the tables. The
+  `relationship_coverage_missing` evidence lives on its own column no
+  state transition can erase, so a reconciliation attempt cannot clear
+  it without re-establishing coverage.
 - **Freshness dependencies** (`pgokf.freshness_dependency`): any writer
   registers a source selector (exact bundle, exact concept, exact path, or
   path prefix - case-sensitive, no globs in v1) mapped to a target
   bundle/scope. Every catalog write evaluates enabled dependencies in the
-  same transaction and marks matching targets stale; an origin/causation
+  same transaction and marks matching targets stale; invalidation is
+  **transitive** through bundle-scope registrations (A -> B -> C: changing
+  A stales B and C), cycle-safe and bounded, and each bundle-level
+  invalidation bumps the target row's dependency invalidation epoch that
+  the compare-and-set completion must have claimed. An origin/causation
   key suppresses producer self-loops, cycles settle idempotently by
   generation, and a change whose scope cannot be proved marks the source
-  bundle stale rather than guessing a target. Dependency registration and
+  bundle stale and invalidates the registration's own dependent at its
+  registered scope rather than guessing a target. Removing a source
+  (unregister/purge) invalidates its registered dependents in the same
+  transaction before their rows cascade away. Dependency registration and
   removal are themselves audited; a new dependency reconciles from the
-  latest source generation. Producer identity is the `session_user`'s role
+  latest source generation, read under the source bundle's advisory lock
+  so registration serializes against an in-flight source change. Producer
+  identity is the `session_user`'s role
   membership; the `producer` column is an opaque label, not authorization.
 - **The `catalog_change_event` outbox**: every refresh, content write,
   and bundle lifecycle mutation commits one durable event (bounded change
@@ -69,13 +83,22 @@ semantically until the embedder rewrites them.
   expected catalog generation, from versioned `jsonb` rows (namespaced
   relation types, direction, resolved or external targets, provenance).
   Sets staged before a refresh stay invisible until their matching
-  catalog generation is accepted; identical retries are no-ops; an empty
-  set removes the prior one. Readers see only the active generation
+  catalog generation is accepted; competing staged attempts for one
+  producer scope resolve to the single newest attempt (an empty winning
+  set really replaces the older one), and activation quarantines any
+  staged row whose source concept the accepted concepts do not contain,
+  so a nonexistent source can never become a traversal node. Identical
+  retries are no-ops. Readers see only the active generation
   through `pgokf.current_relationships`, and
   `pgokf.concept_relationship_neighbors` traverses it with
-  inbound/outbound/both direction, type filters, bounded cycle-safe hops,
+  inbound/outbound/both direction (an undirected edge traverses both ways
+  in every mode), type filters, bounded cycle-safe hops,
   and per-node freshness metadata. A bundle that loses its required
-  relationship coverage is marked stale until coverage returns.
+  relationship coverage is marked stale until coverage returns. Superseded
+  publications are retained with their rows and activation evidence for
+  audit and pruned only 30 days after supersession, and the publication
+  ledger's uniqueness excludes rows whose source bundle was deleted, so
+  sequential bundle deletions never collide in the retained history.
 - **Embedding freshness.** A refresh now deletes the affected concepts'
   embedding rows in the same transaction, so no stale vector can rank
   against new text; `concept_embedding` records the source file hash, the
@@ -94,17 +117,27 @@ semantically until the embedder rewrites them.
   freshness/embedding provenance object per hit. `build_workspace_plugin`
   (pgokf-workspace, MCP, and the web UI) runs the whole build - ranking,
   resolution, seed/relationship closure, freshness reads, source bytes,
-  lock snapshot - inside one repeatable-read transaction, accepts
+  lock snapshot - inside one repeatable-read transaction (writable, so
+  the audited content readers can record their reads inside it), accepts
   `stale_policy = warn|exclude` (default `warn`), concept seeds with
   namespaced relationship-type/direction/hop-bounded closure, and records
   policy, generations, and per-entry freshness in the manifest and lock.
   Warn mode labels stale references with generated banners and a top-level
   `FRESHNESS.md` while never altering exact package bytes (an adjacent
-  `<name>.stale-warning.md` is written instead); exclude mode refuses
-  incomplete builds with the stale ids and reasons enumerated. The new
+  `<name>.stale-warning.md` is written instead), and documents inlined
+  into prompt artifacts carry the same stale marker; exclude mode refuses
+  incomplete builds with the stale ids and reasons enumerated. Package
+  members carry their own freshness: a stale member is excluded (dropping
+  the package whole) or shipped with its own warning, never silently
+  under its parent's state. A required closure that cannot materialize
+  every reached node (for example one dropped by trust filtering) refuses
+  with the missing nodes named, and inbound closure honors undirected
+  edges exactly as traversal does. The new
   `check_workspace_plugin_freshness` operation compares a downloaded
-  plugin's lock against the live catalog and reports
-  `current|stale|retired|unknown`.
+  plugin's lock against the live catalog - per-entry build-time freshness
+  evidence included - and reports
+  `current|stale|retired|unknown`, never certifying `current` without
+  live confirmation.
 
 ## [0.2.0] - 2026-09-09
 

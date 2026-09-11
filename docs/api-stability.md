@@ -21,7 +21,7 @@ the database. Complete comment coverage is a release gate (see
 
 ## The stable surface
 
-### Functions (44)
+### Functions (66)
 
 The installed extension defines one function more than this table: the
 internal `pgokf.bm25_hits` helper the optional BM25 backend calls. It is not
@@ -74,6 +74,31 @@ or disappear in any release.
 | `pgokf.version()` | `pgokf_reader` | Loaded shared-library version |
 | `pgokf.tenant_required()` | any role with `USAGE` on `pgokf` | Whether the `require_tenant` policy is on (consulted by every RLS policy) |
 | `pgokf.mcp_token_bearer(text)` | `pgokf_reader` | The name, role, and tenant of the MCP bearer token with this SHA-256 digest, or no row (`SECURITY DEFINER` over `pgokf_web.mcp_tokens`, which no reader may see) |
+| `pgokf.register_bundle_content_with_context(text, text[], bytea[], jsonb, jsonb)` | `pgokf_writer` | `register_bundle_content` with an explicit change-provenance context (when `context` is `NULL`, the session `pgokf.sync_context` GUC supplies the same provenance) |
+| `pgokf.capabilities()` | `pgokf_reader` | The capability names and interface versions this release implements, as jsonb |
+| `pgokf.concept_search_fresh(text, bigint, integer, text, text, text[], text, text, jsonb)` | `pgokf_reader` | Freshness-aware variant of `concept_search`: a `freshness` filter (`any`/`fresh`/`stale`) plus per-hit effective-freshness and embedding-provenance annotations |
+| `pgokf.register_freshness_dependency(text, bigint, text, bigint, text, text, text, text)` | `pgokf_writer` | Map a source-bundle selector onto a target bundle/scope so source changes mark matched targets stale |
+| `pgokf.disable_freshness_dependency(bigint)` | `pgokf_writer` | Disable a registered freshness dependency |
+| `pgokf.remove_freshness_dependency(bigint)` | `pgokf_writer` | Remove a registered freshness dependency |
+| `pgokf.mark_stale(bigint, text[], text, text)` | `pgokf_writer` | Mark a bundle stale with reason codes and the observed source revision |
+| `pgokf.mark_reconciling(bigint, text)` | `pgokf_writer` | Mark a bundle as reconciling |
+| `pgokf.mark_blocked(bigint, text[], text)` | `pgokf_writer` | Mark a bundle blocked with reason codes |
+| `pgokf.mark_fresh(bigint, bigint, text, text, jsonb, text)` | `pgokf_writer` | Compare-and-set reconciliation completion: refuses (returns `false`) when the catalog generation or observed source revision moved meanwhile |
+| `pgokf.mark_scope_stale(bigint, text, text, text[], text)` | `pgokf_writer` | Mark one scope (concept/path/group) of a bundle stale |
+| `pgokf.clear_freshness_scope(bigint, text, text)` | `pgokf_writer` | Clear a scoped freshness override |
+| `pgokf.list_freshness_dependencies(integer)` | `pgokf_admin` | Inspect the freshness-dependency registry |
+| `pgokf.repair_bundle_freshness(bigint, text, text[])` | `pgokf_admin` | Repair a bundle's freshness state directly |
+| `pgokf.issue_publication_fence(bigint, text, bigint, bigint, text, integer)` | `pgokf_writer` | Compare-and-set the producer's publication fence slot under the bundle advisory lock; hands out the next fencing token |
+| `pgokf.release_publication_fence(bigint, text, bigint)` | `pgokf_writer` | Release a live publication fence token |
+| `pgokf.claim_catalog_change_events(text, integer, integer)` | `pgokf_dispatcher` | Claim pending or expired-claim catalog-change outbox events oldest-first (`FOR UPDATE SKIP LOCKED`) with a lease |
+| `pgokf.ack_catalog_change_event(bigint, text, text)` | `pgokf_dispatcher` | Acknowledge a claimed outbox event after durable producer acceptance (idempotent, producer-bound) |
+| `pgokf.list_catalog_change_events(bigint, integer)` | `pgokf_admin` | Inspect the catalog-change outbox, newest first |
+| `pgokf.replace_relationships(text, bigint, bigint, bigint, bigint, jsonb)` | `pgokf_writer` | Publish a source bundle's complete typed-relationship set, bound to the producer's live publication fence |
+| `pgokf.concept_relationship_neighbors(bigint, text, integer, text, text[], integer)` | `pgokf_reader` | Walk the current typed-relationship set cycle-safely (direction, optional type filter, hop and result ceilings) |
+| `pgokf.set_concept_embedding_cas(bigint, text, real[], text, text, text, text)` | `pgokf_writer` | Compare-and-set embedding write: stores only when the expected file hash still matches, so a superseded attempt cannot overwrite newer content |
+
+Every row from `pgokf.register_bundle_content_with_context` down became stable
+in **0.3.0-dev**; the rows above it predate that release.
 
 The function **name, schema, argument types, argument order, and result shape**
 are all part of the contract. Default values that let callers omit trailing
@@ -81,14 +106,18 @@ arguments (`name`/`options` on `register_bundle`, `bundle_id`/`limit` on search
 and neighbors) are contractual too: an existing call that omits them keeps
 working.
 
-### Composite types (17)
+### Composite types (24)
 
 `pgokf.bundle_sync_result`, `pgokf.concept_search_result`,
 `pgokf.concept_neighbor`, `pgokf.bundle_info`, `pgokf.export_result`,
 `pgokf.sync_log_entry`, `pgokf.catalog_stat`, `pgokf.stale_concept`,
 `pgokf.sync_change`, `pgokf.access_log_entry`, `pgokf.duplicate_group`,
 `pgokf.search_facet`, `pgokf.bundle_log_entry`, `pgokf.concept_version`,
-`pgokf.skill_result`, `pgokf.script_result`, `pgokf.reference_result`.
+`pgokf.skill_result`, `pgokf.script_result`, `pgokf.reference_result`,
+`pgokf.freshness_dependency_info`, `pgokf.publication_fence_info`,
+`pgokf.claimed_change_event`, `pgokf.catalog_change_event_info`,
+`pgokf.concept_search_fresh_result`, `pgokf.relationship_publication_info`,
+`pgokf.relationship_neighbor` (the last seven became stable in **0.3.0-dev**).
 
 The set of columns, their names, and their types are stable. New columns are
 **not** added to an existing composite type in a compatible release, because
@@ -120,7 +149,7 @@ private ones). They are **internal state, not API** - read the
 sync history through `pgokf.list_sync_log` and configuration through
 `pgokf.get_config`; see [The private surface](#the-private-surface-not-api).
 
-### Roles (3)
+### Roles (4)
 
 `pgokf_reader` < `pgokf_writer` < `pgokf_admin`. Their **names** and the
 **privilege boundaries** between them are stable: readers may search and read
@@ -130,13 +159,23 @@ configuration and run the file-writing exports. Each tier inherits the one
 below (`pgokf_admin` → `pgokf_writer` → `pgokf_reader`). These are cluster-wide
 roles and survive `DROP EXTENSION`.
 
-### GUC names (7)
+Since **0.3.0-dev** a fourth role, `pgokf_dispatcher`, stands deliberately
+**outside** the ladder: it inherits nothing and is inherited by nothing. It is
+the sole claim/acknowledge role for the catalog-change outbox
+(`pgokf.claim_catalog_change_events`, `pgokf.ack_catalog_change_event`) and
+holds no search or ingestion rights; admins inspect the outbox through
+`pgokf.list_catalog_change_events`.
+
+### GUC names (8)
 
 `pgokf.max_file_bytes`, `pgokf.max_bundle_files`, `pgokf.max_bundle_bytes`,
 `pgokf.max_frontmatter_bytes`, `pgokf.max_graph_hops`, `pgokf.log_level`, and
 `pgokf.tenant` (the `USERSET`
 multi-tenant policy selector; empty by default, which preserves the
-pre-multi-tenancy see-all behavior). The **names** and their meaning are
+pre-multi-tenancy see-all behavior), plus - since **0.3.0-dev** -
+`pgokf.sync_context` (the `USERSET` change-provenance context a producer
+session sets before a sync; the committed catalog-change event carries it).
+The **names** and their meaning are
 stable; default values are tuning knobs and may be adjusted in a minor release
 when a change is safe and documented.
 
@@ -195,6 +234,13 @@ disappear in any release, and callers must not depend on them:
   administrator-only state managed exclusively through `pgokf.set_config` /
   `pgokf.reset_config` / `pgokf.get_config`. Read and write it only through
   those functions.
+- **The internal `pgokf.*` state tables behind the 0.3.0-dev producer surface** -
+  `pgokf.bundle_freshness`, `pgokf.concept_freshness`,
+  `pgokf.freshness_dependency`, `pgokf.publication_fence`,
+  `pgokf.catalog_change_event`, `pgokf.relationship_publication`, and
+  `pgokf.relationship`. They carry no grant to any reader role; reach the data
+  through the documented views (`pgokf.effective_freshness`,
+  `pgokf.current_relationships`) and functions.
 - **Indexes, constraints, and trigger internals** on the projection tables.
   Their existence and names are not contractual; query behavior is.
 - **The `SECURITY DEFINER` wiring, `search_path` pinning, and grant details**
