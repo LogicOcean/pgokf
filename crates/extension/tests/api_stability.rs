@@ -38,7 +38,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The 63 stable public functions, as `(name, argument-type list)`. The pair
+/// The 64 stable public functions, as `(name, argument-type list)`. The pair
 /// renders to the exact `COMMENT ON FUNCTION pgokf.<name>(<args>)` prefix that
 /// the hardening blocks emit.
 const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
@@ -76,6 +76,10 @@ const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
     ("concept_search_semantic", "real[], bigint, integer"),
     ("concept_search_hybrid", "text, real[], bigint, integer"),
     ("set_concept_embedding", "bigint, text, real[]"),
+    (
+        "set_concept_embedding_cas",
+        "bigint, text, real[], text, text, text, text",
+    ),
     ("rebuild_embedding_index", ""),
     ("concept_neighbors", "text, integer, bigint"),
     ("concept_history", "bigint, text, integer"),

@@ -15,7 +15,12 @@
 --     and acknowledged-only retention pruning
 --     (change_event_retention_days, default 30);
 --   * the additive freshness-aware search variant
---     pgokf.concept_search_fresh.
+--     pgokf.concept_search_fresh;
+--   * embedding freshness (section 11): provenance columns on
+--     pgokf.concept_embedding, the compare-and-set setter
+--     pgokf.set_concept_embedding_cas, the embedding_model/embedding_contract
+--     policy keys, eligibility gating of semantic/hybrid ranking, and the
+--     embedding provenance annotation on concept_search_fresh results.
 --
 -- Every statement is additive: no row is dropped, truncated, deleted, or
 -- rewritten. The one DROP is of the sync_log op CHECK constraint, immediately
@@ -938,6 +943,131 @@ REVOKE ALL ON FUNCTION pgokf.register_bundle_content_with_context(text, text[], 
 GRANT EXECUTE ON FUNCTION pgokf.register_bundle_content_with_context(text, text[], bytea[], jsonb, jsonb) TO pgokf_writer;
 COMMENT ON FUNCTION pgokf.register_bundle_content_with_context(text, text[], bytea[], jsonb, jsonb) IS
     'register_bundle_content with an explicit change-provenance context (jsonb: origin, causation_key, reconciliation_key, producer, manifest_hash, observed_source_generation, and operation - refresh_bundle/put_document/delete_document/concept_change) recorded on the durable catalog-change event, so a companion''s one-document put/delete keeps its precise operation and origin; context NULL (the default) applies the session GUC instead. Writer-tier (pgokf_writer; admin inherits it). Without this function, the session GUC pgokf.sync_context supplies the same context to register_bundle, refresh_bundle, and register_bundle_content.';
+
+-- Last, so the new relations are registered for pg_dump (the rule for every
+
+-- ===========================================================================
+-- 11. Embedding freshness (the stale-embedding fix).
+--
+--     11a. The provenance columns on pgokf.concept_embedding (upgrade-only
+--          ALTERs; the fresh install declares the columns in the same
+--          position - last - in the embedding_table block of
+--          src/catalog/embedding.rs). All three are nullable: an existing
+--          (pre-0.3.0) row carries no source/input hash evidence and is
+--          therefore LEGACY - never eligible for semantic ranking - and is
+--          re-embedded by the watcher's missing-or-stale poll. Hashes are not
+--          backfilled: they cannot be proved for rows written before this
+--          capability existed.
+ALTER TABLE pgokf.concept_embedding ADD COLUMN source_file_hash text;
+ALTER TABLE pgokf.concept_embedding ADD COLUMN input_hash text;
+ALTER TABLE pgokf.concept_embedding ADD COLUMN contract text;
+
+-- The refreshed table/column comments (COMMENT ON replaces; the texts are
+-- verbatim those of the fresh install's embedding_table block).
+COMMENT ON TABLE pgokf.concept_embedding IS
+    'Opt-in per-concept embedding vectors, streamed in by a companion embedder via pgokf.set_concept_embedding / pgokf.set_concept_embedding_cas (the extension never computes embeddings or performs network I/O). The vector is stored as the builtin real[] - NOT a pgvector ''vector'' column - so CREATE EXTENSION pgokf succeeds without pgvector installed; it is cast to vector(dim) at query time and in the HNSW index only when pgvector is present. Rows cascade from pgokf.concepts, so removing a concept or unregistering a bundle drops its embedding automatically, and a sync that re-stages a concept deletes its row in the same transaction. Semantic ranking ranks only ELIGIBLE rows: source_file_hash equal to the concept''s current file_hash, model/dim/contract matching the current embedding policy, and the concept effectively fresh; a row with NULL provenance (legacy or written by the compatibility setter) never ranks.';
+COMMENT ON COLUMN pgokf.concept_embedding.dim IS
+    'Length of embedding, constrained equal to cardinality(embedding); the effective dimension of the stored vector. Semantic eligibility additionally requires dim to equal the current embedding_dim policy.';
+COMMENT ON COLUMN pgokf.concept_embedding.model IS
+    'Identifier of the embedding model that computed the vector (pgokf.set_concept_embedding_cas requires it). NULL marks a legacy row - pre-0.3.0 or written through the compatibility setter pgokf.set_concept_embedding - which is never eligible for semantic ranking.';
+COMMENT ON COLUMN pgokf.concept_embedding.updated_at IS
+    'When this embedding row was last written by pgokf.set_concept_embedding / set_concept_embedding_cas; the embedded_at provenance of search result metadata.';
+COMMENT ON COLUMN pgokf.concept_embedding.source_file_hash IS
+    'The concept''s file_hash at embed time (pgokf.set_concept_embedding_cas compare-and-sets against it). Semantic eligibility requires it to equal the concept''s current file_hash; NULL marks a legacy row that never ranks.';
+COMMENT ON COLUMN pgokf.concept_embedding.input_hash IS
+    'Hash of the exact bounded input text the embedder sent (title + description + body_text under the render contract), supplied by the embedder as provenance; the catalog stores it opaquely and never re-computes it. NULL marks a legacy row.';
+COMMENT ON COLUMN pgokf.concept_embedding.contract IS
+    'The embedder''s render-contract identity (input construction and truncation version), e.g. pgokf-embed/v1/max-chars:8000. When the embedding_contract policy key pins a value, semantic eligibility requires an exact match; NULL marks a legacy row that never ranks.';
+
+--     11b. The embedding contract policy keys (upgrade-only ALTERs; the fresh
+--          install declares the columns in the same position - last - in the
+--          config_table block of src/catalog/config.rs). NOT NULL with a
+--          constant default is metadata-only (no table rewrite).
+ALTER TABLE pgokf_private.config ADD COLUMN embedding_model text NOT NULL DEFAULT '';
+ALTER TABLE pgokf_private.config ADD COLUMN embedding_contract text NOT NULL DEFAULT '';
+
+COMMENT ON COLUMN pgokf_private.config.embedding_dim IS
+    'Expected dimension (1..=16000) of the caller-computed concept embeddings streamed in via pgokf.set_concept_embedding / set_concept_embedding_cas: the setters reject any real[] whose length differs, and pgokf.rebuild_embedding_index builds its pgvector HNSW index with this typmod (vector(embedding_dim)). Default 1536. The extension never computes embeddings. Semantic ranking additionally requires a stored row''s dim to equal this key, so a change revokes the eligibility of every stored vector and marks every bundle holding embedding rows stale (reason embedding_contract_changed) in the same transaction; follow a change with re-ingestion and pgokf.rebuild_embedding_index. HNSW indexing applies only up to pgvector''s 2000-dimension index limit; above it semantic search still works via an exact scan.';
+COMMENT ON COLUMN pgokf_private.config.embedding_model IS
+    'Optional pin on the embedding model a stored concept vector must carry to be eligible for semantic ranking: empty (the default) accepts any non-NULL model; a non-empty value requires an exact match. A change marks every bundle holding embedding rows stale (reason embedding_contract_changed) in the same transaction, before new vectors are queued; the embedding watcher re-embeds the now-stale rows against the new policy. A row with NULL model is legacy and never ranks regardless.';
+COMMENT ON COLUMN pgokf_private.config.embedding_contract IS
+    'Optional pin on the render-contract identity (input construction and truncation version, e.g. pgokf-embed/v1/max-chars:8000) a stored concept vector must carry to be eligible for semantic ranking: empty (the default) accepts any non-NULL contract; a non-empty value requires an exact match. A change marks every bundle holding embedding rows stale (reason embedding_contract_changed) in the same transaction. A row with NULL contract is legacy and never ranks regardless.';
+
+--     11c. The compare-and-set setter, declared exactly as the 0.3.0-dev
+--          install script declares it, then hardened as the
+--          embedding_function_hardening block of src/catalog/embedding.rs
+--          hardens it; the refreshed comments of the pre-existing embedding
+--          functions follow (COMMENT ON replaces).
+CREATE FUNCTION pgokf."set_concept_embedding_cas"(
+    "bundle_id" bigint,
+    "concept_id" TEXT,
+    "embedding" real[],
+    "expected_file_hash" TEXT,
+    "input_hash" TEXT,
+    "model" TEXT,
+    "contract" TEXT
+) RETURNS bool
+STRICT
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'set_concept_embedding_cas_wrapper';
+
+ALTER FUNCTION pgokf.set_concept_embedding_cas(bigint, text, real[], text, text, text, text)
+    SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
+REVOKE ALL ON FUNCTION pgokf.set_concept_embedding_cas(bigint, text, real[], text, text, text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pgokf.set_concept_embedding_cas(bigint, text, real[], text, text, text, text) TO pgokf_writer;
+COMMENT ON FUNCTION pgokf.set_concept_embedding_cas(bigint, text, real[], text, text, text, text) IS
+    'Store or replace one concept''s embedding with full provenance, compare-and-set against the concept''s current file_hash: the write commits only when the concept''s file_hash still equals expected_file_hash under a row lock, returning true; a mismatch returns false having written nothing (retryable - re-read and re-embed, never an error-loop). input_hash is the caller-computed hash of the exact bounded input text, model the embedding model, contract the render-contract identity; all provenance arguments must be non-empty (22023 otherwise, as for a wrong dimension or an unknown concept; 42501 outside pgokf_writer). Only rows written through this setter carry the provenance semantic ranking requires.';
+COMMENT ON FUNCTION pgokf.set_concept_embedding(bigint, text, real[]) IS
+    'Store or replace one concept''s embedding (real[]) streamed in by a companion embedder; the extension never computes embeddings. Writer-tier (pgokf_writer; admin inherits it), SECURITY DEFINER. Validates the concept exists and len(embedding)=embedding_dim (else 22023) and upserts. The vector is stored as real[] so pgokf needs no static pgvector dependency. This 0.2.0 compatibility signature carries no provenance, so the row it writes is a legacy row (model/source_file_hash/input_hash/contract all NULL, cleared on overwrite) that never ranks semantically; use pgokf.set_concept_embedding_cas for an eligible, provenance-carrying write.';
+COMMENT ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer) IS
+    'Semantic nearest-neighbor search: rank concepts by pgvector cosine distance to query_embedding (rank = normalized cosine similarity). Reader-level, invoker rights; active bundles only. query_embedding must have embedding_dim dimensions; limit_count in 1..=500. Requires pgvector: raises 22023 naming the missing dependency when it is not installed (no lexical fallback). Only ELIGIBLE embeddings rank: source_file_hash equal to the concept''s current file_hash, model/dimension/contract matching the embedding_model/embedding_dim/embedding_contract policy, and the concept effectively fresh (bundle freshness fresh, no covering concept/path override); a stale or legacy (NULL-provenance) row never ranks even while the HNSW index physically retains it.';
+COMMENT ON FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer) IS
+    'Hybrid search: Reciprocal Rank Fusion (RRF, k=60) of the lexical result of query (via the configured search_backend) and the semantic result of query_embedding, fused entirely in SQL (rank = fused RRF score). Reader-level, invoker rights; enabled bundles only; limit_count in 1..=500. The semantic component ranks eligible (current, fresh) embeddings only, so an ineligible vector never leaks into the fused result; the lexical component may still return a stale concept, labeled by pgokf.concept_search_fresh. Degrades to lexical-only with a WARNING when pgvector is not installed.';
+COMMENT ON FUNCTION pgokf.rebuild_embedding_index() IS
+    'Admin-only. (Re)build the pgvector HNSW (cosine) index on pgokf.concept_embedding for the configured embedding_dim; returns true when built, or false (with a NOTICE) when pgvector is absent or embedding_dim exceeds pgvector''s 2000-dimension HNSW limit. The index physically retains ineligible rows; the ranking predicates, not the index, enforce eligibility.';
+
+--     11d. The embedding provenance attributes of concept_search_fresh_result
+--          (the fresh install declares them in the same position - last - in
+--          the search_fresh_type block of src/catalog/search.rs; ALTER TYPE
+--          ... ADD ATTRIBUTE appends, and carries no data). The function's
+--          declaration is unchanged - the same C wrapper, rebuilt in the
+--          0.3.0-dev shared library, fills the new attributes - so only the
+--          refreshed comments follow.
+ALTER TYPE pgokf.concept_search_fresh_result ADD ATTRIBUTE embedding_state text;
+ALTER TYPE pgokf.concept_search_fresh_result ADD ATTRIBUTE embedding_model text;
+ALTER TYPE pgokf.concept_search_fresh_result ADD ATTRIBUTE embedding_dim integer;
+ALTER TYPE pgokf.concept_search_fresh_result ADD ATTRIBUTE embedding_input_hash text;
+ALTER TYPE pgokf.concept_search_fresh_result ADD ATTRIBUTE embedded_at timestamptz;
+
+COMMENT ON TYPE pgokf.concept_search_fresh_result IS
+    'One ranked hit from pgokf.concept_search_fresh: the concept_search_result columns plus the concept''s effective freshness annotation - state, reason codes, the scope the state was recorded at, stale_since, the producer''s opaque observed/indexed revisions, the catalog generation the materialization covers (published_revision), the bundle''s live catalog_generation, and last_reconciled_at - plus the embedding provenance: embedding_state (missing / current / stale, where current means the stored vector satisfies the semantic eligibility predicate: source file hash equal to the concept''s current file_hash, model/dimension/contract matching the embedding policy, and the concept effectively fresh), embedding_model, embedding_dim, embedding_input_hash, and embedded_at (NULL when no embedding row exists).';
+COMMENT ON FUNCTION pgokf.concept_search_fresh(text, bigint, integer, text, text, text[], text, text, jsonb) IS
+    'Rank catalog concepts with effective freshness: the concept_search contract plus a freshness filter (any - the default - fresh, or stale; 22023 otherwise) and a per-hit freshness annotation (state, reasons, scope, stale_since, opaque observed/indexed revisions, published_revision, catalog_generation, last_reconciled_at) with concept > path > bundle override precedence; a concept with no recorded row is fresh. Every hit also carries its embedding provenance (embedding_state missing/current/stale under the semantic eligibility predicate, plus model, dimension, input hash, and embedded_at). Lexical results may include stale concepts, always labeled; the filter applies before pagination. Reader-level and tenant-scoped like concept_search. This variant always ranks with the native FTS pipeline; composition with the optional BM25 backend is deferred. Semantic ranking itself (concept_search_semantic / concept_search_hybrid) excludes ineligible embeddings rather than labeling them.';
+
+--     11e. The refreshed capability declaration (the effective_freshness_view
+--          block of src/catalog/freshness.rs), adding embedding_freshness.
+CREATE OR REPLACE FUNCTION pgokf.capabilities() RETURNS jsonb
+    LANGUAGE sql
+    IMMUTABLE
+    PARALLEL SAFE
+    SET search_path = pg_catalog, pg_temp
+    AS $fn$
+        SELECT pg_catalog.jsonb_build_object(
+            'catalog_generation', 1,
+            'publication_fence', 1,
+            'freshness_dependency', 1,
+            'effective_freshness', 1,
+            'catalog_change_event', 1,
+            'search_freshness', 1,
+            'embedding_freshness', 1)
+    $fn$;
+COMMENT ON FUNCTION pgokf.capabilities() IS
+    'The catalog capabilities this pgokf release implements, as a jsonb object of capability name to interface version: catalog_generation, publication_fence, freshness_dependency, effective_freshness, catalog_change_event, search_freshness, and embedding_freshness (all version 1). Immutable; a producer declares the capabilities it requires and checks them here. Later releases only add entries or raise versions.';
+
+--     11f. The refreshed bundle_freshness.embedding_contract evidence comment
+--          (COMMENT ON replaces).
+COMMENT ON COLUMN pgokf.bundle_freshness.embedding_contract IS
+    'The embedding contract (model/dimension/render version) the producer reconciled against, as opaque jsonb evidence recorded by pgokf.mark_fresh. Semantic ranking does not read this evidence: it enforces the live embedding_model / embedding_dim / embedding_contract policy against each embedding row''s own provenance.';
 
 -- Last, so the new relations are registered for pg_dump (the rule for every
 -- upgrade script since 0.1.14). Later phases insert their sections BEFORE
