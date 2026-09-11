@@ -21,6 +21,12 @@
 --     pgokf.set_concept_embedding_cas, the embedding_model/embedding_contract
 --     policy keys, eligibility gating of semantic/hybrid ranking, and the
 --     embedding provenance annotation on concept_search_fresh results.
+--   * generation-bound typed relationships (section 12):
+--     pgokf.relationship_publication / pgokf.relationship, the
+--     pgokf.current_relationships reader projection, the compare-and-set
+--     pgokf.replace_relationships writer API, the
+--     pgokf.concept_relationship_neighbors typed traversal, and the
+--     relationship_coverage_missing participation in pgokf.mark_fresh.
 --
 -- Every statement is additive: no row is dropped, truncated, deleted, or
 -- rewritten. The one DROP is of the sync_log op CHECK constraint, immediately
@@ -1068,6 +1074,357 @@ COMMENT ON FUNCTION pgokf.capabilities() IS
 --          (COMMENT ON replaces).
 COMMENT ON COLUMN pgokf.bundle_freshness.embedding_contract IS
     'The embedding contract (model/dimension/render version) the producer reconciled against, as opaque jsonb evidence recorded by pgokf.mark_fresh. Semantic ranking does not read this evidence: it enforces the live embedding_model / embedding_dim / embedding_contract policy against each embedding row''s own provenance.';
+
+-- ===========================================================================
+-- 12. Generation-bound typed relationships (capability C).
+--
+--     12a. The publication/relationship tables (the relationship_tables block
+--          of src/catalog/relationships.rs, verbatim).
+CREATE TABLE pgokf.relationship_publication (
+    publication_id    bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id         text NOT NULL DEFAULT 'default',
+    producer          text NOT NULL,
+    source_bundle_id  bigint,
+    source_bundle_path text NOT NULL,
+    publication_generation bigint NOT NULL,
+    expected_catalog_generation bigint NOT NULL,
+    activated_catalog_generation bigint,
+    fencing_token     bigint NOT NULL,
+    relationship_set_hash text NOT NULL,
+    idempotency_key   text NOT NULL,
+    manifest_hash     text,
+    state             text NOT NULL DEFAULT 'staged',
+    row_count         integer NOT NULL DEFAULT 0,
+    created_by        text NOT NULL DEFAULT session_user,
+    created_at        timestamptz NOT NULL DEFAULT now(),
+    activated_at      timestamptz,
+    updated_at        timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT relationship_publication_bundle_fk
+        FOREIGN KEY (source_bundle_id) REFERENCES pgokf.bundles (id) ON DELETE SET NULL,
+    CONSTRAINT relationship_publication_state_chk
+        CHECK (state IN ('staged', 'active', 'superseded')),
+    CONSTRAINT relationship_publication_generation_chk
+        CHECK (publication_generation > 0 AND fencing_token > 0
+               AND expected_catalog_generation >= 0),
+    CONSTRAINT relationship_publication_activation_chk
+        CHECK ((state = 'active') = (activated_catalog_generation IS NOT NULL)),
+    CONSTRAINT relationship_publication_uq UNIQUE NULLS NOT DISTINCT
+        (tenant_id, producer, source_bundle_id, publication_generation)
+);
+
+-- The sync-time activation scan: staged/active publications of one bundle.
+CREATE INDEX relationship_publication_bundle_state_idx
+    ON pgokf.relationship_publication (source_bundle_id, state);
+
+CREATE TABLE pgokf.relationship (
+    publication_id    bigint NOT NULL,
+    ordinal           integer NOT NULL,
+    tenant_id         text NOT NULL DEFAULT 'default',
+    source_bundle_id  bigint NOT NULL,
+    source_concept_id text NOT NULL,
+    relation_type     text NOT NULL,
+    direction         text NOT NULL DEFAULT 'directed',
+    target_bundle_id  bigint,
+    target_concept_id text,
+    external_target   text,
+    source_location   jsonb,
+    confidence        double precision,
+    unresolved        boolean NOT NULL DEFAULT false,
+    cross_bundle      boolean NOT NULL DEFAULT false,
+    provenance        jsonb,
+    row_hash          text NOT NULL,
+    CONSTRAINT relationship_pkey PRIMARY KEY (publication_id, ordinal),
+    CONSTRAINT relationship_publication_fk
+        FOREIGN KEY (publication_id)
+        REFERENCES pgokf.relationship_publication (publication_id) ON DELETE CASCADE,
+    CONSTRAINT relationship_direction_chk
+        CHECK (direction IN ('directed', 'undirected')),
+    CONSTRAINT relationship_relation_type_chk
+        CHECK (length(relation_type) <= 128
+               AND position(':' IN relation_type) > 1
+               AND position(':' IN relation_type) < length(relation_type)),
+    CONSTRAINT relationship_target_chk
+        CHECK ((target_bundle_id IS NOT NULL) = (target_concept_id IS NOT NULL)
+               AND NOT (target_concept_id IS NOT NULL AND external_target IS NOT NULL)
+               AND (unresolved OR target_concept_id IS NOT NULL)),
+    CONSTRAINT relationship_confidence_chk
+        CHECK (confidence IS NULL OR (confidence >= 0 AND confidence <= 1))
+);
+
+CREATE INDEX relationship_source_type_idx
+    ON pgokf.relationship (source_bundle_id, source_concept_id, relation_type);
+CREATE INDEX relationship_target_type_idx
+    ON pgokf.relationship (target_bundle_id, target_concept_id, relation_type)
+    WHERE target_concept_id IS NOT NULL;
+
+-- Multi-tenant isolation (see pgokf.bundles): opt-in-by-usage RLS on the
+-- denormalized tenant_id. Not forced; no API role holds any grant on the raw
+-- tables (readers get the pgokf.current_relationships projection only), so the
+-- policies are defense in depth.
+ALTER TABLE pgokf.relationship_publication ENABLE ROW LEVEL SECURITY;
+CREATE POLICY relationship_publication_tenant_isolation ON pgokf.relationship_publication
+    USING (((pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+             OR pg_catalog.current_setting('pgokf.tenant', true) = '')
+            AND NOT (SELECT pgokf.tenant_required()))
+        OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true))
+    WITH CHECK (((pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+                  OR pg_catalog.current_setting('pgokf.tenant', true) = '')
+                 AND NOT (SELECT pgokf.tenant_required()))
+        OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true));
+
+ALTER TABLE pgokf.relationship ENABLE ROW LEVEL SECURITY;
+CREATE POLICY relationship_tenant_isolation ON pgokf.relationship
+    USING (((pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+             OR pg_catalog.current_setting('pgokf.tenant', true) = '')
+            AND NOT (SELECT pgokf.tenant_required()))
+        OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true))
+    WITH CHECK (((pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+                  OR pg_catalog.current_setting('pgokf.tenant', true) = '')
+                 AND NOT (SELECT pgokf.tenant_required()))
+        OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true));
+
+REVOKE ALL ON pgokf.relationship_publication FROM PUBLIC;
+REVOKE ALL ON pgokf.relationship FROM PUBLIC;
+
+COMMENT ON TABLE pgokf.relationship_publication IS
+    'Relationship publication ledger: one immutable attempt/result record per (tenant_id, producer, source_bundle_id, publication_generation), bound to a live pgokf.publication_fence slot (fencing_token) and to the catalog generation the set was computed against (expected_catalog_generation; activated_catalog_generation once active). State staged (invisible until the matching catalog generation is accepted by a refresh) / active / superseded. relationship_set_hash is the BLAKE3 digest of the canonicalized row set and doubles as the idempotency key: an identical retried replace_relationships is a no-op, a differing one under the same key is a 23505 conflict. The bundle reference detaches (ON DELETE SET NULL) so a hard deletion never erases the audit row; source_bundle_path is the durable identity snapshot. Granted to no API role.';
+COMMENT ON COLUMN pgokf.relationship_publication.publication_id IS
+    'Surrogate identity of the publication (GENERATED ALWAYS AS IDENTITY), the foreign-key target of pgokf.relationship.';
+COMMENT ON COLUMN pgokf.relationship_publication.tenant_id IS
+    'Multi-tenant owner, stamped from the source bundle at write time; part of the natural key.';
+COMMENT ON COLUMN pgokf.relationship_publication.producer IS
+    'Opaque caller-supplied producer label; part of the natural key. NOT authorization: replace_relationships requires session_user membership in pgokf_writer (admin inherits).';
+COMMENT ON COLUMN pgokf.relationship_publication.source_bundle_id IS
+    'Live reference to the bundle whose concepts are the relationship sources, or NULL after the bundle was unregistered/purged (ON DELETE SET NULL: a hard deletion never cascades away publication audit). Use source_bundle_path for the durable identity.';
+COMMENT ON COLUMN pgokf.relationship_publication.source_bundle_path IS
+    'Immutable snapshot of the source bundle''s canonical path (or content:<name> key) at write time; survives bundle deletion.';
+COMMENT ON COLUMN pgokf.relationship_publication.publication_generation IS
+    'The producer-side monotonic publication generation; equals the target_generation of the publication fence that authorized the write; part of the natural key.';
+COMMENT ON COLUMN pgokf.relationship_publication.expected_catalog_generation IS
+    'The pgokf.bundles.catalog_generation the row set was computed against: the current generation activates immediately; current + 1 stages for the imminent refresh; anything else is rejected (22023).';
+COMMENT ON COLUMN pgokf.relationship_publication.activated_catalog_generation IS
+    'The catalog generation this publication is the visible relationship set for, once active; NULL while staged or after supersession.';
+COMMENT ON COLUMN pgokf.relationship_publication.fencing_token IS
+    'The live fencing token of the (tenant, producer, bundle) publication fence slot at write time; a superseded or expired token is rejected, so an older producer attempt can never publish.';
+COMMENT ON COLUMN pgokf.relationship_publication.relationship_set_hash IS
+    'BLAKE3 hex digest of the canonicalized relationship set (rows sorted by canonical identity, per-row digests concatenated in order). Identical retried input hashes identically regardless of submission order, making replace_relationships idempotent.';
+COMMENT ON COLUMN pgokf.relationship_publication.idempotency_key IS
+    'The idempotency identity of the write; equal to relationship_set_hash. A retry under the same natural key with the same key is a no-op; a different key conflicts (23505).';
+COMMENT ON COLUMN pgokf.relationship_publication.manifest_hash IS
+    'Hash of the publication manifest the issuing fence carried (producer-supplied evidence, copied from the fence slot); NULL when the fence named none.';
+COMMENT ON COLUMN pgokf.relationship_publication.state IS
+    'staged (written against the next catalog generation; invisible until a refresh accepts exactly that generation), active (the current visible set for its activated generation), or superseded (replaced by a newer activation or left behind by a generation advance).';
+COMMENT ON COLUMN pgokf.relationship_publication.row_count IS
+    'Number of relationship rows in the set; 0 is a deliberate empty set (an empty replacement removes the prior set on activation).';
+COMMENT ON COLUMN pgokf.relationship_publication.created_by IS
+    'The session_user that wrote the publication, captured by column default.';
+COMMENT ON COLUMN pgokf.relationship_publication.created_at IS
+    'When the publication was written (transaction now()).';
+COMMENT ON COLUMN pgokf.relationship_publication.activated_at IS
+    'When the publication became active; NULL while staged or after supersession.';
+COMMENT ON COLUMN pgokf.relationship_publication.updated_at IS
+    'When this row last changed (activation or supersession).';
+
+COMMENT ON TABLE pgokf.relationship IS
+    'The typed relationship rows of one publication (fk pgokf.relationship_publication): source concept, producer-defined namespaced relation_type (opaque text; the catalog never enumerates or interprets it), direction, the optional resolved target (target_bundle_id, target_concept_id), an optional opaque external target identifier, opaque source_location/provenance jsonb, confidence, the unresolved/cross_bundle flags, and the canonical ordinal/row hash. Rows are written once with their publication and never mutated except by activation-time target re-resolution; publications are retained as audit, so rows are too. Granted to no API role; readers use pgokf.current_relationships.';
+COMMENT ON COLUMN pgokf.relationship.publication_id IS
+    'The publication this row belongs to (part of the primary key).';
+COMMENT ON COLUMN pgokf.relationship.ordinal IS
+    'Zero-based position of the row in the canonical (sorted) order of its publication''s set, making the stored order deterministic and identical for a retried submission.';
+COMMENT ON COLUMN pgokf.relationship.tenant_id IS
+    'Multi-tenant owner, denormalized from the publication for a local row-level-security predicate; always equals the publication''s tenant_id.';
+COMMENT ON COLUMN pgokf.relationship.source_bundle_id IS
+    'Snapshot of the source bundle identity at write time (denormalized from the publication so it survives the publication''s ON DELETE SET NULL detach). Concept ids are unique only within a bundle: every graph key is (source_bundle_id, source_concept_id).';
+COMMENT ON COLUMN pgokf.relationship.source_concept_id IS
+    'Concept id of the relationship source within the source bundle.';
+COMMENT ON COLUMN pgokf.relationship.relation_type IS
+    'Producer-defined namespaced relation type (<namespace>:<name>, at most 128 characters). Opaque to the catalog: no domain relation enumeration exists and none is validated beyond the namespaced shape.';
+COMMENT ON COLUMN pgokf.relationship.direction IS
+    'directed (traversed source -> target; the default) or undirected (traversed both ways by concept_relationship_neighbors).';
+COMMENT ON COLUMN pgokf.relationship.target_bundle_id IS
+    'The resolved target''s bundle, when the endpoint validated at write (or activation) time against a bundle active and visible to the writer; NULL for external and unresolved-with-dropped-reference rows. Not a foreign key: the target identity is a snapshot and a target bundle''s later deletion must not rewrite relationship audit.';
+COMMENT ON COLUMN pgokf.relationship.target_concept_id IS
+    'The resolved target''s concept id within target_bundle_id, or the producer-declared target concept retained as opaque metadata on an unresolved row; NULL for external and target-less rows.';
+COMMENT ON COLUMN pgokf.relationship.external_target IS
+    'Opaque producer-defined identifier of a target outside the catalog (mutually exclusive with a resolved target concept); never resolved or traversed.';
+COMMENT ON COLUMN pgokf.relationship.source_location IS
+    'Opaque producer-supplied jsonb locating the relationship in the producer''s own storage (never interpreted by the catalog).';
+COMMENT ON COLUMN pgokf.relationship.confidence IS
+    'Optional producer-supplied confidence in [0, 1]; opaque metadata.';
+COMMENT ON COLUMN pgokf.relationship.unresolved IS
+    'True when no live resolved target backs the row: an external target, no declared target, a target concept absent at write/activation time, or a target bundle that was absent, inactive, or invisible to the writer (the invisible and absent cases are indistinguishable - no existence leak). Unresolved rows are returned as metadata and never materialized as traversal edges.';
+COMMENT ON COLUMN pgokf.relationship.cross_bundle IS
+    'True when the writer declared a target in a bundle other than the source bundle (recorded from the declaration, even when the target endpoint did not resolve).';
+COMMENT ON COLUMN pgokf.relationship.provenance IS
+    'Opaque producer-supplied jsonb provenance (never interpreted by the catalog).';
+COMMENT ON COLUMN pgokf.relationship.row_hash IS
+    'BLAKE3 hex digest of the row''s canonical text; the publication''s relationship_set_hash is computed over these in ordinal order.';
+
+--     12b. The reader projection (the current_relationships_view block of
+--          src/catalog/relationships.rs, verbatim).
+CREATE VIEW pgokf.current_relationships AS
+SELECT p.publication_id,
+       p.producer,
+       p.publication_generation,
+       p.activated_catalog_generation AS catalog_generation,
+       r.source_bundle_id,
+       r.source_concept_id,
+       r.relation_type,
+       r.direction,
+       r.target_bundle_id,
+       r.target_concept_id,
+       r.external_target,
+       r.source_location,
+       r.confidence,
+       r.unresolved,
+       r.cross_bundle,
+       r.provenance,
+       r.ordinal,
+       r.row_hash,
+       r.tenant_id
+FROM pgokf.relationship r
+JOIN pgokf.relationship_publication p ON p.publication_id = r.publication_id
+JOIN pgokf.bundles sb
+  ON sb.id = p.source_bundle_id AND sb.enabled AND sb.retired_at IS NULL
+LEFT JOIN pgokf.bundles tb ON tb.id = r.target_bundle_id
+WHERE p.state = 'active'
+  AND (((pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+         OR pg_catalog.current_setting('pgokf.tenant', true) = '')
+        AND NOT (SELECT pgokf.tenant_required()))
+       OR p.tenant_id = pg_catalog.current_setting('pgokf.tenant', true))
+  AND (r.unresolved
+       OR r.target_bundle_id IS NULL
+       OR (tb.enabled AND tb.retired_at IS NULL
+           AND (((pg_catalog.current_setting('pgokf.tenant', true) IS NULL
+                  OR pg_catalog.current_setting('pgokf.tenant', true) = '')
+                 AND NOT (SELECT pgokf.tenant_required()))
+                OR tb.tenant_id = pg_catalog.current_setting('pgokf.tenant', true))));
+
+COMMENT ON VIEW pgokf.current_relationships IS
+    'Reader projection of the current typed relationships: the rows of every ACTIVE relationship publication whose source bundle is active (enabled and not retired), tenant-scoped like the projection tables, with resolved rows hidden when their target bundle is not currently active and tenant-visible (unresolved and external rows remain as metadata and are never materialized as nonexistent references). Only the active relationship generation is exposed: staged and superseded publications stay invisible here, so no query can combine new concept content with old-generation relationships. SELECT is granted to pgokf_reader; the raw pgokf.relationship / pgokf.relationship_publication tables are granted to no API role.';
+GRANT SELECT ON pgokf.current_relationships TO pgokf_reader;
+
+--     12c. The composite result types (the relationship_types block of
+--          src/catalog/relationships.rs, verbatim).
+CREATE TYPE pgokf.relationship_publication_info AS (
+    publication_id     bigint,
+    tenant_id          text,
+    producer           text,
+    source_bundle_id   bigint,
+    source_bundle_path text,
+    publication_generation bigint,
+    expected_catalog_generation bigint,
+    activated_catalog_generation bigint,
+    fencing_token      bigint,
+    relationship_set_hash text,
+    manifest_hash      text,
+    state              text,
+    row_count          integer,
+    idempotency_key    text,
+    created_at         timestamptz,
+    activated_at       timestamptz
+);
+
+COMMENT ON TYPE pgokf.relationship_publication_info IS
+    'One relationship publication as pgokf.replace_relationships reports it: the natural key, the generation/fence binding, the relationship-set hash (doubling as the idempotency key), the state (staged/active/superseded), the row count, and the timestamps.';
+
+CREATE TYPE pgokf.relationship_neighbor AS (
+    start_bundle_id    bigint,
+    start_concept_id   text,
+    bundle_id          bigint,
+    concept_id         text,
+    hops               integer,
+    path_bundle_ids    bigint[],
+    path_concept_ids   text[],
+    relation_type      text,
+    title              text,
+    freshness_state    text,
+    freshness_reasons  text[],
+    freshness_scope    text,
+    stale_since        timestamptz,
+    observed_revision  text,
+    indexed_revision   text,
+    published_revision text,
+    catalog_generation bigint,
+    last_reconciled_at timestamptz,
+    embedding_state    text,
+    embedding_model    text,
+    embedding_dim      integer,
+    embedding_input_hash text,
+    embedded_at        timestamptz
+);
+
+COMMENT ON TYPE pgokf.relationship_neighbor IS
+    'One concept reachable from a start concept through pgokf.current_relationships: the (bundle_id, concept_id) node, shortest hop count, the path taken as parallel bundle/concept arrays, the relation type of the reaching edge, the title, and the effective freshness annotation (state, reasons, scope, stale_since, opaque revisions, catalog generation, last_reconciled_at) plus the embedding provenance - the same metadata contract as pgokf.concept_search_fresh.';
+
+--     12d. The SQL-callable functions, declared exactly as the 0.3.0-dev
+--          install script declares them (C-language wrappers exported by the
+--          0.3.0-dev shared library).
+CREATE FUNCTION pgokf."concept_relationship_neighbors"(
+    "start_bundle_id" bigint,
+    "start_concept_id" TEXT,
+    "max_hops" INT DEFAULT 2,
+    "direction" TEXT DEFAULT 'outbound',
+    "relation_types" TEXT[] DEFAULT NULL,
+    "max_results" INT DEFAULT 500
+) RETURNS SETOF pgokf.relationship_neighbor
+STABLE PARALLEL SAFE
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'concept_relationship_neighbors_wrapper';
+
+CREATE FUNCTION pgokf."replace_relationships"(
+    "producer" TEXT,
+    "source_bundle_id" bigint,
+    "publication_generation" bigint,
+    "expected_catalog_generation" bigint,
+    "fencing_token" bigint,
+    "rows" jsonb
+) RETURNS pgokf.relationship_publication_info
+STRICT
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'replace_relationships_wrapper';
+
+--     12e. The hardening (the relationship_function_hardening block of
+--          src/catalog/relationships.rs, verbatim).
+ALTER FUNCTION pgokf.replace_relationships(text, bigint, bigint, bigint, bigint, jsonb)
+    SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
+
+REVOKE ALL ON FUNCTION pgokf.replace_relationships(text, bigint, bigint, bigint, bigint, jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pgokf.replace_relationships(text, bigint, bigint, bigint, bigint, jsonb) TO pgokf_writer;
+COMMENT ON FUNCTION pgokf.replace_relationships(text, bigint, bigint, bigint, bigint, jsonb) IS
+    'Replace a source bundle''s typed relationship set for one publication generation, atomically, returning pgokf.relationship_publication_info. Writer-tier (pgokf_writer; admin inherits), SECURITY DEFINER, tenant-confined; producer is an opaque label, not authorization. Compare-and-set under the source bundle advisory lock: fencing_token must be the live unexpired token of the (tenant, producer, bundle) publication fence and publication_generation must equal its target (22023 otherwise, so a superseded or expired attempt never publishes). Generation rule, against the bundle''s current catalog generation G: expected = G activates immediately (superseding the producer''s prior active publication); expected = G + 1 stages the set, invisible until a refresh accepts exactly that generation (run_bundle_sync activates it in the sync transaction and supersedes the prior generation''s publications, so new concepts never combine with old-generation relationships); anything else is 22023. rows is a jsonb array of row objects (source_concept_id, namespaced relation_type ''<namespace>:<name>'', optional direction directed|undirected, optional resolved target target_bundle_id + target_concept_id (concept alone targets the source bundle), optional external_target (mutually exclusive with a resolved target), optional source_location/provenance jsonb, optional confidence in [0,1]); at most 10000 rows, duplicate canonical identities are 22023. Endpoint validation never leaks: an absent, inactive, or cross-tenant target bundle resolves to the same unresolved row with the bundle reference dropped. Rows are canonicalized (sorted) and hashed: an identical retried call is a no-op, the same publication key with a different set is 23505. An empty rows array removes the prior set on activation. A bundle whose relationship coverage a refresh supersedes without replacement stays stale (reason relationship_coverage_missing) and pgokf.mark_fresh refuses until a matching replacement activates.';
+
+REVOKE ALL ON FUNCTION pgokf.concept_relationship_neighbors(bigint, text, integer, text, text[], integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pgokf.concept_relationship_neighbors(bigint, text, integer, text, text[], integer) TO pgokf_reader;
+COMMENT ON FUNCTION pgokf.concept_relationship_neighbors(bigint, text, integer, text, text[], integer) IS
+    'Cycle-safe breadth-first traversal of the current typed relationships from (start_bundle_id, start_concept_id), over pgokf.current_relationships only (the active relationship generation; active bundles; tenant-scoped), keyed on (bundle_id, concept_id). direction is ''outbound'' (default), ''inbound'', or ''both'' (22023 otherwise); relation_types NULL or empty follows every type; max_hops must be at least 1 and is capped at pgokf.max_graph_hops; max_results defaults to 500 and is capped at 10000. Unresolved and external rows never become edges. Each node returns its shortest hop count, path (parallel bundle/concept arrays), the reaching edge''s relation type, title, and the effective freshness annotation plus embedding provenance of pgokf.concept_search_fresh. An unknown or inactive seed yields an empty result. Reader-level, invoker rights. pgokf.concept_neighbors (the Markdown link graph) is unchanged.';
+
+--     12f. The refreshed capability declaration (the effective_freshness_view
+--          block of src/catalog/freshness.rs), adding typed_relationships, and
+--          the refreshed reason-code/mark_fresh comments (COMMENT ON replaces).
+CREATE OR REPLACE FUNCTION pgokf.capabilities() RETURNS jsonb
+    LANGUAGE sql
+    IMMUTABLE
+    PARALLEL SAFE
+    SET search_path = pg_catalog, pg_temp
+    AS $fn$
+        SELECT pg_catalog.jsonb_build_object(
+            'catalog_generation', 1,
+            'publication_fence', 1,
+            'freshness_dependency', 1,
+            'effective_freshness', 1,
+            'catalog_change_event', 1,
+            'search_freshness', 1,
+            'embedding_freshness', 1,
+            'typed_relationships', 1)
+    $fn$;
+COMMENT ON FUNCTION pgokf.capabilities() IS
+    'The catalog capabilities this pgokf release implements, as a jsonb object of capability name to interface version: catalog_generation, publication_fence, freshness_dependency, effective_freshness, catalog_change_event, search_freshness, embedding_freshness, and typed_relationships (all version 1). Immutable; a producer declares the capabilities it requires and checks them here. Later releases only add entries or raise versions.';
+
+COMMENT ON COLUMN pgokf.bundle_freshness.reason_codes IS
+    'Machine-readable, producer-supplied reason codes explaining the current non-fresh state (merged, deduplicated). Catalog-defined codes: legacy_pre_0.3.0, dependency_source_changed, change_scope_unknown, bundle_retired, bundle_restored, bundle_disabled, relationship_coverage_missing; producers may add their own opaque codes.';
+COMMENT ON FUNCTION pgokf.mark_fresh(bigint, bigint, text, text, jsonb, text) IS
+    'Compare-and-set reconciliation completion: mark the bundle fresh only if its observed source revision still equals expected_observed_source_generation AND its live catalog generation equals expected_catalog_generation AND no newer materialized generation exists AND no relationship_coverage_missing reason stands (a refresh that superseded the bundle''s relationship coverage must be answered with a matching pgokf.replace_relationships publication first) AND it is not retired; returns false (changing nothing) otherwise, so a superseded attempt can never clear staleness. On success records the manifest hash and embedding contract evidence and sets last_reconciled_at. Writer-tier; tenant-confined.';
 
 -- Last, so the new relations are registered for pg_dump (the rule for every
 -- upgrade script since 0.1.14). Later phases insert their sections BEFORE

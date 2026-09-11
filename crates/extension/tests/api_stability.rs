@@ -38,7 +38,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The 64 stable public functions, as `(name, argument-type list)`. The pair
+/// The 66 stable public functions, as `(name, argument-type list)`. The pair
 /// renders to the exact `COMMENT ON FUNCTION pgokf.<name>(<args>)` prefix that
 /// the hardening blocks emit.
 const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
@@ -127,9 +127,17 @@ const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
     ("claim_catalog_change_events", "text, integer, integer"),
     ("ack_catalog_change_event", "bigint, text, text"),
     ("list_catalog_change_events", "bigint, integer"),
+    (
+        "replace_relationships",
+        "text, bigint, bigint, bigint, bigint, jsonb",
+    ),
+    (
+        "concept_relationship_neighbors",
+        "bigint, text, integer, text, text[], integer",
+    ),
 ];
 
-/// The 22 stable public composite types.
+/// The 24 stable public composite types.
 const PUBLIC_TYPES: &[&str] = &[
     "bundle_sync_result",
     "concept_search_result",
@@ -153,9 +161,11 @@ const PUBLIC_TYPES: &[&str] = &[
     "claimed_change_event",
     "catalog_change_event_info",
     "concept_search_fresh_result",
+    "relationship_publication_info",
+    "relationship_neighbor",
 ];
 
-/// The 27 catalog tables, as fully-qualified `schema.table` identifiers.
+/// The 29 catalog tables, as fully-qualified `schema.table` identifiers.
 /// Nineteen are public (`pgokf`); the singleton policy row and the three
 /// admin-only history/audit logs live in the `pgokf_private` schema; the
 /// web UI's people, sessions, MCP tokens, and identity-provider settings
@@ -180,6 +190,8 @@ const CATALOG_TABLES: &[&str] = &[
     "pgokf.freshness_dependency",
     "pgokf.publication_fence",
     "pgokf.catalog_change_event",
+    "pgokf.relationship_publication",
+    "pgokf.relationship",
     "pgokf_private.config",
     "pgokf_private.sync_log",
     "pgokf_private.sync_log_change",
