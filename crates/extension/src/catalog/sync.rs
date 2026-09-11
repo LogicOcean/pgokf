@@ -1504,6 +1504,21 @@ pub(crate) fn run_bundle_sync<S: ByteSource>(
 
     delete_removed_concepts(bundle_id, &delta.removed_paths)?;
     delete_reclassified_concepts(bundle_id, &staged)?;
+
+    // Embedding invalidation, in this transaction and immediately around the
+    // concept DML: every staged (re-written) concept loses its embedding row,
+    // so no old vector coexists with the new concept text past commit.
+    // Removed and reclassified concepts cascade their embedding rows through
+    // the concept-delete foreign key; the embedder's missing-row poll
+    // re-embeds whatever this clears.
+    crate::catalog::embedding::invalidate_synced_concepts(
+        bundle_id,
+        &staged
+            .iter()
+            .map(|entry| entry.concept.id.clone())
+            .collect::<Vec<_>>(),
+    )?;
+
     upsert_concepts(bundle_id, &staged, &defaults.text_search_config)?;
     replace_concept_metadata(bundle_id, &staged)?;
 

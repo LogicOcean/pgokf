@@ -2152,6 +2152,37 @@ An added concept for the resync diff.\n";
         assert_eq!(hit, "alpha", "hybrid degrades to lexical-only alpha match");
     }
 
+    /// The concept's current `file_hash`, as the compare-and-set embedding
+    /// setter expects it.
+    fn file_hash_of(bundle_id: i64, concept_id: &str) -> String {
+        Spi::get_one_with_args::<String>(
+            "SELECT file_hash FROM pgokf.concepts WHERE bundle_id = $1 AND id = $2",
+            &[bundle_id.into(), concept_id.into()],
+        )
+        .expect("file hash query executes")
+        .expect("the concept carries a file hash")
+    }
+
+    /// Store a synthetic embedding the way the embedder does: compare-and-set
+    /// against the concept's current file hash, with provenance.
+    fn cas_set_embedding(bundle_id: i64, concept_id: &str, embedding: &str) {
+        let file_hash = file_hash_of(bundle_id, concept_id);
+        let stored = Spi::get_one_with_args::<bool>(
+            "SELECT pgokf.set_concept_embedding_cas(
+                 $1, $2, $3::real[], $4,
+                 'test-input-hash', 'test-model', 'test-contract/v1')",
+            &[
+                bundle_id.into(),
+                concept_id.into(),
+                embedding.into(),
+                file_hash.into(),
+            ],
+        )
+        .expect("set_concept_embedding_cas executes")
+        .expect("the CAS outcome is not NULL");
+        assert!(stored, "the CAS write of {concept_id} is accepted");
+    }
+
     #[pg_test]
     fn semantic_and_hybrid_search_rank_by_synthetic_embeddings() {
         // Arrange: only meaningful where pgvector is installable.
@@ -2168,16 +2199,10 @@ An added concept for the resync diff.\n";
         let bundle_id = register_fixture(&bundle);
 
         // alpha points along axis 1, beta along axis 2 - orthogonal unit vectors.
-        Spi::run_with_args(
-            "SELECT pgokf.set_concept_embedding($1, 'alpha', ARRAY[1,0,0,0]::real[])",
-            &[bundle_id.into()],
-        )
-        .expect("alpha embedding is settable");
-        Spi::run_with_args(
-            "SELECT pgokf.set_concept_embedding($1, 'beta', ARRAY[0,1,0,0]::real[])",
-            &[bundle_id.into()],
-        )
-        .expect("beta embedding is settable");
+        // The compare-and-set setter records the provenance semantic ranking
+        // requires (the legacy set_concept_embedding writes ineligible rows).
+        cas_set_embedding(bundle_id, "alpha", "ARRAY[1,0,0,0]");
+        cas_set_embedding(bundle_id, "beta", "ARRAY[0,1,0,0]");
 
         // The HNSW index builds for the small dimension.
         let built = Spi::get_one::<bool>("SELECT pgokf.rebuild_embedding_index()")

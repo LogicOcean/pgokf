@@ -26,17 +26,35 @@
 //!   ingest. A companion embedder (never this extension - it performs no model
 //!   inference and no network I/O) streams caller-computed embeddings in as
 //!   `real[]`; the row is validated (the concept must exist, the length must
-//!   equal the durable `embedding_dim`) and upserted.
+//!   equal the durable `embedding_dim`) and upserted. This is the 0.2.0
+//!   compatibility signature: it carries no provenance, so the row it writes
+//!   is a legacy row that never ranks semantically.
+//! - [`set_concept_embedding_cas`](pgokf::set_concept_embedding_cas) - the
+//!   provenance-carrying writer-tier ingest: compare-and-set against the
+//!   concept's current `file_hash` (a mismatch is a retryable `false`, never
+//!   an error), recording the source file hash, the caller-computed input
+//!   hash, the model, and the render-contract identity. Only rows written
+//!   through it are eligible for semantic ranking.
 //! - [`concept_search_semantic`](pgokf::concept_search_semantic) - reader-tier
-//!   nearest-neighbor search by `pgvector` cosine distance (`<=>`). Semantic
-//!   search has no lexical equivalent, so when `pgvector` is absent it raises a
-//!   clear `22023` naming the missing dependency rather than silently returning
-//!   nothing.
+//!   nearest-neighbor search by `pgvector` cosine distance (`<=>`) over
+//!   **eligible** embeddings only: the row's `source_file_hash` must equal the
+//!   concept's current `file_hash`, its model/dimension/contract must match
+//!   the durable embedding policy, and the concept must be effectively fresh
+//!   (bundle freshness `fresh`, no covering concept/path override). Stale or
+//!   legacy rows never rank even while the HNSW index physically retains
+//!   them. Semantic search has no lexical equivalent, so when `pgvector` is
+//!   absent it raises a clear `22023` naming the missing dependency rather
+//!   than silently returning nothing.
 //! - [`concept_search_hybrid`](pgokf::concept_search_hybrid) - reader-tier
 //!   Reciprocal Rank Fusion (RRF, k = 60) of the lexical result (through the
-//!   configured `search_backend`) and the semantic result, fused entirely in
-//!   SQL. RRF needs no model, so when `pgvector` is absent this **sensibly**
-//!   degrades to lexical-only with a `WARNING`.
+//!   configured `search_backend`) and the eligible-only semantic result, fused
+//!   entirely in SQL. RRF needs no model, so when `pgvector` is absent this
+//!   **sensibly** degrades to lexical-only with a `WARNING`.
+//!
+//! A sync that re-stages a concept deletes its embedding row in the same
+//! transaction ([`invalidate_synced_concepts`]), so no old vector coexists
+//! with new concept text past commit; the embedder's missing-row poll then
+//! re-embeds it.
 //!
 //! Plus [`rebuild_embedding_index`](pgokf::rebuild_embedding_index) - admin-tier,
 //! mirroring `rebuild_search_index`: it builds a `pgvector` HNSW (cosine) index
@@ -79,6 +97,14 @@ CREATE TABLE pgokf.concept_embedding (
     model      text,
     updated_at timestamptz NOT NULL DEFAULT now(),
     tenant_id  text        NOT NULL DEFAULT 'default',
+    -- source_file_hash / input_hash / contract are appended last so a fresh
+    -- install matches, column-for-column, an existing install upgraded via
+    -- ADD COLUMN (see sql/pgokf--0.2.0--0.3.0-dev.sql). NULL on any of them
+    -- marks a legacy (pre-0.3.0 or compatibility-setter) row, which is never
+    -- eligible for semantic ranking.
+    source_file_hash text,
+    input_hash text,
+    contract text,
     CONSTRAINT concept_embedding_pkey PRIMARY KEY (bundle_id, concept_id),
     CONSTRAINT concept_embedding_concept_fk
         FOREIGN KEY (bundle_id, concept_id)
@@ -102,17 +128,23 @@ CREATE POLICY concept_embedding_tenant_isolation ON pgokf.concept_embedding
         OR tenant_id = pg_catalog.current_setting('pgokf.tenant', true));
 
 COMMENT ON TABLE pgokf.concept_embedding IS
-    'Opt-in per-concept embedding vectors, streamed in by a companion embedder via pgokf.set_concept_embedding (the extension never computes embeddings or performs network I/O). The vector is stored as the builtin real[] - NOT a pgvector ''vector'' column - so CREATE EXTENSION pgokf succeeds without pgvector installed; it is cast to vector(dim) at query time and in the HNSW index only when pgvector is present. Rows cascade from pgokf.concepts, so removing a concept or unregistering a bundle drops its embedding automatically.';
+    'Opt-in per-concept embedding vectors, streamed in by a companion embedder via pgokf.set_concept_embedding / pgokf.set_concept_embedding_cas (the extension never computes embeddings or performs network I/O). The vector is stored as the builtin real[] - NOT a pgvector ''vector'' column - so CREATE EXTENSION pgokf succeeds without pgvector installed; it is cast to vector(dim) at query time and in the HNSW index only when pgvector is present. Rows cascade from pgokf.concepts, so removing a concept or unregistering a bundle drops its embedding automatically, and a sync that re-stages a concept deletes its row in the same transaction. Semantic ranking ranks only ELIGIBLE rows: source_file_hash equal to the concept''s current file_hash, model/dim/contract matching the current embedding policy, and the concept effectively fresh; a row with NULL provenance (legacy or written by the compatibility setter) never ranks.';
 COMMENT ON COLUMN pgokf.concept_embedding.embedding IS
     'The caller-computed embedding as real[]. Its length must equal the durable embedding_dim configuration key at ingest time (enforced by pgokf.set_concept_embedding); dim records that length redundantly for a size-only read.';
 COMMENT ON COLUMN pgokf.concept_embedding.dim IS
-    'Length of embedding, constrained equal to cardinality(embedding); the effective dimension of the stored vector.';
+    'Length of embedding, constrained equal to cardinality(embedding); the effective dimension of the stored vector. Semantic eligibility additionally requires dim to equal the current embedding_dim policy.';
 COMMENT ON COLUMN pgokf.concept_embedding.model IS
-    'Optional identifier of the embedding model/producer that computed the vector, for provenance; NULL when not supplied.';
+    'Identifier of the embedding model that computed the vector (pgokf.set_concept_embedding_cas requires it). NULL marks a legacy row - pre-0.3.0 or written through the compatibility setter pgokf.set_concept_embedding - which is never eligible for semantic ranking.';
 COMMENT ON COLUMN pgokf.concept_embedding.updated_at IS
-    'When this embedding row was last written by pgokf.set_concept_embedding.';
+    'When this embedding row was last written by pgokf.set_concept_embedding / set_concept_embedding_cas; the embedded_at provenance of search result metadata.';
 COMMENT ON COLUMN pgokf.concept_embedding.tenant_id IS
     'Multi-tenant owner, denormalized from the concept''s bundle for a local row-level-security predicate; always equals the bundle''s tenant_id.';
+COMMENT ON COLUMN pgokf.concept_embedding.source_file_hash IS
+    'The concept''s file_hash at embed time (pgokf.set_concept_embedding_cas compare-and-sets against it). Semantic eligibility requires it to equal the concept''s current file_hash; NULL marks a legacy row that never ranks.';
+COMMENT ON COLUMN pgokf.concept_embedding.input_hash IS
+    'Hash of the exact bounded input text the embedder sent (title + description + body_text under the render contract), supplied by the embedder as provenance; the catalog stores it opaquely and never re-computes it. NULL marks a legacy row.';
+COMMENT ON COLUMN pgokf.concept_embedding.contract IS
+    'The embedder''s render-contract identity (input construction and truncation version), e.g. pgokf-embed/v1/max-chars:8000. When the embedding_contract policy key pins a value, semantic eligibility requires an exact match; NULL marks a legacy row that never ranks.';
 
 GRANT SELECT ON pgokf.concept_embedding TO pgokf_reader;
 ",
@@ -166,16 +198,72 @@ fn pgvector_schema() -> Result<Option<String>, CatalogError> {
     })
 }
 
-/// The effective `embedding_dim` for an invoker-rights reader path, read through
-/// the reader-granted `SECURITY DEFINER` `pgokf.get_config` projection (the same
-/// indirection `concept_search` uses for `search_backend`, because these search
-/// functions cannot read the admin-only config table directly).
-fn effective_embedding_dim() -> Result<i32, CatalogError> {
-    Spi::get_one::<i32>("SELECT (pgokf.get_config() ->> 'embedding_dim')::pg_catalog.int4")
-        .map_err(spi_error("failed to read embedding_dim configuration"))?
-        .ok_or_else(|| {
-            CatalogError::internal("embedding_dim is missing from configuration", Path::new(""))
+/// The current embedding contract policy a stored vector must match to be
+/// eligible for semantic ranking.
+///
+/// `model`/`contract` are the durable `embedding_model` / `embedding_contract`
+/// configuration keys; an empty value is the unpinned default, which matches
+/// any non-NULL row value (a NULL row value is legacy and never matches).
+/// `dim` is always pinned: a row stored under a different `embedding_dim` is
+/// ineligible (and would fail the `vector(dim)` cast besides).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EmbeddingPolicy {
+    pub dim: i32,
+    pub model: String,
+    pub contract: String,
+}
+
+/// Read the effective embedding policy through the reader-granted
+/// `pgokf.get_config` projection, in one round trip. Used by the
+/// invoker-rights search paths, which cannot read the admin-only config table
+/// directly.
+pub(crate) fn effective_embedding_policy() -> Result<EmbeddingPolicy, CatalogError> {
+    Spi::connect(|client| {
+        let table = client
+            .select(
+                "SELECT (cfg ->> 'embedding_dim')::pg_catalog.int4,
+                        cfg ->> 'embedding_model',
+                        cfg ->> 'embedding_contract'
+                 FROM (SELECT pgokf.get_config() AS cfg) AS c",
+                Some(1),
+                &[],
+            )
+            .map_err(spi_error("failed to read the embedding policy configuration"))?;
+        let Some(row) = table.into_iter().next() else {
+            return Err(CatalogError::internal(
+                "the embedding policy configuration is missing",
+                Path::new(""),
+            ));
+        };
+        let reader = RowReader::new(&row, "failed to read the embedding policy", "config");
+        Ok(EmbeddingPolicy {
+            dim: reader.required(1, "embedding_dim")?,
+            model: reader.required(2, "embedding_model")?,
+            contract: reader.required(3, "embedding_contract")?,
         })
+    })
+}
+
+/// The physical-contract half of semantic eligibility, over the aliases `e`
+/// (`pgokf.concept_embedding`) and `c` (`pgokf.concepts`): a non-legacy row
+/// whose recorded source hash equals the concept's current `file_hash` and
+/// whose model/dimension/contract match the current policy. An unpinned
+/// (empty) model/contract policy matches any non-NULL row value; a NULL row
+/// value is legacy and never matches. The caller binds the policy as the
+/// numbered parameters `model_param`, `dim_param`, and `contract_param`.
+///
+/// The other half of eligibility - the concept's effective freshness and the
+/// bundle being active - is expressed at each query site (the invoker-rights
+/// ranking path reads the reader-granted `pgokf.effective_freshness`
+/// projection because the raw freshness tables are granted to no API role).
+/// Keep every site of this predicate in sync.
+pub(crate) fn contract_match_sql(model_param: usize, dim_param: usize, contract_param: usize) -> String {
+    format!(
+        "e.source_file_hash IS NOT NULL AND e.source_file_hash = c.file_hash \
+         AND e.model IS NOT NULL AND (${model_param} = '' OR e.model = ${model_param}) \
+         AND e.dim = ${dim_param} \
+         AND e.contract IS NOT NULL AND (${contract_param} = '' OR e.contract = ${contract_param})"
+    )
 }
 
 /// Validate a caller-supplied embedding length against the expected dimension.
@@ -251,23 +339,45 @@ fn read_result_hits(table: SpiTupleTable) -> Result<Vec<SearchHit>, CatalogError
     Ok(hits)
 }
 
-/// Run the nearest-neighbor query, ordered by `pgvector` cosine distance, with a
-/// normalized cosine-similarity score. Assumes `pgvector` is present and the
-/// query embedding length equals `dim` (both checked by the callers).
+/// Run the nearest-neighbor query over **eligible** embedding rows only,
+/// ordered by `pgvector` cosine distance, with a normalized cosine-similarity
+/// score. Assumes `pgvector` is present and the query embedding length equals
+/// the policy dimension (both checked by the callers).
 ///
-/// `dim` is a trusted `integer` from validated configuration (never caller
-/// input), so formatting it into the `vector(dim)` typmod is injection-safe - an
-/// `i32` can only render as digits - and is required because a typmod cannot be
-/// a bound parameter. The query embedding is bound as `$1` (never interpolated).
-/// Both the stored column and the query vector cast through the identical
-/// `embedding::vector(dim)` expression the HNSW index is built on, so the index
-/// serves the ordering when present.
+/// Eligibility (the "stale vectors do not rank" invariant) requires, per row:
+///
+/// - the physical contract match ([`contract_match_sql`]): non-legacy
+///   provenance whose `source_file_hash` equals the concept's current
+///   `file_hash` and whose model/dimension/contract match `policy`;
+/// - the concept's effective freshness is `fresh`: the bundle-scope
+///   freshness row is `fresh` AND no covering concept/path scope override is
+///   non-fresh. The invoker-rights query reads the reader-granted
+///   `pgokf.effective_freshness` projection for this (the raw freshness
+///   tables are granted to no API role); this is the deliberate
+///   bundle-state-plus-override check rather than a per-candidate function
+///   call;
+/// - the bundle is active (enabled, not retired).
+///
+/// Ineligible rows may physically remain in the table (and in the HNSW index)
+/// for audit/rollback, but they never rank: the HNSW index serves the
+/// ordering only as a pre-filter, because the eligibility predicates are not
+/// index expressions.
+///
+/// `policy.dim` is a trusted `integer` from validated configuration (never
+/// caller input), so formatting it into the `vector(dim)` typmod is
+/// injection-safe - an `i32` can only render as digits - and is required
+/// because a typmod cannot be a bound parameter. The query embedding is bound
+/// as `$1` (never interpolated). Both the stored column and the query vector
+/// cast through the identical `embedding::vector(dim)` expression the HNSW
+/// index is built on, so the index serves the ordering when present.
 fn run_semantic_query(
     query_embedding: &[f32],
     bundle_id: Option<i64>,
     limit: i64,
-    dim: i32,
+    policy: &EmbeddingPolicy,
 ) -> Result<Vec<SearchHit>, CatalogError> {
+    let dim = policy.dim;
+    let eligibility = contract_match_sql(4, 5, 6);
     let query = format!(
         "SELECT c.bundle_id,
                 c.id,
@@ -279,7 +389,16 @@ fn run_semantic_query(
          FROM pgokf.concept_embedding e
          JOIN pgokf.concepts c ON c.bundle_id = e.bundle_id AND c.id = e.concept_id
          JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled AND b.retired_at IS NULL
-         WHERE ($2 IS NULL OR c.bundle_id = $2)
+         JOIN pgokf.effective_freshness ef
+           ON ef.bundle_id = c.bundle_id AND ef.scope_kind = 'bundle' AND ef.state = 'fresh'
+         WHERE {eligibility}
+           AND NOT EXISTS (
+               SELECT 1 FROM pgokf.effective_freshness eo
+               WHERE eo.bundle_id = c.bundle_id
+                 AND eo.state <> 'fresh'
+                 AND ((eo.scope_kind = 'concept' AND eo.scope_key = c.id)
+                      OR (eo.scope_kind = 'path' AND eo.scope_key = c.path)))
+           AND ($2 IS NULL OR c.bundle_id = $2)
          ORDER BY e.embedding::vector({dim}) <=> $1::vector({dim}),
                   c.bundle_id, c.id
          LIMIT $3"
@@ -293,6 +412,9 @@ fn run_semantic_query(
                     query_embedding.to_vec().into(),
                     bundle_id.into(),
                     limit.into(),
+                    policy.model.clone().into(),
+                    policy.dim.into(),
+                    policy.contract.clone().into(),
                 ],
             )
             .map_err(spi_error("semantic search query failed"))?;
@@ -311,6 +433,14 @@ fn concept_exists(bundle_id: i64, concept_id: &str) -> Result<bool, CatalogError
 }
 
 /// Authorize (writer), validate, and upsert one concept embedding.
+///
+/// The 0.2.0 compatibility setter: it carries no provenance arguments, so the
+/// row it writes is a **legacy** row - `model`, `source_file_hash`,
+/// `input_hash`, and `contract` are all NULL (an overwrite deliberately clears
+/// any provenance a compare-and-set write had recorded, because this setter
+/// cannot prove the vector it stores corresponds to the current concept). A
+/// legacy row is stored but is never eligible for semantic ranking; the
+/// embedding watcher re-embeds it through the compare-and-set setter.
 fn set_concept_embedding_impl(
     bundle_id: i64,
     concept_id: &str,
@@ -349,7 +479,11 @@ fn set_concept_embedding_impl(
          ON CONFLICT (bundle_id, concept_id) DO UPDATE SET
              embedding = excluded.embedding,
              dim = excluded.dim,
-             updated_at = pg_catalog.now()",
+             updated_at = pg_catalog.now(),
+             model = NULL,
+             source_file_hash = NULL,
+             input_hash = NULL,
+             contract = NULL",
         &[
             bundle_id.into(),
             concept_id.into(),
@@ -358,6 +492,144 @@ fn set_concept_embedding_impl(
         ],
     )
     .map_err(spi_error("failed to upsert concept embedding"))
+}
+
+/// Validate one non-empty provenance argument of the compare-and-set setter.
+fn validate_provenance_arg(name: &str, value: &str) -> Result<(), CatalogError> {
+    if value.trim().is_empty() {
+        return Err(CatalogError::invalid_parameter(
+            format!("{name} must not be empty"),
+            Path::new(""),
+        ));
+    }
+    Ok(())
+}
+
+/// Authorize (writer), validate, compare-and-set, and upsert one concept
+/// embedding with full provenance.
+///
+/// The compare-and-set closes the inference race between a slow embedder and a
+/// concurrent sync: the concept row is locked (`FOR UPDATE`) and its current
+/// `file_hash` is read under that lock, so a sync's concept update either
+/// commits first (and is observed here) or waits behind this write and then
+/// deletes this row in its own transaction (see
+/// [`invalidate_synced_concepts`]). Both orderings are safe; without the lock
+/// an insert could land between a sync's delete and its commit and survive
+/// with a stale hash - the ranking eligibility predicate still excludes such
+/// a row, but the lock keeps the table itself clean.
+///
+/// Returns `Ok(false)` - a retryable rejection, not an error - when the
+/// concept's current `file_hash` no longer equals `expected_file_hash`: the
+/// concept changed since the caller read it, so the computed vector describes
+/// an old input and must be recomputed (the caller re-polls).
+fn set_concept_embedding_cas_impl(
+    bundle_id: i64,
+    concept_id: &str,
+    embedding: Vec<f32>,
+    expected_file_hash: &str,
+    input_hash: &str,
+    model: &str,
+    contract: &str,
+) -> Result<bool, CatalogError> {
+    security::authorize_current_user(security::Operation::Ingest, Path::new(""))?;
+    security::enforce_bundle_tenant(bundle_id)?;
+
+    validate_provenance_arg("expected_file_hash", expected_file_hash)?;
+    validate_provenance_arg("input_hash", input_hash)?;
+    validate_provenance_arg("model", model)?;
+    validate_provenance_arg("contract", contract)?;
+
+    let dim = config::embedding_dim()?;
+    validate_embedding_length(embedding.len(), dim)?;
+    validate_embedding_finite(&embedding)?;
+
+    // connect_mut + update: SPI read-only selects reject FOR UPDATE, and
+    // Spi::get_one errors on an empty result instead of returning None.
+    let current_hash = Spi::connect_mut(|client| {
+        let mut table = client
+            .update(
+                "SELECT file_hash FROM pgokf.concepts
+                 WHERE bundle_id = $1 AND id = $2
+                 FOR UPDATE",
+                Some(1),
+                &[bundle_id.into(), concept_id.into()],
+            )
+            .map_err(spi_error("failed to lock the concept for the embedding write"))?;
+        table
+            .next()
+            .map(|row| {
+                RowReader::new(&row, "failed to read the concept file hash", "concept")
+                    .required::<String>(1, "file_hash")
+            })
+            .transpose()
+    })?;
+    let Some(current_hash) = current_hash else {
+        return Err(CatalogError::invalid_parameter(
+            format!("no such concept {concept_id} in bundle {bundle_id}"),
+            Path::new(""),
+        ));
+    };
+    if current_hash != expected_file_hash {
+        return Ok(false);
+    }
+
+    Spi::run_with_args(
+        "INSERT INTO pgokf.concept_embedding
+             (bundle_id, tenant_id, concept_id, embedding, dim, model, updated_at,
+              source_file_hash, input_hash, contract)
+         VALUES ($1,
+                 (SELECT b.tenant_id FROM pgokf.bundles b WHERE b.id = $1),
+                 $2, $3, $4, $5, pg_catalog.now(), $6, $7, $8)
+         ON CONFLICT (bundle_id, concept_id) DO UPDATE SET
+             embedding = excluded.embedding,
+             dim = excluded.dim,
+             model = excluded.model,
+             updated_at = pg_catalog.now(),
+             source_file_hash = excluded.source_file_hash,
+             input_hash = excluded.input_hash,
+             contract = excluded.contract",
+        &[
+            bundle_id.into(),
+            concept_id.into(),
+            embedding.into(),
+            dim.into(),
+            model.into(),
+            expected_file_hash.into(),
+            input_hash.into(),
+            contract.into(),
+        ],
+    )
+    .map_err(spi_error("failed to upsert concept embedding"))?;
+    Ok(true)
+}
+
+/// Delete the embedding rows of the concepts a sync is re-staging, in bounded
+/// batches, inside the sync's own transaction.
+///
+/// A re-staged concept is about to receive new text (and a new `file_hash`)
+/// from the concept upsert; its old vector must not coexist with the new text
+/// past commit, so the row is deleted here - immediately around the concept
+/// DML. Removed and reclassified concepts need no explicit delete: their
+/// embedding rows cascade from the concept delete through the foreign key.
+/// After commit the embedder's missing-row poll naturally re-embeds the
+/// concept.
+///
+/// # Errors
+///
+/// Returns a [`CatalogError`] on any SPI failure, aborting the sync.
+pub(crate) fn invalidate_synced_concepts(
+    bundle_id: i64,
+    concept_ids: &[String],
+) -> Result<(), CatalogError> {
+    for chunk in concept_ids.chunks(500) {
+        Spi::run_with_args(
+            "DELETE FROM pgokf.concept_embedding
+             WHERE bundle_id = $1 AND concept_id = ANY($2)",
+            &[bundle_id.into(), chunk.to_vec().into()],
+        )
+        .map_err(spi_error("failed to invalidate embeddings of synced concepts"))?;
+    }
+    Ok(())
 }
 
 /// Authorize (reader), validate, require `pgvector`, and run the semantic query.
@@ -371,9 +643,9 @@ fn concept_search_semantic_impl(
     if !pgvector_installed()? {
         return Err(missing_pgvector_error());
     }
-    let dim = effective_embedding_dim()?;
-    validate_embedding_length(query_embedding.len(), dim)?;
-    run_semantic_query(query_embedding, bundle_id, limit, dim)
+    let policy = effective_embedding_policy()?;
+    validate_embedding_length(query_embedding.len(), policy.dim)?;
+    run_semantic_query(query_embedding, bundle_id, limit, &policy)
 }
 
 /// The (`bundle_id`, `concept_id`) key of a ranked hit, in rank order - the RRF
@@ -478,10 +750,14 @@ fn concept_search_hybrid_impl(
     let lexical = RankKeys::from_hits(&lexical_hits);
 
     // Semantic list when pgvector is present; otherwise degrade to lexical-only.
+    // The semantic side ranks eligible (current, fresh) vectors only, so an
+    // ineligible embedding can never leak into the fused result through the
+    // semantic component; the lexical side may still return the concept, with
+    // the freshness label pgokf.concept_search_fresh annotates.
     let semantic = if pgvector_installed()? {
-        let dim = effective_embedding_dim()?;
-        validate_embedding_length(query_embedding.len(), dim)?;
-        let semantic_hits = run_semantic_query(query_embedding, bundle_id, limit, dim)?;
+        let policy = effective_embedding_policy()?;
+        validate_embedding_length(query_embedding.len(), policy.dim)?;
+        let semantic_hits = run_semantic_query(query_embedding, bundle_id, limit, &policy)?;
         RankKeys::from_hits(&semantic_hits)
     } else {
         pgrx::warning!(
@@ -558,7 +834,7 @@ mod pgokf {
 
     use super::{
         concept_search_hybrid_impl, concept_search_semantic_impl, rebuild,
-        set_concept_embedding_impl,
+        set_concept_embedding_cas_impl, set_concept_embedding_impl,
     };
     use crate::catalog::types;
 
@@ -571,10 +847,64 @@ mod pgokf {
     /// in - the extension never computes embeddings and performs no network I/O.
     /// Raises SQLSTATE `22023` on a wrong length or an unknown concept, and
     /// `42501` for a caller outside `pgokf_writer`.
+    ///
+    /// This is the 0.2.0 compatibility signature: it carries no provenance
+    /// arguments, so the row it writes is a legacy row (model, source_file_hash,
+    /// input_hash, and contract all NULL - an overwrite clears them) that is
+    /// stored but never eligible for semantic ranking. New writers should use
+    /// `pgokf.set_concept_embedding_cas`, which proves the vector matches the
+    /// current concept.
     #[pg_extern(requires = ["embedding_table"])]
     fn set_concept_embedding(bundle_id: i64, concept_id: &str, embedding: Vec<f32>) {
         set_concept_embedding_impl(bundle_id, concept_id, embedding)
             .unwrap_or_else(|error| error.raise());
+    }
+
+    /// Store (or replace) a concept's embedding vector with full provenance,
+    /// compare-and-set against the concept's current `file_hash`.
+    ///
+    /// Requires membership in `pgokf_writer` (an admin qualifies by
+    /// inheritance). Beyond the `set_concept_embedding` validation (the
+    /// `embedding` length must equal the durable `embedding_dim` key and the
+    /// concept must exist - SQLSTATE `22023` otherwise), every provenance
+    /// argument must be non-empty: `expected_file_hash` is the concept's
+    /// `file_hash` the caller read when it built the embedding input,
+    /// `input_hash` is the caller-computed hash of the exact bounded input
+    /// text it embedded, `model` identifies the embedding model, and
+    /// `contract` is the caller's render-contract identity (input construction
+    /// and truncation version).
+    ///
+    /// The write commits only when the concept's current `file_hash` still
+    /// equals `expected_file_hash` under a row lock; on a mismatch the
+    /// function returns `false` and writes nothing - a **retryable**
+    /// rejection: the concept changed since the caller read it, so the caller
+    /// should re-read and re-embed rather than error. Returns `true` when the
+    /// vector was stored. Only rows written through this setter carry the
+    /// provenance semantic ranking requires.
+    // `embedding` is a `Vec<f32>` because that is the SQL `real[]` boundary
+    // type; it is only borrowed into the impl, so pass-by-value is inherent to
+    // the pgrx signature. Seven SQL arguments are the CAS contract itself.
+    #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+    #[pg_extern(requires = ["embedding_table"])]
+    fn set_concept_embedding_cas(
+        bundle_id: i64,
+        concept_id: &str,
+        embedding: Vec<f32>,
+        expected_file_hash: &str,
+        input_hash: &str,
+        model: &str,
+        contract: &str,
+    ) -> bool {
+        set_concept_embedding_cas_impl(
+            bundle_id,
+            concept_id,
+            embedding,
+            expected_file_hash,
+            input_hash,
+            model,
+            contract,
+        )
+        .unwrap_or_else(|error| error.raise())
     }
 
     /// Rank concepts by semantic similarity to a query embedding.
@@ -582,11 +912,17 @@ mod pgokf {
     /// Requires membership in `pgokf_reader` (or `pgokf_admin`). Orders by
     /// `pgvector` cosine distance (`<=>`) over stored concept embeddings; the
     /// `rank` column is the normalized cosine similarity (`1 - distance`).
-    /// `query_embedding` must have `embedding_dim` dimensions. Searches enabled
+    /// `query_embedding` must have `embedding_dim` dimensions. Searches active
     /// bundles only; `limit_count` must lie in `1..=500`. **Requires pgvector**:
     /// raises SQLSTATE `22023` naming the missing dependency when the `pgvector`
     /// extension is not installed (semantic search has no lexical fallback - use
     /// `pgokf.concept_search` for that).
+    ///
+    /// Only **eligible** embeddings rank: the row's `source_file_hash` must
+    /// equal the concept's current `file_hash`, its model/dimension/contract
+    /// must match the durable embedding policy, and the concept must be
+    /// effectively fresh. Stale or legacy (NULL-provenance) rows never rank,
+    /// even while the HNSW index physically retains them.
     // `query_embedding` is a `Vec<f32>` because that is the SQL `real[]` boundary
     // type; it is only borrowed into the impl, so pass-by-value is inherent to the
     // pgrx signature.
@@ -612,9 +948,11 @@ mod pgokf {
     /// lexical result of `query` (through the configured `search_backend`) with
     /// the semantic result of `query_embedding` using RRF (k = 60), entirely in
     /// SQL. The `rank` column is the fused RRF score. Searches enabled bundles
-    /// only; `limit_count` must lie in `1..=500`. When `pgvector` is not
-    /// installed this **degrades to lexical-only** with a `WARNING` (RRF needs
-    /// no model, so lexical-only is a sensible fallback).
+    /// only; `limit_count` must lie in `1..=500`. The semantic component ranks
+    /// eligible embeddings only (the same predicate `concept_search_semantic`
+    /// applies), so an ineligible vector never leaks into the fused result.
+    /// When `pgvector` is not installed this **degrades to lexical-only** with
+    /// a `WARNING` (RRF needs no model, so lexical-only is a sensible fallback).
     // `query_embedding` is a `Vec<f32>` because that is the SQL `real[]` boundary
     // type; it is only borrowed into the impl, so pass-by-value is inherent to the
     // pgrx signature.
@@ -656,28 +994,35 @@ mod pgokf {
         r"
 ALTER FUNCTION pgokf.set_concept_embedding(bigint, text, real[])
     SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
+ALTER FUNCTION pgokf.set_concept_embedding_cas(bigint, text, real[], text, text, text, text)
+    SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
 ALTER FUNCTION pgokf.rebuild_embedding_index()
     SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
 REVOKE ALL ON FUNCTION pgokf.set_concept_embedding(bigint, text, real[]) FROM PUBLIC;
+REVOKE ALL ON FUNCTION pgokf.set_concept_embedding_cas(bigint, text, real[], text, text, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION pgokf.rebuild_embedding_index() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pgokf.set_concept_embedding(bigint, text, real[]) TO pgokf_writer;
+GRANT EXECUTE ON FUNCTION pgokf.set_concept_embedding_cas(bigint, text, real[], text, text, text, text) TO pgokf_writer;
 GRANT EXECUTE ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer) TO pgokf_reader;
 GRANT EXECUTE ON FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer) TO pgokf_reader;
 GRANT EXECUTE ON FUNCTION pgokf.rebuild_embedding_index() TO pgokf_admin;
 COMMENT ON FUNCTION pgokf.set_concept_embedding(bigint, text, real[]) IS
-    'Store or replace one concept''s embedding (real[]) streamed in by a companion embedder; the extension never computes embeddings. Writer-tier (pgokf_writer; admin inherits it), SECURITY DEFINER. Validates the concept exists and len(embedding)=embedding_dim (else 22023) and upserts. The vector is stored as real[] so pgokf needs no static pgvector dependency.';
+    'Store or replace one concept''s embedding (real[]) streamed in by a companion embedder; the extension never computes embeddings. Writer-tier (pgokf_writer; admin inherits it), SECURITY DEFINER. Validates the concept exists and len(embedding)=embedding_dim (else 22023) and upserts. The vector is stored as real[] so pgokf needs no static pgvector dependency. This 0.2.0 compatibility signature carries no provenance, so the row it writes is a legacy row (model/source_file_hash/input_hash/contract all NULL, cleared on overwrite) that never ranks semantically; use pgokf.set_concept_embedding_cas for an eligible, provenance-carrying write.';
+COMMENT ON FUNCTION pgokf.set_concept_embedding_cas(bigint, text, real[], text, text, text, text) IS
+    'Store or replace one concept''s embedding with full provenance, compare-and-set against the concept''s current file_hash: the write commits only when the concept''s file_hash still equals expected_file_hash under a row lock, returning true; a mismatch returns false having written nothing (retryable - re-read and re-embed, never an error-loop). input_hash is the caller-computed hash of the exact bounded input text, model the embedding model, contract the render-contract identity; all provenance arguments must be non-empty (22023 otherwise, as for a wrong dimension or an unknown concept; 42501 outside pgokf_writer). Only rows written through this setter carry the provenance semantic ranking requires.';
 COMMENT ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer) IS
-    'Semantic nearest-neighbor search: rank concepts by pgvector cosine distance to query_embedding (rank = normalized cosine similarity). Reader-level, invoker rights; enabled bundles only. query_embedding must have embedding_dim dimensions; limit_count in 1..=500. Requires pgvector: raises 22023 naming the missing dependency when it is not installed (no lexical fallback).';
+    'Semantic nearest-neighbor search: rank concepts by pgvector cosine distance to query_embedding (rank = normalized cosine similarity). Reader-level, invoker rights; active bundles only. query_embedding must have embedding_dim dimensions; limit_count in 1..=500. Requires pgvector: raises 22023 naming the missing dependency when it is not installed (no lexical fallback). Only ELIGIBLE embeddings rank: source_file_hash equal to the concept''s current file_hash, model/dimension/contract matching the embedding_model/embedding_dim/embedding_contract policy, and the concept effectively fresh (bundle freshness fresh, no covering concept/path override); a stale or legacy (NULL-provenance) row never ranks even while the HNSW index physically retains it.';
 COMMENT ON FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer) IS
-    'Hybrid search: Reciprocal Rank Fusion (RRF, k=60) of the lexical result of query (via the configured search_backend) and the semantic result of query_embedding, fused entirely in SQL (rank = fused RRF score). Reader-level, invoker rights; enabled bundles only; limit_count in 1..=500. Degrades to lexical-only with a WARNING when pgvector is not installed.';
+    'Hybrid search: Reciprocal Rank Fusion (RRF, k=60) of the lexical result of query (via the configured search_backend) and the semantic result of query_embedding, fused entirely in SQL (rank = fused RRF score). Reader-level, invoker rights; enabled bundles only; limit_count in 1..=500. The semantic component ranks eligible (current, fresh) embeddings only, so an ineligible vector never leaks into the fused result; the lexical component may still return a stale concept, labeled by pgokf.concept_search_fresh. Degrades to lexical-only with a WARNING when pgvector is not installed.';
 COMMENT ON FUNCTION pgokf.rebuild_embedding_index() IS
-    'Admin-only. (Re)build the pgvector HNSW (cosine) index on pgokf.concept_embedding for the configured embedding_dim; returns true when built, or false (with a NOTICE) when pgvector is absent or embedding_dim exceeds pgvector''s 2000-dimension HNSW limit.';
+    'Admin-only. (Re)build the pgvector HNSW (cosine) index on pgokf.concept_embedding for the configured embedding_dim; returns true when built, or false (with a NOTICE) when pgvector is absent or embedding_dim exceeds pgvector''s 2000-dimension HNSW limit. The index physically retains ineligible rows; the ranking predicates, not the index, enforce eligibility.';
 ",
         name = "embedding_function_hardening",
         requires = [
             set_concept_embedding,
+            set_concept_embedding_cas,
             concept_search_semantic,
             concept_search_hybrid,
             rebuild_embedding_index
@@ -739,8 +1084,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_pgvector_error_is_invalid_parameter_and_names_the_dependency() {
-        // Arrange / Act
+    fn missing_pgvector_error_is_invalid_parameter_and_names_the_dependency() {        // Arrange / Act
         let error = missing_pgvector_error();
 
         // Assert
@@ -781,5 +1125,35 @@ mod tests {
             keys.concept_ids,
             vec!["alpha".to_owned(), "beta".to_owned()]
         );
+    }
+
+    #[test]
+    fn contract_match_sql_binds_the_policy_parameters_and_requires_provenance() {
+        // Arrange / Act
+        let predicate = contract_match_sql(4, 5, 6);
+
+        // Assert: the hash gate, the always-pinned dimension, and the
+        // optionally pinned model/contract all reference the numbered policy
+        // parameters; a NULL (legacy) provenance value never satisfies it.
+        assert!(predicate.contains("e.source_file_hash IS NOT NULL"));
+        assert!(predicate.contains("e.source_file_hash = c.file_hash"));
+        assert!(predicate.contains("($4 = '' OR e.model = $4)"));
+        assert!(predicate.contains("e.dim = $5"));
+        assert!(predicate.contains("($6 = '' OR e.contract = $6)"));
+        assert!(predicate.contains("e.model IS NOT NULL"));
+        assert!(predicate.contains("e.contract IS NOT NULL"));
+    }
+
+    #[test]
+    fn validate_provenance_arg_rejects_empty_and_blank_values() {
+        // Arrange / Act / Assert: ordinary values pass; empty and
+        // whitespace-only provenance is rejected with 22023.
+        assert!(validate_provenance_arg("model", "text-embedding-3-small").is_ok());
+        for invalid in ["", "   "] {
+            let error = validate_provenance_arg("model", invalid)
+                .expect_err("empty provenance must be rejected");
+            assert_eq!(error.sqlstate(), "22023");
+            assert!(error.message().contains("model"));
+        }
     }
 }
