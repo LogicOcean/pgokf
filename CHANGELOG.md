@@ -10,6 +10,102 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 ## [Unreleased]
 
+**Generic producer capabilities: catalog generations, freshness, a durable
+change-event outbox, generation-bound typed relationships, and
+freshness-aware workspace plugins** (the schema step toward **0.3.0**;
+development builds ship as `0.3.0-dev`). Everything here is
+producer-neutral: the catalog manages generic bundles, concepts, paths, and
+opaque producer revisions only. `ALTER EXTENSION pgokf UPDATE` is additive
+and preserves all data; bundles that predate the upgrade start `stale`
+(reason `legacy_pre_0.3.0`) until a producer reconciles them, and
+pre-upgrade embedding rows (which carry no provenance) simply never rank
+semantically until the embedder rewrites them.
+
+### Added
+
+- **Catalog generations and publication fences.** Every accepted refresh,
+  content resync, and bundle state mutation bumps a monotonic
+  `pgokf.bundles.catalog_generation` under the bundle's advisory lock.
+  `pgokf.publication_fence` plus `issue_publication_fence` /
+  `release_publication_fence` give producers compare-and-set publication
+  fencing (monotonic target generation and fencing token, expected prior
+  catalog generation, manifest hash, expiry). `pgokf.capabilities()`
+  reports the catalog's capability/version set to any reader.
+- **Bundle and concept freshness** (`pgokf.bundle_freshness`,
+  `pgokf.concept_freshness`): a generic state machine
+  (`fresh`/`stale`/`reconciling`/`blocked`/`retired`) with opaque reason
+  codes and producer source revisions, scope-level overrides
+  (`concept`/`path`/`group`), and the reader-level
+  `pgokf.effective_freshness` projection that search and plugin builds
+  consult without knowing any producer schema. Writer APIs
+  `mark_stale` / `mark_scope_stale` / `mark_reconciling` / `mark_blocked`
+  and the compare-and-set `mark_fresh` (which refuses superseded
+  generations) are hardened `SECURITY DEFINER` functions; no role holds
+  direct DML on the tables.
+- **Freshness dependencies** (`pgokf.freshness_dependency`): any writer
+  registers a source selector (exact bundle, exact concept, exact path, or
+  path prefix - case-sensitive, no globs in v1) mapped to a target
+  bundle/scope. Every catalog write evaluates enabled dependencies in the
+  same transaction and marks matching targets stale; an origin/causation
+  key suppresses producer self-loops, cycles settle idempotently by
+  generation, and a change whose scope cannot be proved marks the source
+  bundle stale rather than guessing a target. Dependency registration and
+  removal are themselves audited; a new dependency reconciles from the
+  latest source generation. Producer identity is the `session_user`'s role
+  membership; the `producer` column is an opaque label, not authorization.
+- **The `catalog_change_event` outbox**: every refresh, content write,
+  and bundle lifecycle mutation commits one durable event (bounded change
+  summary, origin, causation key, catalog generation) in the same
+  transaction. The new cluster-wide NOLOGIN role `pgokf_dispatcher`
+  receives `claim_catalog_change_events` (`FOR UPDATE SKIP LOCKED`,
+  attempt counting, lease expiry) and the idempotent, producer-bound
+  `ack_catalog_change_event` - and nothing else. Unacknowledged events are
+  never pruned; acknowledged events are pruned after the configurable
+  `change_event_retention_days` (default 30). LISTEN/NOTIFY remains a
+  non-durable wake-up hint carrying the event id.
+- **Generation-bound typed relationships.** `replace_relationships`
+  atomically replaces a producer's relationship set for a source bundle at
+  a publication generation, validated against the publication fence and
+  expected catalog generation, from versioned `jsonb` rows (namespaced
+  relation types, direction, resolved or external targets, provenance).
+  Sets staged before a refresh stay invisible until their matching
+  catalog generation is accepted; identical retries are no-ops; an empty
+  set removes the prior one. Readers see only the active generation
+  through `pgokf.current_relationships`, and
+  `pgokf.concept_relationship_neighbors` traverses it with
+  inbound/outbound/both direction, type filters, bounded cycle-safe hops,
+  and per-node freshness metadata. A bundle that loses its required
+  relationship coverage is marked stale until coverage returns.
+- **Embedding freshness.** A refresh now deletes the affected concepts'
+  embedding rows in the same transaction, so no stale vector can rank
+  against new text; `concept_embedding` records the source file hash, the
+  exact input hash, the model, and the contract identity, and semantic and
+  hybrid ranking only consider vectors whose provenance matches the
+  current concept and policy and whose bundle is effectively fresh. The
+  compare-and-set setter `set_concept_embedding_cas` refuses to store a
+  vector computed from a superseded concept version (the legacy setter
+  keeps working but writes rows that never rank), and changing the
+  `embedding_model` / `embedding_contract` / `embedding_dim` policy keys
+  marks every embedded bundle stale in the same transaction. The
+  `pgokf-embed` worker polls for missing **or stale** rows and treats CAS
+  rejection as retryable.
+- **Freshness-aware search and plugins.** `pgokf.concept_search_fresh`
+  adds the `freshness = any|fresh|stale` filter and returns the full
+  freshness/embedding provenance object per hit. `build_workspace_plugin`
+  (pgokf-workspace, MCP, and the web UI) runs the whole build - ranking,
+  resolution, seed/relationship closure, freshness reads, source bytes,
+  lock snapshot - inside one repeatable-read transaction, accepts
+  `stale_policy = warn|exclude` (default `warn`), concept seeds with
+  namespaced relationship-type/direction/hop-bounded closure, and records
+  policy, generations, and per-entry freshness in the manifest and lock.
+  Warn mode labels stale references with generated banners and a top-level
+  `FRESHNESS.md` while never altering exact package bytes (an adjacent
+  `<name>.stale-warning.md` is written instead); exclude mode refuses
+  incomplete builds with the stale ids and reasons enumerated. The new
+  `check_workspace_plugin_freshness` operation compares a downloaded
+  plugin's lock against the live catalog and reports
+  `current|stale|retired|unknown`.
+
 ## [0.2.0] - 2026-09-09
 
 **Skill packages are catalog content, and a web UI to work with them.** A
