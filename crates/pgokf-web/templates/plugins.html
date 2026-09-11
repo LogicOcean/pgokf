@@ -138,6 +138,46 @@
         </div>
       </div>
     </details>
+
+    <details class="advanced"{% if form.stale_policy.as_str() == "exclude" || !form.seeds.is_empty() %} open{% endif %}>
+      <summary>Freshness and closure</summary>
+      <div class="step-grid">
+        <div class="field">
+          <label for="p-stale-policy">When the catalog says a concept is not fresh</label>
+          <select id="p-stale-policy" name="stale_policy">
+            <option value="warn" {% if form.stale_policy.as_str() != "exclude" %}selected{% endif %}>Keep it, labelled (warn)</option>
+            <option value="exclude" {% if form.stale_policy.as_str() == "exclude" %}selected{% endif %}>Leave it out (exclude)</option>
+          </select>
+          <p class="hint">Warn keeps stale concepts with a banner or an adjacent warning file (exact bytes are never modified) and a FRESHNESS.md report. Exclude drops them, and refuses the build - naming the stale ids and reasons - when a ticked file, a seed, or a required closure node is stale or nothing fresh remains.</p>
+        </div>
+        <div class="field check">
+          <label><input type="checkbox" name="require_closure" value="1" {% if form.require_closure %}checked{% endif %}> Require the closure <span class="muted">(refuse the build when a relationship it follows has no resolved target)</span></label>
+        </div>
+      </div>
+      <div class="step-grid">
+        <div class="field">
+          <label for="p-seeds">Closure seeds <span class="muted">(one <code>bundle:concept id</code> per line)</span></label>
+          <textarea id="p-seeds" class="live" name="seeds" rows="2" placeholder="3:runbooks/database-failover">{{ form.seeds }}</textarea>
+          <p class="hint">Each seed is included and expanded through the catalog's typed relationships.</p>
+        </div>
+        <div class="field">
+          <label for="p-relation-types">Relationship types <span class="muted">(comma-separated; empty follows all)</span></label>
+          <input id="p-relation-types" type="text" class="live" name="relation_types" value="{{ form.relation_types }}" placeholder="docs:references">
+        </div>
+        <div class="field">
+          <label for="p-direction">Direction</label>
+          <select id="p-direction" name="direction">
+            <option value="outbound" {% if form.direction.as_str() == "outbound" %}selected{% endif %}>Outbound</option>
+            <option value="inbound" {% if form.direction.as_str() == "inbound" %}selected{% endif %}>Inbound</option>
+            <option value="both" {% if form.direction.as_str() == "both" %}selected{% endif %}>Both</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="p-hops">Hops</label>
+          <input id="p-hops" type="number" class="live" name="hops" value="{{ form.hops }}" min="1" max="8" placeholder="2">
+        </div>
+      </div>
+    </details>
   </section>
 
   <section class="step" id="step-extras">

@@ -24,10 +24,14 @@
 //! - [`similar`] - `pgokf.find_similar`, content more-like-this over the seed's
 //!   `body_tsv` dispatched through the same `SearchBackend` seam.
 //! - [`embedding`] - the optional pgvector semantic/hybrid surface
-//!   (`pgokf.concept_embedding`, `set_concept_embedding`,
+//!   (`pgokf.concept_embedding`, `set_concept_embedding` and its
+//!   provenance-carrying compare-and-set successor `set_concept_embedding_cas`,
 //!   `concept_search_semantic`, `concept_search_hybrid`,
 //!   `rebuild_embedding_index`), reached only through runtime SQL and storing
-//!   the vector as `real[]` so `CREATE EXTENSION` needs no pgvector.
+//!   the vector as `real[]` so `CREATE EXTENSION` needs no pgvector. Semantic
+//!   ranking ranks only eligible (current, fresh, policy-matching) vectors;
+//!   the sync engine deletes a re-staged concept's embedding row in the sync
+//!   transaction.
 //! - [`facets`] - `pgokf.search_facets`, faceted result counts over the same
 //!   matching set `concept_search` produces, grouped by a validated facet.
 //! - [`search_status`] - `pgokf.search_index_status`, the reader-level jsonb
@@ -77,24 +81,43 @@
 //!   engine's `ContentSource` and runs the identical shared pipeline, so a
 //!   companion process can stream an object store into the catalog without the
 //!   extension performing any network or filesystem I/O.
+//! - [`change_event`] - the durable catalog-change outbox
+//!   (`pgokf.catalog_change_event`): one event per committed catalog mutation,
+//!   written in the mutation's own transaction, with dispatcher claim/ack and
+//!   acknowledged-only retention pruning.
+//! - [`freshness`] - freshness state and dependency evaluation
+//!   (`pgokf.bundle_freshness`, `pgokf.concept_freshness`,
+//!   `pgokf.freshness_dependency`, the `pgokf.effective_freshness` reader
+//!   projection, the `mark_*` writer APIs), publication fences
+//!   (`pgokf.publication_fence`), and the `pgokf.capabilities()` declaration.
+//! - [`relationships`] - generation-bound typed relationships
+//!   (`pgokf.relationship_publication` + `pgokf.relationship`, the
+//!   `pgokf.current_relationships` reader projection, the compare-and-set
+//!   `pgokf.replace_relationships` writer API, and the
+//!   `pgokf.concept_relationship_neighbors` typed traversal). The sync engine
+//!   activates the staged publication matching an accepted catalog generation
+//!   in the sync transaction.
 
 pub mod access;
 pub mod admin;
 pub mod audit;
 mod batch;
 pub mod bundle_log;
+pub mod change_event;
 pub mod config;
 pub mod content;
 pub mod dedup;
 pub mod embedding;
 pub mod export;
 pub mod facets;
+pub mod freshness;
 pub mod history;
 mod iso8601;
 pub mod links;
 pub mod neighbors;
 pub mod packages;
 pub mod provenance;
+pub mod relationships;
 pub mod schedule;
 pub mod schema;
 pub mod search;

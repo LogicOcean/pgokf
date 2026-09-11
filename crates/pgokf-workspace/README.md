@@ -110,6 +110,65 @@ symbolic link, and refuses existing files unless told to overwrite. Reading a co
 build goes through the audited `get_concept_source()` (or the package
 readers above), which is what that log is for.
 
+## One snapshot, freshness, and closure
+
+`build_in_transaction` (what the web download and the MCP tool call) runs
+the whole build - ranking, resolution, closure, source reads, freshness
+reads, and the lock snapshot - under one `REPEATABLE READ` transaction, so
+a tree never mixes catalog generations. The snapshot stays writable: the
+audited readers (`get_concept_source()`, the package readers) append one
+audit row per read inside it, and a read-only transaction would refuse
+those writes. The plain [`build`] keeps the statement-per-stage form for
+callers that cannot hand over a mutable client.
+
+On a catalog with the freshness surface (pgokf 0.3.0's
+`pgokf.effective_freshness`), each selected concept's effective state is
+read in the same snapshot - each skill package member's state too - and
+the selection's `stale_policy` decides what happens to a stale one:
+
+- `warn` (the default) keeps it, labelled: a generated banner after the
+  frontmatter of a reconstructed document, or - for a skill package or a
+  stored-source document, whose bytes are materialized exactly and never
+  modified - a deterministic adjacent `<name>.stale-warning.md` (`SKILL.md`
+  → `SKILL.stale-warning.md`). A stale package member gets its own adjacent
+  warning beside the member file, with the member's own evidence; a prompt
+  bundle inlines the warning with the document's text. The tree gains a
+  top-level `FRESHNESS.md` with every stale concept's state, reasons, and
+  revisions, linked from the index, and the manifest and lockfile record
+  the policy, each entry's state/reasons/revisions (a member entry carries
+  the member's own state), and each bundle's catalog generation.
+- `exclude` drops stale concepts before anything is read, and refuses the
+  build - enumerating the stale ids, their roles, and the catalog's
+  reasons - when an exact pick, a seed, or a required closure node is
+  stale, or when nothing fresh remains. A package ships byte for byte or
+  not at all, so a package with a stale member is dropped whole and the
+  stale member is what the enumeration names.
+
+`seeds` (`bundle_id:concept_id` refs) start a closure over the catalog's
+typed relationships (`pgokf.current_relationships`), walked breadth-first
+inside the same snapshot with caller-supplied namespaced `relation_types`,
+a `direction` (`outbound`, `inbound`, `both`), and a bounded hop count
+(default 2, at most 8). The builder holds no relationship vocabulary of its
+own. `require_closure` turns an incomplete closure - a traversed
+relationship whose target never resolved, a reached node the trust filter
+kept out, or a closure node the exclude policy would drop - into a refusal
+naming the offending edges or nodes. The lockfile records the closure's
+seeds, filters, hop bound, reached nodes, and unresolved edges. A catalog
+without these capabilities builds exactly as it always has (nothing is
+warned about, and seeds are refused with a clear message), and a build
+that engaged none of it is byte-identical to one from before.
+
+A downloaded plugin cannot update itself, so
+`check_plugin_freshness` (the `check_workspace_plugin_freshness` MCP tool)
+compares its `okf-workspace.lock` - the pinned bundle sync hashes, catalog
+generations where recorded, and the build-time freshness evidence of the
+content entries - with the live catalog and answers `current`, `stale`,
+`retired`, or `unknown` with per-bundle reasons. Content the catalog
+already reported stale when the plugin was built keeps the artifact
+`stale` until it is rebuilt (the check compares the bytes that shipped);
+a bare matching hash on a catalog without live freshness state is
+`unknown`, never `current`.
+
 ## Pointing at an HTTP endpoint
 
 By default the `mcp` component configures a **local** server the harness
@@ -149,4 +208,5 @@ the two plugin tools; the guide says so.
 
 Use it from the web UI (**Plugins** page) or the MCP server
 (`build_workspace_plugin` with `components`, `mcp_command` or `mcp_url`,
-`web_url`; `list_plugin_targets`); both call the same [`build`] function.
+`web_url`; `list_plugin_targets`); both call the same
+[`build_in_transaction`] flow.

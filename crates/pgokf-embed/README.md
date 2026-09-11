@@ -5,31 +5,39 @@ The reference **embedding-generation companion** for [`pgokf`](../extension).
 `pgokf` ships semantic search - `pgokf.concept_search_semantic(real[])`,
 `pgokf.concept_search_hybrid(...)`, and the `pgokf.concept_embedding` store - but
 it deliberately **never computes an embedding and never performs network I/O**.
-Vectors are streamed in from outside through
-`pgokf.set_concept_embedding(bundle_id, concept_id, embedding)`. `pgokf-embed` is
+Vectors are streamed in from outside through the compare-and-set setter
+`pgokf.set_concept_embedding_cas(...)`. `pgokf-embed` is
 that outside half: the reference embedder that pairs with the shipped search.
 
 It is a small, standalone async binary that:
 
 1. connects to PostgreSQL as a `pgokf_writer`-capable role;
-2. finds every concept in `pgokf.concepts` that has **no** matching
-   `pgokf.concept_embedding` row (optionally scoped to one `--bundle`);
+2. finds every concept in `pgokf.concepts` whose `pgokf.concept_embedding` row
+   is **missing or stale** - no row, a legacy row without provenance, a source
+   hash behind the concept's current `file_hash`, or a dimension/model/contract
+   the durable embedding policy no longer matches (optionally scoped to one
+   `--bundle`) - reading the concept's current `file_hash` with it;
 3. builds a bounded input text per concept - `title + description + body_text`,
    truncated to `--max-chars` on a UTF-8 boundary;
 4. calls a configurable **OpenAI-compatible** embeddings endpoint
    (`POST {endpoint}/v1/embeddings` with `{"model": ..., "input": [...]}`,
    `Authorization: Bearer <key>`), in batches of `--batch-size`;
-5. streams each returned vector back with `pgokf.set_concept_embedding`.
+5. streams each returned vector back with `pgokf.set_concept_embedding_cas`,
+   passing the polled `file_hash` as the expected value plus the provenance
+   (the BLAKE3 hash of the exact input bytes, the model name, and the render
+   contract identity `pgokf-embed/v1/max-chars:<n>`). A compare-and-set
+   refusal - the concept changed while inference ran - is retryable: the
+   concept is logged, skipped, and re-polled on the next pass.
 
 ## Where credentials live
 
 The embeddings endpoint URL, model name, and API key are supplied on the CLI or
 through the environment, and are **never hard-coded and never written to
 PostgreSQL**. The database itself never learns the endpoint or the key - it only
-ever receives finished vectors through `pgokf.set_concept_embedding`. The
+ever receives finished vectors through `pgokf.set_concept_embedding_cas`. The
 PostgreSQL connection string authenticates a login role that is a member of
-`pgokf_writer` (the tier the setter requires); reading `embedding_dim` and the
-concept projections additionally needs `pgokf_reader`.
+`pgokf_writer` (the tier the setter requires); reading the embedding policy and
+the concept projections additionally needs `pgokf_reader`.
 
 ## Any OpenAI-compatible endpoint
 
@@ -84,7 +92,9 @@ Every flag has an environment-variable equivalent:
 `--watch` turns the one-shot run into a service: after the initial pass it
 polls the catalog every `--interval` seconds and embeds whatever
 `register_bundle` / `refresh_bundle` / `register_bundle_content` added or
-changed since, so new content is searchable semantically within one interval
+changed since (a refresh deletes the re-staged concepts' embedding rows in its
+own transaction, so the next pass re-embeds them), so new content is searchable
+semantically within one interval
 with no operator action. Each pass opens its own connection, a failed pass is
 logged and retried on the next interval (a database or endpoint restart never
 kills the daemon), passes with nothing to do are silent, and SIGINT or SIGTERM

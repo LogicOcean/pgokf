@@ -17,6 +17,9 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'pgokf_admin') THEN
         CREATE ROLE pgokf_admin NOLOGIN;
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'pgokf_dispatcher') THEN
+        CREATE ROLE pgokf_dispatcher NOLOGIN;
+    END IF;
 END
 $pgokf$;
 
@@ -30,6 +33,11 @@ GRANT USAGE ON SCHEMA pgokf TO pgokf_reader;
 GRANT USAGE ON SCHEMA pgokf TO pgokf_writer;
 GRANT USAGE ON SCHEMA pgokf TO pgokf_admin;
 GRANT USAGE ON SCHEMA pgokf_private TO pgokf_admin;
+-- The dispatcher is deliberately OUTSIDE the reader < writer < admin ladder:
+-- it may claim and acknowledge durable catalog-change events and nothing
+-- else. It inherits no other role and no other role inherits it; pgokf_admin
+-- inspects the outbox through its own granted function.
+GRANT USAGE ON SCHEMA pgokf TO pgokf_dispatcher;
 
 -- Least-privilege role hierarchy: reader < writer < admin. Granting the lower
 -- role to the higher one makes each tier inherit everything below it, so a
@@ -75,6 +83,8 @@ COMMENT ON ROLE pgokf_writer IS
     'pgokf ingestion API role: may register, refresh, and unregister bundles; inherits pgokf_reader. Intended account for an automated ingestion pipeline / the content-ingestion API. Does not include configuration or file-writing exports.';
 COMMENT ON ROLE pgokf_admin IS
     'pgokf administrative API role: everything a writer can do plus configuration (set_config/reset_config) and file-writing exports (export_parquet/export_sources); inherits pgokf_writer (and thus pgokf_reader).';
+COMMENT ON ROLE pgokf_dispatcher IS
+    'pgokf outbox delivery role: may claim and acknowledge durable catalog-change events (pgokf.claim_catalog_change_events / pgokf.ack_catalog_change_event) and nothing else. Deliberately outside the reader < writer < admin ladder: it inherits nothing and no tier inherits it, so an event consumer holds no search or ingestion rights; pgokf_admin inspects the outbox through pgokf.list_catalog_change_events. Intended account for an automated event dispatcher.';
 
 -- Register every extension-owned table and sequence with pg_dump, so a logical
 -- backup carries the catalog's rows and sequence positions rather than just the

@@ -2152,6 +2152,37 @@ An added concept for the resync diff.\n";
         assert_eq!(hit, "alpha", "hybrid degrades to lexical-only alpha match");
     }
 
+    /// The concept's current `file_hash`, as the compare-and-set embedding
+    /// setter expects it.
+    fn file_hash_of(bundle_id: i64, concept_id: &str) -> String {
+        Spi::get_one_with_args::<String>(
+            "SELECT file_hash FROM pgokf.concepts WHERE bundle_id = $1 AND id = $2",
+            &[bundle_id.into(), concept_id.into()],
+        )
+        .expect("file hash query executes")
+        .expect("the concept carries a file hash")
+    }
+
+    /// Store a synthetic embedding the way the embedder does: compare-and-set
+    /// against the concept's current file hash, with provenance. `embedding`
+    /// is a fixed test constant (e.g. `ARRAY[1,0,0,0]`), interpolated - a bound
+    /// parameter would be parsed as an array *literal*, which the ARRAY[...]
+    /// spelling is not.
+    fn cas_set_embedding(bundle_id: i64, concept_id: &str, embedding: &str) {
+        let file_hash = file_hash_of(bundle_id, concept_id);
+        let stored = Spi::get_one_with_args::<bool>(
+            &format!(
+                "SELECT pgokf.set_concept_embedding_cas(
+                     $1, $2, {embedding}::real[], $3,
+                     'test-input-hash', 'test-model', 'test-contract/v1')"
+            ),
+            &[bundle_id.into(), concept_id.into(), file_hash.into()],
+        )
+        .expect("set_concept_embedding_cas executes")
+        .expect("the CAS outcome is not NULL");
+        assert!(stored, "the CAS write of {concept_id} is accepted");
+    }
+
     #[pg_test]
     fn semantic_and_hybrid_search_rank_by_synthetic_embeddings() {
         // Arrange: only meaningful where pgvector is installable.
@@ -2168,16 +2199,10 @@ An added concept for the resync diff.\n";
         let bundle_id = register_fixture(&bundle);
 
         // alpha points along axis 1, beta along axis 2 - orthogonal unit vectors.
-        Spi::run_with_args(
-            "SELECT pgokf.set_concept_embedding($1, 'alpha', ARRAY[1,0,0,0]::real[])",
-            &[bundle_id.into()],
-        )
-        .expect("alpha embedding is settable");
-        Spi::run_with_args(
-            "SELECT pgokf.set_concept_embedding($1, 'beta', ARRAY[0,1,0,0]::real[])",
-            &[bundle_id.into()],
-        )
-        .expect("beta embedding is settable");
+        // The compare-and-set setter records the provenance semantic ranking
+        // requires (the legacy set_concept_embedding writes ineligible rows).
+        cas_set_embedding(bundle_id, "alpha", "ARRAY[1,0,0,0]");
+        cas_set_embedding(bundle_id, "beta", "ARRAY[0,1,0,0]");
 
         // The HNSW index builds for the small dimension.
         let built = Spi::get_one::<bool>("SELECT pgokf.rebuild_embedding_index()")
@@ -7450,5 +7475,3071 @@ Use the solo skill on its own.\n";
         // Assert: one file updated, every member row follows.
         assert_eq!(counts, (0, 1, 0, 5));
         assert_eq!(visibilities(), "private");
+    }
+
+    // ---------------------------------------------------------------------
+    // 0.3.0: catalog generations, the durable change-event outbox, freshness
+    // state/dependency evaluation, and publication fences.
+    //
+    // Known harness limitation: pgrx runs each #[pg_test] in one transaction
+    // (and CI single-threads them), so FOR UPDATE SKIP LOCKED contention
+    // between two concurrent claiming sessions cannot be exercised here; the
+    // claim path's single-session behavior (owner, lease, attempts, idempotent
+    // producer-bound ack) is covered instead. Claim-expiry retry is likewise
+    // untestable in one transaction because now() is transaction-stable.
+    // ---------------------------------------------------------------------
+
+    /// Count the outbox events recorded for one bundle (by live id or, after
+    /// unregister detached the reference, by the snapshotted path). The stored
+    /// path is canonicalized, so callers pass the fixture's unique directory
+    /// name and match with LIKE.
+    fn event_count(bundle_id: i64, fixture_dir_name: &str) -> i64 {
+        Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.catalog_change_event
+             WHERE bundle_id = $1 OR bundle_path LIKE $2",
+            &[bundle_id.into(), format!("%{fixture_dir_name}%").into()],
+        )
+        .expect("event count query executes")
+        .expect("count is not NULL")
+    }
+
+    /// The fixture's unique directory name (the canonicalization-stable event
+    /// matcher for [`event_count`]).
+    fn fixture_dir_name(bundle: &FixtureBundle) -> String {
+        bundle
+            .root
+            .file_name()
+            .expect("fixture root has a name")
+            .to_str()
+            .expect("fixture name is UTF-8")
+            .to_owned()
+    }
+
+    /// The distinct `operation` values of a bundle's events, ordered.
+    fn event_operations(bundle_id: i64) -> String {
+        Spi::get_one_with_args::<String>(
+            "SELECT string_agg(DISTINCT operation, ',' ORDER BY operation)
+             FROM pgokf.catalog_change_event WHERE bundle_id = $1",
+            &[bundle_id.into()],
+        )
+        .expect("event operations query executes")
+        .expect("operations exist")
+    }
+
+    /// The bundle freshness `(state, reason_codes)` as `state{reasons}`.
+    fn freshness_state(bundle_id: i64) -> String {
+        Spi::get_one_with_args::<String>(
+            "SELECT state || '{' || coalesce(array_to_string(reason_codes, ','), '') || '}'
+             FROM pgokf.bundle_freshness WHERE bundle_id = $1",
+            &[bundle_id.into()],
+        )
+        .expect("freshness query executes")
+        .expect("the freshness row exists")
+    }
+
+    /// The bundle's current catalog generation.
+    fn generation_of(bundle_id: i64) -> i64 {
+        Spi::get_one_with_args::<i64>(
+            "SELECT catalog_generation FROM pgokf.bundles WHERE id = $1",
+            &[bundle_id.into()],
+        )
+        .expect("generation query executes")
+        .expect("generation is not NULL")
+    }
+
+    #[pg_test]
+    fn catalog_generations_and_events_track_every_mutation() {
+        // Arrange / Act: one register, one refresh, then every state mutation.
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+
+        // Assert: register bumped the generation to 1, committed exactly one
+        // refresh_bundle event, and initialized the bundle fresh.
+        assert_eq!(generation_of(bundle_id), 1, "register is generation 1");
+        assert_eq!(event_count(bundle_id, &fixture_dir_name(&bundle)), 1);
+        assert_eq!(event_operations(bundle_id), "refresh_bundle");
+        assert_eq!(freshness_state(bundle_id), "fresh{}");
+
+        fs::write(bundle.root.join("alpha.md"), ALPHA_EDITED).expect("alpha edit is writable");
+        let counts = refresh_counts(bundle_id);
+        assert_eq!(counts, (0, 1, 0, 1), "the edit is the single updated file");
+        assert_eq!(generation_of(bundle_id), 2, "refresh bumps the generation");
+        assert_eq!(event_count(bundle_id, &fixture_dir_name(&bundle)), 2);
+        assert_eq!(freshness_state(bundle_id), "fresh{}");
+
+        for (enabled, op) in [(false, "disable_bundle"), (true, "enable_bundle")] {
+            Spi::run_with_args(
+                "SELECT pgokf.set_bundle_enabled($1, $2)",
+                &[bundle_id.into(), enabled.into()],
+            )
+            .expect("set_bundle_enabled executes");
+            let found = Spi::get_one_with_args::<i64>(
+                "SELECT count(*) FROM pgokf.catalog_change_event
+                 WHERE bundle_id = $1 AND operation = $2",
+                &[bundle_id.into(), op.into()],
+            )
+            .expect("state-event query executes")
+            .expect("count is not NULL");
+            assert_eq!(found, 1, "exactly one {op} event");
+        }
+        assert_eq!(generation_of(bundle_id), 4, "each state toggle bumps once");
+        // Disabling conservatively stale-marks; enabling clears nothing.
+        assert_eq!(freshness_state(bundle_id), "stale{bundle_disabled}");
+
+        Spi::run_with_args("SELECT pgokf.retire_bundle($1)", &[bundle_id.into()])
+            .expect("retire executes");
+        assert_eq!(freshness_state(bundle_id), "retired{bundle_retired}");
+        Spi::run_with_args("SELECT pgokf.unretire_bundle($1)", &[bundle_id.into()])
+            .expect("unretire executes");
+        assert_eq!(generation_of(bundle_id), 6);
+        assert_eq!(freshness_state(bundle_id), "stale{bundle_restored}");
+        assert_eq!(
+            event_operations(bundle_id),
+            "disable_bundle,enable_bundle,refresh_bundle,retire_bundle,unretire_bundle"
+        );
+
+        // Act: unregister. The event must survive with its identity snapshot
+        // and a NULLed live reference, never cascade away.
+        Spi::run_with_args("SELECT pgokf.unregister_bundle($1)", &[bundle_id.into()])
+            .expect("unregister executes");
+
+        // Assert (the stored bundle_path is canonicalized, which can differ
+        // from the fixture path spelling, so the event is found by operation
+        // and tenant - unique in this test).
+        let detached = Spi::get_one_with_args::<bool>(
+            "SELECT bundle_id IS NULL AND bundle_path LIKE $1
+             FROM pgokf.catalog_change_event
+             WHERE operation = 'unregister_bundle'",
+            &[format!("%{}", bundle.root.file_name().unwrap().to_str().unwrap()).into()],
+        )
+        .expect("detached event query executes")
+        .expect("the unregister event exists");
+        assert!(detached, "the unregister event detached, not cascaded");
+        assert_eq!(
+            event_count(bundle_id, &fixture_dir_name(&bundle)),
+            7,
+            "every mutation committed exactly one event"
+        );
+    }
+
+    #[pg_test]
+    fn a_failed_sync_commits_no_event_and_no_generation() {
+        // Arrange: a registered bundle, then an unparseable file added on disk.
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        let events_before = event_count(bundle_id, &fixture_dir_name(&bundle));
+        let generation_before = generation_of(bundle_id);
+        fs::write(
+            bundle.root.join("broken.md"),
+            "---\nkey: [unclosed\n---\n\nbody\n",
+        )
+        .expect("broken fixture is writable");
+        Spi::run(
+            "CREATE FUNCTION pg_temp.refresh_sqlstate(bid bigint) RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.refresh_bundle(bid);
+                 RETURN 'ok';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("refresh probe is creatable");
+
+        // Act
+        let sqlstate = Spi::get_one_with_args::<String>(
+            "SELECT pg_temp.refresh_sqlstate($1)",
+            &[bundle_id.into()],
+        )
+        .expect("refresh probe executes")
+        .expect("the probe reports a SQLSTATE");
+
+        // Assert: the strict sync failed and rolled back - no event, no
+        // generation bump, no freshness change.
+        assert_ne!(sqlstate, "ok", "the malformed file aborts the sync");
+        assert_eq!(
+            event_count(bundle_id, &fixture_dir_name(&bundle)),
+            events_before
+        );
+        assert_eq!(generation_of(bundle_id), generation_before);
+        assert_eq!(freshness_state(bundle_id), "fresh{}");
+    }
+
+    /// Register the freshness dependency via SQL, returning its identity.
+    fn register_dependency(
+        producer: &str,
+        source: i64,
+        selector_kind: &str,
+        selector_value: &str,
+        target: i64,
+        causation_key: Option<&str>,
+    ) -> i64 {
+        Spi::get_one_with_args::<i64>(
+            "SELECT pgokf.register_freshness_dependency($1, $2, $3, $5, $4, 'bundle', NULL, $6)",
+            &[
+                producer.into(),
+                source.into(),
+                selector_kind.into(),
+                selector_value.into(),
+                target.into(),
+                causation_key.into(),
+            ],
+        )
+        .expect("register_freshness_dependency executes")
+        .expect("a dependency id is returned")
+    }
+
+    #[pg_test]
+    fn dependency_evaluation_marks_targets_and_suppresses_causation() {
+        // Arrange: source and target bundles, and a bundle-scope dependency
+        // with a causation key.
+        let source = FixtureBundle::create();
+        let target = FixtureBundle::create();
+        let source_id = register_fixture(&source);
+        let target_id = register_fixture(&target);
+        let dependency_id = register_dependency(
+            "producer-a",
+            source_id,
+            "bundle",
+            "",
+            target_id,
+            Some("loop-1"),
+        );
+
+        // Assert: registration starts from the source's CURRENT generation -
+        // nothing is marked for pre-registration history.
+        assert_eq!(freshness_state(target_id), "fresh{}");
+        let baseline = Spi::get_one_with_args::<i64>(
+            "SELECT last_source_catalog_generation FROM pgokf.freshness_dependency
+             WHERE dependency_id = $1",
+            &[dependency_id.into()],
+        )
+        .expect("watermark query executes")
+        .expect("the watermark exists");
+        assert_eq!(baseline, 1, "the baseline is the source's generation");
+
+        // Act: change the source WITHOUT the causation key.
+        fs::write(source.root.join("alpha.md"), ALPHA_EDITED).expect("source edit is writable");
+        let _ = refresh_counts(source_id);
+
+        // Assert: the target was marked stale in the same transaction, and the
+        // dependency watermark advanced to the source's new generation.
+        assert_eq!(
+            freshness_state(target_id),
+            "stale{dependency_source_changed}"
+        );
+        let watermark = Spi::get_one_with_args::<i64>(
+            "SELECT last_source_catalog_generation FROM pgokf.freshness_dependency
+             WHERE dependency_id = $1",
+            &[dependency_id.into()],
+        )
+        .expect("watermark query executes")
+        .expect("the watermark exists");
+        assert_eq!(watermark, 2);
+
+        // A completion based on pre-invalidation evidence refuses: the
+        // dependency invalidation bumped the target's epoch past the attempt's
+        // (empty) claim, so the CAS cannot erase the newer staleness.
+        let refused = Spi::get_one_with_args::<bool>(
+            "SELECT pgokf.mark_fresh($1, $2, NULL, 'manifest-1', NULL, 'producer-a')",
+            &[target_id.into(), generation_of(target_id).into()],
+        )
+        .expect("mark_fresh executes")
+        .expect("a verdict is returned");
+        assert!(!refused, "an unclaimed dependency invalidation refuses");
+        assert_eq!(
+            freshness_state(target_id),
+            "stale{dependency_source_changed}"
+        );
+
+        // The producer reconciles: claim the newest epoch, then
+        // compare-and-set the target fresh against its current generation.
+        Spi::run_with_args(
+            "SELECT pgokf.mark_reconciling($1, 'producer-a')",
+            &[target_id.into()],
+        )
+        .expect("mark_reconciling executes");
+        let reconciled = Spi::get_one_with_args::<bool>(
+            "SELECT pgokf.mark_fresh($1, $2, NULL, 'manifest-1', NULL, 'producer-a')",
+            &[target_id.into(), generation_of(target_id).into()],
+        )
+        .expect("mark_fresh executes")
+        .expect("a verdict is returned");
+        assert!(reconciled, "the claimed CAS clears the target");
+        assert_eq!(freshness_state(target_id), "fresh{}");
+
+        // Act: change the source again, this time caused by the dependency's
+        // own reconciliation loop (causation key loop-1).
+        fs::write(
+            source.root.join("beta.md"),
+            BETA_CONCEPT.replace("Beta", "Betamax"),
+        )
+        .expect("source edit is writable");
+        Spi::run("SET pgokf.sync_context = '{\"causation_key\": \"loop-1\"}'")
+            .expect("sync context is settable");
+        let _ = refresh_counts(source_id);
+        Spi::run("RESET pgokf.sync_context").expect("sync context resets");
+
+        // Assert: causation suppression - the event was recorded and the
+        // watermark advanced, but the target was NOT marked again.
+        assert_eq!(freshness_state(target_id), "fresh{}");
+        let watermark = Spi::get_one_with_args::<i64>(
+            "SELECT last_source_catalog_generation FROM pgokf.freshness_dependency
+             WHERE dependency_id = $1",
+            &[dependency_id.into()],
+        )
+        .expect("watermark query executes")
+        .expect("the watermark exists");
+        assert_eq!(watermark, 3, "the suppressed event was still evaluated");
+
+        // Assert: an identical re-registration is a conflict (23505).
+        Spi::run(
+            "CREATE FUNCTION pg_temp.register_dup_sqlstate() RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.register_freshness_dependency(
+                     'producer-a', (SELECT source_bundle_id FROM pgokf.freshness_dependency
+                                    WHERE dependency_id = (SELECT max(dependency_id)
+                                                           FROM pgokf.freshness_dependency)),
+                     'bundle',
+                     (SELECT target_bundle_id FROM pgokf.freshness_dependency
+                      WHERE dependency_id = (SELECT max(dependency_id)
+                                             FROM pgokf.freshness_dependency)),
+                     '', 'bundle', NULL, 'loop-1');
+                 RETURN 'no-error';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("duplicate probe is creatable");
+        let sqlstate = Spi::get_one::<String>("SELECT pg_temp.register_dup_sqlstate()")
+            .expect("duplicate probe executes")
+            .expect("the probe reports a SQLSTATE");
+        assert_eq!(sqlstate, "23505", "an identical dependency is a conflict");
+    }
+
+    #[pg_test]
+    fn concept_selector_matches_exactly_and_scope_overrides_mark() {
+        // Arrange: source and target, with a concept selector on 'alpha'.
+        let source = FixtureBundle::create();
+        let target = FixtureBundle::create();
+        let source_id = register_fixture(&source);
+        let target_id = register_fixture(&target);
+        let _ = register_dependency("producer-a", source_id, "concept", "alpha", target_id, None);
+        // A scope-targeted dependency too: path_prefix docs/ -> concept scope.
+        let scoped_id = Spi::get_one_with_args::<i64>(
+            "SELECT pgokf.register_freshness_dependency(
+                 'producer-a', $1, 'concept', $2, 'beta', 'concept', 'alpha', NULL)",
+            &[source_id.into(), target_id.into()],
+        )
+        .expect("scoped dependency registers")
+        .expect("a dependency id is returned");
+        assert!(scoped_id > 0);
+
+        // Act: change beta only.
+        fs::write(
+            source.root.join("beta.md"),
+            BETA_CONCEPT.replace("Beta", "Betamax"),
+        )
+        .expect("source edit is writable");
+        let _ = refresh_counts(source_id);
+
+        // Assert: the alpha selector did not match; the beta selector marked
+        // the target's concept-scope override for alpha, not the whole bundle.
+        assert_eq!(freshness_state(target_id), "fresh{}");
+        let scope_state = Spi::get_one_with_args::<String>(
+            "SELECT state FROM pgokf.concept_freshness
+             WHERE bundle_id = $1 AND scope_kind = 'concept' AND scope_key = 'alpha'",
+            &[target_id.into()],
+        )
+        .expect("scope query executes")
+        .expect("the scope override exists");
+        assert_eq!(scope_state, "stale");
+
+        // Act: change alpha; the bundle-scope... the concept selector matches.
+        fs::write(source.root.join("alpha.md"), ALPHA_EDITED).expect("source edit is writable");
+        let _ = refresh_counts(source_id);
+
+        // Assert: the concept selector matched alpha's change.
+        assert_eq!(
+            freshness_state(target_id),
+            "stale{dependency_source_changed}"
+        );
+    }
+
+    #[pg_test]
+    fn an_unprovable_selector_scope_marks_the_source_not_a_guessed_target() {
+        // Arrange: a lifecycle event carries no concept detail, so a narrowed
+        // (concept) selector cannot be proved against it. One dependency
+        // targets the whole bundle, another a concept scope.
+        let source = FixtureBundle::create();
+        let target = FixtureBundle::create();
+        let source_id = register_fixture(&source);
+        let target_id = register_fixture(&target);
+        let _ = register_dependency("producer-a", source_id, "concept", "alpha", target_id, None);
+        let scoped_id = Spi::get_one_with_args::<i64>(
+            "SELECT pgokf.register_freshness_dependency(
+                 'producer-a', $1, 'concept', $2, 'alpha', 'concept', 'beta', NULL)",
+            &[source_id.into(), target_id.into()],
+        )
+        .expect("scoped dependency registers")
+        .expect("a dependency id is returned");
+        assert!(scoped_id > 0);
+
+        // Act: enable (a no-op state toggle that still commits an event).
+        Spi::run_with_args(
+            "SELECT pgokf.set_bundle_enabled($1, true)",
+            &[source_id.into()],
+        )
+        .expect("enable executes");
+
+        // Assert: unknown scope is stale scope - the SOURCE bundle is marked
+        // (fresh -> stale with change_scope_unknown), and the KNOWN registered
+        // dependents are invalidated directly at their registered scopes (the
+        // registration proves the dependency even when the changed scope
+        // cannot); no unregistered target is guessed.
+        assert_eq!(freshness_state(source_id), "stale{change_scope_unknown}");
+        assert_eq!(
+            freshness_state(target_id),
+            "stale{dependency_source_changed}",
+            "the registered bundle-level dependent is invalidated"
+        );
+        let scope_state = Spi::get_one_with_args::<String>(
+            "SELECT state FROM pgokf.concept_freshness
+             WHERE bundle_id = $1 AND scope_kind = 'concept' AND scope_key = 'beta'",
+            &[target_id.into()],
+        )
+        .expect("scope query executes")
+        .expect("the scope override exists");
+        assert_eq!(
+            scope_state, "stale",
+            "the registered scope-level dependent is invalidated"
+        );
+    }
+
+    #[pg_test]
+    fn mark_fresh_compare_and_set_refuses_old_generations() {
+        // Arrange: a registered (fresh, generation 1) bundle.
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+
+        // A producer observes revision r2: the bundle goes stale.
+        Spi::run_with_args(
+            "SELECT pgokf.mark_stale($1, '{source_advanced}'::text[], 'producer-a', 'r2')",
+            &[bundle_id.into()],
+        )
+        .expect("mark_stale executes");
+        assert_eq!(freshness_state(bundle_id), "stale{source_advanced}");
+
+        // Assert: a CAS naming the wrong observed revision refuses.
+        let wrong_revision = Spi::get_one_with_args::<bool>(
+            "SELECT pgokf.mark_fresh($1, 1, 'r1')",
+            &[bundle_id.into()],
+        )
+        .expect("mark_fresh executes")
+        .expect("a verdict is returned");
+        assert!(!wrong_revision, "a stale observed revision must refuse");
+
+        // Assert: a CAS naming an old catalog generation refuses.
+        let wrong_generation = Spi::get_one_with_args::<bool>(
+            "SELECT pgokf.mark_fresh($1, 99, 'r2')",
+            &[bundle_id.into()],
+        )
+        .expect("mark_fresh executes")
+        .expect("a verdict is returned");
+        assert!(
+            !wrong_generation,
+            "a mismatched catalog generation must refuse"
+        );
+        assert_eq!(freshness_state(bundle_id), "stale{source_advanced}");
+
+        // Act: the matching CAS clears.
+        let reconciled = Spi::get_one_with_args::<bool>(
+            "SELECT pgokf.mark_fresh($1, 1, 'r2')",
+            &[bundle_id.into()],
+        )
+        .expect("mark_fresh executes")
+        .expect("a verdict is returned");
+        assert!(reconciled);
+        assert_eq!(freshness_state(bundle_id), "fresh{}");
+
+        // Assert: the same CAS, retried after a newer catalog change advanced
+        // the generation, refuses - an old attempt never clears anew.
+        fs::write(bundle.root.join("alpha.md"), ALPHA_EDITED).expect("edit is writable");
+        let _ = refresh_counts(bundle_id);
+        let retried = Spi::get_one_with_args::<bool>(
+            "SELECT pgokf.mark_fresh($1, 1, 'r2')",
+            &[bundle_id.into()],
+        )
+        .expect("mark_fresh executes")
+        .expect("a verdict is returned");
+        assert!(!retried, "a superseded attempt must refuse");
+    }
+
+    #[pg_test]
+    fn mark_fresh_refuses_a_completion_older_than_dependency_invalidation() {
+        // The reviewer's saved-generation-after-dependency-change probe:
+        // completion evidence saved before a dependency-source change must
+        // never complete over the newer invalidation.
+        let source = FixtureBundle::create();
+        let target = FixtureBundle::create();
+        let source_id = register_fixture(&source);
+        let target_id = register_fixture(&target);
+        let _ = register_dependency("producer-a", source_id, "bundle", "", target_id, None);
+        let saved_generation = generation_of(target_id);
+
+        // Act: the dependency source changes; the target goes stale.
+        fs::write(source.root.join("alpha.md"), ALPHA_EDITED).expect("source edit is writable");
+        let _ = refresh_counts(source_id);
+        assert_eq!(
+            freshness_state(target_id),
+            "stale{dependency_source_changed}"
+        );
+
+        // Assert: the completion with saved (pre-invalidation) evidence
+        // refuses - the invalidation bumped the target's epoch past the
+        // attempt's (empty) claim - and the staleness is not erased.
+        let stale_completion = Spi::get_one_with_args::<bool>(
+            "SELECT pgokf.mark_fresh($1, $2)",
+            &[target_id.into(), saved_generation.into()],
+        )
+        .expect("mark_fresh executes")
+        .expect("a verdict is returned");
+        assert!(
+            !stale_completion,
+            "evidence older than the invalidation refuses"
+        );
+        assert_eq!(
+            freshness_state(target_id),
+            "stale{dependency_source_changed}"
+        );
+
+        // Act: the producer claims the newest epoch, but another source change
+        // lands after the claim, before the completion.
+        Spi::run_with_args(
+            "SELECT pgokf.mark_reconciling($1, 'producer-a')",
+            &[target_id.into()],
+        )
+        .expect("mark_reconciling executes");
+        fs::write(
+            source.root.join("beta.md"),
+            BETA_CONCEPT.replace("Beta", "Betamax"),
+        )
+        .expect("source edit is writable");
+        let _ = refresh_counts(source_id);
+
+        // Assert: the invalidation after the claim refuses the completion too.
+        let refused = Spi::get_one_with_args::<bool>(
+            "SELECT pgokf.mark_fresh($1, $2)",
+            &[target_id.into(), saved_generation.into()],
+        )
+        .expect("mark_fresh executes")
+        .expect("a verdict is returned");
+        assert!(!refused, "an invalidation after the claim refuses");
+
+        // Act/Assert: re-claiming the newest epoch lets the completion clear.
+        Spi::run_with_args(
+            "SELECT pgokf.mark_reconciling($1, 'producer-a')",
+            &[target_id.into()],
+        )
+        .expect("mark_reconciling executes");
+        let reconciled = Spi::get_one_with_args::<bool>(
+            "SELECT pgokf.mark_fresh($1, $2)",
+            &[target_id.into(), saved_generation.into()],
+        )
+        .expect("mark_fresh executes")
+        .expect("a verdict is returned");
+        assert!(reconciled, "the claimed completion clears");
+        assert_eq!(freshness_state(target_id), "fresh{}");
+    }
+
+    #[pg_test]
+    fn mark_reconciling_repeats_and_preserves_reasons() {
+        // Regression: a second mark_reconciling merged an empty reason set and
+        // raised 23502 (array_agg over an empty union is NULL; reason_codes is
+        // NOT NULL).
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+
+        Spi::run_with_args(
+            "SELECT pgokf.mark_reconciling($1, 'producer-a')",
+            &[bundle_id.into()],
+        )
+        .expect("first mark_reconciling executes");
+        assert_eq!(freshness_state(bundle_id), "reconciling{}");
+        Spi::run_with_args(
+            "SELECT pgokf.mark_reconciling($1, 'producer-a')",
+            &[bundle_id.into()],
+        )
+        .expect("second mark_reconciling executes");
+
+        // Assert: the repeat keeps a sane state/reason pair, and a claimed
+        // completion still clears.
+        assert_eq!(
+            freshness_state(bundle_id),
+            "reconciling{}",
+            "the repeat keeps sane state and reasons"
+        );
+        let reconciled = Spi::get_one_with_args::<bool>(
+            "SELECT pgokf.mark_fresh($1, $2)",
+            &[bundle_id.into(), generation_of(bundle_id).into()],
+        )
+        .expect("mark_fresh executes")
+        .expect("a verdict is returned");
+        assert!(reconciled);
+        assert_eq!(freshness_state(bundle_id), "fresh{}");
+    }
+
+    #[pg_test]
+    fn unregister_invalidates_its_registered_dependents() {
+        // Arrange: an accepted bundle-scope dependency source -> target.
+        let source = FixtureBundle::create();
+        let target = FixtureBundle::create();
+        let source_id = register_fixture(&source);
+        let target_id = register_fixture(&target);
+        let _ = register_dependency("producer-a", source_id, "bundle", "", target_id, None);
+        assert_eq!(freshness_state(target_id), "fresh{}");
+
+        // Act: the source leaves the catalog.
+        Spi::run_with_args("SELECT pgokf.unregister_bundle($1)", &[source_id.into()])
+            .expect("unregister executes");
+
+        // Assert: the dependent is stale (source removed) in the same
+        // transaction - never falsely fresh after its source vanished - its
+        // epoch was bumped, and the dependency rows left with the source.
+        assert_eq!(
+            freshness_state(target_id),
+            "stale{dependency_source_changed}"
+        );
+        let epoch = Spi::get_one_with_args::<i64>(
+            "SELECT dependency_invalidation_epoch FROM pgokf.bundle_freshness
+             WHERE bundle_id = $1",
+            &[target_id.into()],
+        )
+        .expect("epoch query executes")
+        .expect("the freshness row exists");
+        assert_eq!(epoch, 1, "the removal bumped the dependent's epoch");
+        let surviving = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.freshness_dependency WHERE target_bundle_id = $1",
+            &[target_id.into()],
+        )
+        .expect("dependency count executes")
+        .expect("count is not NULL");
+        assert_eq!(surviving, 0, "the dependency rows left with the source");
+        // The source's events survive, detached - never cascaded.
+        assert_eq!(
+            event_count(source_id, &fixture_dir_name(&source)),
+            2,
+            "register + unregister events both survive"
+        );
+    }
+
+    #[pg_test]
+    fn purge_invalidates_its_registered_dependents() {
+        // Arrange: a retired source with an accepted dependent (registration
+        // after retirement is accepted, per the reviewer's probe).
+        let source = FixtureBundle::create();
+        let target = FixtureBundle::create();
+        let source_id = register_fixture(&source);
+        let target_id = register_fixture(&target);
+        Spi::run_with_args("SELECT pgokf.retire_bundle($1)", &[source_id.into()])
+            .expect("retire executes");
+        let _ = register_dependency("producer-a", source_id, "bundle", "", target_id, None);
+        assert_eq!(freshness_state(target_id), "fresh{}");
+
+        // Act: the retired source is purged. This whole pg_test runs in one
+        // transaction where now() is constant, so backdate retired_at to
+        // simulate an elapsed window (the convention of the purge tests).
+        Spi::run_with_args(
+            "UPDATE pgokf.bundles SET retired_at = pg_catalog.now() - interval '10 minutes'
+             WHERE id = $1",
+            &[source_id.into()],
+        )
+        .expect("backdating retired_at executes");
+        let purged = Spi::get_one::<i64>("SELECT pgokf.purge_retired('1 minute')")
+            .expect("purge executes")
+            .expect("a count is returned");
+        assert_eq!(purged, 1);
+
+        // Assert: the dependent is stale (source removed), and the purge event
+        // survives detached.
+        assert_eq!(
+            freshness_state(target_id),
+            "stale{dependency_source_changed}"
+        );
+        let surviving = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.freshness_dependency WHERE target_bundle_id = $1",
+            &[target_id.into()],
+        )
+        .expect("dependency count executes")
+        .expect("count is not NULL");
+        assert_eq!(surviving, 0, "the dependency rows left with the source");
+        assert_eq!(
+            event_count(source_id, &fixture_dir_name(&source)),
+            3,
+            "register + retire + purge events all survive"
+        );
+    }
+
+    #[pg_test]
+    fn dependency_invalidation_walks_transitively_and_cycle_safely() {
+        // Part 1 - chain: A -> B -> C; changing A stales B AND C in the same
+        // transaction, while the unreachable D stays fresh.
+        let bundle_a = FixtureBundle::create();
+        let bundle_b = FixtureBundle::create();
+        let bundle_c = FixtureBundle::create();
+        let bundle_d = FixtureBundle::create();
+        let a = register_fixture(&bundle_a);
+        let b = register_fixture(&bundle_b);
+        let c = register_fixture(&bundle_c);
+        let d = register_fixture(&bundle_d);
+        let _ = register_dependency("producer-a", a, "bundle", "", b, None);
+        let _ = register_dependency("producer-a", b, "bundle", "", c, None);
+
+        fs::write(bundle_a.root.join("alpha.md"), ALPHA_EDITED).expect("edit is writable");
+        let _ = refresh_counts(a);
+
+        assert_eq!(freshness_state(b), "stale{dependency_source_changed}");
+        assert_eq!(
+            freshness_state(c),
+            "stale{dependency_source_changed}",
+            "the transitive dependent is invalidated"
+        );
+        assert_eq!(freshness_state(d), "fresh{}", "unreachable is unaffected");
+        for (bundle_id, name) in [(b, "b"), (c, "c")] {
+            let epoch = Spi::get_one_with_args::<i64>(
+                "SELECT dependency_invalidation_epoch FROM pgokf.bundle_freshness
+                 WHERE bundle_id = $1",
+                &[bundle_id.into()],
+            )
+            .expect("epoch query executes")
+            .expect("the freshness row exists");
+            assert_eq!(epoch, 1, "the walk bumped {name}'s epoch");
+        }
+
+        // Part 2 - cycle: X -> Y -> X terminates (this test completing is the
+        // proof) and marks the whole cycle stale.
+        let bundle_x = FixtureBundle::create();
+        let bundle_y = FixtureBundle::create();
+        let x = register_fixture(&bundle_x);
+        let y = register_fixture(&bundle_y);
+        let _ = register_dependency("producer-a", x, "bundle", "", y, None);
+        let _ = register_dependency("producer-a", y, "bundle", "", x, None);
+
+        fs::write(bundle_x.root.join("alpha.md"), ALPHA_EDITED).expect("edit is writable");
+        let _ = refresh_counts(x);
+
+        assert_eq!(freshness_state(y), "stale{dependency_source_changed}");
+        assert_eq!(
+            freshness_state(x),
+            "stale{dependency_source_changed}",
+            "the cycle back-edge marks the origin too, and terminates"
+        );
+
+        // Part 3 - self-loop: S -> S terminates.
+        let bundle_s = FixtureBundle::create();
+        let s = register_fixture(&bundle_s);
+        let _ = register_dependency("producer-a", s, "bundle", "", s, None);
+
+        fs::write(bundle_s.root.join("alpha.md"), ALPHA_EDITED).expect("edit is writable");
+        let _ = refresh_counts(s);
+
+        assert_eq!(
+            freshness_state(s),
+            "stale{dependency_source_changed}",
+            "the self-loop marks once and terminates"
+        );
+    }
+
+    #[pg_test]
+    fn coverage_missing_evidence_survives_mark_reconciling() {
+        // The reviewer's coverage-superseded-then-reconciling probe: the
+        // coverage evidence must keep blocking mark_fresh until coverage is
+        // genuinely re-established - mark_reconciling must not erase it.
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        let token = issue_fence(bundle_id, "producer-a", 10);
+        let (state, _) = replace_rows(
+            bundle_id,
+            "producer-a",
+            10,
+            1,
+            token,
+            r#"[{"source_concept_id": "alpha", "relation_type": "ns:edge",
+                  "target_concept_id": "beta"}]"#,
+        );
+        assert_eq!(state, "active");
+
+        // Act: a refresh supersedes the coverage without a replacement.
+        fs::write(bundle.root.join("alpha.md"), ALPHA_EDITED).expect("edit is writable");
+        let _ = refresh_counts(bundle_id);
+        assert_eq!(
+            freshness_state(bundle_id),
+            "stale{relationship_coverage_missing}"
+        );
+        assert!(current_relationship_rows(bundle_id).is_empty());
+        let generation = generation_of(bundle_id);
+
+        // Assert: the completion refuses while the evidence stands.
+        let refused = Spi::get_one_with_args::<bool>(
+            "SELECT pgokf.mark_fresh($1, $2)",
+            &[bundle_id.into(), generation.into()],
+        )
+        .expect("mark_fresh executes")
+        .expect("a verdict is returned");
+        assert!(!refused);
+
+        // Act: mark_reconciling. The mutable state reasons move on...
+        Spi::run_with_args(
+            "SELECT pgokf.mark_reconciling($1, 'producer-a')",
+            &[bundle_id.into()],
+        )
+        .expect("mark_reconciling executes");
+        assert_eq!(freshness_state(bundle_id), "reconciling{}");
+
+        // Assert: ...but the same completion STILL refuses, with zero current
+        // edges - the dedicated evidence column survived the state transition.
+        let still_refused = Spi::get_one_with_args::<bool>(
+            "SELECT pgokf.mark_fresh($1, $2)",
+            &[bundle_id.into(), generation.into()],
+        )
+        .expect("mark_fresh executes")
+        .expect("a verdict is returned");
+        assert!(
+            !still_refused,
+            "coverage evidence keeps blocking after mark_reconciling"
+        );
+        assert!(current_relationship_rows(bundle_id).is_empty());
+
+        // Act/Assert: publishing the matching replacement resolves the
+        // evidence, and the completion then clears.
+        let token2 = issue_fence(bundle_id, "producer-a", 11);
+        let (state, _) = replace_rows(
+            bundle_id,
+            "producer-a",
+            11,
+            generation,
+            token2,
+            r#"[{"source_concept_id": "alpha", "relation_type": "ns:edge",
+                  "target_concept_id": "beta"}]"#,
+        );
+        assert_eq!(state, "active");
+        let reconciled = Spi::get_one_with_args::<bool>(
+            "SELECT pgokf.mark_fresh($1, $2)",
+            &[bundle_id.into(), generation.into()],
+        )
+        .expect("mark_fresh executes")
+        .expect("a verdict is returned");
+        assert!(reconciled, "coverage restored, mark_fresh completes");
+        assert_eq!(freshness_state(bundle_id), "fresh{}");
+    }
+
+    #[pg_test]
+    fn mark_fresh_revalidates_after_the_lifecycle_lock() {
+        // Unit-level simulation of the reviewer's two-session row-wait probe
+        // (a disabling transaction commits while a completion waits on the
+        // freshness row). The pg_test harness runs one transaction, so two
+        // interleaved sessions cannot be driven here; the simulation is
+        // faithful because the completion now takes the same bundle advisory
+        // lock the lifecycle mutation holds for its whole transaction, so in
+        // the real interleaving the completion's check only runs after the
+        // mutation commits - exactly the statement order driven here in one
+        // session. The post-wait committed state (generation, freshness row)
+        // is what the completion must re-verify in both orders.
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        let saved_generation = generation_of(bundle_id);
+
+        // The "concurrent" disable commits: generation 2, conservatively stale.
+        Spi::run_with_args(
+            "SELECT pgokf.set_bundle_enabled($1, false)",
+            &[bundle_id.into()],
+        )
+        .expect("disable executes");
+
+        // Assert: the completion prepared with pre-wait evidence refuses -
+        // the post-wait committed generation no longer matches - and the final
+        // state is not falsely fresh.
+        let completed = Spi::get_one_with_args::<bool>(
+            "SELECT pgokf.mark_fresh($1, $2)",
+            &[bundle_id.into(), saved_generation.into()],
+        )
+        .expect("mark_fresh executes")
+        .expect("a verdict is returned");
+        assert!(
+            !completed,
+            "a completion behind a committed lifecycle change refuses"
+        );
+        assert_eq!(freshness_state(bundle_id), "stale{bundle_disabled}");
+        assert_eq!(generation_of(bundle_id), 2);
+    }
+
+    #[pg_test]
+    fn registration_baselines_under_the_source_lock() {
+        // Unit-level simulation of the reviewer's in-flight-registration probe
+        // (a refresh holds its transaction uncommitted while a concurrent
+        // registration reads the old generation and inserts its watermark
+        // after evaluation ran). One-transaction harness again: registration
+        // now reads the source generation and inserts its watermark under the
+        // source bundle's advisory lock - the same lock a refresh holds until
+        // commit - so a source change either commits before the lock is
+        // granted (the baseline reads its generation, simulated here) or
+        // evaluates after the registration commits (and sees the new
+        // dependency). No interleaving can slip a stale watermark in between
+        // a committed change and its evaluation.
+        let source = FixtureBundle::create();
+        let target = FixtureBundle::create();
+        let source_id = register_fixture(&source);
+        let target_id = register_fixture(&target);
+
+        // A source change that commits before the registration...
+        fs::write(source.root.join("alpha.md"), ALPHA_EDITED).expect("edit is writable");
+        let _ = refresh_counts(source_id);
+        assert_eq!(generation_of(source_id), 2);
+
+        // ...baselines the dependency at the CURRENT (post-change) generation.
+        let dependency_id =
+            register_dependency("producer-a", source_id, "bundle", "", target_id, None);
+        let baseline = Spi::get_one_with_args::<i64>(
+            "SELECT last_source_catalog_generation FROM pgokf.freshness_dependency
+             WHERE dependency_id = $1",
+            &[dependency_id.into()],
+        )
+        .expect("watermark query executes")
+        .expect("the watermark exists");
+        assert_eq!(baseline, 2, "the baseline is the committed generation");
+        assert_eq!(freshness_state(target_id), "fresh{}");
+
+        // And a later change evaluates normally from that baseline.
+        fs::write(
+            source.root.join("beta.md"),
+            BETA_CONCEPT.replace("Beta", "Betamax"),
+        )
+        .expect("edit is writable");
+        let _ = refresh_counts(source_id);
+        assert_eq!(
+            freshness_state(target_id),
+            "stale{dependency_source_changed}"
+        );
+    }
+
+    #[pg_test]
+    fn claim_and_ack_are_producer_bound_and_idempotent() {
+        // Arrange: two committed events (register + refresh).
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        fs::write(bundle.root.join("alpha.md"), ALPHA_EDITED).expect("edit is writable");
+        let _ = refresh_counts(bundle_id);
+
+        // Act: claim both for dispatcher 'd1'.
+        let claimed = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgokf.claim_catalog_change_events('d1', 10, 300)",
+        )
+        .expect("claim executes")
+        .expect("count is not NULL");
+        assert_eq!(claimed, 2, "both pending events are claimed");
+        let attempts = Spi::get_one::<i64>(
+            "SELECT sum(attempts) FROM pgokf.catalog_change_event
+             WHERE status = 'claimed' AND claimed_by = 'd1'
+               AND claim_expires_at > created_at",
+        )
+        .expect("claim state query executes")
+        .expect("sum is not NULL");
+        assert_eq!(attempts, 2, "each claim set owner, expiry, and attempts=1");
+
+        // Assert: a second claim finds nothing (the lease is held; expiry
+        // retry is untestable in one transaction - now() is fixed).
+        let reclaimed = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgokf.claim_catalog_change_events('d1', 10, 300)",
+        )
+        .expect("re-claim executes")
+        .expect("count is not NULL");
+        assert_eq!(reclaimed, 0, "held claims are not re-claimable");
+
+        // Assert: a different producer label cannot ack (42501).
+        Spi::run(
+            "CREATE FUNCTION pg_temp.ack_sqlstate(eid bigint, who text, key text) RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.ack_catalog_change_event(eid, who, key);
+                 RETURN 'ok';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("ack probe is creatable");
+        let first_event =
+            Spi::get_one::<i64>("SELECT min(event_id) FROM pgokf.catalog_change_event")
+                .expect("event id query executes")
+                .expect("an event exists");
+        let foreign = Spi::get_one_with_args::<String>(
+            "SELECT pg_temp.ack_sqlstate($1, 'd2', 'k1')",
+            &[first_event.into()],
+        )
+        .expect("foreign ack probe executes")
+        .expect("the probe reports a SQLSTATE");
+        assert_eq!(foreign, "42501", "only the claiming producer may ack");
+
+        // Act / Assert: the right producer acks; a same-key retry is an
+        // idempotent no-op; a conflicting key is 22023; an unclaimed event is
+        // 22023.
+        let acked = Spi::get_one_with_args::<bool>(
+            "SELECT pgokf.ack_catalog_change_event($1, 'd1', 'k1')",
+            &[first_event.into()],
+        )
+        .expect("ack executes")
+        .expect("a verdict is returned");
+        assert!(acked);
+        let re_acked = Spi::get_one_with_args::<bool>(
+            "SELECT pgokf.ack_catalog_change_event($1, 'd1', 'k1')",
+            &[first_event.into()],
+        )
+        .expect("idempotent ack executes")
+        .expect("a verdict is returned");
+        assert!(re_acked, "a same-key retry is idempotent");
+        let conflicting = Spi::get_one_with_args::<String>(
+            "SELECT pg_temp.ack_sqlstate($1, 'd1', 'k2')",
+            &[first_event.into()],
+        )
+        .expect("conflicting ack probe executes")
+        .expect("the probe reports a SQLSTATE");
+        assert_eq!(conflicting, "22023", "a conflicting acceptance key fails");
+
+        // Assert: the acknowledged row is terminal; the still-claimed row
+        // remains unacknowledged (and would be retryable after lease expiry).
+        let states = Spi::get_one::<String>(
+            "SELECT string_agg(status, ',' ORDER BY event_id)
+             FROM pgokf.catalog_change_event",
+        )
+        .expect("status query executes")
+        .expect("statuses exist");
+        assert_eq!(states, "acknowledged,claimed");
+    }
+
+    #[pg_test]
+    fn freshness_and_outbox_grants_confine_readers_writers_and_tenants() {
+        // Arrange: one bundle per tenant.
+        let acme_bundle = FixtureBundle::create();
+        let globex_bundle = FixtureBundle::create();
+        Spi::run("SET pgokf.tenant = 'acme'").expect("pgokf.tenant is settable");
+        let acme_id = register_fixture(&acme_bundle);
+        Spi::run("SET pgokf.tenant = 'globex'").expect("pgokf.tenant is settable");
+        let globex_id = register_fixture(&globex_bundle);
+        Spi::run("RESET pgokf.tenant").expect("pgokf.tenant resets");
+
+        // Assert: a cross-tenant dependency endpoint is indistinguishable from
+        // an unregistered bundle (22023), on either side.
+        Spi::run(
+            "CREATE FUNCTION pg_temp.register_dep_sqlstate(source bigint, target bigint)
+             RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.register_freshness_dependency(
+                     'producer-a', source, 'bundle', target, '', 'bundle', NULL, NULL);
+                 RETURN 'no-error';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("dependency probe is creatable");
+        Spi::run("SET pgokf.tenant = 'globex'").expect("pgokf.tenant is settable");
+        let cross_source = Spi::get_one_with_args::<String>(
+            "SELECT pg_temp.register_dep_sqlstate($1, $2)",
+            &[acme_id.into(), globex_id.into()],
+        )
+        .expect("cross-source probe executes")
+        .expect("the probe reports a SQLSTATE");
+        assert_eq!(cross_source, "22023", "a foreign source is unknown");
+        let cross_target = Spi::get_one_with_args::<String>(
+            "SELECT pg_temp.register_dep_sqlstate($1, $2)",
+            &[globex_id.into(), acme_id.into()],
+        )
+        .expect("cross-target probe executes")
+        .expect("the probe reports a SQLSTATE");
+        assert_eq!(cross_target, "22023", "a foreign target is unknown");
+
+        // Assert: a reader has no EXECUTE on the writer APIs, no SELECT on the
+        // raw tables, and (a writer) no EXECUTE on the dispatcher claim.
+        Spi::run("CREATE ROLE pgokf_fresh_reader").expect("reader role is creatable");
+        Spi::run("GRANT pgokf_reader TO pgokf_fresh_reader").expect("reader role is grantable");
+        Spi::run("CREATE ROLE pgokf_fresh_writer").expect("writer role is creatable");
+        Spi::run("GRANT pgokf_writer TO pgokf_fresh_writer").expect("writer role is grantable");
+        Spi::run(
+            "CREATE FUNCTION pg_temp.reader_probe() RETURNS text
+             LANGUAGE plpgsql
+             SET role TO pgokf_fresh_reader
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.mark_stale(1, '{}'::text[]);
+                 RETURN 'not-denied';
+             EXCEPTION WHEN insufficient_privilege THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("reader probe is creatable");
+        let denied = Spi::get_one::<String>("SELECT pg_temp.reader_probe()")
+            .expect("reader probe executes")
+            .expect("the probe reports a SQLSTATE");
+        assert_eq!(denied, "42501", "a reader cannot call mark_stale");
+        Spi::run(
+            "CREATE FUNCTION pg_temp.reader_raw_probe() RETURNS text
+             LANGUAGE plpgsql
+             SET role TO pgokf_fresh_reader
+             AS $probe$
+             BEGIN
+                 PERFORM count(*) FROM pgokf.bundle_freshness;
+                 RETURN 'not-denied';
+             EXCEPTION WHEN insufficient_privilege THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("raw-table probe is creatable");
+        let raw_denied = Spi::get_one::<String>("SELECT pg_temp.reader_raw_probe()")
+            .expect("raw-table probe executes")
+            .expect("the probe reports a SQLSTATE");
+        assert_eq!(raw_denied, "42501", "a reader cannot read the raw table");
+        Spi::run(
+            "CREATE FUNCTION pg_temp.writer_claim_probe() RETURNS text
+             LANGUAGE plpgsql
+             SET role TO pgokf_fresh_writer
+             AS $probe$
+             BEGIN
+                 PERFORM count(*) FROM pgokf.claim_catalog_change_events('w', 1, 60);
+                 RETURN 'not-denied';
+             EXCEPTION WHEN insufficient_privilege THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("writer claim probe is creatable");
+        let claim_denied = Spi::get_one::<String>("SELECT pg_temp.writer_claim_probe()")
+            .expect("writer claim probe executes")
+            .expect("the probe reports a SQLSTATE");
+        assert_eq!(
+            claim_denied, "42501",
+            "writers do not get outbox delivery rights"
+        );
+    }
+
+    #[pg_test]
+    fn the_effective_freshness_view_is_tenant_scoped_for_readers() {
+        // Arrange: one bundle per tenant, and a non-superuser reader (so the
+        // owner-rights view's inline tenant predicate is what scopes it).
+        let acme_bundle = FixtureBundle::create();
+        let globex_bundle = FixtureBundle::create();
+        Spi::run("SET pgokf.tenant = 'acme'").expect("pgokf.tenant is settable");
+        let _acme_id = register_fixture(&acme_bundle);
+        Spi::run("SET pgokf.tenant = 'globex'").expect("pgokf.tenant is settable");
+        let _globex_id = register_fixture(&globex_bundle);
+        Spi::run("CREATE ROLE pgokf_effective_reader").expect("reader role is creatable");
+        Spi::run("GRANT pgokf_reader TO pgokf_effective_reader").expect("reader role is grantable");
+        Spi::run(
+            "CREATE FUNCTION pg_temp.effective_counts() RETURNS bigint
+             LANGUAGE plpgsql
+             SET role TO pgokf_effective_reader
+             AS $probe$
+             BEGIN
+                 RETURN (SELECT count(*) FROM pgokf.effective_freshness);
+             END
+             $probe$;",
+        )
+        .expect("effective probe is creatable");
+
+        // Act / Assert: a globex-scoped reader sees only globex's row; an
+        // unset session sees both (the backward-compatible default).
+        let globex_rows = Spi::get_one::<i64>("SELECT pg_temp.effective_counts()")
+            .expect("effective probe executes")
+            .expect("a count is returned");
+        assert_eq!(globex_rows, 1, "a globex reader sees only globex's row");
+        Spi::run("RESET pgokf.tenant").expect("pgokf.tenant resets");
+        let all_rows = Spi::get_one::<i64>("SELECT pg_temp.effective_counts()")
+            .expect("effective probe executes")
+            .expect("a count is returned");
+        assert_eq!(all_rows, 2, "an unset session sees every tenant's rows");
+    }
+
+    #[pg_test]
+    fn capabilities_declares_the_shipped_capability_versions() {
+        // Act
+        let capabilities = Spi::connect(|client| {
+            let row = client
+                .select(
+                    "SELECT capabilities ->> 'catalog_generation',
+                            capabilities ->> 'freshness_dependency',
+                            capabilities ->> 'catalog_change_event',
+                            capabilities ->> 'publication_fence',
+                            capabilities ->> 'effective_freshness',
+                            capabilities ->> 'search_freshness',
+                            capabilities ->> 'embedding_freshness',
+                            capabilities ->> 'typed_relationships'
+                     FROM (SELECT pgokf.capabilities() AS capabilities) AS declared",
+                    Some(1),
+                    &[],
+                )
+                .expect("capabilities query executes")
+                .first();
+            (1..=8)
+                .map(|ordinal| {
+                    row.get::<String>(ordinal)
+                        .expect("capability value is readable")
+                        .expect("capability value is not NULL")
+                })
+                .collect::<Vec<_>>()
+        });
+
+        // Assert: every shipped capability is declared at version 1.
+        assert_eq!(capabilities, vec!["1"; 8]);
+    }
+
+    #[pg_test]
+    fn concept_search_fresh_filters_and_labels_by_effective_freshness() {
+        // Arrange: the fixture bundle (alpha carries 'peregrine').
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+
+        // Assert (default any): the hit is labeled fresh at bundle scope.
+        let default_state = Spi::get_one::<String>(
+            "SELECT freshness_state || '@' || freshness_scope
+             FROM pgokf.concept_search_fresh('peregrine')",
+        )
+        .expect("freshness search executes")
+        .expect("the hit exists");
+        assert_eq!(default_state, "fresh@bundle");
+
+        // Act: mark the alpha concept stale through a scope override.
+        Spi::run_with_args(
+            "SELECT pgokf.mark_scope_stale($1, 'concept', 'alpha', '{content_changed}'::text[], 'producer-a')",
+            &[bundle_id.into()],
+        )
+        .expect("mark_scope_stale executes");
+
+        // Assert: `any` still returns the hit, now labeled with the override's
+        // scope and state; `fresh` filters it out; `stale` returns only it.
+        let labeled = Spi::get_one::<String>(
+            "SELECT freshness_state || '@' || freshness_scope || '@'
+                    || array_to_string(freshness_reasons, ',')
+             FROM pgokf.concept_search_fresh('peregrine')",
+        )
+        .expect("freshness search executes")
+        .expect("the hit exists");
+        assert_eq!(labeled, "stale@concept:alpha@content_changed");
+        let fresh_hits = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgokf.concept_search_fresh('peregrine', NULL, 20, 'fresh')",
+        )
+        .expect("fresh-filtered search executes")
+        .expect("count is not NULL");
+        assert_eq!(fresh_hits, 0, "the stale hit is filtered out of fresh");
+        let stale_hits = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgokf.concept_search_fresh('peregrine', NULL, 20, 'stale')",
+        )
+        .expect("stale-filtered search executes")
+        .expect("count is not NULL");
+        assert_eq!(stale_hits, 1, "the stale filter returns the stale hit");
+
+        // Act / Assert: clearing the override returns the scope to the bundle
+        // state, and a bad filter value is a caller error (22023).
+        Spi::run_with_args(
+            "SELECT pgokf.clear_freshness_scope($1, 'concept', 'alpha')",
+            &[bundle_id.into()],
+        )
+        .expect("clear_freshness_scope executes");
+        let cleared = Spi::get_one::<String>(
+            "SELECT freshness_state FROM pgokf.concept_search_fresh('peregrine')",
+        )
+        .expect("freshness search executes")
+        .expect("the hit exists");
+        assert_eq!(cleared, "fresh");
+        Spi::run(
+            "CREATE FUNCTION pg_temp.fresh_filter_sqlstate(f text) RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             BEGIN
+                 PERFORM count(*) FROM pgokf.concept_search_fresh('peregrine', NULL, 20, f);
+                 RETURN 'no-error';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("filter probe is creatable");
+        let bad_filter = Spi::get_one::<String>("SELECT pg_temp.fresh_filter_sqlstate('mystery')")
+            .expect("filter probe executes")
+            .expect("the probe reports a SQLSTATE");
+        assert_eq!(bad_filter, "22023", "an unknown freshness filter fails");
+    }
+
+    #[pg_test]
+    fn publication_fences_compare_and_set_under_the_bundle_lock() {
+        // Arrange: a registered bundle at generation 1.
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        Spi::run(
+            "CREATE FUNCTION pg_temp.fence_sqlstate(bid bigint, target bigint, expected bigint)
+             RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.issue_publication_fence(bid, 'producer-a', target, expected);
+                 RETURN 'ok';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("fence probe is creatable");
+
+        // Assert: a stale expected catalog generation is refused (22023).
+        let stale = Spi::get_one_with_args::<String>(
+            "SELECT pg_temp.fence_sqlstate($1, 1, 99)",
+            &[bundle_id.into()],
+        )
+        .expect("fence probe executes")
+        .expect("the probe reports a SQLSTATE");
+        assert_eq!(stale, "22023");
+
+        // Act: issue against the current generation; the token starts at 1.
+        let token = Spi::get_one_with_args::<i64>(
+            "SELECT fencing_token FROM pgokf.issue_publication_fence($1, 'producer-a', 7, 1)",
+            &[bundle_id.into()],
+        )
+        .expect("issue executes")
+        .expect("a token is returned");
+        assert_eq!(token, 1);
+
+        // Assert: a non-advancing target is refused; an advancing one
+        // supersedes with the next token.
+        let not_advancing = Spi::get_one_with_args::<String>(
+            "SELECT pg_temp.fence_sqlstate($1, 7, 1)",
+            &[bundle_id.into()],
+        )
+        .expect("fence probe executes")
+        .expect("the probe reports a SQLSTATE");
+        assert_eq!(not_advancing, "22023", "the target must advance");
+        let token2 = Spi::get_one_with_args::<i64>(
+            "SELECT fencing_token FROM pgokf.issue_publication_fence($1, 'producer-a', 8, 1)",
+            &[bundle_id.into()],
+        )
+        .expect("re-issue executes")
+        .expect("a token is returned");
+        assert_eq!(token2, 2, "supersession hands out the next token");
+
+        // Assert: releasing with a superseded token fails; the live token
+        // releases.
+        Spi::run(
+            "CREATE FUNCTION pg_temp.release_sqlstate(bid bigint, token bigint) RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.release_publication_fence(bid, 'producer-a', token);
+                 RETURN 'ok';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("release probe is creatable");
+        let superseded = Spi::get_one_with_args::<String>(
+            "SELECT pg_temp.release_sqlstate($1, 1)",
+            &[bundle_id.into()],
+        )
+        .expect("release probe executes")
+        .expect("the probe reports a SQLSTATE");
+        assert_eq!(superseded, "22023", "a superseded token never completes");
+        let released = Spi::get_one_with_args::<String>(
+            "SELECT pg_temp.release_sqlstate($1, 2)",
+            &[bundle_id.into()],
+        )
+        .expect("release probe executes")
+        .expect("the probe reports a SQLSTATE");
+        assert_eq!(released, "ok");
+        let fence_state = Spi::get_one_with_args::<String>(
+            "SELECT state FROM pgokf.publication_fence WHERE bundle_id = $1",
+            &[bundle_id.into()],
+        )
+        .expect("fence state query executes")
+        .expect("the fence row exists");
+        assert_eq!(fence_state, "released");
+    }
+
+    #[pg_test]
+    fn content_sync_with_context_records_operation_and_provenance() {
+        // Arrange: a content bundle, then a resync that names its operation and
+        // provenance explicitly (a companion's one-document put).
+        let (_bundle_id, ..) = register_content(
+            "handbook",
+            vec!["alpha.md".to_owned()],
+            vec![CONTENT_ALPHA.as_bytes().to_vec()],
+        );
+
+        // Act
+        let (resynced, updated, ..) = Spi::connect(|client| {
+            let row = client
+                .select(
+                    "SELECT bundle_id, updated FROM pgokf.register_bundle_content_with_context(
+                         'handbook',
+                         ARRAY['alpha.md']::text[],
+                         ARRAY[$1::bytea]::bytea[],
+                         '{}'::jsonb,
+                         '{\"operation\": \"put_document\", \"origin\": \"test-rig\",
+                           \"producer\": \"test-producer\", \"causation_key\": \"k-1\"}'::jsonb) AS r",
+                    Some(1),
+                    &[CONTENT_GAMMA.as_bytes().into()],
+                )
+                .expect("register_bundle_content_with_context executes")
+                .first();
+            (
+                row.get::<i64>(1)
+                    .expect("bundle_id readable")
+                    .expect("not NULL"),
+                row.get::<i32>(2)
+                    .expect("updated readable")
+                    .expect("not NULL"),
+            )
+        });
+        assert_eq!(updated, 1, "the changed document is the single update");
+
+        // Assert: the event carries the declared operation and provenance.
+        let recorded = Spi::get_one_with_args::<String>(
+            "SELECT operation || '|' || coalesce(origin, '-') || '|'
+                    || coalesce(producer, '-') || '|' || coalesce(causation_key, '-')
+             FROM pgokf.catalog_change_event
+             WHERE bundle_id = $1 ORDER BY event_id DESC LIMIT 1",
+            &[resynced.into()],
+        )
+        .expect("event query executes")
+        .expect("the event exists");
+        assert_eq!(recorded, "put_document|test-rig|test-producer|k-1");
+        // And the change summary names the changed concept, bounded.
+        let changed = Spi::get_one_with_args::<String>(
+            "SELECT changes -> 'updated' -> 0 ->> 'id'
+             FROM pgokf.catalog_change_event
+             WHERE bundle_id = $1 ORDER BY event_id DESC LIMIT 1",
+            &[resynced.into()],
+        )
+        .expect("changes query executes")
+        .expect("the change record exists");
+        assert_eq!(changed, "alpha");
+    }
+
+    // ---------------------------------------------------------------------
+    // 0.3.0 Phase 2: embedding freshness - transactional invalidation on
+    // sync, the compare-and-set setter, eligibility gating of semantic and
+    // hybrid ranking, and embedding-contract config-change invalidation.
+    //
+    // The ranking assertions run only where pgvector is installable (the
+    // pgvector_available guard, as in the 0.1.6 S3 tests); the invalidation,
+    // CAS, and freshness assertions need no vector support.
+    // ---------------------------------------------------------------------
+
+    /// The stored embedding provenance of one concept, as
+    /// `model|contract|source_file_hash|input_hash` with `-` for NULLs, or
+    /// `None` when the concept has no embedding row (`Spi::get_one` raises on
+    /// an empty result, so this goes through `is_empty` like the catalog's own
+    /// lookups).
+    fn embedding_provenance(bundle_id: i64, concept_id: &str) -> Option<String> {
+        Spi::connect(|client| {
+            let table = client
+                .select(
+                    "SELECT coalesce(model, '-') || '|' || coalesce(contract, '-') || '|'
+                            || coalesce(source_file_hash, '-') || '|' || coalesce(input_hash, '-')
+                     FROM pgokf.concept_embedding WHERE bundle_id = $1 AND concept_id = $2",
+                    Some(1),
+                    &[bundle_id.into(), concept_id.into()],
+                )
+                .expect("embedding provenance query executes");
+            if table.is_empty() {
+                return None;
+            }
+            table.first().get_one::<String>().expect("readable")
+        })
+    }
+
+    /// The embedding annotation of the alpha hit for one query term, as
+    /// `embedding_state|embedding_model` with `-` for a NULL model.
+    fn fresh_embedding_annotation_for(query: &str) -> String {
+        Spi::get_one_with_args::<String>(
+            "SELECT embedding_state || '|' || coalesce(embedding_model, '-')
+             FROM pgokf.concept_search_fresh($1)",
+            &[query.into()],
+        )
+        .expect("freshness search executes")
+        .expect("the alpha hit exists")
+    }
+
+    /// The embedding annotation of the 'peregrine' (alpha) hit.
+    fn fresh_embedding_annotation() -> String {
+        fresh_embedding_annotation_for("peregrine")
+    }
+
+    #[pg_test]
+    fn refresh_deletes_a_re_staged_concepts_embedding_row_atomically() {
+        // Arrange: dim 4 and the fixture registered; both concepts embedded
+        // through the compare-and-set setter with full provenance.
+        Spi::run("SELECT pgokf.set_config('embedding_dim', '4'::jsonb)")
+            .expect("embedding_dim is configurable");
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        cas_set_embedding(bundle_id, "alpha", "ARRAY[1,0,0,0]");
+        cas_set_embedding(bundle_id, "beta", "ARRAY[0,1,0,0]");
+        let alpha_hash_before = file_hash_of(bundle_id, "alpha");
+
+        // Act: edit alpha's body and refresh - one updated file.
+        fs::write(bundle.root.join("alpha.md"), ALPHA_EDITED).expect("alpha edit is writable");
+        let counts = refresh_counts(bundle_id);
+        assert_eq!(counts, (0, 1, 0, 1), "the edit is the single updated file");
+
+        // Assert: alpha's embedding row is gone (a re-staged concept is
+        // invalidated in the sync's own transaction); beta's survives
+        // untouched, provenance included.
+        let remaining = Spi::get_one_with_args::<String>(
+            "SELECT coalesce(string_agg(concept_id, ',' ORDER BY concept_id), '<none>')
+             FROM pgokf.concept_embedding WHERE bundle_id = $1",
+            &[bundle_id.into()],
+        )
+        .expect("embedding rows query executes")
+        .expect("the aggregate is not NULL");
+        assert_eq!(
+            remaining, "beta",
+            "only the untouched concept keeps its row"
+        );
+        assert_eq!(
+            embedding_provenance(bundle_id, "beta").as_deref(),
+            Some(
+                format!(
+                    "test-model|test-contract/v1|{}|test-input-hash",
+                    file_hash_of(bundle_id, "beta")
+                )
+                .as_str()
+            ),
+            "beta's provenance survives intact"
+        );
+        assert_eq!(embedding_provenance(bundle_id, "alpha"), None);
+        assert_ne!(
+            file_hash_of(bundle_id, "alpha"),
+            alpha_hash_before,
+            "the refresh recorded alpha's new file hash"
+        );
+        // And the annotation (against the edited body's new term) reports the
+        // cleared row as missing.
+        assert_eq!(fresh_embedding_annotation_for("quokka"), "missing|-");
+    }
+
+    #[pg_test]
+    fn cas_setter_rejects_a_superseded_expected_hash() {
+        // Arrange: dim 4 and the fixture; the "slow worker" has polled alpha's
+        // file hash but not yet stored its vector.
+        Spi::run("SELECT pgokf.set_config('embedding_dim', '4'::jsonb)")
+            .expect("embedding_dim is configurable");
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        let polled_hash = file_hash_of(bundle_id, "alpha");
+
+        // Act: the concept changes before the worker's write arrives.
+        fs::write(bundle.root.join("alpha.md"), ALPHA_EDITED).expect("alpha edit is writable");
+        refresh_counts(bundle_id);
+
+        // Assert: the compare-and-set refuses the stale expectation - a
+        // retryable false, writing nothing.
+        let stored = Spi::get_one_with_args::<bool>(
+            "SELECT pgokf.set_concept_embedding_cas(
+                 $1, 'alpha', ARRAY[1,0,0,0]::real[], $2,
+                 'stale-input-hash', 'test-model', 'test-contract/v1')",
+            &[bundle_id.into(), polled_hash.into()],
+        )
+        .expect("set_concept_embedding_cas executes")
+        .expect("the CAS outcome is not NULL");
+        assert!(!stored, "a superseded expected hash is rejected");
+        assert_eq!(
+            embedding_provenance(bundle_id, "alpha"),
+            None,
+            "the rejected write stores no row"
+        );
+
+        // Re-polling (reading the current hash) and re-embedding succeeds.
+        cas_set_embedding(bundle_id, "alpha", "ARRAY[1,0,0,0]");
+        assert_eq!(
+            embedding_provenance(bundle_id, "alpha").as_deref(),
+            Some(
+                format!(
+                    "test-model|test-contract/v1|{}|test-input-hash",
+                    file_hash_of(bundle_id, "alpha")
+                )
+                .as_str()
+            ),
+        );
+    }
+
+    #[pg_test]
+    fn cas_setter_validates_provenance_dimension_and_concept() {
+        // Arrange: dim 4, the fixture, and a probe reporting the SQLSTATE of a
+        // CAS call with one varying argument.
+        Spi::run("SELECT pgokf.set_config('embedding_dim', '4'::jsonb)")
+            .expect("embedding_dim is configurable");
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        Spi::run(
+            "CREATE FUNCTION pg_temp.cas_sqlstate(
+                 bid bigint, cid text, dims int, expected text, input_hash text,
+                 model text, contract text)
+             RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             DECLARE
+                 v real[];
+             BEGIN
+                 SELECT array_agg(1.0::real) INTO v FROM generate_series(1, dims);
+                 PERFORM pgokf.set_concept_embedding_cas(
+                     bid, cid, v, expected, input_hash, model, contract);
+                 RETURN 'ok';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("CAS probe is creatable");
+        let hash = file_hash_of(bundle_id, "alpha");
+        let probe = |cid: &str, dims: i32, expected: &str, model: &str| -> String {
+            Spi::get_one_with_args::<String>(
+                "SELECT pg_temp.cas_sqlstate($1, $2, $3, $4, 'ih', $5, 'c/v1')",
+                &[
+                    bundle_id.into(),
+                    cid.into(),
+                    dims.into(),
+                    expected.into(),
+                    model.into(),
+                ],
+            )
+            .expect("CAS probe executes")
+            .expect("the probe reports an outcome")
+        };
+
+        // Act / Assert
+        assert_eq!(probe("alpha", 4, &hash, "test-model"), "ok");
+        assert_eq!(
+            probe("alpha", 4, &hash, ""),
+            "22023",
+            "an empty model is rejected"
+        );
+        assert_eq!(
+            probe("alpha", 4, "", "test-model"),
+            "22023",
+            "an empty expected hash is rejected"
+        );
+        assert_eq!(
+            probe("alpha", 8, &hash, "test-model"),
+            "22023",
+            "a wrong dimension is rejected"
+        );
+        assert_eq!(
+            probe("ghost", 4, &hash, "test-model"),
+            "22023",
+            "an unknown concept is rejected"
+        );
+    }
+
+    #[pg_test]
+    fn legacy_and_overwritten_embeddings_never_rank() {
+        // Arrange: the ranking assertions need pgvector.
+        if !pgvector_available() {
+            return;
+        }
+        Spi::run("CREATE EXTENSION IF NOT EXISTS vector").expect("pgvector is creatable");
+        Spi::run("SELECT pgokf.set_config('embedding_dim', '4'::jsonb)")
+            .expect("embedding_dim is configurable");
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+
+        // Act: the compatibility (0.2.0) setter writes alpha's vector - a
+        // legacy row with NULL provenance.
+        Spi::run_with_args(
+            "SELECT pgokf.set_concept_embedding($1, 'alpha', ARRAY[1,0,0,0]::real[])",
+            &[bundle_id.into()],
+        )
+        .expect("the compatibility setter still works");
+
+        // Assert: the row is stored, provably unprovenanced, never ranks
+        // semantically, does not leak into hybrid's semantic component, and is
+        // labeled stale by the freshness-aware search.
+        assert_eq!(
+            embedding_provenance(bundle_id, "alpha").as_deref(),
+            Some("-|-|-|-"),
+            "the compatibility setter writes a NULL-provenance row"
+        );
+        let semantic = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgokf.concept_search_semantic(ARRAY[1,0,0,0]::real[])",
+        )
+        .expect("semantic search executes")
+        .expect("count is not NULL");
+        assert_eq!(semantic, 0, "a legacy row never ranks semantically");
+        let hybrid = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgokf.concept_search_hybrid(
+                 'nonexistentterm', ARRAY[1,0,0,0]::real[])",
+        )
+        .expect("hybrid search executes")
+        .expect("count is not NULL");
+        assert_eq!(
+            hybrid, 0,
+            "a legacy row never leaks into hybrid's semantic component"
+        );
+        assert_eq!(fresh_embedding_annotation(), "stale|-");
+
+        // Act: the embedder re-writes the row through the CAS setter.
+        cas_set_embedding(bundle_id, "alpha", "ARRAY[1,0,0,0]");
+
+        // Assert: the current row ranks and is labeled current.
+        let nearest = Spi::get_one::<String>(
+            "SELECT concept_id FROM pgokf.concept_search_semantic(ARRAY[1,0,0,0]::real[]) LIMIT 1",
+        )
+        .expect("semantic search executes")
+        .expect("the re-embedded concept ranks");
+        assert_eq!(nearest, "alpha", "a current, provenanced vector ranks");
+        assert_eq!(fresh_embedding_annotation(), "current|test-model");
+
+        // Act: a compatibility-setter overwrite deliberately strips the
+        // provenance again.
+        Spi::run_with_args(
+            "SELECT pgokf.set_concept_embedding($1, 'alpha', ARRAY[1,0,0,0]::real[])",
+            &[bundle_id.into()],
+        )
+        .expect("the compatibility overwrite executes");
+
+        // Assert
+        assert_eq!(
+            embedding_provenance(bundle_id, "alpha").as_deref(),
+            Some("-|-|-|-"),
+            "an unprovenanced overwrite clears the provenance it cannot prove"
+        );
+        let semantic_after = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgokf.concept_search_semantic(ARRAY[1,0,0,0]::real[])",
+        )
+        .expect("semantic search executes")
+        .expect("count is not NULL");
+        assert_eq!(semantic_after, 0, "the overwritten row is ineligible again");
+    }
+
+    #[pg_test]
+    fn non_fresh_concepts_are_semantically_ineligible_but_lexically_visible() {
+        // Arrange: pgvector, dim 4, the fixture, and a current alpha vector.
+        if !pgvector_available() {
+            return;
+        }
+        Spi::run("CREATE EXTENSION IF NOT EXISTS vector").expect("pgvector is creatable");
+        Spi::run("SELECT pgokf.set_config('embedding_dim', '4'::jsonb)")
+            .expect("embedding_dim is configurable");
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        cas_set_embedding(bundle_id, "alpha", "ARRAY[1,0,0,0]");
+        let semantic_count = || -> i64 {
+            Spi::get_one::<i64>(
+                "SELECT count(*) FROM pgokf.concept_search_semantic(ARRAY[1,0,0,0]::real[])",
+            )
+            .expect("semantic search executes")
+            .expect("count is not NULL")
+        };
+        assert_eq!(
+            semantic_count(),
+            1,
+            "the current vector of a fresh concept ranks"
+        );
+
+        // Act: a concept-scope override marks alpha stale.
+        Spi::run_with_args(
+            "SELECT pgokf.mark_scope_stale($1, 'concept', 'alpha', '{content_changed}'::text[], 'producer-a')",
+            &[bundle_id.into()],
+        )
+        .expect("mark_scope_stale executes");
+
+        // Assert: the vector no longer ranks semantically, while the lexical
+        // path still returns the concept (labeled by concept_search_fresh).
+        assert_eq!(
+            semantic_count(),
+            0,
+            "a covering stale override revokes eligibility"
+        );
+        let lexical = Spi::get_one::<String>(
+            "SELECT concept_id FROM pgokf.concept_search_hybrid('peregrine', ARRAY[1,0,0,0]::real[])
+             LIMIT 1",
+        )
+        .expect("hybrid search executes")
+        .expect("the lexical side still matches alpha");
+        assert_eq!(
+            lexical, "alpha",
+            "the lexical path may still return the stale concept"
+        );
+        assert_eq!(fresh_embedding_annotation(), "stale|test-model");
+
+        // Act: clear the override; mark the whole bundle stale instead.
+        Spi::run_with_args(
+            "SELECT pgokf.clear_freshness_scope($1, 'concept', 'alpha')",
+            &[bundle_id.into()],
+        )
+        .expect("clear_freshness_scope executes");
+        Spi::run_with_args(
+            "SELECT pgokf.mark_stale($1, '{source_advanced}'::text[], 'producer-a', 'rev-2')",
+            &[bundle_id.into()],
+        )
+        .expect("mark_stale executes");
+
+        // Assert: a non-fresh bundle revokes eligibility just the same.
+        assert_eq!(semantic_count(), 0, "a stale bundle revokes eligibility");
+
+        // Act: the compare-and-set completion re-establishes currency.
+        let marked = Spi::get_one_with_args::<bool>(
+            "SELECT pgokf.mark_fresh($1, $2, 'rev-2')",
+            &[bundle_id.into(), generation_of(bundle_id).into()],
+        )
+        .expect("mark_fresh executes")
+        .expect("the CAS outcome is not NULL");
+        assert!(marked, "mark_fresh accepts the newest state");
+
+        // Assert: eligibility follows the restored freshness.
+        assert_eq!(semantic_count(), 1, "a fresh-again concept ranks again");
+    }
+
+    #[pg_test]
+    fn embedding_contract_config_change_marks_embedding_bundles_stale() {
+        // Arrange: dim 4 and the fixture (no embedding rows yet, so the dim
+        // change invalidates nothing).
+        Spi::run("SELECT pgokf.set_config('embedding_dim', '4'::jsonb)")
+            .expect("embedding_dim is configurable");
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        cas_set_embedding(bundle_id, "alpha", "ARRAY[1,0,0,0]");
+        assert_eq!(freshness_state(bundle_id), "fresh{}");
+        let mark_fresh = |bundle_id: i64| {
+            let marked = Spi::get_one_with_args::<bool>(
+                "SELECT pgokf.mark_fresh($1, $2)",
+                &[bundle_id.into(), generation_of(bundle_id).into()],
+            )
+            .expect("mark_fresh executes")
+            .expect("the CAS outcome is not NULL");
+            assert!(marked, "mark_fresh accepts the newest state");
+        };
+
+        // Act: an unrelated configuration change.
+        Spi::run("SELECT pgokf.set_config('default_strict', 'false'::jsonb)")
+            .expect("default_strict is configurable");
+
+        // Assert: the embedding scope is untouched by a non-contract key.
+        assert_eq!(
+            freshness_state(bundle_id),
+            "fresh{}",
+            "an unrelated key change does not mark the bundle stale"
+        );
+
+        // Act: pin the embedding model (a contract change, and the bundle
+        // holds an embedding row).
+        Spi::run("SELECT pgokf.set_config('embedding_model', '\"test-model\"'::jsonb)")
+            .expect("embedding_model is configurable");
+
+        // Assert: the bundle is marked stale in the same transaction, before
+        // new vectors are queued - even though the pin happens to match the
+        // stored provenance (currency must be re-established by a producer
+        // compare-and-set; the catalog never clears staleness on its own).
+        assert_eq!(
+            freshness_state(bundle_id),
+            "stale{embedding_contract_changed}",
+            "a contract change marks the embedding-holding bundle stale"
+        );
+
+        // Act/Assert: re-establish currency; re-setting the SAME value is not
+        // a change and invalidates nothing.
+        mark_fresh(bundle_id);
+        Spi::run("SELECT pgokf.set_config('embedding_model', '\"test-model\"'::jsonb)")
+            .expect("embedding_model is reconfigurable");
+        assert_eq!(
+            freshness_state(bundle_id),
+            "fresh{}",
+            "an unchanged value is not a contract change"
+        );
+
+        // Act/Assert: a reset that changes the policy invalidates too.
+        Spi::run("SELECT pgokf.reset_config('embedding_model')").expect("reset_config executes");
+        assert_eq!(
+            freshness_state(bundle_id),
+            "stale{embedding_contract_changed}",
+            "resetting a contract key is a contract change"
+        );
+
+        // Where pgvector is available, the model pin also excludes the stored
+        // rows from semantic ranking independently of the freshness mark.
+        if pgvector_available() {
+            Spi::run("CREATE EXTENSION IF NOT EXISTS vector").expect("pgvector is creatable");
+            let semantic_count = || -> i64 {
+                Spi::get_one::<i64>(
+                    "SELECT count(*) FROM pgokf.concept_search_semantic(ARRAY[1,0,0,0]::real[])",
+                )
+                .expect("semantic search executes")
+                .expect("count is not NULL")
+            };
+            // Unpinned policy: the provenanced row is eligible once the bundle
+            // is fresh again.
+            mark_fresh(bundle_id);
+            assert_eq!(
+                semantic_count(),
+                1,
+                "an unpinned model policy accepts the row"
+            );
+            // A mismatched pin excludes it even after freshness is restored.
+            Spi::run("SELECT pgokf.set_config('embedding_model', '\"other-model\"'::jsonb)")
+                .expect("embedding_model is reconfigurable");
+            mark_fresh(bundle_id);
+            assert_eq!(semantic_count(), 0, "a model-mismatched row never ranks");
+            assert_eq!(fresh_embedding_annotation(), "stale|test-model");
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Typed relationships (capability C).
+    // ------------------------------------------------------------------
+
+    /// Issue the producer's fence against the bundle's current generation and
+    /// return the live fencing token.
+    fn issue_fence(bundle_id: i64, producer: &str, target: i64) -> i64 {
+        Spi::get_one_with_args::<i64>(
+            "SELECT fencing_token
+             FROM pgokf.issue_publication_fence($1, $2, $3, $4)",
+            &[
+                bundle_id.into(),
+                producer.into(),
+                target.into(),
+                generation_of(bundle_id).into(),
+            ],
+        )
+        .expect("issue_publication_fence executes")
+        .expect("a fencing token is returned")
+    }
+
+    /// `replace_relationships`, returning `(state, row_count)` of the
+    /// publication it wrote (or found, on an idempotent retry).
+    fn replace_rows(
+        bundle_id: i64,
+        producer: &str,
+        publication_generation: i64,
+        expected: i64,
+        token: i64,
+        rows: &str,
+    ) -> (String, i32) {
+        Spi::connect(|client| {
+            let row = client
+                .select(
+                    "SELECT state, row_count
+                     FROM pgokf.replace_relationships($1, $2, $3, $4, $5, $6::jsonb)",
+                    Some(1),
+                    &[
+                        producer.into(),
+                        bundle_id.into(),
+                        publication_generation.into(),
+                        expected.into(),
+                        token.into(),
+                        rows.into(),
+                    ],
+                )
+                .expect("replace_relationships executes")
+                .first();
+            let state = row
+                .get::<String>(1)
+                .expect("state is readable")
+                .expect("state is not NULL");
+            let count = row
+                .get::<i32>(2)
+                .expect("row_count is readable")
+                .expect("row_count is not NULL");
+            (state, count)
+        })
+    }
+
+    /// The SQLSTATE a `replace_relationships` call raises ('ok' when none).
+    fn replace_sqlstate(
+        bundle_id: i64,
+        producer: &str,
+        publication_generation: i64,
+        expected: i64,
+        token: i64,
+        rows: &str,
+    ) -> String {
+        Spi::run(
+            "CREATE OR REPLACE FUNCTION pg_temp.replace_sqlstate(
+                 producer text, bid bigint, pub_gen bigint, expected bigint,
+                 token bigint, rows jsonb) RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.replace_relationships(producer, bid, pub_gen, expected, token, rows);
+                 RETURN 'ok';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("replace probe is creatable");
+        Spi::get_one_with_args::<String>(
+            "SELECT pg_temp.replace_sqlstate($1, $2, $3, $4, $5, $6::jsonb)",
+            &[
+                producer.into(),
+                bundle_id.into(),
+                publication_generation.into(),
+                expected.into(),
+                token.into(),
+                rows.into(),
+            ],
+        )
+        .expect("replace probe executes")
+        .expect("the probe reports a SQLSTATE")
+    }
+
+    /// The states of a bundle's publications, oldest generation first.
+    fn publication_states(bundle_id: i64) -> String {
+        Spi::get_one_with_args::<String>(
+            "SELECT coalesce(string_agg(state || ':' || row_count, ','
+                          ORDER BY publication_generation), '<none>')
+             FROM pgokf.relationship_publication WHERE source_bundle_id = $1",
+            &[bundle_id.into()],
+        )
+        .expect("publication states query executes")
+        .expect("states string is not NULL")
+    }
+
+    /// The visible current relationships of a bundle as
+    /// `source-[:type]->target` rows, ordered.
+    fn current_relationship_rows(bundle_id: i64) -> Vec<String> {
+        Spi::connect(|client| {
+            client
+                .select(
+                    "SELECT source_concept_id || '-[:' || relation_type || ']->' ||
+                            coalesce(target_bundle_id || ':' || target_concept_id,
+                                     'ext:' || external_target, '<none>') ||
+                            CASE WHEN unresolved THEN ' (unresolved)' ELSE '' END
+                     FROM pgokf.current_relationships
+                     WHERE source_bundle_id = $1
+                     ORDER BY ordinal",
+                    None,
+                    &[bundle_id.into()],
+                )
+                .expect("current_relationships query executes")
+                .map(|row| {
+                    row.get::<String>(1)
+                        .expect("row text is readable")
+                        .expect("row text is not NULL")
+                })
+                .collect::<Vec<_>>()
+        })
+    }
+
+    #[pg_test]
+    fn replace_relationships_validates_shape_endpoints_and_limits() {
+        // Arrange: a registered bundle (generation 1) and its live fence.
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        let token = issue_fence(bundle_id, "producer-a", 10);
+
+        // Assert: row-shape violations are 22023, naming the row position.
+        for bad_rows in [
+            // not an array
+            r#"{"source_concept_id": "alpha"}"#,
+            // a non-object row
+            r#"["not an object"]"#,
+            // unnamespaced relation type
+            r#"[{"source_concept_id": "alpha", "relation_type": "calls"}]"#,
+            // empty relation namespace
+            r#"[{"source_concept_id": "alpha", "relation_type": ":calls"}]"#,
+            // both a resolved and an external target
+            r#"[{"source_concept_id": "alpha", "relation_type": "ns:r", "target_concept_id": "beta", "external_target": "x"}]"#,
+            // duplicate canonical identities
+            r#"[{"source_concept_id": "alpha", "relation_type": "ns:r"},
+                {"source_concept_id": "alpha", "relation_type": "ns:r"}]"#,
+            // an unknown source concept (immediate mode validates endpoints)
+            r#"[{"source_concept_id": "ghost", "relation_type": "ns:r"}]"#,
+            // an unsupported key
+            r#"[{"source_concept_id": "alpha", "relation_type": "ns:r", "surprise": 1}]"#,
+        ] {
+            let state = replace_sqlstate(bundle_id, "producer-a", 10, 1, token, bad_rows);
+            assert_eq!(state, "22023", "rows {bad_rows}");
+        }
+
+        // Assert: the hard row limit is enforced before any catalog write.
+        let oversized = format!(
+            "[{}]",
+            vec![r#"{"source_concept_id": "alpha", "relation_type": "ns:r", "external_target": "e"}"#; 10_001]
+                .join(",")
+        );
+        let state = replace_sqlstate(bundle_id, "producer-a", 10, 1, token, &oversized);
+        assert_eq!(state, "22023", "more than 10000 rows is rejected");
+
+        // Assert: arbitrary producer-defined namespaced types are accepted, and
+        // a same-bundle concept-only target resolves.
+        let (state, count) = replace_rows(
+            bundle_id,
+            "producer-a",
+            10,
+            1,
+            token,
+            r#"[
+                {"source_concept_id": "alpha", "relation_type": "code:calls",
+                 "target_concept_id": "beta", "confidence": 0.75,
+                 "source_location": {"path": "a.rs", "line": 9}},
+                {"source_concept_id": "alpha", "relation_type": "anything:goes"},
+                {"source_concept_id": "alpha", "relation_type": "code:links",
+                 "external_target": "registry:other-thing"},
+                {"source_concept_id": "alpha", "relation_type": "code:misses",
+                 "target_concept_id": "absent"}
+            ]"#,
+        );
+        assert_eq!((state.as_str(), count), ("active", 4));
+        assert_eq!(
+            current_relationship_rows(bundle_id),
+            vec![
+                format!("alpha-[:anything:goes]-><none> (unresolved)"),
+                format!("alpha-[:code:calls]->{bundle_id}:beta"),
+                format!("alpha-[:code:links]->ext:registry:other-thing (unresolved)"),
+                format!("alpha-[:code:misses]->{bundle_id}:absent (unresolved)"),
+            ]
+        );
+    }
+
+    #[pg_test]
+    fn replace_relationships_enforces_fence_and_generation() {
+        // Arrange: a registered bundle (generation 1).
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        let rows = r#"[{"source_concept_id": "alpha", "relation_type": "ns:r"}]"#;
+
+        // Assert: no fence, a wrong token, and a publication generation that is
+        // not the fence's target are all 22023.
+        let no_fence = replace_sqlstate(bundle_id, "producer-a", 10, 1, 1, rows);
+        assert_eq!(no_fence, "22023", "a fence must exist first");
+        let token = issue_fence(bundle_id, "producer-a", 10);
+        let wrong_token = replace_sqlstate(bundle_id, "producer-a", 10, 1, token + 9, rows);
+        assert_eq!(wrong_token, "22023", "only the live token publishes");
+        let wrong_target = replace_sqlstate(bundle_id, "producer-a", 11, 1, token, rows);
+        assert_eq!(
+            wrong_target, "22023",
+            "the publication generation must equal the fence target"
+        );
+
+        // Assert: a stale expected catalog generation is rejected, as is a
+        // generation further ahead than the pending refresh.
+        let stale_expected = replace_sqlstate(bundle_id, "producer-a", 10, 99, token, rows);
+        assert_eq!(
+            stale_expected, "22023",
+            "a mismatched expected generation fails"
+        );
+        let too_far = replace_sqlstate(bundle_id, "producer-a", 10, 3, token, rows);
+        assert_eq!(too_far, "22023", "only current or next generation is valid");
+
+        // Act: publish against the current generation, then supersede the
+        // fence; the old token can no longer publish.
+        let (written, _) = replace_rows(bundle_id, "producer-a", 10, 1, token, rows);
+        assert_eq!(written, "active");
+        let token2 = issue_fence(bundle_id, "producer-a", 11);
+        assert_eq!(token2, token + 1);
+        let superseded = replace_sqlstate(bundle_id, "producer-a", 11, 1, token, rows);
+        assert_eq!(superseded, "22023", "a superseded token never publishes");
+    }
+
+    #[pg_test]
+    fn identical_retry_is_a_noop_and_a_differing_set_conflicts() {
+        // Arrange
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        let token = issue_fence(bundle_id, "producer-a", 10);
+        // Deliberately unsorted; the canonical form sorts them.
+        let rows = r#"[
+            {"source_concept_id": "beta", "relation_type": "ns:y"},
+            {"source_concept_id": "alpha", "relation_type": "ns:x"}
+        ]"#;
+        let resorted = r#"[
+            {"source_concept_id": "alpha", "relation_type": "ns:x"},
+            {"source_concept_id": "beta", "relation_type": "ns:y"}
+        ]"#;
+
+        // Act: write, then retry with the same set in another order.
+        let (state, count) = replace_rows(bundle_id, "producer-a", 10, 1, token, rows);
+        assert_eq!((state.as_str(), count), ("active", 2));
+        let (retry_state, retry_count) =
+            replace_rows(bundle_id, "producer-a", 10, 1, token, resorted);
+        assert_eq!(
+            (retry_state.as_str(), retry_count),
+            ("active", 2),
+            "an identical retry is a no-op"
+        );
+        assert_eq!(
+            publication_states(bundle_id),
+            "active:2",
+            "the retry wrote no second publication"
+        );
+
+        // Assert: the same key with a different set is a 23505 conflict.
+        let conflict = replace_sqlstate(
+            bundle_id,
+            "producer-a",
+            10,
+            1,
+            token,
+            r#"[{"source_concept_id": "alpha", "relation_type": "ns:x"}]"#,
+        );
+        assert_eq!(conflict, "23505");
+    }
+
+    #[pg_test]
+    fn staged_rows_activate_only_on_the_matching_refresh() {
+        // Arrange: bundle at generation 1; rows staged for generation 2 that
+        // target a concept the refresh will add.
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        let token = issue_fence(bundle_id, "producer-a", 10);
+        let (state, count) = replace_rows(
+            bundle_id,
+            "producer-a",
+            10,
+            2,
+            token,
+            r#"[
+                {"source_concept_id": "alpha", "relation_type": "code:calls",
+                 "target_concept_id": "gamma"},
+                {"source_concept_id": "alpha", "relation_type": "code:calls",
+                 "target_concept_id": "still-absent"}
+            ]"#,
+        );
+        assert_eq!((state.as_str(), count), ("staged", 2));
+
+        // Assert: staged rows are invisible before the refresh.
+        assert!(
+            current_relationship_rows(bundle_id).is_empty(),
+            "a staged publication is not reader-visible"
+        );
+
+        // Act: the refresh that adds gamma and accepts generation 2.
+        fs::write(
+            bundle.root.join("gamma.md"),
+            "---\ntype: Reference\ntitle: Gamma\n---\n\n# Gamma\n",
+        )
+        .expect("gamma fixture is writable");
+        let _ = refresh_counts(bundle_id);
+        assert_eq!(generation_of(bundle_id), 2);
+
+        // Assert: the publication activated in the sync transaction, and the
+        // added target re-resolved while the still-absent one stayed
+        // unresolved.
+        assert_eq!(publication_states(bundle_id), "active:2");
+        assert_eq!(
+            current_relationship_rows(bundle_id),
+            vec![
+                format!("alpha-[:code:calls]->{bundle_id}:gamma"),
+                format!("alpha-[:code:calls]->{bundle_id}:still-absent (unresolved)"),
+            ]
+        );
+
+        // Assert (after-refresh rule): a write naming the now-current
+        // generation activates immediately; one naming an older generation is
+        // rejected.
+        let token2 = issue_fence(bundle_id, "producer-a", 11);
+        let immediate = replace_sqlstate(
+            bundle_id,
+            "producer-a",
+            11,
+            2,
+            token2,
+            r#"[{"source_concept_id": "beta", "relation_type": "ns:new"}]"#,
+        );
+        assert_eq!(immediate, "ok", "the current generation activates");
+        // A different producer's fence/key, so the generation rule - not the
+        // idempotency conflict - is what fires.
+        let token_b = issue_fence(bundle_id, "producer-b", 5);
+        let stale_expected = replace_sqlstate(
+            bundle_id,
+            "producer-b",
+            5,
+            1,
+            token_b,
+            r#"[{"source_concept_id": "beta", "relation_type": "ns:old"}]"#,
+        );
+        assert_eq!(
+            stale_expected, "22023",
+            "a stale expected generation is rejected"
+        );
+    }
+
+    #[pg_test]
+    fn a_refresh_without_replacement_keeps_coverage_stale() {
+        // Arrange: an active publication at generation 1.
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        let token = issue_fence(bundle_id, "producer-a", 10);
+        let (state, _) = replace_rows(
+            bundle_id,
+            "producer-a",
+            10,
+            1,
+            token,
+            r#"[{"source_concept_id": "alpha", "relation_type": "code:calls",
+                  "target_concept_id": "beta"}]"#,
+        );
+        assert_eq!(state, "active");
+        assert_eq!(freshness_state(bundle_id), "fresh{}");
+
+        // Act: refresh to generation 2 without staging a replacement.
+        fs::write(bundle.root.join("alpha.md"), ALPHA_EDITED).expect("edit is writable");
+        let _ = refresh_counts(bundle_id);
+
+        // Assert: the old-generation publication is superseded (no
+        // mixed-generation exposure - the view is empty) and the bundle is
+        // stale with the coverage reason.
+        assert_eq!(publication_states(bundle_id), "superseded:1");
+        assert!(
+            current_relationship_rows(bundle_id).is_empty(),
+            "old-generation relationships never combine with new concepts"
+        );
+        assert_eq!(
+            freshness_state(bundle_id),
+            "stale{relationship_coverage_missing}"
+        );
+
+        // Assert: the compare-and-set completion refuses while the coverage
+        // reason stands.
+        let refused = Spi::get_one_with_args::<bool>(
+            "SELECT pgokf.mark_fresh($1, $2)",
+            &[bundle_id.into(), generation_of(bundle_id).into()],
+        )
+        .expect("mark_fresh executes")
+        .expect("a verdict is returned");
+        assert!(!refused, "mark_fresh refuses until coverage is restored");
+
+        // Act: publish the replacement against the current generation.
+        let token2 = issue_fence(bundle_id, "producer-a", 11);
+        let (state, _) = replace_rows(
+            bundle_id,
+            "producer-a",
+            11,
+            2,
+            token2,
+            r#"[{"source_concept_id": "alpha", "relation_type": "code:calls",
+                  "target_concept_id": "beta"}]"#,
+        );
+        assert_eq!(state, "active");
+        assert_eq!(
+            freshness_state(bundle_id),
+            "stale{}",
+            "the replacement cleared the coverage reason"
+        );
+
+        // Assert: the CAS now completes.
+        let reconciled = Spi::get_one_with_args::<bool>(
+            "SELECT pgokf.mark_fresh($1, $2)",
+            &[bundle_id.into(), generation_of(bundle_id).into()],
+        )
+        .expect("mark_fresh executes")
+        .expect("a verdict is returned");
+        assert!(reconciled, "coverage restored, mark_fresh completes");
+        assert_eq!(freshness_state(bundle_id), "fresh{}");
+    }
+
+    #[pg_test]
+    fn an_empty_replacement_removes_the_prior_set() {
+        // Arrange: an active two-row publication.
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        let token = issue_fence(bundle_id, "producer-a", 10);
+        let (state, _) = replace_rows(
+            bundle_id,
+            "producer-a",
+            10,
+            1,
+            token,
+            r#"[
+                {"source_concept_id": "alpha", "relation_type": "ns:x"},
+                {"source_concept_id": "beta", "relation_type": "ns:y"}
+            ]"#,
+        );
+        assert_eq!(state, "active");
+        assert_eq!(current_relationship_rows(bundle_id).len(), 2);
+
+        // Act: replace with the empty set against the same generation.
+        let token2 = issue_fence(bundle_id, "producer-a", 11);
+        let (state, count) = replace_rows(bundle_id, "producer-a", 11, 1, token2, "[]");
+
+        // Assert: the empty publication is active and the prior rows are gone
+        // from the current projection.
+        assert_eq!((state.as_str(), count), ("active", 0));
+        assert!(current_relationship_rows(bundle_id).is_empty());
+        assert_eq!(publication_states(bundle_id), "superseded:2,active:0");
+    }
+
+    #[pg_test]
+    fn typed_neighbors_traverse_directions_types_and_cycles_with_freshness() {
+        // Arrange: two bundles; cross-bundle edges both ways (a cycle), a
+        // same-bundle edge, an undirected edge, and an external edge.
+        let bundle_a = FixtureBundle::create();
+        let bundle_b = FixtureBundle::create();
+        let a = register_fixture(&bundle_a);
+        let b = register_fixture(&bundle_b);
+        let rows = format!(
+            r#"[
+                {{"source_concept_id": "alpha", "relation_type": "code:calls",
+                  "target_bundle_id": {b}, "target_concept_id": "alpha"}},
+                {{"source_concept_id": "alpha", "relation_type": "code:contains",
+                  "target_concept_id": "beta"}},
+                {{"source_concept_id": "beta", "relation_type": "code:sees",
+                  "direction": "undirected", "target_concept_id": "alpha"}},
+                {{"source_concept_id": "alpha", "relation_type": "code:links",
+                  "external_target": "registry:elsewhere"}}
+            ]"#
+        );
+        let token_a = issue_fence(a, "producer-a", 10);
+        let (state, _) = replace_rows(a, "producer-a", 10, 1, token_a, &rows);
+        assert_eq!(state, "active");
+        let rows_b = format!(
+            r#"[{{"source_concept_id": "alpha", "relation_type": "ns:back",
+                  "target_bundle_id": {a}, "target_concept_id": "alpha"}}]"#
+        );
+        let token_b = issue_fence(b, "producer-a", 10);
+        let (state, _) = replace_rows(b, "producer-a", 10, 1, token_b, &rows_b);
+        assert_eq!(state, "active");
+
+        // The traversal result as "bundle:concept@hops(via type) state" rows.
+        let walk = |seed_bundle: i64,
+                    seed: &str,
+                    direction: &str,
+                    types: Option<Vec<String>>|
+         -> Vec<String> {
+            Spi::connect(|client| {
+                client
+                    .select(
+                        "SELECT bundle_id || ':' || concept_id || '@' || hops ||
+                                '(' || relation_type || ') ' || freshness_state ||
+                                '/' || embedding_state
+                         FROM pgokf.concept_relationship_neighbors(
+                             $1, $2, 5, $3, $4::text[])
+                         ORDER BY hops, bundle_id, concept_id",
+                        None,
+                        &[
+                            seed_bundle.into(),
+                            seed.into(),
+                            direction.into(),
+                            types.into(),
+                        ],
+                    )
+                    .expect("typed neighbors executes")
+                    .map(|row| {
+                        row.get::<String>(1)
+                            .expect("row text is readable")
+                            .expect("row text is not NULL")
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+
+        // Assert (outbound): A.alpha reaches B.alpha and A.beta; the cycle back
+        // through ns:back terminates (A.alpha is never its own neighbor); the
+        // external row never becomes an edge. Freshness metadata is present.
+        assert_eq!(
+            walk(a, "alpha", "outbound", None),
+            vec![
+                format!("{a}:beta@1(code:contains) fresh/missing"),
+                format!("{b}:alpha@1(code:calls) fresh/missing"),
+            ]
+        );
+
+        // Assert (inbound): B.alpha's inbound resolved edges come from
+        // A.alpha's code:calls row; one hop further, the undirected
+        // code:sees edge (beta--alpha) reaches A.beta - an undirected edge is
+        // traversable in both directions under every direction mode.
+        assert_eq!(
+            walk(b, "alpha", "inbound", None),
+            vec![
+                format!("{a}:alpha@1(code:calls) fresh/missing"),
+                format!("{a}:beta@2(code:sees) fresh/missing"),
+            ]
+        );
+
+        // Assert (undirected): beta--alpha is traversable from alpha even
+        // though its source is beta; one hop further, the traversal continues
+        // outbound from A.alpha across bundles. This mixed graph cannot
+        // isolate the outbound reverse-undirected branch (the directed
+        // alpha -> beta edge reaches the same nodes); the lone-undirected
+        // case from both endpoints in all three modes is covered by
+        // a_lone_undirected_edge_traverses_both_endpoints_in_all_modes.
+        assert_eq!(
+            walk(a, "beta", "both", None),
+            vec![
+                format!("{a}:alpha@1(code:sees) fresh/missing"),
+                format!("{b}:alpha@2(code:calls) fresh/missing"),
+            ]
+        );
+
+        // Assert (type filter): only code:calls edges are followed.
+        assert_eq!(
+            walk(a, "alpha", "outbound", Some(vec!["code:calls".to_owned()])),
+            vec![format!("{b}:alpha@1(code:calls) fresh/missing")]
+        );
+
+        // Assert: a bogus direction and a sub-1 hop count are 22023; an
+        // unknown seed yields an empty result.
+        Spi::run(
+            "CREATE OR REPLACE FUNCTION pg_temp.neighbors_sqlstate(direction text, hops integer)
+             RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             BEGIN
+                 PERFORM count(*) FROM pgokf.concept_relationship_neighbors(
+                     (SELECT min(id) FROM pgokf.bundles), 'alpha', hops, direction);
+                 RETURN 'ok';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("neighbors probe is creatable");
+        for (direction, hops) in [("sideways", 2), ("outbound", 0)] {
+            let state = Spi::get_one_with_args::<String>(
+                "SELECT pg_temp.neighbors_sqlstate($1, $2)",
+                &[direction.into(), hops.into()],
+            )
+            .expect("neighbors probe executes")
+            .expect("the probe reports a SQLSTATE");
+            assert_eq!(state, "22023", "{direction}/{hops}");
+        }
+        assert!(
+            walk(a, "ghost", "both", None).is_empty(),
+            "an unknown seed traverses to nothing"
+        );
+    }
+
+    #[pg_test]
+    fn relationship_visibility_follows_bundle_lifecycle_and_tenancy() {
+        // Arrange: one bundle per tenant, each with an active publication;
+        // acme's rows target both globex's bundle (cross-tenant: unresolved,
+        // reference dropped) and its own.
+        let acme_bundle = FixtureBundle::create();
+        let globex_bundle = FixtureBundle::create();
+        Spi::run("SET pgokf.tenant = 'acme'").expect("pgokf.tenant is settable");
+        let acme = register_fixture(&acme_bundle);
+        Spi::run("SET pgokf.tenant = 'globex'").expect("pgokf.tenant is settable");
+        let globex = register_fixture(&globex_bundle);
+        let globex_token = issue_fence(globex, "producer-g", 10);
+        let (state, _) = replace_rows(
+            globex,
+            "producer-g",
+            10,
+            1,
+            globex_token,
+            r#"[{"source_concept_id": "alpha", "relation_type": "ns:g",
+                 "target_concept_id": "beta"}]"#,
+        );
+        assert_eq!(state, "active");
+        Spi::run("SET pgokf.tenant = 'acme'").expect("pgokf.tenant is settable");
+        let acme_token = issue_fence(acme, "producer-a", 10);
+        let cross_rows = format!(
+            r#"[
+                {{"source_concept_id": "alpha", "relation_type": "ns:local",
+                  "target_concept_id": "beta"}},
+                {{"source_concept_id": "alpha", "relation_type": "ns:cross",
+                  "target_bundle_id": {globex}, "target_concept_id": "alpha"}}
+            ]"#
+        );
+        let (state, _) = replace_rows(acme, "producer-a", 10, 1, acme_token, &cross_rows);
+        assert_eq!(state, "active");
+
+        // Assert: the cross-tenant target resolved to the same unresolved row
+        // an absent bundle would produce, with the bundle reference dropped.
+        let cross_reference = Spi::get_one_with_args::<String>(
+            "SELECT coalesce(target_bundle_id::text, '<dropped>') || '/' || cross_bundle
+             FROM pgokf.relationship r
+             JOIN pgokf.relationship_publication p ON p.publication_id = r.publication_id
+             WHERE p.source_bundle_id = $1 AND r.relation_type = 'ns:cross'",
+            &[acme.into()],
+        )
+        .expect("cross-target query executes")
+        .expect("the row exists");
+        assert_eq!(
+            cross_reference, "<dropped>/true",
+            "an invisible target is stored unresolved, reference dropped"
+        );
+
+        // Assert: a globex-scoped write against acme's bundle is
+        // indistinguishable from an unknown bundle (22023).
+        Spi::run("SET pgokf.tenant = 'globex'").expect("pgokf.tenant is settable");
+        let cross_write = replace_sqlstate(
+            acme,
+            "producer-g",
+            20,
+            1,
+            1,
+            r#"[{"source_concept_id": "alpha", "relation_type": "ns:r"}]"#,
+        );
+        assert_eq!(cross_write, "22023", "a cross-tenant source is unknown");
+
+        // Assert: a non-superuser reader sees only its own tenant's rows, and
+        // holds no grant on the raw tables.
+        Spi::run("CREATE ROLE pgokf_rel_reader").expect("reader role is creatable");
+        Spi::run("GRANT pgokf_reader TO pgokf_rel_reader").expect("reader role is grantable");
+        Spi::run(
+            "CREATE OR REPLACE FUNCTION pg_temp.rel_counts() RETURNS text
+             LANGUAGE plpgsql
+             SET role TO pgokf_rel_reader
+             AS $probe$
+             BEGIN
+                 RETURN (SELECT count(*) FROM pgokf.current_relationships)::text;
+             END
+             $probe$;",
+        )
+        .expect("reader count probe is creatable");
+        let globex_rows = Spi::get_one::<String>("SELECT pg_temp.rel_counts()")
+            .expect("reader count probe executes")
+            .expect("a count is returned");
+        assert_eq!(globex_rows, "1", "a globex reader sees only globex's row");
+        Spi::run(
+            "CREATE OR REPLACE FUNCTION pg_temp.rel_raw_probe() RETURNS text
+             LANGUAGE plpgsql
+             SET role TO pgokf_rel_reader
+             AS $probe$
+             BEGIN
+                 PERFORM count(*) FROM pgokf.relationship;
+                 RETURN 'not-denied';
+             EXCEPTION WHEN insufficient_privilege THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("raw-table probe is creatable");
+        let raw_denied = Spi::get_one::<String>("SELECT pg_temp.rel_raw_probe()")
+            .expect("raw-table probe executes")
+            .expect("the probe reports a SQLSTATE");
+        assert_eq!(raw_denied, "42501", "a reader cannot read the raw table");
+
+        // Assert: a reader cannot call the writer API at all.
+        Spi::run(
+            "CREATE OR REPLACE FUNCTION pg_temp.rel_write_probe() RETURNS text
+             LANGUAGE plpgsql
+             SET role TO pgokf_rel_reader
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.replace_relationships('p', 1, 1, 1, 1, '[]'::jsonb);
+                 RETURN 'not-denied';
+             EXCEPTION WHEN insufficient_privilege THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("writer probe is creatable");
+        let write_denied = Spi::get_one::<String>("SELECT pg_temp.rel_write_probe()")
+            .expect("writer probe executes")
+            .expect("the probe reports a SQLSTATE");
+        assert_eq!(write_denied, "42501", "a reader cannot publish");
+
+        // Act/Assert (lifecycle): retiring the source bundle removes its
+        // current relationship visibility; unretiring restores it.
+        Spi::run("RESET pgokf.tenant").expect("pgokf.tenant resets");
+        Spi::run_with_args("SELECT pgokf.retire_bundle($1)", &[acme.into()])
+            .expect("retire executes");
+        assert!(
+            current_relationship_rows(acme).is_empty(),
+            "retirement hides the bundle's current relationships"
+        );
+        Spi::run_with_args("SELECT pgokf.unretire_bundle($1)", &[acme.into()])
+            .expect("unretire executes");
+        assert_eq!(
+            current_relationship_rows(acme).len(),
+            2,
+            "unretirement restores the projection"
+        );
+
+        // Act/Assert: unregistering detaches the publication's live bundle
+        // reference (audit retained, visibility gone).
+        Spi::run_with_args("SELECT pgokf.unregister_bundle($1)", &[acme.into()])
+            .expect("unregister executes");
+        let (attached, retained_rows) = Spi::connect(|client| {
+            let row = client
+                .select(
+                    "SELECT p.source_bundle_id IS NOT NULL,
+                            (SELECT count(*) FROM pgokf.relationship r
+                             WHERE r.publication_id = p.publication_id)
+                     FROM pgokf.relationship_publication p
+                     WHERE p.producer = 'producer-a' AND p.publication_generation = 10",
+                    Some(1),
+                    &[],
+                )
+                .expect("retention query executes")
+                .first();
+            (
+                row.get::<bool>(1)
+                    .expect("the flag is readable")
+                    .expect("the flag is not NULL"),
+                row.get::<i64>(2)
+                    .expect("the count is readable")
+                    .expect("the count is not NULL"),
+            )
+        });
+        assert!(!attached, "the publication detached, not cascaded");
+        assert_eq!(
+            retained_rows, 2,
+            "the relationship rows are retained as audit"
+        );
+        let visible = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgokf.current_relationships
+             WHERE producer = 'producer-a'",
+        )
+        .expect("post-delete visibility query executes")
+        .expect("count is not NULL");
+        assert_eq!(visible, 0, "a deleted bundle's relationships are invisible");
+    }
+
+    #[pg_test]
+    fn competing_staged_attempts_activate_only_the_newest() {
+        // Arrange: bundle at generation 1.
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+
+        // Act: stage attempt 10 (one row) for generation 2, then re-fence and
+        // stage attempt 11 (the empty replacement) for the same generation.
+        let token10 = issue_fence(bundle_id, "producer-a", 10);
+        let (state, _) = replace_rows(
+            bundle_id,
+            "producer-a",
+            10,
+            2,
+            token10,
+            r#"[{"source_concept_id": "alpha", "relation_type": "ns:first",
+                 "target_concept_id": "beta"}]"#,
+        );
+        assert_eq!(state, "staged");
+        let token11 = issue_fence(bundle_id, "producer-a", 11);
+        let (state, count) = replace_rows(bundle_id, "producer-a", 11, 2, token11, "[]");
+        assert_eq!((state.as_str(), count), ("staged", 0));
+
+        // Act: the refresh accepts generation 2.
+        fs::write(bundle.root.join("alpha.md"), ALPHA_EDITED).expect("edit is writable");
+        let _ = refresh_counts(bundle_id);
+        assert_eq!(generation_of(bundle_id), 2);
+
+        // Assert: only the newest attempt activated; the empty winning set
+        // really replaced the older staged set.
+        assert_eq!(
+            publication_states(bundle_id),
+            "superseded:1,active:0",
+            "exactly one staged attempt activates per producer scope"
+        );
+        assert!(
+            current_relationship_rows(bundle_id).is_empty(),
+            "the empty winning set removed the older attempt's rows"
+        );
+
+        // Act: stage two successive NONEMPTY attempts for generation 3.
+        let token12 = issue_fence(bundle_id, "producer-a", 12);
+        let (state, _) = replace_rows(
+            bundle_id,
+            "producer-a",
+            12,
+            3,
+            token12,
+            r#"[{"source_concept_id": "beta", "relation_type": "ns:loser",
+                 "target_concept_id": "alpha"}]"#,
+        );
+        assert_eq!(state, "staged");
+        let token13 = issue_fence(bundle_id, "producer-a", 13);
+        let (state, _) = replace_rows(
+            bundle_id,
+            "producer-a",
+            13,
+            3,
+            token13,
+            r#"[{"source_concept_id": "alpha", "relation_type": "ns:winner",
+                 "target_concept_id": "beta"}]"#,
+        );
+        assert_eq!(state, "staged");
+        fs::write(
+            bundle.root.join("gamma.md"),
+            "---\ntype: Reference\ntitle: Gamma\n---\n\n# Gamma\n",
+        )
+        .expect("gamma fixture is writable");
+        let _ = refresh_counts(bundle_id);
+        assert_eq!(generation_of(bundle_id), 3);
+
+        // Assert: only the newer nonempty set survives.
+        assert_eq!(
+            publication_states(bundle_id),
+            "superseded:1,superseded:0,superseded:1,active:1"
+        );
+        assert_eq!(
+            current_relationship_rows(bundle_id),
+            vec![format!("alpha-[:ns:winner]->{bundle_id}:beta")]
+        );
+    }
+
+    #[pg_test]
+    fn staged_activation_quarantines_absent_sources() {
+        // Arrange: bundle holds only alpha and beta; stage rows whose source
+        // `ghost` never exists alongside one valid row.
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        let token = issue_fence(bundle_id, "producer-a", 10);
+        let (state, count) = replace_rows(
+            bundle_id,
+            "producer-a",
+            10,
+            2,
+            token,
+            r#"[
+                {"source_concept_id": "ghost", "relation_type": "ns:haunts",
+                 "target_concept_id": "alpha"},
+                {"source_concept_id": "ghost", "relation_type": "ns:haunts",
+                 "target_concept_id": "beta"},
+                {"source_concept_id": "alpha", "relation_type": "code:calls",
+                 "target_concept_id": "beta"}
+            ]"#,
+        );
+        assert_eq!((state.as_str(), count), ("staged", 3));
+
+        // Act: the refresh accepts generation 2.
+        fs::write(bundle.root.join("alpha.md"), ALPHA_EDITED).expect("edit is writable");
+        let _ = refresh_counts(bundle_id);
+        assert_eq!(generation_of(bundle_id), 2);
+
+        // Assert: the publication activated, but the ghost-source rows were
+        // quarantined - neither current_relationships nor the stored rows
+        // mention the ghost.
+        assert_eq!(publication_states(bundle_id), "active:3");
+        assert_eq!(
+            current_relationship_rows(bundle_id),
+            vec![format!("alpha-[:code:calls]->{bundle_id}:beta")],
+            "a nonexistent source never surfaces in the projection"
+        );
+        let stored = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.relationship r
+             JOIN pgokf.relationship_publication p ON p.publication_id = r.publication_id
+             WHERE p.source_bundle_id = $1",
+            &[bundle_id.into()],
+        )
+        .expect("stored-row query executes")
+        .expect("count is not NULL");
+        assert_eq!(stored, 1, "the absent-source rows were quarantined");
+
+        // Assert: no traversal path mentions the ghost - it can never act as a
+        // graph bridge.
+        let paths = Spi::connect(|client| {
+            client
+                .select(
+                    "SELECT concept_id || '@' || hops || ' path=' ||
+                            array_to_string(path_concept_ids, ',')
+                     FROM pgokf.concept_relationship_neighbors($1, 'alpha', 3, 'both')
+                     ORDER BY hops, concept_id",
+                    None,
+                    &[bundle_id.into()],
+                )
+                .expect("typed neighbors executes")
+                .map(|row| {
+                    row.get::<String>(1)
+                        .expect("row text is readable")
+                        .expect("row text is not NULL")
+                })
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(paths, vec!["beta@1 path=alpha,beta"]);
+    }
+
+    #[pg_test]
+    fn deleting_two_bundles_keeps_the_detached_ledger() {
+        // Arrange: two bundles, each publishing the same producer+generation
+        // key (legitimate while both bundles are live).
+        let bundle_a = FixtureBundle::create();
+        let bundle_b = FixtureBundle::create();
+        let a = register_fixture(&bundle_a);
+        let b = register_fixture(&bundle_b);
+        let rows = r#"[{"source_concept_id": "alpha", "relation_type": "ns:r",
+                        "target_concept_id": "beta"}]"#;
+        let token_a = issue_fence(a, "probe", 10);
+        let (state, _) = replace_rows(a, "probe", 10, 1, token_a, rows);
+        assert_eq!(state, "active");
+        let token_b = issue_fence(b, "probe", 10);
+        let (state, _) = replace_rows(b, "probe", 10, 1, token_b, rows);
+        assert_eq!(state, "active");
+
+        // Act/Assert: both bundles unregister cleanly; the second deletion
+        // must not collide in the retained ledger (the detached rows are
+        // excluded from the live-key partial unique index).
+        Spi::run_with_args("SELECT pgokf.unregister_bundle($1)", &[a.into()])
+            .expect("first unregister executes");
+        Spi::run_with_args("SELECT pgokf.unregister_bundle($1)", &[b.into()])
+            .expect("second unregister executes");
+
+        // Assert: both audit rows remain, detached, with their rows retained.
+        let (ledger, detached, retained_rows) = Spi::connect(|client| {
+            let row = client
+                .select(
+                    "SELECT count(*),
+                            count(*) FILTER (WHERE p.source_bundle_id IS NULL),
+                            (SELECT count(*) FROM pgokf.relationship r
+                             JOIN pgokf.relationship_publication p2
+                               ON p2.publication_id = r.publication_id
+                             WHERE p2.producer = 'probe')
+                     FROM pgokf.relationship_publication p
+                     WHERE p.producer = 'probe'",
+                    Some(1),
+                    &[],
+                )
+                .expect("ledger query executes")
+                .first();
+            (
+                row.get::<i64>(1)
+                    .expect("ledger count is readable")
+                    .expect("ledger count is not NULL"),
+                row.get::<i64>(2)
+                    .expect("detached count is readable")
+                    .expect("detached count is not NULL"),
+                row.get::<i64>(3)
+                    .expect("row count is readable")
+                    .expect("row count is not NULL"),
+            )
+        });
+        assert_eq!(ledger, 2, "both publication audit rows are retained");
+        assert_eq!(detached, 2, "both detached instead of cascading");
+        assert_eq!(retained_rows, 2, "the relationship rows survive as audit");
+    }
+
+    #[pg_test]
+    fn a_lone_undirected_edge_traverses_both_endpoints_in_all_modes() {
+        // Arrange: a single undirected edge alpha--beta and nothing else.
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        let token = issue_fence(bundle_id, "producer-a", 10);
+        let (state, _) = replace_rows(
+            bundle_id,
+            "producer-a",
+            10,
+            1,
+            token,
+            r#"[{"source_concept_id": "alpha", "relation_type": "ns:peer",
+                 "direction": "undirected", "target_concept_id": "beta"}]"#,
+        );
+        assert_eq!(state, "active");
+
+        let walk = |seed: &str, direction: &str| -> Vec<String> {
+            Spi::connect(|client| {
+                client
+                    .select(
+                        "SELECT concept_id || '@' || hops || '(' || relation_type || ')'
+                         FROM pgokf.concept_relationship_neighbors($1, $2, 1, $3)
+                         ORDER BY hops, concept_id",
+                        None,
+                        &[bundle_id.into(), seed.into(), direction.into()],
+                    )
+                    .expect("typed neighbors executes")
+                    .map(|row| {
+                        row.get::<String>(1)
+                            .expect("row text is readable")
+                            .expect("row text is not NULL")
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+
+        // Assert: the lone undirected edge is traversable from BOTH endpoints
+        // in every direction mode - including outbound from the target side.
+        for direction in ["outbound", "inbound", "both"] {
+            assert_eq!(
+                walk("alpha", direction),
+                vec!["beta@1(ns:peer)"],
+                "alpha sees beta ({direction})"
+            );
+            assert_eq!(
+                walk("beta", direction),
+                vec!["alpha@1(ns:peer)"],
+                "beta sees alpha ({direction})"
+            );
+        }
+    }
+
+    #[pg_test]
+    fn aged_superseded_publications_are_pruned_at_activation() {
+        // Arrange: an active publication at generation 1.
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        let rows = r#"[{"source_concept_id": "alpha", "relation_type": "ns:r",
+                        "target_concept_id": "beta"}]"#;
+        let token10 = issue_fence(bundle_id, "producer-a", 10);
+        let (state, _) = replace_rows(bundle_id, "producer-a", 10, 1, token10, rows);
+        assert_eq!(state, "active");
+
+        // Act: a staged replacement activates at generation 2, superseding
+        // publication 10.
+        let token11 = issue_fence(bundle_id, "producer-a", 11);
+        let (state, _) = replace_rows(bundle_id, "producer-a", 11, 2, token11, rows);
+        assert_eq!(state, "staged");
+        fs::write(bundle.root.join("alpha.md"), ALPHA_EDITED).expect("edit is writable");
+        let _ = refresh_counts(bundle_id);
+        assert_eq!(generation_of(bundle_id), 2);
+        assert_eq!(publication_states(bundle_id), "superseded:1,active:1");
+
+        // Arrange: age publication 10's supersession beyond the 30-day
+        // retention window.
+        Spi::run_with_args(
+            "UPDATE pgokf.relationship_publication
+             SET updated_at = pg_catalog.now() - pg_catalog.make_interval(days => 31)
+             WHERE source_bundle_id = $1 AND publication_generation = 10",
+            &[bundle_id.into()],
+        )
+        .expect("updated_at is backdatable");
+
+        // Act: the next staged replacement activates at generation 3.
+        let token12 = issue_fence(bundle_id, "producer-a", 12);
+        let (state, _) = replace_rows(bundle_id, "producer-a", 12, 3, token12, rows);
+        assert_eq!(state, "staged");
+        fs::write(
+            bundle.root.join("gamma.md"),
+            "---\ntype: Reference\ntitle: Gamma\n---\n\n# Gamma\n",
+        )
+        .expect("gamma fixture is writable");
+        let _ = refresh_counts(bundle_id);
+        assert_eq!(generation_of(bundle_id), 3);
+
+        // Assert: the aged superseded publication was pruned (rows cascaded);
+        // the freshly superseded one is retained with its edges and its
+        // activation evidence.
+        assert_eq!(
+            publication_states(bundle_id),
+            "superseded:1,active:1",
+            "the aged superseded publication is gone, the fresh one retained"
+        );
+        let pruned = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.relationship_publication
+             WHERE source_bundle_id = $1 AND publication_generation = 10",
+            &[bundle_id.into()],
+        )
+        .expect("pruned query executes")
+        .expect("count is not NULL");
+        assert_eq!(pruned, 0, "publication 10 was hard-deleted");
+        let orphans = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgokf.relationship r
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM pgokf.relationship_publication p
+                 WHERE p.publication_id = r.publication_id)",
+        )
+        .expect("orphan query executes")
+        .expect("count is not NULL");
+        assert_eq!(orphans, 0, "the pruned publication's rows cascaded");
+        let evidence = Spi::get_one_with_args::<String>(
+            "SELECT (SELECT count(*) FROM pgokf.relationship r
+                     WHERE r.publication_id = p.publication_id) || '/' ||
+                    p.activated_catalog_generation || '/' || (p.activated_at IS NOT NULL)
+             FROM pgokf.relationship_publication p
+             WHERE p.source_bundle_id = $1 AND p.publication_generation = 11",
+            &[bundle_id.into()],
+        )
+        .expect("evidence query executes")
+        .expect("evidence is not NULL");
+        assert_eq!(
+            evidence, "1/2/true",
+            "the freshly superseded set keeps its rows and activation evidence"
+        );
     }
 }

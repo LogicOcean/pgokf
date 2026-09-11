@@ -232,6 +232,9 @@ mod tests {
             concept_count: 0,
             package_count: 0,
             concepts: Vec::new(),
+            warnings: Vec::new(),
+            excluded: Vec::new(),
+            freshness_available: false,
         }
     }
 

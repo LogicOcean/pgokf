@@ -32,10 +32,13 @@ pg_test = []
 
 [dependencies]
 arrow.workspace = true
-okf-parser = { version = "=0.2.0", path = "../okf-parser" }
-okf-sync = { version = "=0.2.0", path = "../okf-sync" }
+okf-parser = { version = "=0.3.0-dev", path = "../okf-parser" }
+okf-sync = { version = "=0.3.0-dev", path = "../okf-sync" }
 parquet.workspace = true
 pgrx.workspace = true
+# Direct dependency since the typed-relationship write API parses its jsonb
+# `rows` argument in Rust (pgrx::JsonB wraps a serde_json::Value).
+serde_json.workspace = true
 
 [dev-dependencies]
 # In-database (`#[pg_test]`) harness. Pinned to the same version as `pgrx`

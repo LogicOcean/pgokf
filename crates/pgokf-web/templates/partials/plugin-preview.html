@@ -6,6 +6,8 @@
 <div class="result-summary">
   <div class="result-facts">
     <p class="result-line"><strong>{{ p.concepts.len() }} concept{{ p.concepts.len()|pluralize }}</strong> {{ p.description }}{% if p.package_count > 0 %}, including <strong>{{ p.package_count }} skill package{{ p.package_count|pluralize }}</strong> copied whole{% endif %}.</p>
+    {% if p.stale_count > 0 %}<p class="warn-text">The catalog reports <strong>{{ p.stale_count }} concept{{ p.stale_count|pluralize }}</strong> as not fresh. They are kept and labelled (a banner or an adjacent <code>*.stale-warning.md</code>; exact bytes are never modified), and the zip carries a <code>FRESHNESS.md</code> report.</p>{% endif %}
+    {% if p.excluded_count > 0 %}<p class="muted">{{ p.excluded_count }} stale concept{{ p.excluded_count|pluralize }} excluded by the exclude policy; <code>FRESHNESS.md</code> lists them.</p>{% endif %}
     <p class="muted">For <strong>{{ p.target_label }}</strong>: the files go under <code>{{ p.root }}</code> and the harness reads <code>{{ p.index_file }}</code> first.{% if let Some(m) = p.mcp_note %} {{ m }}{% endif %}{% if p.truncated %} <span class="warn-text">The selection hit its limit; raise it under Trust and size in step 3, or narrow the rule.</span>{% endif %}</p>
   </div>
   <div class="result-cta">
@@ -19,7 +21,7 @@
     <ol class="hits compact">
       {% for c in p.concepts %}
       <li class="hit">
-        <div class="hit-head"><a class="hit-title" href="/concepts/{{ c.bundle_id }}/{{ c.concept_id|urlencode_path }}">{{ c.title.as_deref().unwrap_or(c.concept_id.as_str()) }}</a>{% if let Some(t) = c.concept_type %}<span class="pill type">{{ t }}</span>{% endif %}{% if let Some(pkg) = c.package %}<span class="pill muted" title="An Agent Skills package: SKILL.md and its resources are copied byte for byte">package · {{ pkg.resources.len() }} file{{ pkg.resources.len()|pluralize }}</span>{% endif %}{% if let Some(r) = c.resource %}<span class="pill muted">{{ r.class }} of {{ r.package_concept_id }}</span>{% endif %}<span class="pill trust-{{ c.trust_tier }}">{{ c.trust_tier }}</span></div>
+        <div class="hit-head"><a class="hit-title" href="/concepts/{{ c.bundle_id }}/{{ c.concept_id|urlencode_path }}">{{ c.title.as_deref().unwrap_or(c.concept_id.as_str()) }}</a>{% if let Some(t) = c.concept_type %}<span class="pill type">{{ t }}</span>{% endif %}{% if let Some(pkg) = c.package %}<span class="pill muted" title="An Agent Skills package: SKILL.md and its resources are copied byte for byte">package · {{ pkg.resources.len() }} file{{ pkg.resources.len()|pluralize }}</span>{% endif %}{% if let Some(r) = c.resource %}<span class="pill muted">{{ r.class }} of {{ r.package_concept_id }}</span>{% endif %}<span class="pill trust-{{ c.trust_tier }}">{{ c.trust_tier }}</span>{% if c.freshness.is_stale() %}<span class="pill warn" title="The catalog reports this concept as not fresh: {{ c.freshness.reasons.join(", ") }}">stale</span>{% endif %}</div>
         <div class="hit-meta">{{ c.bundle_name }} <span class="muted">/ {{ c.path }}</span></div>
       </li>
       {% endfor %}

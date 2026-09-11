@@ -51,6 +51,7 @@ exercised against a live PostgreSQL 18 cluster.
 | `concept_search_semantic(query_embedding, bundle_id, limit_count)` | `SETOF concept_search_result` | STABLE | invoker | `pgokf_reader` |
 | `concept_search_hybrid(query, query_embedding, bundle_id, limit_count)` | `SETOF concept_search_result` | STABLE | invoker | `pgokf_reader` |
 | `set_concept_embedding(bundle_id, concept_id, embedding)` | `void` | VOLATILE | DEFINER | `pgokf_writer` |
+| `set_concept_embedding_cas(bundle_id, concept_id, embedding, expected_file_hash, input_hash, model, contract)` | `boolean` | VOLATILE | DEFINER | `pgokf_writer` |
 | `rebuild_embedding_index()` | `boolean` | VOLATILE | DEFINER | `pgokf_admin` |
 | `concept_neighbors(concept_id, max_hops, bundle_id)` | `SETOF concept_neighbor` | STABLE | invoker | `pgokf_reader` |
 | `list_bundle_log(bundle_id, directory, max_rows)` | `SETOF bundle_log_entry` | STABLE | invoker | `pgokf_reader` |
@@ -75,18 +76,42 @@ exercised against a live PostgreSQL 18 cluster.
 | `get_skill(bundle_id, concept_id)` | `skill_result` | STABLE | DEFINER | `pgokf_reader` |
 | `get_script(bundle_id, concept_id)` | `script_result` | STABLE | DEFINER | `pgokf_reader` |
 | `get_reference(bundle_id, concept_id, include_bytes)` | `reference_result` | STABLE | DEFINER | `pgokf_reader` |
+| `register_bundle_content_with_context(name, paths, contents, options, context)` | `bundle_sync_result` | VOLATILE | DEFINER | `pgokf_writer` |
+| `capabilities()` | `jsonb` | IMMUTABLE | invoker | `pgokf_reader` |
+| `concept_search_fresh(query, bundle_id, limit_count, freshness, concept_type, tags, status, trust_tier, after_cursor)` | `SETOF concept_search_fresh_result` | STABLE | invoker | `pgokf_reader` |
+| `register_freshness_dependency(producer, source_bundle_id, selector_kind, target_bundle_id, selector_value, target_scope_kind, target_scope_key, causation_key)` | `bigint` | VOLATILE | DEFINER | `pgokf_writer` |
+| `disable_freshness_dependency(dependency_id)` | `void` | VOLATILE | DEFINER | `pgokf_writer` |
+| `remove_freshness_dependency(dependency_id)` | `void` | VOLATILE | DEFINER | `pgokf_writer` |
+| `mark_stale(bundle_id, reason_codes, producer, observed_source_generation)` | `void` | VOLATILE | DEFINER | `pgokf_writer` |
+| `mark_reconciling(bundle_id, producer)` | `void` | VOLATILE | DEFINER | `pgokf_writer` |
+| `mark_blocked(bundle_id, reason_codes, producer)` | `void` | VOLATILE | DEFINER | `pgokf_writer` |
+| `mark_fresh(bundle_id, expected_catalog_generation, expected_observed_source_generation, manifest_hash, embedding_contract, producer)` | `boolean` | VOLATILE | DEFINER | `pgokf_writer` |
+| `mark_scope_stale(bundle_id, scope_kind, scope_key, reason_codes, producer)` | `void` | VOLATILE | DEFINER | `pgokf_writer` |
+| `clear_freshness_scope(bundle_id, scope_kind, scope_key)` | `void` | VOLATILE | DEFINER | `pgokf_writer` |
+| `list_freshness_dependencies(max_rows)` | `SETOF freshness_dependency_info` | VOLATILE | DEFINER | `pgokf_admin` |
+| `repair_bundle_freshness(bundle_id, state, reason_codes)` | `void` | VOLATILE | DEFINER | `pgokf_admin` |
+| `issue_publication_fence(bundle_id, producer, target_generation, expected_catalog_generation, manifest_hash, lease_seconds)` | `publication_fence_info` | VOLATILE | DEFINER | `pgokf_writer` |
+| `release_publication_fence(bundle_id, producer, fencing_token)` | `void` | VOLATILE | DEFINER | `pgokf_writer` |
+| `claim_catalog_change_events(producer, limit, lease_seconds)` | `SETOF claimed_change_event` | VOLATILE | DEFINER | `pgokf_dispatcher` |
+| `ack_catalog_change_event(event_id, producer, acceptance_key)` | `boolean` | VOLATILE | DEFINER | `pgokf_dispatcher` |
+| `list_catalog_change_events(bundle_id, max_rows)` | `SETOF catalog_change_event_info` | VOLATILE | DEFINER | `pgokf_admin` |
+| `replace_relationships(producer, source_bundle_id, publication_generation, expected_catalog_generation, fencing_token, rows)` | `relationship_publication_info` | VOLATILE | DEFINER | `pgokf_writer` |
+| `concept_relationship_neighbors(start_bundle_id, start_concept_id, max_hops, direction, relation_types, max_results)` | `SETOF relationship_neighbor` | STABLE | invoker | `pgokf_reader` |
 
 `register_bundle`, `concept_search`, `search_facets`, `find_similar`,
 `concept_search_semantic`, `concept_search_hybrid`, `concept_neighbors`,
+`concept_relationship_neighbors`,
 `reset_config`, `list_sync_log`, `list_access_log`, `duplicate_concepts`,
 `purge_retired`, and `stale_concepts` accept `NULL`-defaulting (or
 default-valued) arguments and are therefore **not** declared `STRICT`; every
 other function - including `list_bundles`, `bundle_info`, `catalog_stats`,
 `health`, `search_index_status`, `retire_bundle`, `unretire_bundle`,
-`list_sync_changes`, `set_concept_embedding`, `rebuild_embedding_index`,
+`list_sync_changes`, `set_concept_embedding`, `set_concept_embedding_cas`,
+`rebuild_embedding_index`,
 `schedule_refresh`, and `unschedule_refresh` - is `STRICT`.
 `concept_search`, `search_facets`, `find_similar`, `concept_search_semantic`,
-`concept_search_hybrid`, `concept_neighbors`, `list_bundle_log`, `catalog_stats`,
+`concept_search_hybrid`, `concept_neighbors`, `concept_relationship_neighbors`,
+`list_bundle_log`, `catalog_stats`,
 `duplicate_concepts`, `stale_concepts`, `concept_history`, and `concept_as_of`
 are also `PARALLEL SAFE`.
 `list_bundle_log` accepts a `NULL`-defaulting `directory`, so it is **not**
@@ -500,8 +525,18 @@ BM25 backend, `pgokf` takes **no static dependency** on it: `CREATE EXTENSION
 pgokf` succeeds without pgvector, embeddings are stored as the builtin `real[]`
 in `pgokf.concept_embedding`, and the `vector` type is used only at query and
 index time. `pgokf` never computes embeddings - a companion embedder streams
-caller-computed vectors in via `set_concept_embedding` (see
+caller-computed vectors in via `set_concept_embedding_cas` (see
 [search-guide.md](search-guide.md)).
+
+Only **eligible** embeddings rank: a row whose `source_file_hash` equals the
+concept's current `file_hash`, whose model/dimension/contract match the durable
+`embedding_model` / `embedding_dim` / `embedding_contract` policy, and whose
+concept is effectively fresh (bundle freshness `fresh`, no covering
+concept/path scope override). A sync that re-stages a concept deletes its
+embedding row in the same transaction, and changing an embedding contract key
+marks every embedding-holding bundle stale before new vectors can be queued.
+Ineligible rows may physically remain in the table and the HNSW index; they are
+never returned.
 
 ### `pgokf.set_concept_embedding(bundle_id bigint, concept_id text, embedding real[]) → void`
 
@@ -510,9 +545,31 @@ Store or replace one concept's embedding. `STRICT`, `SECURITY DEFINER`,
 `length(embedding)` equals the durable `embedding_dim` config key (`22023`
 otherwise), then upserts into `pgokf.concept_embedding`.
 
+This is the 0.2.0 compatibility signature: it carries no provenance, so the row
+it writes (or overwrites) has NULL `model` / `source_file_hash` / `input_hash` /
+`contract` and is **never eligible for semantic ranking** - the embedding
+watcher re-embeds it through the compare-and-set setter below.
+
+### `pgokf.set_concept_embedding_cas(bundle_id bigint, concept_id text, embedding real[], expected_file_hash text, input_hash text, model text, contract text) → boolean`
+
+Store or replace one concept's embedding **with full provenance**,
+compare-and-set against the concept's current `file_hash`. `STRICT`,
+`SECURITY DEFINER`, **requires `pgokf_writer`**. All four provenance arguments
+must be non-empty (`22023` otherwise, as for a wrong length or an unknown
+concept): `expected_file_hash` is the concept's `file_hash` the caller read when
+it built the embedding input, `input_hash` is the caller-computed hash of the
+exact bounded input text it embedded, `model` the embedding model, and
+`contract` the render-contract identity (input construction and truncation
+version, e.g. `pgokf-embed/v1/max-chars:8000`). The write commits only when the
+concept's current `file_hash` still equals `expected_file_hash` under a row
+lock; a mismatch returns `false` having written nothing - a **retryable**
+rejection (re-read and re-embed), never an error.
+
 ```sql
-SELECT pgokf.set_concept_embedding(1, 'runbooks/database-failover',
-                                   ARRAY[0.0123, -0.0456, ...]::real[]);
+SELECT pgokf.set_concept_embedding_cas(1, 'runbooks/database-failover',
+                                       ARRAY[0.0123, -0.0456, ...]::real[],
+                                       '<file_hash at read time>', '<input hash>',
+                                       'my-model', 'my-embedder/v1');
 ```
 
 ### `pgokf.concept_search_semantic(query_embedding real[], bundle_id bigint DEFAULT NULL, limit_count int DEFAULT 10) → SETOF pgokf.concept_search_result`
@@ -525,8 +582,10 @@ dimensions.
 
 **Requires pgvector.** Because semantic search has no lexical equivalent, when
 pgvector is not installed this raises `22023` naming the missing dependency
-(`CREATE EXTENSION vector`) rather than silently returning nothing. Only enabled
-bundles are searched.
+(`CREATE EXTENSION vector`) rather than silently returning nothing. Only active
+bundles are searched, and only **eligible** embeddings rank (see the
+eligibility rule in the section introduction); a stale or legacy vector is
+never returned.
 
 ```sql
 SELECT concept_id, round(rank::numeric, 4) AS cosine_similarity
@@ -537,11 +596,17 @@ FROM pgokf.concept_search_semantic(ARRAY[0.0123, -0.0456, ...]::real[]);
 
 Fuse the **lexical** result of `query` (through the configured `search_backend`)
 with the **semantic** result of `query_embedding` using **Reciprocal Rank
-Fusion** (RRF, k = 60), entirely in SQL. `STABLE PARALLEL SAFE`, invoker rights,
+Fusion** (RRF, k = 60), entirely in SQL. `STABLE PARALLEL RESTRICTED` (the
+lexical half may execute the BM25 provider's parallel-unsafe scoring), invoker
+rights,
 **requires `pgokf_reader`**. The `rank` column is the fused RRF score; a concept
-strong in *both* lists outranks one strong in only one. When pgvector is not
-installed, hybrid **degrades to lexical-only** with a `WARNING` (RRF needs no
-model, so this fallback is sensible - unlike pure semantic search).
+strong in *both* lists outranks one strong in only one. The semantic component
+ranks eligible embeddings only (the predicate in the section introduction), so
+an ineligible vector never leaks into the fused result; the lexical component
+may still return a stale concept, labeled by `concept_search_fresh`. When
+pgvector is not installed, hybrid **degrades to lexical-only** with a `WARNING`
+(RRF needs no model, so this fallback is sensible - unlike pure semantic
+search).
 
 ```sql
 SELECT concept_id, round(rank::numeric, 6) AS rrf
@@ -780,6 +845,200 @@ FROM pgokf.concept_as_of(1, 'runbooks/database-failover', TIMESTAMPTZ '2026-08-2
 -- ---------+------------------------+---------------------
 --        2 | Database Failover (v2) | Revised failover ...
 ```
+
+---
+
+## Producer capabilities: generations, freshness, and change events
+
+Since 0.3.0 the catalog exposes the generic producer contract surface. Every
+catalog mutation - a register/refresh/content sync and every bundle state
+mutation - increments the bundle's monotonic `pgokf.bundles.catalog_generation`
+and commits exactly one durable `pgokf.catalog_change_event` row **in the same
+transaction**, then evaluates the enabled `pgokf.freshness_dependency`
+registrations whose source is the changed bundle and marks matched targets
+stale - all atomically, so no committed change can exist without its event and
+its freshness consequences.
+
+**Producer identity.** Every `producer` argument and column on this surface is
+a **caller-supplied opaque label, not authorization**. Authorization is always
+the `session_user`'s membership in the role ladder (`pgokf_writer` /
+`pgokf_admin`, or `pgokf_dispatcher` for outbox delivery), checked exactly as
+in [security.md](security.md), plus the usual tenant confinement. A future
+release may bind labels to an authenticated principal registry; the wire shape
+already carries `created_by`/`producer` pairs so that binding can be added
+without breaking changes.
+
+**Capability declaration.** `pgokf.capabilities() → jsonb` (IMMUTABLE, invoker
+rights, `pgokf_reader`) returns the capability names and interface versions
+this release implements:
+
+```sql
+SELECT jsonb_pretty(pgokf.capabilities());
+-- {
+--   "catalog_generation": 1,   "publication_fence": 1,
+--   "freshness_dependency": 1, "effective_freshness": 1,
+--   "catalog_change_event": 1, "search_freshness": 1,
+--   "embedding_freshness": 1,  "typed_relationships": 1
+-- }
+```
+
+**Provenance context.** A producer sets `SET [LOCAL] pgokf.sync_context =
+'{"origin": ..., "causation_key": ..., "reconciliation_key": ...,
+"producer": ..., "manifest_hash": ..., "observed_source_generation": ...}'`
+before calling `register_bundle` / `refresh_bundle` /
+`register_bundle_content`; the committed event carries those opaque values
+verbatim. A `causation_key` equal to a dependency's own key suppresses
+re-triggering that dependency, so a producer-driven refresh cannot recurse.
+`pgokf.register_bundle_content_with_context(name, paths, contents, options,
+context jsonb)` takes the same object as an explicit argument, additionally
+accepting an `operation` override (`refresh_bundle` / `put_document` /
+`delete_document` / `concept_change`) so a companion's one-document edit keeps
+its precise operation.
+
+**Freshness.** `pgokf.bundle_freshness` (one row per bundle) and
+`pgokf.concept_freshness` (sparse `concept`/`path`/`group` scope overrides)
+hold the generic state (`fresh` / `stale` / `reconciling` / `blocked` /
+`retired`), reason codes, and the producer's opaque revisions. Readers use the
+tenant-scoped `pgokf.effective_freshness` view; the raw tables are granted to
+no role. Bundles registered before 0.3.0 are backfilled `stale` (reason
+`legacy_pre_0.3.0`) and stay stale until reconciled; bundles registered
+afterward are born `fresh`. Writers transition state with `mark_stale` /
+`mark_scope_stale` / `mark_reconciling` / `mark_blocked`, and complete a
+reconciliation with the compare-and-set `mark_fresh`, which refuses (returns
+`false`) when the observed source revision or the catalog generation has moved
+meanwhile - a superseded attempt can never clear staleness. `mark_fresh`
+additionally refuses while the bundle's dependency invalidation epoch exceeds
+the epoch the attempt claimed with `mark_reconciling`: every dependency-driven
+invalidation (direct, transitive, unprovable-scope, or source removal) bumps
+the epoch, so a completion prepared before the newest invalidation landed must
+be re-claimed before it can complete. The `relationship_coverage_missing`
+evidence lives on its own column, which no state transition (including
+`mark_reconciling`) erases; `mark_fresh` refuses until coverage is genuinely
+re-established or an admin repairs the row. The completion's check runs under
+the bundle advisory lock every register/refresh/lifecycle mutation holds, so
+it never certifies a generation or epoch older than a committed mutation it
+waited behind. Admins inspect the
+registry with `list_freshness_dependencies` and repair with
+`repair_bundle_freshness`.
+
+**Dependencies.** `register_freshness_dependency(producer, source_bundle_id,
+selector_kind, target_bundle_id, selector_value, target_scope_kind,
+target_scope_key, causation_key) → bigint` maps a source selector onto a
+target bundle/scope. The selector grammar is exact and case-sensitive (no glob
+or regex): `selector_kind` is `bundle` (empty `selector_value`), `concept`
+(exact concept id), `path` (exact bundle-relative path), or `path_prefix`.
+Evaluation is idempotent by source catalog generation (each dependency tracks
+its watermark, starting from the source's generation at registration - read
+under the source bundle's advisory lock, so registration serializes against an
+in-flight source change). Invalidation is transitive: a bundle marked `stale`
+at bundle scope feeds the same-transaction walk of the bundle-scope
+dependencies sourced at it, so a change to A stales B and C along A → B → C
+(the walk is cycle-safe - cycles and self-loops terminate - and bounded).
+When a change's scope cannot be proved against a narrowed selector - a
+lifecycle event carries no concept detail, or a change summary exceeded its
+bound - the *source* bundle itself is marked stale (`change_scope_unknown`)
+and the dependency's *registered* dependent is invalidated directly at its
+registered target scope; no unregistered target is guessed. Unregistering or
+purging a source invalidates its registered dependents
+(`dependency_source_changed`) in the same transaction, before the dependency
+rows cascade away with the source.
+
+**Outbox delivery.** A dispatcher claims with
+`pgokf.claim_catalog_change_events(producer, limit, lease_seconds) → SETOF
+pgokf.claimed_change_event` (`FOR UPDATE SKIP LOCKED`, oldest first, attempt
+counter) and acknowledges with `pgokf.ack_catalog_change_event(event_id,
+producer, acceptance_key) → boolean` (idempotent, bound to the claiming
+producer label). Both require the dedicated **`pgokf_dispatcher`** role, which
+is deliberately outside the reader < writer < admin ladder - an event consumer
+holds no search or ingestion rights. Unacknowledged events stay retryable and
+are never pruned; acknowledged events age out under the
+`change_event_retention_days` policy (default 30). Admins inspect with
+`list_catalog_change_events`; no role may `SELECT` the raw table. The existing
+`notify_channel` `LISTEN`/`NOTIFY` announcement remains as a non-durable
+wake-up hint whose payload points at the event id.
+
+**Publication fences.** `issue_publication_fence(bundle_id, producer,
+target_generation, expected_catalog_generation, manifest_hash, lease_seconds)
+→ pgokf.publication_fence_info` compare-and-sets the producer's fence slot
+under the bundle advisory lock: the expected catalog generation must be
+current and the target generation must advance (`22023` otherwise), and each
+issuance hands out the next `fencing_token`.
+`release_publication_fence(bundle_id, producer, fencing_token)` releases only
+the live token.
+
+**Typed relationships.** The catalog owns a producer-neutral, cross-bundle
+typed-relationship projection (separate from the same-bundle Markdown link
+graph: `concept_neighbors` is unchanged). A producer writes a source bundle's
+complete relationship set with `replace_relationships(producer,
+source_bundle_id, publication_generation, expected_catalog_generation,
+fencing_token, rows jsonb) → pgokf.relationship_publication_info`
+(`SECURITY DEFINER`, `pgokf_writer`, tenant-confined), bound to its live
+publication fence: the token must be the slot's live, unexpired one and
+`publication_generation` must equal the fence's target (`22023` otherwise, so
+a superseded or expired attempt never publishes). Each row names a
+`source_concept_id`, an arbitrary producer-defined namespaced `relation_type`
+(`<namespace>:<name>`; the catalog never enumerates or interprets the
+vocabulary), an optional `direction` (`directed` default, or `undirected`),
+and an optional target: a resolved `target_bundle_id` + `target_concept_id`
+(a concept id alone targets the source bundle), an opaque `external_target`,
+or neither (an unresolved row, returned as metadata but never materialized as
+a traversal edge). Endpoint validation never leaks: an absent, inactive, or
+cross-tenant target bundle produces the same `unresolved` row with the
+endpoint references dropped. Rows are canonicalized (sorted) and hashed, so an
+identical retried call is a no-op while the same publication key with a
+different set is a `23505` conflict; an empty `rows` array removes the prior
+set on activation.
+
+The **generation binding** decides visibility. Against the bundle's current
+catalog generation `G`: `expected_catalog_generation = G` activates the set
+immediately (superseding the producer's prior active publication);
+`G + 1` stages it - invisible until a refresh accepts exactly that
+generation, at which point the sync transaction itself activates it and
+supersedes the prior generation's publications, so no query ever combines new
+concept content with old-generation relationships; any other value is
+`22023`. When competing staged attempts of one `(tenant, producer, bundle)`
+scope expect the accepted generation (the producer staged, re-fenced, and
+staged again), only the newest `publication_generation` activates and the
+rest are superseded, so an empty winning set really replaces the prior one.
+Activation validates endpoints against the accepted concept set: a
+still-absent declared target stays `unresolved`, and a row whose **source**
+concept does not exist in the accepted set is quarantined (deleted) - a
+nonexistent source never appears in `current_relationships` or in any
+traversal path. A refresh that supersedes a bundle's relationship coverage
+without activating a matching staged replacement keeps the bundle `stale`
+(reason `relationship_coverage_missing`), and the compare-and-set `mark_fresh`
+refuses until the producer publishes the matching replacement (which clears
+the reason). Readers see only the active generation through the tenant-scoped
+`pgokf.current_relationships` view (the raw tables are granted to no role);
+retiring or disabling a bundle removes its current relationship visibility
+without touching the retained publication audit rows. Superseded retention is
+bounded: every activation (immediate or refresh-time) hard-deletes the
+bundle's superseded publications whose supersession is more than 30 days old
+(their rows cascade), while the immediately previous superseded set is always
+retained with its rows and activation evidence.
+`concept_relationship_neighbors(start_bundle_id, start_concept_id, max_hops,
+direction, relation_types, max_results) → SETOF pgokf.relationship_neighbor`
+walks the current set cycle-safely (`outbound` / `inbound` / `both`, optional
+type filter, hop and result ceilings), returning each node's effective
+freshness and embedding provenance exactly as `concept_search_fresh` does. An
+`undirected` row is traversable both ways under every direction mode -
+`outbound` follows it in reverse from the target side as well.
+
+**Search surfacing.** `pgokf.concept_search_fresh(query, bundle_id,
+limit_count, freshness, ...) → SETOF pgokf.concept_search_fresh_result` is the
+additive freshness-aware variant of `concept_search` (the existing signature
+and result type are unchanged): `freshness` is `any` (default) / `fresh` /
+`stale`, applied before pagination, and every hit is annotated with its
+effective freshness (state, reasons, scope, opaque revisions, catalog
+generation) with concept > path > bundle override precedence. Lexical results
+may include stale concepts, always labeled. Every hit also carries its
+embedding provenance: `embedding_state` (`missing` / `current` / `stale` under
+the semantic eligibility predicate), `embedding_model`, `embedding_dim`,
+`embedding_input_hash`, and `embedded_at`. Semantic ranking itself
+(`concept_search_semantic`, and the semantic component of
+`concept_search_hybrid`) **excludes** ineligible embeddings rather than
+labeling them - a stale or legacy vector never ranks. This variant ranks with
+the native FTS pipeline (BM25 composition is deferred).
 
 ---
 

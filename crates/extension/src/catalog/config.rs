@@ -28,8 +28,15 @@
 //! `search_backend`, `bm25_provider` (`auto`/`pg_textsearch`/`pg_search`),
 //! a boolean for `require_tenant` (deny an unscoped session instead of the
 //! see-all default),
-//! `notify_channel` (a `LISTEN`/`NOTIFY` channel, or empty to disable), and
-//! `okf_version_policy` (`warn`/`reject`). Every value is
+//! `notify_channel` (a `LISTEN`/`NOTIFY` channel, or empty to disable),
+//! `okf_version_policy` (`warn`/`reject`), and `change_event_retention_days`
+//! (retention of acknowledged outbox events; unacknowledged events are never
+//! pruned). The embedding contract keys - `embedding_dim` (an integer),
+//! `embedding_model` and `embedding_contract` (optional pins, empty =
+//! unpinned) - additionally drive stale-embedding invalidation: changing any
+//! of them marks every bundle holding embedding rows stale
+//! (`embedding_contract_changed`) in the same transaction, before new vectors
+//! are queued. Every value is
 //! validated and coerced per key ([`coerce`]); an unknown key or a value of the
 //! wrong shape or domain is rejected with SQLSTATE `22023`. `pgokf.get_config()`
 //! is a reader-level projection returning the effective policy as `jsonb`.
@@ -78,6 +85,12 @@ enum ConfigKey {
     /// `set_concept_embedding` length check and the `rebuild_embedding_index`
     /// HNSW index typmod.
     EmbeddingDim,
+    /// Optional pin on the embedding model a stored vector must carry to rank
+    /// semantically; empty (the default) accepts any non-NULL model.
+    EmbeddingModel,
+    /// Optional pin on the render-contract identity a stored vector must carry
+    /// to rank semantically; empty (the default) accepts any non-NULL contract.
+    EmbeddingContract,
     /// Whether sync records an append-only SCD-2 version trail of each concept
     /// into `pgokf.concept_history` (opt-in; off by default for zero storage /
     /// behavior change).
@@ -89,6 +102,9 @@ enum ConfigKey {
     /// Whether a session must set `pgokf.tenant` to see or write anything
     /// (`true`), or an unset session is cross-tenant (`false`, the default).
     RequireTenant,
+    /// Retention window, in days, for acknowledged `pgokf.catalog_change_event`
+    /// rows; unacknowledged events are never pruned.
+    ChangeEventRetentionDays,
 }
 
 impl ConfigKey {
@@ -105,10 +121,13 @@ impl ConfigKey {
             Self::NotifyChannel => "notify_channel",
             Self::OkfVersionPolicy => "okf_version_policy",
             Self::EmbeddingDim => "embedding_dim",
+            Self::EmbeddingModel => "embedding_model",
+            Self::EmbeddingContract => "embedding_contract",
             Self::TrackHistory => "track_history",
             Self::HistoryRetentionDays => "history_retention_days",
             Self::Bm25Provider => "bm25_provider",
             Self::RequireTenant => "require_tenant",
+            Self::ChangeEventRetentionDays => "change_event_retention_days",
         }
     }
 
@@ -126,10 +145,13 @@ impl ConfigKey {
             "notify_channel" => Ok(Self::NotifyChannel),
             "okf_version_policy" => Ok(Self::OkfVersionPolicy),
             "embedding_dim" => Ok(Self::EmbeddingDim),
+            "embedding_model" => Ok(Self::EmbeddingModel),
+            "embedding_contract" => Ok(Self::EmbeddingContract),
             "track_history" => Ok(Self::TrackHistory),
             "history_retention_days" => Ok(Self::HistoryRetentionDays),
             "bm25_provider" => Ok(Self::Bm25Provider),
             "require_tenant" => Ok(Self::RequireTenant),
+            "change_event_retention_days" => Ok(Self::ChangeEventRetentionDays),
             other => Err(CatalogError::invalid_parameter(
                 format!("unknown configuration key: {other}"),
                 Path::new(""),
@@ -151,10 +173,13 @@ enum ConfigValue {
     NotifyChannel(String),
     OkfVersionPolicy(String),
     EmbeddingDim(i32),
+    EmbeddingModel(String),
+    EmbeddingContract(String),
     TrackHistory(bool),
     HistoryRetentionDays(i32),
     Bm25Provider(String),
     RequireTenant(bool),
+    ChangeEventRetentionDays(i32),
 }
 
 /// The two accepted values of the `okf_version_policy` key.
@@ -361,6 +386,42 @@ fn validate_embedding_dim(dim: i64) -> Result<i32, CatalogError> {
     })
 }
 
+/// Longest accepted `embedding_model` / `embedding_contract` label. These are
+/// opaque identity strings compared for equality only; a generous bound keeps
+/// the config row narrow without constraining real model or contract names.
+const MAX_EMBEDDING_LABEL_LEN: usize = 200;
+
+/// Validate an `embedding_model` / `embedding_contract` pin: empty (the
+/// unpinned default) or a non-blank label of at most
+/// [`MAX_EMBEDDING_LABEL_LEN`] bytes with no NUL.
+fn validate_embedding_label(label: &str, key_name: &str) -> Result<(), CatalogError> {
+    if label.is_empty() {
+        return Ok(());
+    }
+    if label.trim().is_empty() {
+        return Err(CatalogError::invalid_parameter(
+            format!("{key_name} must not be blank (use the empty string to leave it unpinned)"),
+            Path::new(""),
+        ));
+    }
+    if label.len() > MAX_EMBEDDING_LABEL_LEN {
+        return Err(CatalogError::invalid_parameter(
+            format!(
+                "{key_name} must be at most {MAX_EMBEDDING_LABEL_LEN} bytes, got {}",
+                label.len()
+            ),
+            Path::new(""),
+        ));
+    }
+    if label.contains('\0') {
+        return Err(CatalogError::invalid_parameter(
+            format!("{key_name} must not contain NUL bytes"),
+            Path::new(""),
+        ));
+    }
+    Ok(())
+}
+
 /// Coerce the `embedding_dim` integer key.
 fn coerce_embedding_dim(value: pgrx::JsonB, key: ConfigKey) -> Result<ConfigValue, CatalogError> {
     let json = value.0;
@@ -445,6 +506,19 @@ fn coerce_history_retention_days(
     )?))
 }
 
+/// Coerce the `change_event_retention_days` integer key.
+fn coerce_change_event_retention_days(
+    value: pgrx::JsonB,
+    key: ConfigKey,
+) -> Result<ConfigValue, CatalogError> {
+    let json = value.0;
+    let raw = json.as_i64().ok_or_else(|| type_error(key, "an integer"))?;
+    Ok(ConfigValue::ChangeEventRetentionDays(validate_nonneg_days(
+        raw,
+        "change_event_retention_days",
+    )?))
+}
+
 /// Coerce and validate a `jsonb` value for `key` into a typed [`ConfigValue`].
 ///
 /// A thin per-shape dispatch: each key owns its coercion by naming its own
@@ -493,6 +567,18 @@ fn coerce(key: ConfigKey, value: pgrx::JsonB) -> Result<ConfigValue, CatalogErro
             ConfigValue::OkfVersionPolicy,
         ),
         ConfigKey::EmbeddingDim => coerce_embedding_dim(value, key),
+        ConfigKey::EmbeddingModel => coerce_string(
+            value,
+            key,
+            |text| validate_embedding_label(text, "embedding_model"),
+            ConfigValue::EmbeddingModel,
+        ),
+        ConfigKey::EmbeddingContract => coerce_string(
+            value,
+            key,
+            |text| validate_embedding_label(text, "embedding_contract"),
+            ConfigValue::EmbeddingContract,
+        ),
         ConfigKey::TrackHistory => coerce_bool(value, key, ConfigValue::TrackHistory),
         ConfigKey::HistoryRetentionDays => coerce_history_retention_days(value, key),
         ConfigKey::Bm25Provider => coerce_string(
@@ -502,6 +588,7 @@ fn coerce(key: ConfigKey, value: pgrx::JsonB) -> Result<ConfigValue, CatalogErro
             ConfigValue::Bm25Provider,
         ),
         ConfigKey::RequireTenant => coerce_bool(value, key, ConfigValue::RequireTenant),
+        ConfigKey::ChangeEventRetentionDays => coerce_change_event_retention_days(value, key),
     }
 }
 
@@ -593,6 +680,14 @@ fn persist(value: &ConfigValue) -> Result<(), CatalogError> {
             "UPDATE pgokf_private.config SET embedding_dim = $1 WHERE singleton",
             &[(*dim).into()],
         ),
+        ConfigValue::EmbeddingModel(model) => Spi::run_with_args(
+            "UPDATE pgokf_private.config SET embedding_model = $1 WHERE singleton",
+            &[model.as_str().into()],
+        ),
+        ConfigValue::EmbeddingContract(contract) => Spi::run_with_args(
+            "UPDATE pgokf_private.config SET embedding_contract = $1 WHERE singleton",
+            &[contract.as_str().into()],
+        ),
         ConfigValue::TrackHistory(flag) => Spi::run_with_args(
             "UPDATE pgokf_private.config SET track_history = $1 WHERE singleton",
             &[(*flag).into()],
@@ -608,6 +703,10 @@ fn persist(value: &ConfigValue) -> Result<(), CatalogError> {
         ConfigValue::RequireTenant(flag) => Spi::run_with_args(
             "UPDATE pgokf_private.config SET require_tenant = $1 WHERE singleton",
             &[(*flag).into()],
+        ),
+        ConfigValue::ChangeEventRetentionDays(days) => Spi::run_with_args(
+            "UPDATE pgokf_private.config SET change_event_retention_days = $1 WHERE singleton",
+            &[(*days).into()],
         ),
     }
     .map_err(|error| spi_error("failed to persist configuration", &error))
@@ -646,6 +745,12 @@ fn reset_key(key: ConfigKey) -> Result<(), CatalogError> {
         ConfigKey::EmbeddingDim => {
             "UPDATE pgokf_private.config SET embedding_dim = DEFAULT WHERE singleton"
         }
+        ConfigKey::EmbeddingModel => {
+            "UPDATE pgokf_private.config SET embedding_model = DEFAULT WHERE singleton"
+        }
+        ConfigKey::EmbeddingContract => {
+            "UPDATE pgokf_private.config SET embedding_contract = DEFAULT WHERE singleton"
+        }
         ConfigKey::TrackHistory => {
             "UPDATE pgokf_private.config SET track_history = DEFAULT WHERE singleton"
         }
@@ -657,6 +762,9 @@ fn reset_key(key: ConfigKey) -> Result<(), CatalogError> {
         }
         ConfigKey::RequireTenant => {
             "UPDATE pgokf_private.config SET require_tenant = DEFAULT WHERE singleton"
+        }
+        ConfigKey::ChangeEventRetentionDays => {
+            "UPDATE pgokf_private.config SET change_event_retention_days = DEFAULT WHERE singleton"
         }
     };
     Spi::run(statement).map_err(|error| spi_error("failed to reset configuration key", &error))
@@ -676,13 +784,115 @@ fn reset_all() -> Result<(), CatalogError> {
              notify_channel = DEFAULT, \
              okf_version_policy = DEFAULT, \
              embedding_dim = DEFAULT, \
+             embedding_model = DEFAULT, \
+             embedding_contract = DEFAULT, \
              track_history = DEFAULT, \
              history_retention_days = DEFAULT, \
              bm25_provider = DEFAULT, \
-             require_tenant = DEFAULT \
+             require_tenant = DEFAULT, \
+             change_event_retention_days = DEFAULT \
          WHERE singleton",
     )
     .map_err(|error| spi_error("failed to reset configuration", &error))
+}
+
+/// The embedding contract policy: the three durable keys whose change revokes
+/// every stored vector's currency (`embedding_dim`, `embedding_model`,
+/// `embedding_contract`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EmbeddingContractPolicy {
+    dim: i32,
+    model: String,
+    contract: String,
+}
+
+/// Read the current embedding contract policy from the singleton config row.
+fn embedding_contract_policy() -> Result<EmbeddingContractPolicy, CatalogError> {
+    Spi::connect(|client| {
+        let table = client
+            .select(
+                "SELECT embedding_dim, embedding_model, embedding_contract
+                 FROM pgokf_private.config WHERE singleton",
+                Some(1),
+                &[],
+            )
+            .map_err(|error| spi_error("failed to read the embedding contract policy", &error))?;
+        let Some(row) = table.into_iter().next() else {
+            return Err(CatalogError::internal(
+                "configuration row is missing",
+                Path::new(""),
+            ));
+        };
+        Ok(EmbeddingContractPolicy {
+            dim: spi_read::required_column(
+                &row,
+                1,
+                "failed to read embedding_dim",
+                "embedding_dim is NULL",
+            )?,
+            model: spi_read::required_column(
+                &row,
+                2,
+                "failed to read embedding_model",
+                "embedding_model is NULL",
+            )?,
+            contract: spi_read::required_column(
+                &row,
+                3,
+                "failed to read embedding_contract",
+                "embedding_contract is NULL",
+            )?,
+        })
+    })
+}
+
+/// Reason code recorded when an embedding contract policy change revokes
+/// semantic currency.
+const REASON_EMBEDDING_CONTRACT_CHANGED: &str = "embedding_contract_changed";
+
+/// Mark every bundle that holds embedding rows stale when the embedding
+/// contract policy changes.
+///
+/// A model/dimension/render-contract change is a catalog event for embedding
+/// purposes: the affected scope - every bundle with stored vectors - is marked
+/// stale with reason `embedding_contract_changed` **in the configuration
+/// change's own transaction, before any new vector can be queued**. The
+/// physical rows are kept (audit/rollback): they are already ineligible under
+/// the new policy (semantic ranking requires model/dimension/contract to match
+/// it), and the embedding watcher's missing-or-stale poll re-embeds them
+/// against the new contract. `reconciling`/`blocked`/`stale` bundles are
+/// already effectively stale; `retired` bundles stay retired.
+///
+/// No `pgokf.catalog_change_event` row is emitted: that outbox is
+/// generation-bound per bundle mutation, and a cluster-wide policy change has
+/// no single catalog generation to carry. The freshness rows' reason code and
+/// `updated_at` are the durable record.
+fn invalidate_embeddings_for_contract_change() -> Result<(), CatalogError> {
+    Spi::run_with_args(
+        "UPDATE pgokf.bundle_freshness f
+         SET state = 'stale',
+             reason_codes = ARRAY[$1]::text[],
+             stale_since = pg_catalog.now(),
+             updated_at = pg_catalog.now()
+         WHERE f.state = 'fresh'
+           AND EXISTS (SELECT 1 FROM pgokf.concept_embedding e
+                       WHERE e.bundle_id = f.bundle_id)",
+        &[REASON_EMBEDDING_CONTRACT_CHANGED.into()],
+    )
+    .map_err(|error| spi_error("failed to mark embedding scope stale", &error))
+}
+
+/// Run `mutation` (a config write), and when it changed the embedding contract
+/// policy, mark the affected embedding scope stale in the same transaction.
+fn with_embedding_contract_invalidation(
+    mutation: impl FnOnce() -> Result<(), CatalogError>,
+) -> Result<(), CatalogError> {
+    let before = embedding_contract_policy()?;
+    mutation()?;
+    if embedding_contract_policy()? != before {
+        invalidate_embeddings_for_contract_change()?;
+    }
+    Ok(())
 }
 
 fn set_config_impl(key: &str, value: pgrx::JsonB) -> Result<(), CatalogError> {
@@ -692,14 +902,17 @@ fn set_config_impl(key: &str, value: pgrx::JsonB) -> Result<(), CatalogError> {
     if let ConfigValue::DefaultTextSearchConfig(name) = &coerced {
         ensure_text_search_config_exists(name)?;
     }
-    persist(&coerced)
+    with_embedding_contract_invalidation(|| persist(&coerced))
 }
 
 fn reset_config_impl(key: Option<String>) -> Result<(), CatalogError> {
     security::authorize_current_user(security::Operation::Register, Path::new(""))?;
     match key {
-        None => reset_all(),
-        Some(key) => reset_key(ConfigKey::parse(&key)?),
+        None => with_embedding_contract_invalidation(reset_all),
+        Some(key) => {
+            let parsed = ConfigKey::parse(&key)?;
+            with_embedding_contract_invalidation(|| reset_key(parsed))
+        }
     }
 }
 
@@ -717,10 +930,13 @@ fn get_config_impl() -> Result<pgrx::JsonB, CatalogError> {
              'notify_channel', pg_catalog.to_jsonb(notify_channel),
              'okf_version_policy', pg_catalog.to_jsonb(okf_version_policy),
              'embedding_dim', pg_catalog.to_jsonb(embedding_dim),
+             'embedding_model', pg_catalog.to_jsonb(embedding_model),
+             'embedding_contract', pg_catalog.to_jsonb(embedding_contract),
              'track_history', pg_catalog.to_jsonb(track_history),
              'history_retention_days', pg_catalog.to_jsonb(history_retention_days),
              'bm25_provider', pg_catalog.to_jsonb(bm25_provider),
-             'require_tenant', pg_catalog.to_jsonb(require_tenant))
+             'require_tenant', pg_catalog.to_jsonb(require_tenant),
+             'change_event_retention_days', pg_catalog.to_jsonb(change_event_retention_days))
          FROM pgokf_private.config
          WHERE singleton",
     )
@@ -800,6 +1016,25 @@ pub fn embedding_dim() -> Result<i32, CatalogError> {
     Spi::get_one::<i32>("SELECT embedding_dim FROM pgokf_private.config WHERE singleton")
         .map_err(|error| spi_error("failed to read embedding_dim", &error))?
         .ok_or_else(|| CatalogError::internal("embedding_dim is missing", Path::new("")))
+}
+
+/// The durable acknowledged-event retention window, in days.
+///
+/// Read from the singleton config row by the outbox prune that runs at the
+/// tail of a successful sync (the `SECURITY DEFINER` sync path holds privileges
+/// on the admin-only config table). `0` keeps acknowledged events indefinitely.
+/// Unacknowledged events are never pruned regardless of this value.
+///
+/// # Errors
+///
+/// Returns a [`CatalogError`] when the configuration row cannot be read or is
+/// missing.
+pub fn change_event_retention_days() -> Result<i32, CatalogError> {
+    Spi::get_one::<i32>(
+        "SELECT change_event_retention_days FROM pgokf_private.config WHERE singleton",
+    )
+    .map_err(|error| spi_error("failed to read change_event_retention_days", &error))?
+    .ok_or_else(|| CatalogError::internal("change_event_retention_days is missing", Path::new("")))
 }
 
 /// The durable, sync-time defaults consumed by the register/refresh engine.
@@ -951,13 +1186,21 @@ CREATE TABLE pgokf_private.config (
     -- require_tenant is appended last for the same reason (see
     -- sql/pgokf--0.1.15--0.1.16.sql).
     require_tenant             boolean NOT NULL DEFAULT false,
+    -- change_event_retention_days is appended last relative to earlier columns
+    -- for the same reason (see sql/pgokf--0.2.0--0.3.0-dev.sql).
+    change_event_retention_days integer NOT NULL DEFAULT 30,
+    -- embedding_model / embedding_contract are appended last for the same
+    -- reason (see sql/pgokf--0.2.0--0.3.0-dev.sql).
+    embedding_model            text    NOT NULL DEFAULT '',
+    embedding_contract         text    NOT NULL DEFAULT '',
     CONSTRAINT config_singleton_chk CHECK (singleton),
     CONSTRAINT config_retention_nonneg_chk CHECK (sync_log_retention_days >= 0),
     CONSTRAINT config_search_backend_chk CHECK (search_backend IN ('native', 'bm25')),
     CONSTRAINT config_okf_version_policy_chk CHECK (okf_version_policy IN ('warn', 'reject')),
     CONSTRAINT config_embedding_dim_chk CHECK (embedding_dim BETWEEN 1 AND 16000),
     CONSTRAINT config_history_retention_nonneg_chk CHECK (history_retention_days >= 0),
-    CONSTRAINT config_bm25_provider_chk CHECK (bm25_provider IN ('auto', 'pg_search', 'pg_textsearch'))
+    CONSTRAINT config_bm25_provider_chk CHECK (bm25_provider IN ('auto', 'pg_search', 'pg_textsearch')),
+    CONSTRAINT config_change_event_retention_nonneg_chk CHECK (change_event_retention_days >= 0)
 );
 
 INSERT INTO pgokf_private.config DEFAULT VALUES;
@@ -1026,7 +1269,7 @@ COMMENT ON COLUMN pgokf_private.config.notify_channel IS
 COMMENT ON COLUMN pgokf_private.config.okf_version_policy IS
     'How sync treats a bundle-root index.md that declares an okf_version this build does not support (only 0.2 / 0.2.x is supported): ''warn'' (the default) logs a WARNING and indexes anyway, ''reject'' aborts the sync with 22023. An absent okf_version is always accepted and leaves pgokf.bundles.okf_version NULL.';
 COMMENT ON COLUMN pgokf_private.config.embedding_dim IS
-    'Expected dimension (1..=16000) of the caller-computed concept embeddings streamed in via pgokf.set_concept_embedding: the setter rejects any real[] whose length differs, and pgokf.rebuild_embedding_index builds its pgvector HNSW index with this typmod (vector(embedding_dim)). Default 1536. The extension never computes embeddings; a change is not retroactive to already-stored rows and should be followed by re-ingestion and pgokf.rebuild_embedding_index. HNSW indexing applies only up to pgvector''s 2000-dimension index limit; above it semantic search still works via an exact scan.';
+    'Expected dimension (1..=16000) of the caller-computed concept embeddings streamed in via pgokf.set_concept_embedding / set_concept_embedding_cas: the setters reject any real[] whose length differs, and pgokf.rebuild_embedding_index builds its pgvector HNSW index with this typmod (vector(embedding_dim)). Default 1536. The extension never computes embeddings. Semantic ranking additionally requires a stored row''s dim to equal this key, so a change revokes the eligibility of every stored vector and marks every bundle holding embedding rows stale (reason embedding_contract_changed) in the same transaction; follow a change with re-ingestion and pgokf.rebuild_embedding_index. HNSW indexing applies only up to pgvector''s 2000-dimension index limit; above it semantic search still works via an exact scan.';
 COMMENT ON COLUMN pgokf_private.config.track_history IS
     'Whether a register/refresh/content sync records an append-only SCD-2 version trail of each changed concept into pgokf.concept_history (true = keep point-in-time history; storage/retention tradeoff) or records nothing (false, the default). Off by default so an existing install, and any bundle synced with history disabled, behaves exactly as before with zero extra storage. Not retroactive: enabling it starts recording at the next sync; a concept first versioned after it was enabled begins at version 1 with the change_kind of that sync.';
 COMMENT ON COLUMN pgokf_private.config.require_tenant IS
@@ -1035,6 +1278,12 @@ COMMENT ON COLUMN pgokf_private.config.bm25_provider IS
     'Which BM25 provider extension the bm25 search backend uses: ''auto'' (the default: pg_textsearch when installed, else pg_search), ''pg_textsearch'' (Tiger Data, PostgreSQL license, PostgreSQL 17 and 18), or ''pg_search'' (ParadeDB, AGPL-3.0). Both providers name their index access method bm25 and cannot coexist in one database. A named provider that is not installed makes bm25 search fall back to native with a warning; rebuild_search_index builds the resolved provider''s index.';
 COMMENT ON COLUMN pgokf_private.config.history_retention_days IS
     'Retention window in days for CLOSED pgokf.concept_history versions (valid_to IS NOT NULL): closed versions whose valid_to predates now() - this many days are pruned in the same transaction after each successful sync appends its history, when track_history is on. The single current open version of a concept (valid_to IS NULL) is never pruned. 0 (the default) keeps history indefinitely; must be >= 0.';
+COMMENT ON COLUMN pgokf_private.config.change_event_retention_days IS
+    'Retention window in days for ACKNOWLEDGED pgokf.catalog_change_event rows: an acknowledged event whose acknowledged_at predates now() - this many days is pruned in the same transaction after a successful sync appends new events. Pending or claimed-but-unacknowledged events are NEVER pruned (delivery is at-least-once; an unacknowledged event stays retryable). 0 keeps acknowledged events indefinitely; must be >= 0. Default 30.';
+COMMENT ON COLUMN pgokf_private.config.embedding_model IS
+    'Optional pin on the embedding model a stored concept vector must carry to be eligible for semantic ranking: empty (the default) accepts any non-NULL model; a non-empty value requires an exact match. A change marks every bundle holding embedding rows stale (reason embedding_contract_changed) in the same transaction, before new vectors are queued; the embedding watcher re-embeds the now-stale rows against the new policy. A row with NULL model is legacy and never ranks regardless.';
+COMMENT ON COLUMN pgokf_private.config.embedding_contract IS
+    'Optional pin on the render-contract identity (input construction and truncation version, e.g. pgokf-embed/v1/max-chars:8000) a stored concept vector must carry to be eligible for semantic ranking: empty (the default) accepts any non-NULL contract; a non-empty value requires an exact match. A change marks every bundle holding embedding rows stale (reason embedding_contract_changed) in the same transaction. A row with NULL contract is legacy and never ranks regardless.';
 ",
     name = "config_table",
     requires = ["catalog_tables"]
@@ -1060,7 +1309,12 @@ mod pgokf {
     /// `LISTEN`/`NOTIFY` identifier, or empty to disable),
     /// `okf_version_policy` (`warn` or `reject`), a boolean for
     /// `track_history`, and an integer for `sync_log_retention_days`,
-    /// `history_retention_days`, and `embedding_dim` (1..=16000). Unknown keys
+    /// `history_retention_days`, `change_event_retention_days` (acknowledged
+    /// outbox events only; unacknowledged events are never pruned), and
+    /// `embedding_dim` (1..=16000), plus the embedding contract pins
+    /// `embedding_model` / `embedding_contract` (a string; empty leaves the
+    /// policy unpinned). Changing an embedding contract key marks every bundle
+    /// holding embedding rows stale in the same transaction. Unknown keys
     /// and wrong-shaped or out-of-domain values raise SQLSTATE `22023`.
     #[pg_extern(requires = ["config_table"])]
     fn set_config(key: &str, value: pgrx::JsonB) {
@@ -1144,8 +1398,14 @@ mod tests {
             ("notify_channel", ConfigKey::NotifyChannel),
             ("okf_version_policy", ConfigKey::OkfVersionPolicy),
             ("embedding_dim", ConfigKey::EmbeddingDim),
+            ("embedding_model", ConfigKey::EmbeddingModel),
+            ("embedding_contract", ConfigKey::EmbeddingContract),
             ("track_history", ConfigKey::TrackHistory),
             ("history_retention_days", ConfigKey::HistoryRetentionDays),
+            (
+                "change_event_retention_days",
+                ConfigKey::ChangeEventRetentionDays,
+            ),
         ];
 
         for (name, key) in expected {
@@ -1399,6 +1659,31 @@ mod tests {
             // Assert
             assert_eq!(error.sqlstate(), "22023");
         }
+    }
+
+    #[test]
+    fn validate_embedding_label_accepts_empty_and_plain_labels() {
+        // Arrange / Act / Assert: the unpinned default and ordinary identities.
+        assert!(validate_embedding_label("", "embedding_model").is_ok());
+        assert!(validate_embedding_label("text-embedding-3-small", "embedding_model").is_ok());
+        assert!(
+            validate_embedding_label("pgokf-embed/v1/max-chars:8000", "embedding_contract").is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_embedding_label_rejects_blank_overlong_and_nul() {
+        // Arrange / Act / Assert
+        let blank = validate_embedding_label("   ", "embedding_model")
+            .expect_err("a whitespace-only pin must be rejected");
+        assert_eq!(blank.sqlstate(), "22023");
+        let overlong =
+            validate_embedding_label(&"m".repeat(MAX_EMBEDDING_LABEL_LEN + 1), "embedding_model")
+                .expect_err("an overlong pin must be rejected");
+        assert_eq!(overlong.sqlstate(), "22023");
+        let nul = validate_embedding_label("bad\0label", "embedding_contract")
+            .expect_err("a NUL byte must be rejected");
+        assert_eq!(nul.sqlstate(), "22023");
     }
 
     #[test]

@@ -38,12 +38,16 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The stable public functions, as `(name, argument-type list)`. The pair
+/// The 66 stable public functions, as `(name, argument-type list)`. The pair
 /// renders to the exact `COMMENT ON FUNCTION pgokf.<name>(<args>)` prefix that
 /// the hardening blocks emit.
 const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
     ("register_bundle", "text, text, jsonb"),
     ("register_bundle_content", "text, text[], bytea[], jsonb"),
+    (
+        "register_bundle_content_with_context",
+        "text, text[], bytea[], jsonb, jsonb",
+    ),
     ("refresh_bundle", "bigint"),
     ("unregister_bundle", "bigint"),
     ("set_bundle_enabled", "bigint, boolean"),
@@ -58,6 +62,10 @@ const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
         "text, bigint, integer, text, text[], text, text, jsonb",
     ),
     (
+        "concept_search_fresh",
+        "text, bigint, integer, text, text, text[], text, text, jsonb",
+    ),
+    (
         "search_facets",
         "text, bigint, text, text, text[], text, text",
     ),
@@ -68,7 +76,10 @@ const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
     ("concept_search_semantic", "real[], bigint, integer"),
     ("concept_search_hybrid", "text, real[], bigint, integer"),
     ("set_concept_embedding", "bigint, text, real[]"),
-    ("set_concept_embedding", "bigint, text, real[], text"),
+    (
+        "set_concept_embedding_cas",
+        "bigint, text, real[], text, text, text, text",
+    ),
     ("rebuild_embedding_index", ""),
     ("concept_neighbors", "text, integer, bigint"),
     ("concept_history", "bigint, text, integer"),
@@ -93,9 +104,40 @@ const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
     ("version", ""),
     ("tenant_required", ""),
     ("mcp_token_bearer", "text"),
+    ("capabilities", ""),
+    (
+        "register_freshness_dependency",
+        "text, bigint, text, bigint, text, text, text, text",
+    ),
+    ("disable_freshness_dependency", "bigint"),
+    ("remove_freshness_dependency", "bigint"),
+    ("mark_stale", "bigint, text[], text, text"),
+    ("mark_reconciling", "bigint, text"),
+    ("mark_blocked", "bigint, text[], text"),
+    ("mark_fresh", "bigint, bigint, text, text, jsonb, text"),
+    ("mark_scope_stale", "bigint, text, text, text[], text"),
+    ("clear_freshness_scope", "bigint, text, text"),
+    ("list_freshness_dependencies", "integer"),
+    ("repair_bundle_freshness", "bigint, text, text[]"),
+    (
+        "issue_publication_fence",
+        "bigint, text, bigint, bigint, text, integer",
+    ),
+    ("release_publication_fence", "bigint, text, bigint"),
+    ("claim_catalog_change_events", "text, integer, integer"),
+    ("ack_catalog_change_event", "bigint, text, text"),
+    ("list_catalog_change_events", "bigint, integer"),
+    (
+        "replace_relationships",
+        "text, bigint, bigint, bigint, bigint, jsonb",
+    ),
+    (
+        "concept_relationship_neighbors",
+        "bigint, text, integer, text, text[], integer",
+    ),
 ];
 
-/// The 17 stable public composite types.
+/// The 24 stable public composite types.
 const PUBLIC_TYPES: &[&str] = &[
     "bundle_sync_result",
     "concept_search_result",
@@ -114,10 +156,17 @@ const PUBLIC_TYPES: &[&str] = &[
     "skill_result",
     "script_result",
     "reference_result",
+    "freshness_dependency_info",
+    "publication_fence_info",
+    "claimed_change_event",
+    "catalog_change_event_info",
+    "concept_search_fresh_result",
+    "relationship_publication_info",
+    "relationship_neighbor",
 ];
 
-/// The 22 catalog tables, as fully-qualified `schema.table` identifiers.
-/// Fourteen are public (`pgokf`); the singleton policy row and the three
+/// The 29 catalog tables, as fully-qualified `schema.table` identifiers.
+/// Nineteen are public (`pgokf`); the singleton policy row and the three
 /// admin-only history/audit logs live in the `pgokf_private` schema; the
 /// web UI's people, sessions, MCP tokens, and identity-provider settings
 /// live in `pgokf_web` (writer-only). All are documented all the same.
@@ -136,6 +185,13 @@ const CATALOG_TABLES: &[&str] = &[
     "pgokf.skills",
     "pgokf.scripts",
     "pgokf.reference_documents",
+    "pgokf.bundle_freshness",
+    "pgokf.concept_freshness",
+    "pgokf.freshness_dependency",
+    "pgokf.publication_fence",
+    "pgokf.catalog_change_event",
+    "pgokf.relationship_publication",
+    "pgokf.relationship",
     "pgokf_private.config",
     "pgokf_private.sync_log",
     "pgokf_private.sync_log_change",
@@ -146,18 +202,26 @@ const CATALOG_TABLES: &[&str] = &[
     "pgokf_web.identity_providers",
 ];
 
-/// The three public API roles created by `sql/bootstrap.sql`
-/// (`pgokf_reader` < `pgokf_writer` < `pgokf_admin`).
-const API_ROLES: &[&str] = &["pgokf_reader", "pgokf_writer", "pgokf_admin"];
+/// The four public API roles created by `sql/bootstrap.sql`
+/// (`pgokf_reader` < `pgokf_writer` < `pgokf_admin`, plus the out-of-ladder
+/// `pgokf_dispatcher` outbox delivery role).
+const API_ROLES: &[&str] = &[
+    "pgokf_reader",
+    "pgokf_writer",
+    "pgokf_admin",
+    "pgokf_dispatcher",
+];
 
-/// The number of `#[pg_extern]` functions defined under `src/catalog/`. Three
+/// The number of `#[pg_extern]` functions defined under `src/catalog/`. Four
 /// public functions are not `#[pg_extern]`s there: `pgokf.version()` is
 /// declared in `src/lib.rs`, `pgokf.tenant_required()` is plain SQL in
 /// `sql/bootstrap.sql` (every row-level-security policy references it, so it
-/// must exist before any table), and `pgokf.mcp_token_bearer(text)` is plain
-/// SQL beside the table it reads (`src/catalog/web_identity.rs`), so the
-/// catalog count is three less than [`PUBLIC_FUNCTIONS`].
-const CATALOG_PG_EXTERN_COUNT: usize = PUBLIC_FUNCTIONS.len() - 3;
+/// must exist before any table), `pgokf.mcp_token_bearer(text)` is plain
+/// SQL beside the table it reads (`src/catalog/web_identity.rs`), and
+/// `pgokf.capabilities()` is plain SQL in the `effective_freshness_view` block
+/// of `src/catalog/freshness.rs` (an immutable constant, so no Rust wrapper is
+/// needed), so the catalog count is four less than [`PUBLIC_FUNCTIONS`].
+const CATALOG_PG_EXTERN_COUNT: usize = PUBLIC_FUNCTIONS.len() - 4;
 
 /// SQL keywords that must never appear in an executable upgrade statement,
 /// because they would break the no-data-loss guarantee.

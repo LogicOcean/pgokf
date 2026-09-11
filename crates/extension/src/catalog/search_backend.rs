@@ -400,6 +400,14 @@ const KEYSET_ORDER_LIMIT: &str = "
     ORDER BY hits.rank DESC, hits.bundle_id ASC, hits.concept_id ASC
     LIMIT $3";
 
+/// The keyset pagination predicate alone (the `WHERE` half of
+/// [`KEYSET_ORDER_LIMIT`]), so the freshness-aware variant can AND its own
+/// freshness filter into the same tail.
+pub(crate) const KEYSET_PREDICATE: &str = "($9 IS NULL
+       OR hits.rank < $9
+       OR (hits.rank = $9 AND hits.bundle_id > $10)
+       OR (hits.rank = $9 AND hits.bundle_id = $10 AND hits.concept_id > $11))";
+
 // `ts_rank_cd` takes no configuration; the regconfig `$4` drives both
 // `websearch_to_tsquery` and `ts_headline`.
 //
@@ -411,18 +419,14 @@ const KEYSET_ORDER_LIMIT: &str = "
 // concept with no provenance row has NULL status/tier and is excluded by a
 // non-NULL filter, as intended). The LEFT JOIN never multiplies rows -
 // `concept_provenance`'s primary key is `(bundle_id, concept_id)` - so an
-// all-NULL-filter call returns exactly what it did before. The match and the
-// filters live in the `hits` subquery; the shared KEYSET_ORDER_LIMIT tail applies
-// the cursor, the stable total order, and the limit over it.
-const NATIVE_QUERY: &str = "
-    SELECT hits.bundle_id,
-           hits.concept_id,
-           hits.path,
-           hits.title,
-           hits.type,
-           hits.rank,
-           hits.headline
-    FROM (
+// all-NULL-filter call returns exactly what it did before.
+//
+// The subquery is `pub(crate)` so the freshness-aware variant
+// (`pgokf.concept_search_fresh`, see [`crate::catalog::search`]) wraps the
+// identical match/rank/filter set instead of forking it; the shared
+// KEYSET_ORDER_LIMIT tail applies the cursor, the stable total order, and the
+// limit over it.
+pub(crate) const NATIVE_HITS_QUERY: &str = "
         SELECT c.bundle_id AS bundle_id,
                c.id AS concept_id,
                c.path AS path,
@@ -443,12 +447,21 @@ const NATIVE_QUERY: &str = "
           AND ($5 IS NULL OR c.type = $5)
           AND ($6 IS NULL OR c.tags @> $6)
           AND ($7 IS NULL OR cp.status = $7)
-          AND ($8 IS NULL OR cp.trust_tier = $8)
-    ) AS hits";
+          AND ($8 IS NULL OR cp.trust_tier = $8)";
+
+const NATIVE_QUERY: &str = "
+    SELECT hits.bundle_id,
+           hits.concept_id,
+           hits.path,
+           hits.title,
+           hits.type,
+           hits.rank,
+           hits.headline
+    FROM (";
 
 impl SearchBackend for NativeBackend {
     fn search(&self, request: &SearchRequest) -> Result<Vec<SearchHit>, CatalogError> {
-        let query = format!("{NATIVE_QUERY}{KEYSET_ORDER_LIMIT}");
+        let query = format!("{NATIVE_QUERY}{NATIVE_HITS_QUERY}\n    ) AS hits{KEYSET_ORDER_LIMIT}");
         Spi::connect(|client| {
             let table = client
                 .select(&query, None, &bind_search_args(request))

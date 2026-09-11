@@ -715,13 +715,38 @@ produced by *your* embedder - the same mountless-companion pattern as
 [`pgokf-ingest`](https://github.com/LogicOcean/pgokf/tree/main/crates/pgokf-ingest):
 a process you run computes each concept's vector (from its `body_text`, which you
 can read with `pgokf.get_concept_source` or from your own source of truth) and
-streams it in as `pgokf_writer`:
+streams it in as `pgokf_writer` through the compare-and-set setter, which records
+the provenance semantic ranking requires and refuses to store a vector whose
+concept changed while inference ran:
 
 ```sql
--- one row per concept, from your embedder
-SELECT pgokf.set_concept_embedding(1, 'runbooks/database-failover',
-                                   ARRAY[0.0123, -0.0456, ...]::real[]);
+-- one row per concept, from your embedder: the concept's file_hash as read when
+-- the input was built, the hash of the exact input text, your model, and your
+-- render-contract identity
+SELECT pgokf.set_concept_embedding_cas(
+           1, 'runbooks/database-failover', ARRAY[0.0123, -0.0456, ...]::real[],
+           (SELECT file_hash FROM pgokf.concepts
+            WHERE bundle_id = 1 AND id = 'runbooks/database-failover'),
+           '<hash of the exact input text>', 'my-embedding-model', 'my-embedder/v1');
+-- returns false (retryable) when the concept changed meanwhile: re-read, re-embed
 ```
+
+The 0.2.0 `set_concept_embedding(bundle_id, concept_id, embedding)` signature
+still works, but it carries no provenance, so the row it writes is a **legacy
+row that never ranks semantically** (and an overwrite clears provenance it
+cannot prove). The shipped [`pgokf-embed`](https://github.com/LogicOcean/pgokf/tree/main/crates/pgokf-embed)
+companion uses the compare-and-set setter and re-embeds missing **or stale**
+rows automatically.
+
+Only **eligible** vectors rank: the row's `source_file_hash` must equal the
+concept's current `file_hash` (a refresh that re-stages a concept deletes its
+embedding row in the same transaction), its model/dimension/contract must match
+the durable `embedding_model` / `embedding_dim` / `embedding_contract` policy
+(an empty pin accepts any non-NULL value), and the concept must be effectively
+fresh. Stale or legacy rows are simply never returned by semantic or hybrid
+ranking, even while the HNSW index physically retains them;
+`pgokf.concept_search_fresh` labels each hit's embedding as `missing`,
+`current`, or `stale` with its model, dimension, input hash, and `embedded_at`.
 
 Set `embedding_dim` to match your model first (default `1536`):
 
@@ -729,8 +754,9 @@ Set `embedding_dim` to match your model first (default `1536`):
 SELECT pgokf.set_config('embedding_dim', '768'::jsonb);   -- admin
 ```
 
-`set_concept_embedding` rejects any vector whose length differs from
-`embedding_dim` (`22023`). After a bulk load, build the ANN index:
+`set_concept_embedding_cas` (and the legacy `set_concept_embedding`) rejects any
+vector whose length differs from `embedding_dim` (`22023`). After a bulk load,
+build the ANN index:
 
 ```sql
 SELECT pgokf.rebuild_embedding_index();   -- admin; pgvector HNSW cosine

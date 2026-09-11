@@ -11,10 +11,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use pgokf_workspace::{
-    BuildOptions, Component, ConceptRef, CustomHarness, Profile, Selection, Shape, TOKEN_ENV,
-    Target, TokenRef,
+    BuildOptions, Component, ConceptRef, CustomHarness, Direction, Profile, Selection, Shape,
+    StalePolicy, TOKEN_ENV, Target, TokenRef,
 };
 use serde_json::{Value, json};
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_postgres::Client;
 use tokio_postgres::types::ToSql;
@@ -48,6 +49,13 @@ pub const HOST_ONLY: &str = "x-okf-host-only";
 /// A live catalog connection, optionally scoped to one tenant.
 pub struct Catalog {
     client: Client,
+    /// A second reader connection `build_workspace_plugin` holds for the
+    /// whole build: the build runs inside one repeatable-read transaction,
+    /// and the shared `client` pipelines requests from concurrent callers,
+    /// so the transaction cannot live there. The mutex serializes builds.
+    build: Mutex<Client>,
+    /// The build connection's driver, folded into [`Catalog::take_driver`].
+    build_driver: Option<JoinHandle<()>>,
     /// A `pgokf_writer` connection, when the operator gave one: what the
     /// `writer` and `admin` roles need, and what this server does without
     /// entirely when it is not set.
@@ -88,6 +96,12 @@ impl Catalog {
         if let Some(tenant) = tenant {
             pgokf_pgconn::set_tenant(&client, tenant).await?;
         }
+        let (build_client, build_driver) = pgokf_pgconn::connect(database_url, force_tls)
+            .await
+            .context("connecting to PostgreSQL for plugin builds")?;
+        if let Some(tenant) = tenant {
+            pgokf_pgconn::set_tenant(&build_client, tenant).await?;
+        }
         let database_name: String = client
             .query_one("SELECT current_database()", &[])
             .await
@@ -96,6 +110,8 @@ impl Catalog {
 
         Ok(Self {
             client,
+            build: Mutex::new(build_client),
+            build_driver: Some(build_driver),
             writer: None,
             writer_driver: None,
             database_name,
@@ -142,9 +158,20 @@ impl Catalog {
     /// It finishes only when the link to PostgreSQL is gone, and nothing
     /// re-establishes it, so a server that means to keep running takes this
     /// and stops when it ends rather than answering every later call with
-    /// the same failure. A second call returns `None`.
+    /// the same failure. A second call returns `None`. The build
+    /// connection's driver is folded in: the returned task ends when either
+    /// link does.
     pub fn take_driver(&mut self) -> Option<JoinHandle<()>> {
-        self.driver.take()
+        match (self.driver.take(), self.build_driver.take()) {
+            (Some(reader), Some(build)) => Some(tokio::spawn(async move {
+                tokio::select! {
+                    _ = reader => {}
+                    _ = build => {}
+                }
+            })),
+            (reader, None) => reader,
+            (None, build) => build,
+        }
     }
 
     /// Take the writer connection's driver, to wait on it beside the
@@ -172,6 +199,15 @@ impl Catalog {
             )
             .await
             .context("setting the statement timeout")?;
+        self.build
+            .lock()
+            .await
+            .execute(
+                "SELECT set_config('statement_timeout', $1, false)",
+                &[&millis.to_string()],
+            )
+            .await
+            .context("setting the build connection's statement timeout")?;
         // The writer is one shared, serialized connection too: an unbounded
         // statement on it would hold up every other write.
         if let Some(writer) = &self.writer {
@@ -307,6 +343,12 @@ impl Catalog {
                         "bundle_ids": {"type": "array", "items": {"type": "integer"}, "description": "Restrict to these bundle ids."},
                         "concept_ids": {"type": "array", "items": {"type": "string"}, "description": "Include exactly these concept ids (within the selected bundles)."},
                         "picks": {"type": "array", "items": {"type": "string"}, "description": "Specific files by identity, as 'bundle_id:concept_id' strings (a skill's SKILL.md id copies the whole package; a script or reference id copies that file). Picks are added to whatever the other selectors match and are never cut by the limit."},
+                        "stale_policy": {"type": "string", "enum": ["warn", "exclude"], "description": "What to do with concepts the catalog reports as not fresh (default warn): warn keeps them, labelled - a banner on each reconstructed document, a generated <name>.stale-warning.md beside every exact-bytes file, which is never modified, and a top-level FRESHNESS.md - with states and reasons in the manifests; exclude drops them and refuses the build, enumerating the stale ids and reasons, when an exact pick, a seed, or a required closure node is stale, or nothing fresh remains."},
+                        "seeds": {"type": "array", "items": {"type": "string"}, "description": "Closure seeds, as 'bundle_id:concept_id' strings: the build includes each seed and expands it through the catalog's typed relationships (requires the catalog's typed_relationships capability)."},
+                        "relation_types": {"type": "array", "items": {"type": "string"}, "description": "With seeds: follow only these namespaced relationship types (for example 'docs:references'); empty follows every type. The names are the publisher's; the builder holds no vocabulary of its own."},
+                        "direction": {"type": "string", "enum": ["outbound", "inbound", "both"], "description": "With seeds: which way the closure walks relationships (default outbound)."},
+                        "hops": {"type": "integer", "description": "With seeds: how many relationship hops the closure walks (1..=8, default 2)."},
+                        "require_closure": {"type": "boolean", "description": "With seeds: refuse the build when the closure cannot be completed - a traversed relationship whose target is unresolved, or a closure node the stale policy would drop."},
                         "tags": {"type": "array", "items": {"type": "string"}, "description": "All-of tag containment filter."},
                         "types": {"type": "array", "items": {"type": "string"}, "description": "Any-of concept type filter."},
                         "query": {"type": "string", "description": "Full-text query (websearch syntax); results are ranked."},
@@ -321,6 +363,17 @@ impl Catalog {
                         "overwrite": {"type": "boolean", HOST_ONLY: true, "description": "With output_dir: replace files that already exist, including an existing AGENTS.md (default false; symbolic links are never followed)."}
                     },
                     "required": ["target"]
+                }
+            },
+            {
+                "name": "check_workspace_plugin_freshness",
+                "description": "Compare a built plugin's okf-workspace.lock with the live catalog: the pinned bundle generations, sync hashes, and freshness states against what the catalog reports now. Answers current, stale, retired, or unknown, with reasons per bundle. A downloaded plugin cannot update itself; rebuild it with build_workspace_plugin when this says stale.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "lock": {"type": "string", "description": "The full content of the plugin's okf-workspace.lock file."}
+                    },
+                    "required": ["lock"]
                 }
             }
         ])
@@ -348,6 +401,9 @@ impl Catalog {
             "get_skill" => self.get_skill(arguments).await,
             "list_plugin_targets" => Ok(Self::list_plugin_targets()),
             "build_workspace_plugin" => self.build_workspace_plugin(arguments).await,
+            "check_workspace_plugin_freshness" => {
+                self.check_workspace_plugin_freshness(arguments).await
+            }
             other => bail!("unknown tool '{other}'"),
         }
     }
@@ -436,6 +492,15 @@ impl Catalog {
         .await
     }
 
+    /// `check_workspace_plugin_freshness`: the lockfile is compared with the
+    /// live catalog in one read; the answer is the plugin's status with
+    /// per-bundle reasons.
+    async fn check_workspace_plugin_freshness(&self, args: &Value) -> Result<Value> {
+        let lock = require_str(args, "lock")?;
+        let check = pgokf_workspace::check_plugin_freshness(&self.client, lock).await?;
+        serde_json::to_value(check).context("rendering the freshness check")
+    }
+
     fn list_plugin_targets() -> Value {
         Value::Array(
             Profile::all()
@@ -485,8 +550,46 @@ impl Catalog {
                 .unwrap_or_default()
                 .join("\n"),
         )?;
+        let seeds = ConceptRef::parse_list(
+            &opt_string_vec(args, "seeds")?
+                .unwrap_or_default()
+                .join("\n"),
+        )?;
+        let stale_policy = match opt_str(args, "stale_policy") {
+            None => StalePolicy::Warn,
+            Some(id) => StalePolicy::parse(id)
+                .ok_or_else(|| anyhow!("argument 'stale_policy' must be 'warn' or 'exclude'"))?,
+        };
+        let direction = match opt_str(args, "direction") {
+            None => Direction::Outbound,
+            Some(id) => Direction::parse(id).ok_or_else(|| {
+                anyhow!("argument 'direction' must be 'outbound', 'inbound', or 'both'")
+            })?,
+        };
+        let hops = match opt_i64(args, "hops")? {
+            None => None,
+            Some(n)
+                if usize::try_from(n)
+                    .is_ok_and(|n| (1..=pgokf_workspace::MAX_HOPS).contains(&n)) =>
+            {
+                usize::try_from(n).ok()
+            }
+            Some(_) => bail!(
+                "argument 'hops' must be between 1 and {}",
+                pgokf_workspace::MAX_HOPS
+            ),
+        };
         Ok(Selection {
             picks,
+            stale_policy,
+            seeds,
+            relation_types: opt_string_vec(args, "relation_types")?.unwrap_or_default(),
+            direction,
+            hops,
+            require_closure: args
+                .get("require_closure")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             all: args.get("all").and_then(Value::as_bool).unwrap_or(false),
             bundle_ids: opt_i64_vec(args, "bundle_ids")?.unwrap_or_default(),
             concept_ids: opt_string_vec(args, "concept_ids")?.unwrap_or_default(),
@@ -548,7 +651,27 @@ impl Catalog {
         })?;
         let selection = Self::selection_from_args(args)?;
         let options = self.options_from_args(args, target)?;
-        let plugin = pgokf_workspace::build(&self.client, &options, &selection).await?;
+        // The build holds one repeatable-read snapshot for its whole run, so
+        // it takes the dedicated connection: the shared client pipelines
+        // concurrent callers' statements, and a transaction cannot live
+        // there. The lock serializes builds.
+        let plugin = {
+            let mut build = self.build.lock().await;
+            match pgokf_workspace::build_in_transaction(&mut build, &options, &selection).await {
+                Ok(plugin) => plugin,
+                Err(error) => {
+                    // A stale-policy or closure refusal is a normal answer,
+                    // returned with the enumerations, not an error string.
+                    if let Some(refusal) = error
+                        .chain()
+                        .find_map(|cause| cause.downcast_ref::<pgokf_workspace::BuildRefusal>())
+                    {
+                        return Ok(refusal.to_json());
+                    }
+                    return Err(error);
+                }
+            }
+        };
 
         let mut result = json!({
             "target": plugin.target,
@@ -563,6 +686,7 @@ impl Catalog {
                 "type": c.concept_type,
                 "trust_tier": c.trust_tier,
                 "exact_source": c.exact,
+                "freshness": c.freshness.state,
             })).collect::<Vec<_>>(),
             "files": plugin.files.iter().map(|f| json!({
                 "path": f.path,
@@ -571,6 +695,12 @@ impl Catalog {
                 "executable": f.executable,
             })).collect::<Vec<_>>(),
         });
+        if !plugin.warnings.is_empty() {
+            result["warnings"] = serde_json::to_value(&plugin.warnings).unwrap_or_default();
+        }
+        if !plugin.excluded.is_empty() {
+            result["excluded"] = serde_json::to_value(&plugin.excluded).unwrap_or_default();
+        }
         match opt_str(args, "output_dir") {
             Some(dir) => {
                 let overwrite = args
@@ -929,6 +1059,7 @@ mod tests {
                 "get_skill",
                 "list_plugin_targets",
                 "build_workspace_plugin",
+                "check_workspace_plugin_freshness",
                 "list_bundles",
                 "put_document",
                 "delete_document",
@@ -937,5 +1068,51 @@ mod tests {
                 "set_bundle_state",
             ],
         );
+    }
+
+    #[test]
+    fn the_build_selection_parses_the_stale_policy_and_closure_arguments() {
+        // Arrange / Act
+        let full = Catalog::selection_from_args(&json!({
+            "stale_policy": "exclude",
+            "seeds": ["1:runbooks/a", "2:b"],
+            "relation_types": ["docs:references"],
+            "direction": "both",
+            "hops": 3,
+            "require_closure": true,
+        }))
+        .expect("valid");
+        let plain = Catalog::selection_from_args(&json!({})).expect("defaults");
+
+        // Assert
+        assert_eq!(full.stale_policy, StalePolicy::Exclude);
+        assert_eq!(
+            full.seeds
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            ["1:runbooks/a", "2:b"]
+        );
+        assert_eq!(full.relation_types, ["docs:references"]);
+        assert_eq!(full.direction, Direction::Both);
+        assert_eq!(full.hops, Some(3));
+        assert!(full.require_closure);
+        assert_eq!(plain.stale_policy, StalePolicy::Warn);
+        assert!(plain.seeds.is_empty() && !plain.require_closure);
+        assert_eq!(plain.direction, Direction::Outbound);
+
+        // Bad values are named.
+        for args in [
+            json!({"stale_policy": "drop"}),
+            json!({"direction": "up"}),
+            json!({"hops": 0}),
+            json!({"hops": 99}),
+            json!({"seeds": ["no-colon"]}),
+        ] {
+            assert!(
+                Catalog::selection_from_args(&args).is_err(),
+                "{args} should fail"
+            );
+        }
     }
 }

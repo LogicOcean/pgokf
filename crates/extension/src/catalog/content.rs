@@ -215,11 +215,17 @@ fn insert_content_bundle(
 
 /// Authorize, validate, and run the shared sync pipeline against an in-memory
 /// [`ContentSource`], creating the content bundle or resyncing an existing one.
+///
+/// `context` is the producer's change-provenance context for the durable
+/// outbox event: `None` reads the session's `pgokf.sync_context` GUC (the
+/// backward-compatible behavior of `register_bundle_content`), `Some` carries
+/// the explicit context of `register_bundle_content_with_context`.
 fn register_bundle_content_impl(
     name: &str,
     paths: Vec<String>,
     contents: Vec<Vec<u8>>,
     options: Option<pgrx::JsonB>,
+    context: Option<crate::catalog::change_event::ChangeContext>,
 ) -> Result<(i64, String, okf_sync::SyncReport), CatalogError> {
     security::authorize_current_user(security::Operation::Ingest, Path::new(""))?;
 
@@ -236,7 +242,17 @@ fn register_bundle_content_impl(
         None => insert_content_bundle(&path_key, name, options)?,
     };
 
-    let report = sync::run_bundle_sync(bundle_id, &source, sync::SyncOp::Content, &path_key)?;
+    let context = match context {
+        Some(context) => context,
+        None => crate::catalog::change_event::ChangeContext::from_session()?,
+    };
+    let report = sync::run_bundle_sync(
+        bundle_id,
+        &source,
+        sync::SyncOp::Content,
+        &path_key,
+        &context,
+    )?;
     Ok((bundle_id, path_key, report))
 }
 
@@ -273,7 +289,47 @@ mod pgokf {
         // exact bytes.
         let contents = super::collect_contents(contents).unwrap_or_else(|error| error.raise());
         let (bundle_id, path_key, report) =
-            register_bundle_content_impl(name, paths, contents, options)
+            register_bundle_content_impl(name, paths, contents, options, None)
+                .unwrap_or_else(|error| error.raise());
+        types::bundle_sync_result(bundle_id, &path_key, report)
+            .unwrap_or_else(|error| error.raise())
+    }
+
+    /// `register_bundle_content` with an explicit change-provenance context.
+    ///
+    /// Identical to `register_bundle_content` (same authorization, validation,
+    /// and pipeline), except the durable outbox event records the given
+    /// `context`: a JSON object with optional `origin`, `causation_key`,
+    /// `reconciliation_key`, `producer`, `manifest_hash`,
+    /// `observed_source_generation` (all opaque producer-supplied values), and
+    /// `operation` (`refresh_bundle`, `put_document`, `delete_document`, or
+    /// `concept_change`), so a one-document companion edit is not collapsed
+    /// into an anonymous content resync. A `causation_key` suppresses
+    /// re-triggering the freshness dependencies registered with the same key.
+    /// Raises SQLSTATE `22023` for a malformed context.
+    // `context` is a jsonb datum handed over by the pg_extern wrapper; only its
+    // text rendering is borrowed, so pass-by-value is inherent to the boundary.
+    #[allow(clippy::needless_pass_by_value)]
+    #[pg_extern(requires = ["catalog_tables"])]
+    fn register_bundle_content_with_context(
+        name: &str,
+        paths: Vec<String>,
+        contents: pgrx::Array<'_, &[u8]>,
+        options: default!(Option<pgrx::JsonB>, "'{}'"),
+        context: default!(Option<pgrx::JsonB>, "NULL"),
+    ) -> pgrx::composite_type!('static, "pgokf.bundle_sync_result") {
+        let contents = super::collect_contents(contents).unwrap_or_else(|error| error.raise());
+        // The argument arrived as jsonb (already parsed and validated by
+        // PostgreSQL); re-render and run it through the same field extraction
+        // and validation the GUC path uses. NULL means "no explicit context":
+        // the session's pgokf.sync_context GUC applies, exactly as for
+        // register_bundle_content.
+        let context = context.map(|context| {
+            crate::catalog::change_event::ChangeContext::parse(&context.0.to_string())
+                .unwrap_or_else(|error| error.raise())
+        });
+        let (bundle_id, path_key, report) =
+            register_bundle_content_impl(name, paths, contents, options, context)
                 .unwrap_or_else(|error| error.raise());
         types::bundle_sync_result(bundle_id, &path_key, report)
             .unwrap_or_else(|error| error.raise())
@@ -287,9 +343,18 @@ REVOKE ALL ON FUNCTION pgokf.register_bundle_content(text, text[], bytea[], json
 GRANT EXECUTE ON FUNCTION pgokf.register_bundle_content(text, text[], bytea[], jsonb) TO pgokf_writer;
 COMMENT ON FUNCTION pgokf.register_bundle_content(text, text[], bytea[], jsonb) IS
     'Register or resync an OKF bundle from in-memory content: the mountless ingestion path a companion process uses to stream bytes read from an object store, so the extension performs no network I/O. paths[] and contents[] must be equal-length, non-null arrays of safe bundle-relative paths and their bytes; the bundle is keyed on content:<name> with source_type=''content'' and re-called to resync (changed concepts upserted, missing ones deleted). Writer-tier (pgokf_writer; admin inherits it). Raises 22023 on a shape/path violation, honoring the max_bundle_files/max_file_bytes ceilings.';
+ALTER FUNCTION pgokf.register_bundle_content_with_context(text, text[], bytea[], jsonb, jsonb)
+    SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
+REVOKE ALL ON FUNCTION pgokf.register_bundle_content_with_context(text, text[], bytea[], jsonb, jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pgokf.register_bundle_content_with_context(text, text[], bytea[], jsonb, jsonb) TO pgokf_writer;
+COMMENT ON FUNCTION pgokf.register_bundle_content_with_context(text, text[], bytea[], jsonb, jsonb) IS
+    'register_bundle_content with an explicit change-provenance context (jsonb: origin, causation_key, reconciliation_key, producer, manifest_hash, observed_source_generation, and operation - refresh_bundle/put_document/delete_document/concept_change) recorded on the durable catalog-change event, so a companion''s one-document put/delete keeps its precise operation and origin; context NULL (the default) applies the session GUC instead. Writer-tier (pgokf_writer; admin inherits it). Without this function, the session GUC pgokf.sync_context supplies the same context to register_bundle, refresh_bundle, and register_bundle_content.';
 ",
         name = "content_function_hardening",
-        requires = [register_bundle_content]
+        requires = [
+            register_bundle_content,
+            register_bundle_content_with_context
+        ]
     );
 }
 

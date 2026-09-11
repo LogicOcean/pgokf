@@ -2065,6 +2065,18 @@ impl Borrowed {
         self.get()
     }
 
+    /// The underlying client mutably, for a caller that opens a transaction
+    /// (the plugin builder's one-snapshot build). A holder that finishes
+    /// with a transaction still open is dropped, not returned to the pool:
+    /// `finish` is for work that left the connection in autocommit.
+    pub(crate) fn client_mut(&mut self) -> &mut tokio_postgres::Client {
+        use std::ops::DerefMut as _;
+        self.object
+            .as_mut()
+            .expect("a borrowed connection is present until finish or drop")
+            .deref_mut()
+    }
+
     /// Mark the work complete so the connection returns to the pool.
     pub(crate) fn finish(&mut self) {
         self.done = true;

@@ -4,6 +4,7 @@
 //! are the database's decisions, never this crate's.
 
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,89 @@ pub const MAX_PACKAGE_MEMBERS: usize = 2_000;
 pub const MAX_CONTENT_BYTES: u64 = 256 * 1024 * 1024;
 /// The default when a caller gives no limit.
 pub const DEFAULT_LIMIT: usize = 100;
+
+/// What a build does with concepts the catalog reports as not fresh
+/// (spec §4.8).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StalePolicy {
+    /// Keep stale concepts and label them: a banner or an adjacent warning
+    /// file per stale concept (a stale package member gets its own, beside
+    /// the member file), a top-level `FRESHNESS.md`, and the states
+    /// recorded in the manifest and lockfile. Exact bytes never change.
+    #[default]
+    Warn,
+    /// Drop stale concepts before materialization, refusing the build when
+    /// an exact pick, a seed, or a required closure node is stale, when no
+    /// fresh concepts remain, or when a requested closure would break. A
+    /// skill package ships byte for byte or not at all, so a package with a
+    /// stale member is dropped whole: the stale member is enumerated, and a
+    /// required package with a stale member refuses the build.
+    Exclude,
+}
+
+impl StalePolicy {
+    /// The identifier used in manifests and tool arguments.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Warn => "warn",
+            Self::Exclude => "exclude",
+        }
+    }
+
+    /// Parse `warn` or `exclude`.
+    #[must_use]
+    pub fn parse(id: &str) -> Option<Self> {
+        match id.trim() {
+            "warn" => Some(Self::Warn),
+            "exclude" => Some(Self::Exclude),
+            _ => None,
+        }
+    }
+}
+
+/// Which way a seed closure walks typed relationships.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Direction {
+    /// Source to target (the default).
+    #[default]
+    Outbound,
+    /// Target to source.
+    Inbound,
+    /// Both ways.
+    Both,
+}
+
+impl Direction {
+    /// The identifier `pgokf.concept_relationship_neighbors` accepts.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Outbound => "outbound",
+            Self::Inbound => "inbound",
+            Self::Both => "both",
+        }
+    }
+
+    /// Parse `outbound`, `inbound`, or `both`.
+    #[must_use]
+    pub fn parse(id: &str) -> Option<Self> {
+        match id.trim() {
+            "outbound" => Some(Self::Outbound),
+            "inbound" => Some(Self::Inbound),
+            "both" => Some(Self::Both),
+            _ => None,
+        }
+    }
+}
+
+/// The default hop bound of a seed closure (the extension's own default).
+pub const DEFAULT_HOPS: usize = 2;
+/// The most hops one closure walks, client-side; the extension caps
+/// `max_hops` further through `pgokf.max_graph_hops`.
+pub const MAX_HOPS: usize = 8;
 
 /// The selectors of one `include` entry: every field narrows, and an empty
 /// selection (no selector at all) is refused rather than exporting a catalog.
@@ -61,6 +145,29 @@ pub struct Selection {
     /// limit.
     #[serde(default)]
     pub picks: Vec<ConceptRef>,
+    /// What to do with concepts the catalog reports as not fresh.
+    #[serde(default)]
+    pub stale_policy: StalePolicy,
+    /// Closure seeds: catalog concept refs the build starts from and expands
+    /// through the typed relationships of `pgokf.current_relationships`.
+    #[serde(default)]
+    pub seeds: Vec<ConceptRef>,
+    /// Namespaced relationship types the closure follows (caller-supplied;
+    /// empty follows every type). The builder holds no vocabulary of its own.
+    #[serde(default)]
+    pub relation_types: Vec<String>,
+    /// Which way the closure walks relationships.
+    #[serde(default)]
+    pub direction: Direction,
+    /// The closure's hop bound (default [`DEFAULT_HOPS`], capped at
+    /// [`MAX_HOPS`]).
+    #[serde(default)]
+    pub hops: Option<usize>,
+    /// Refuse the build when the closure cannot be completed: an unresolved
+    /// relationship target on a traversed edge, or a closure node the stale
+    /// policy would drop.
+    #[serde(default)]
+    pub require_closure: bool,
 }
 
 /// One concept named by identity: `(bundle_id, concept_id)`.
@@ -130,11 +237,11 @@ impl std::fmt::Display for ConceptRef {
 }
 
 impl Selection {
-    /// `true` when nothing at all is selected: no narrowing selector and no
-    /// pick.
+    /// `true` when nothing at all is selected: no narrowing selector, no
+    /// pick, and no seed.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        !self.has_filters() && self.picks.is_empty()
+        !self.has_filters() && self.picks.is_empty() && self.seeds.is_empty()
     }
 
     /// `true` when at least one narrowing selector is set (a pick alone is
@@ -153,6 +260,12 @@ impl Selection {
     #[must_use]
     pub fn effective_limit(&self) -> usize {
         self.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_CONCEPTS)
+    }
+
+    /// The effective closure hop bound, bounded to [`MAX_HOPS`].
+    #[must_use]
+    pub fn effective_hops(&self) -> usize {
+        self.hops.unwrap_or(DEFAULT_HOPS).clamp(1, MAX_HOPS)
     }
 
     /// A short human description ("type Runbook, tagged a, b, in bundle 2").
@@ -190,6 +303,26 @@ impl Selection {
                 parts.push(format!("plus {picked}"));
             }
         }
+        if !self.seeds.is_empty() {
+            let mut closure = format!(
+                "{} seed{} within {} hop{}",
+                self.seeds.len(),
+                if self.seeds.len() == 1 { "" } else { "s" },
+                self.effective_hops(),
+                if self.effective_hops() == 1 { "" } else { "s" }
+            );
+            if !self.relation_types.is_empty() {
+                let _ = write!(closure, " of type {}", self.relation_types.join(", "));
+            }
+            if self.direction != Direction::Outbound {
+                let _ = write!(closure, " ({})", self.direction.id());
+            }
+            if parts.is_empty() {
+                parts.push(format!("the closure of {closure}"));
+            } else {
+                parts.push(format!("plus the closure of {closure}"));
+            }
+        }
         if parts.is_empty() {
             if self.all {
                 "everything in the catalog".to_owned()
@@ -201,6 +334,100 @@ impl Selection {
         } else {
             parts.join(", ")
         }
+    }
+}
+
+/// The catalog's effective freshness for one concept, read from
+/// `pgokf.effective_freshness` inside the build's snapshot: a concept-scope
+/// override when one is recorded, otherwise the bundle's state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Freshness {
+    /// `fresh`, `stale`, `reconciling`, `blocked`, `retired`, or `unknown`
+    /// (a catalog without the freshness surface).
+    pub state: String,
+    pub reasons: Vec<String>,
+    /// Which recorded scope set the state: `concept` or `bundle`.
+    pub scope: String,
+    pub stale_since: Option<String>,
+    /// The producer's opaque observed revision.
+    pub observed_revision: Option<String>,
+    /// The producer's opaque materialized-input revision.
+    pub indexed_revision: Option<String>,
+    /// The catalog generation the materialization covers.
+    pub published_revision: Option<String>,
+    /// The bundle's live catalog generation in the build's snapshot.
+    pub catalog_generation: Option<i64>,
+    pub last_reconciled_at: Option<String>,
+}
+
+impl Freshness {
+    /// The state of a concept on a catalog without the freshness surface, or
+    /// one with no recorded row: nothing is claimed, nothing is warned about.
+    #[must_use]
+    pub fn unknown() -> Self {
+        Self {
+            state: "unknown".to_owned(),
+            reasons: Vec::new(),
+            scope: String::new(),
+            stale_since: None,
+            observed_revision: None,
+            indexed_revision: None,
+            published_revision: None,
+            catalog_generation: None,
+            last_reconciled_at: None,
+        }
+    }
+
+    /// `true` when the catalog reports the concept as not fresh. `unknown`
+    /// is not stale: a catalog without the freshness surface must not turn
+    /// every build into a warning.
+    #[must_use]
+    pub fn is_stale(&self) -> bool {
+        self.state != "fresh" && self.state != "unknown"
+    }
+}
+
+impl Default for Freshness {
+    fn default() -> Self {
+        Self::unknown()
+    }
+}
+
+/// How a concept entered the selection. The narrowing selectors are the
+/// default route and set no flag; the flags mark the additive routes, which
+/// the stale policy treats as required (a stale one refuses an `exclude`
+/// build rather than being dropped).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct Origin {
+    /// Named by identity in `picks`.
+    pub pick: bool,
+    /// A closure seed.
+    pub seed: bool,
+    /// Reached by walking typed relationships from a seed.
+    pub closure: bool,
+}
+
+impl Origin {
+    /// The role a stale concept plays in a refusal or exclusion listing.
+    #[must_use]
+    pub fn role(&self, require_closure: bool) -> &'static str {
+        if self.pick {
+            "pick"
+        } else if self.seed {
+            "seed"
+        } else if self.closure && require_closure {
+            "required-closure"
+        } else if self.closure {
+            "closure"
+        } else {
+            "selected"
+        }
+    }
+
+    /// `true` when the stale policy must not silently drop this concept.
+    #[must_use]
+    pub fn required(&self, require_closure: bool) -> bool {
+        self.pick || self.seed || (self.closure && require_closure)
     }
 }
 
@@ -236,6 +463,14 @@ pub struct ConceptRecord {
     /// or asset) selected on its own; dropped when its package is selected
     /// too, because the package already carries it.
     pub resource: Option<ResourceRecord>,
+    /// The catalog's effective freshness for this concept in the build's
+    /// snapshot ([`Freshness::unknown`] until resolved, and on a catalog
+    /// without the freshness surface).
+    #[serde(default)]
+    pub freshness: Freshness,
+    /// How the concept entered the selection.
+    #[serde(default)]
+    pub origin: Origin,
 }
 
 /// A skill package: what `pgokf.skills` records plus, after loading, every
@@ -250,6 +485,13 @@ pub struct PackageRecord {
     pub hash: String,
     /// The package's scripts, references, and assets, in path order.
     pub resources: Vec<ResourceFile>,
+    /// Each member's own effective freshness by concept id, resolved in the
+    /// build's snapshot (empty until resolved, and on a catalog without the
+    /// freshness surface). A member absent from the map is
+    /// [`Freshness::unknown`]. Internal bookkeeping: the lockfile records a
+    /// member's state on its own entry instead.
+    #[serde(default, skip)]
+    pub member_freshness: std::collections::BTreeMap<String, Freshness>,
 }
 
 /// One file of a skill package.
@@ -300,13 +542,27 @@ pub struct Snapshot {
     pub bundles: Vec<BundleState>,
 }
 
-/// One bundle's identity in the snapshot.
+/// One bundle's identity in the snapshot. The freshness fields stay `None`
+/// (and out of the serialized lockfile) unless the build engaged the
+/// freshness surface, so a build with nothing stale is byte-identical to one
+/// from before the surface existed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BundleState {
     pub id: i64,
     pub name: String,
     pub sync_hash: Option<String>,
     pub last_synced_at: Option<String>,
+    /// The bundle's catalog generation in the build's snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_generation: Option<i64>,
+    /// The bundle-scope effective freshness state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub freshness_reasons: Vec<String>,
+    /// The bundle's embedding contract evidence, as the catalog records it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_contract: Option<serde_json::Value>,
 }
 
 const TRUSTED_TIERS: [&str; 2] = ["human-reviewed", "machine-confirmed"];
@@ -426,8 +682,932 @@ pub async fn resolve<C: GenericClient>(
     rows.iter().map(record_from_row).collect()
 }
 
+// ---------------------------------------------------------------------------
+// Catalog capabilities, freshness, seed closure, and the stale policy
+// ---------------------------------------------------------------------------
+
+/// The catalog capabilities a build consults, probed once per build from
+/// `pgokf.capabilities()`. A catalog that predates the capability function
+/// reports none of them, and the build behaves exactly as it always has.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Capabilities {
+    /// `pgokf.effective_freshness`.
+    pub freshness: bool,
+    /// `pgokf.bundles.catalog_generation`.
+    pub catalog_generation: bool,
+    /// `pgokf.current_relationships` and `pgokf.concept_relationship_neighbors`.
+    pub typed_relationships: bool,
+}
+
+/// Checks `pg_catalog` for `pgokf.capabilities` without calling it: a
+/// catalog that predates the function simply has no row, so discovery never
+/// raises. Raising (the old `SELECT pgokf.capabilities()` against a legacy
+/// catalog, SQLSTATE 42883) aborts the build's whole transaction, and no
+/// client-side catch makes it usable again (25P02).
+const CAPABILITY_PROBE_SQL: &str = "SELECT 1 FROM pg_catalog.pg_proc p
+             JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+             WHERE n.nspname = 'pgokf' AND p.proname = 'capabilities'
+             LIMIT 1";
+
+/// Probe the catalog's capability declaration. A catalog that predates the
+/// capability function reports none of them - found by the catalog lookup
+/// above, never by catching the undefined-function error, which would abort
+/// the surrounding transaction.
+pub(crate) async fn capabilities<C: GenericClient>(client: &C) -> Result<Capabilities> {
+    let declared = client
+        .query_opt(CAPABILITY_PROBE_SQL, &[])
+        .await
+        .context("checking for the catalog capability declaration")?;
+    if declared.is_none() {
+        return Ok(Capabilities::default());
+    }
+    let row = client
+        .query_opt("SELECT pgokf.capabilities()", &[])
+        .await
+        .context("reading the catalog capabilities")?;
+    let declared: Option<serde_json::Value> = row.and_then(|r| r.try_get(0).ok()).flatten();
+    Ok(parse_capabilities(declared.as_ref()))
+}
+
+/// The declaration's meaning: a capability is offered at version 1 or
+/// higher; no declaration (a legacy catalog) means none of them.
+fn parse_capabilities(declared: Option<&serde_json::Value>) -> Capabilities {
+    let has = |name: &str| {
+        declared
+            .and_then(|v| v.get(name))
+            .and_then(serde_json::Value::as_i64)
+            .is_some_and(|version| version >= 1)
+    };
+    Capabilities {
+        freshness: has("effective_freshness"),
+        catalog_generation: has("catalog_generation"),
+        typed_relationships: has("typed_relationships"),
+    }
+}
+
+/// One stale concept named in a refusal or an exclusion, with the role that
+/// made it matter and the catalog's reasons.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StaleConcept {
+    pub bundle_id: i64,
+    pub concept_id: String,
+    /// `pick`, `seed`, `required-closure`, `closure`, or `selected`.
+    pub role: String,
+    pub state: String,
+    pub reasons: Vec<String>,
+}
+
+impl StaleConcept {
+    pub(crate) fn of(record: &ConceptRecord, require_closure: bool) -> Self {
+        Self {
+            bundle_id: record.bundle_id,
+            concept_id: record.concept_id.clone(),
+            role: record.origin.role(require_closure).to_owned(),
+            state: record.freshness.state.clone(),
+            reasons: record.freshness.reasons.clone(),
+        }
+    }
+
+    /// One stale package member named in a refusal or an exclusion. It
+    /// carries the package's role: the member entered the build the way its
+    /// package did.
+    pub(crate) fn member(
+        record: &ConceptRecord,
+        concept_id: &str,
+        freshness: &Freshness,
+        require_closure: bool,
+    ) -> Self {
+        Self {
+            bundle_id: record.bundle_id,
+            concept_id: concept_id.to_owned(),
+            role: record.origin.role(require_closure).to_owned(),
+            state: freshness.state.clone(),
+            reasons: freshness.reasons.clone(),
+        }
+    }
+}
+
+/// A package record's stale members, keyed by concept id (the map is
+/// sorted, so refusals and reports are deterministic). Empty for any other
+/// record.
+fn stale_members(record: &ConceptRecord) -> impl Iterator<Item = (&String, &Freshness)> {
+    record
+        .package
+        .iter()
+        .flat_map(|p| p.member_freshness.iter())
+        .filter(|(_, freshness)| freshness.is_stale())
+}
+
+/// A typed relationship row whose target did not resolve: reported as
+/// metadata when the closure is optional, refused when it is required.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnresolvedEdge {
+    pub source_bundle_id: i64,
+    pub source_concept_id: String,
+    pub relation_type: String,
+    pub direction: String,
+    pub target_bundle_id: Option<i64>,
+    pub target_concept_id: Option<String>,
+    pub external_target: Option<String>,
+}
+
+/// One node a closure reached beyond its seeds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ClosureNode {
+    pub bundle_id: i64,
+    pub concept_id: String,
+    /// Shortest hop count from a seed.
+    pub hops: usize,
+    /// The node this one was reached from.
+    pub via: Option<ConceptRef>,
+    /// The relation type of the reaching edge.
+    pub relation_type: Option<String>,
+}
+
+/// What a seed closure did, recorded in the lockfile.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ClosureReport {
+    pub seeds: Vec<ConceptRef>,
+    pub direction: Direction,
+    pub relation_types: Vec<String>,
+    pub hops: usize,
+    pub required: bool,
+    /// The reached nodes (seeds excluded), in deterministic order.
+    pub nodes: Vec<ClosureNode>,
+    /// Unresolved edges the traversal could not follow. Present only when
+    /// the closure is not required; a required closure refuses instead.
+    pub unresolved: Vec<UnresolvedEdge>,
+}
+
+/// A build the stale policy or the closure rules refuse, carrying the
+/// enumerations the refusal must give (spec §4.8). The MCP tool renders it
+/// as structured JSON; everywhere else its message is the enumeration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum BuildRefusal {
+    /// An exact pick, a seed, or a required closure node is stale.
+    StaleRequired { concepts: Vec<StaleConcept> },
+    /// Excluding the stale concepts left nothing to build.
+    NoFreshConcepts { concepts: Vec<StaleConcept> },
+    /// A required closure crosses a relationship whose target never resolved.
+    UnresolvedRequired { edges: Vec<UnresolvedEdge> },
+    /// A seed names no visible concept.
+    SeedNotFound { seeds: Vec<ConceptRef> },
+    /// A required closure reached nodes nothing selectable answers to (they
+    /// are hidden, retired, or below the trust filter).
+    ClosureNodesMissing { nodes: Vec<ConceptRef> },
+    /// Seeds plus their closure would push the build past the concept ceiling.
+    ClosureExceedsLimit { limit: usize },
+}
+
+impl BuildRefusal {
+    /// The structured form the MCP tool returns: `{"refused": true, ...}`.
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        let mut value = serde_json::to_value(self).unwrap_or(serde_json::Value::Null);
+        value["refused"] = serde_json::Value::Bool(true);
+        value["detail"] = serde_json::Value::String(self.to_string());
+        value
+    }
+}
+
+impl std::fmt::Display for BuildRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StaleRequired { concepts } => {
+                writeln!(
+                    f,
+                    "the stale policy refuses this build: {} required concept{} not fresh",
+                    concepts.len(),
+                    if concepts.len() == 1 { " is" } else { "s are" }
+                )?;
+                for c in concepts {
+                    writeln!(
+                        f,
+                        "  {}:{} ({}, state {}, reasons: {})",
+                        c.bundle_id,
+                        c.concept_id,
+                        c.role,
+                        c.state,
+                        c.reasons.join(", ")
+                    )?;
+                }
+                write!(f, "rebuild with stale_policy warn to keep them, labelled")?;
+            }
+            Self::NoFreshConcepts { concepts } => {
+                writeln!(
+                    f,
+                    "the stale policy refuses this build: excluding the stale concepts leaves nothing"
+                )?;
+                for c in concepts {
+                    writeln!(
+                        f,
+                        "  {}:{} (state {}, reasons: {})",
+                        c.bundle_id,
+                        c.concept_id,
+                        c.state,
+                        c.reasons.join(", ")
+                    )?;
+                }
+                write!(f, "rebuild with stale_policy warn to keep them, labelled")?;
+            }
+            Self::UnresolvedRequired { edges } => {
+                writeln!(
+                    f,
+                    "the required closure cannot be completed: {} relationship{} an unresolved target",
+                    edges.len(),
+                    if edges.len() == 1 { " has" } else { "s have" }
+                )?;
+                for e in edges {
+                    write!(
+                        f,
+                        "  {}:{} -[{}]-> ",
+                        e.source_bundle_id, e.source_concept_id, e.relation_type
+                    )?;
+                    match (
+                        &e.target_bundle_id,
+                        &e.target_concept_id,
+                        &e.external_target,
+                    ) {
+                        (Some(b), Some(c), _) => writeln!(f, "{b}:{c} (not in the catalog)")?,
+                        (_, _, Some(x)) => writeln!(f, "external {x:?}")?,
+                        _ => writeln!(f, "(target unknown)")?,
+                    }
+                }
+            }
+            Self::SeedNotFound { seeds } => {
+                write!(f, "no visible concept answers to the seed")?;
+                let list: Vec<String> = seeds.iter().map(ToString::to_string).collect();
+                write!(f, "{}", if seeds.len() == 1 { " " } else { "s " })?;
+                write!(f, "{}", list.join(", "))?;
+            }
+            Self::ClosureNodesMissing { nodes } => {
+                writeln!(
+                    f,
+                    "the required closure cannot be completed: {} reached node{} nothing selectable answers to (hidden, retired, or below the trust filter)",
+                    nodes.len(),
+                    if nodes.len() == 1 { " has" } else { "s have" }
+                )?;
+                for node in nodes {
+                    writeln!(f, "  {node}")?;
+                }
+                write!(
+                    f,
+                    "widen the selection's trust, or rebuild without require_closure"
+                )?;
+            }
+            Self::ClosureExceedsLimit { limit } => {
+                write!(
+                    f,
+                    "the seeds and their closure select more than {limit} concepts; narrow the selection, the relationship types, or the hop bound"
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for BuildRefusal {}
+
+/// Everything the resolution stage learned beyond the records themselves:
+/// what the closure did, what the stale policy excluded, and whether the
+/// catalog has the freshness surface at all.
+#[derive(Debug, Clone, Default)]
+pub struct BuildReport {
+    /// `false` on a catalog without `pgokf.effective_freshness` (every
+    /// record then keeps [`Freshness::unknown`], and nothing is warned or
+    /// excluded).
+    pub freshness_available: bool,
+    pub closure: Option<ClosureReport>,
+    /// Concepts the `exclude` policy dropped, in selection order.
+    pub excluded: Vec<StaleConcept>,
+    /// The probed catalog capabilities, for the snapshot's extended form.
+    pub(crate) capabilities: Capabilities,
+}
+
+/// Resolve a selection completely, inside the caller's snapshot: the plain
+/// selectors, then the seed closure, then each record's effective freshness,
+/// then the stale policy. This is the build's (and the preview's) one
+/// resolution path; [`resolve`] remains the plain record-only form.
+///
+/// # Errors
+///
+/// An empty selection, a catalog failure, or a [`BuildRefusal`].
+pub(crate) async fn resolve_selected<C: GenericClient>(
+    client: &C,
+    selection: &Selection,
+) -> Result<(Vec<ConceptRecord>, BuildReport)> {
+    let capabilities = capabilities(client).await?;
+    let mut records = resolve(client, selection).await?;
+    let closure = if selection.seeds.is_empty() {
+        None
+    } else {
+        if !capabilities.typed_relationships {
+            return Err(anyhow!(
+                "seeds and closure need the catalog's typed_relationships capability \
+                 (pgokf 0.3.0); this catalog does not offer it"
+            ));
+        }
+        Some(apply_closure(client, selection, &mut records).await?)
+    };
+    let freshness_available = capabilities.freshness;
+    if freshness_available {
+        apply_freshness(client, &mut records).await?;
+        apply_member_freshness(client, &mut records).await?;
+    }
+    let excluded = apply_stale_policy(selection, &mut records)?;
+    Ok((
+        records,
+        BuildReport {
+            freshness_available,
+            closure,
+            excluded,
+            capabilities,
+        },
+    ))
+}
+
+/// `true` when the freshness/closure machinery had any say in this build:
+/// the lockfile and manifest record the policy only then, so a build with no
+/// new selectors and nothing stale stays byte-identical to one from before
+/// the surface existed.
+pub(crate) fn engaged(selection: &Selection, records: &[ConceptRecord]) -> bool {
+    !selection.seeds.is_empty()
+        || selection.stale_policy == StalePolicy::Exclude
+        || records
+            .iter()
+            .any(|r| r.freshness.is_stale() || stale_members(r).next().is_some())
+}
+
+/// Fill every record's freshness from `pgokf.effective_freshness`: a
+/// concept-scope override when one is recorded, otherwise the bundle row.
+async fn apply_freshness<C: GenericClient>(
+    client: &C,
+    records: &mut [ConceptRecord],
+) -> Result<()> {
+    if records.is_empty() {
+        return Ok(());
+    }
+    let bundle_ids: Vec<i64> = {
+        let mut ids: Vec<i64> = records.iter().map(|r| r.bundle_id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    };
+    let rows = client
+        .query(
+            "SELECT bundle_id, scope_kind, scope_key, state, coalesce(reasons, '{}'),
+                    to_char(stale_since AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),
+                    observed_revision, indexed_revision, published_revision, catalog_generation,
+                    to_char(last_reconciled_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
+             FROM pgokf.effective_freshness
+             WHERE bundle_id = ANY($1) AND scope_kind IN ('bundle', 'concept')",
+            &[&bundle_ids],
+        )
+        .await
+        .context("reading the effective freshness")?;
+    let mut bundle_rows: std::collections::BTreeMap<i64, &tokio_postgres::Row> =
+        std::collections::BTreeMap::new();
+    let mut concept_rows: std::collections::BTreeMap<(i64, String), &tokio_postgres::Row> =
+        std::collections::BTreeMap::new();
+    for row in &rows {
+        let scope_kind: String = row.try_get(1)?;
+        if scope_kind == "bundle" {
+            bundle_rows.insert(row.try_get(0)?, row);
+        } else if let Some(key) = row.try_get::<_, Option<String>>(2)? {
+            concept_rows.insert((row.try_get(0)?, key), row);
+        }
+    }
+    for record in records.iter_mut() {
+        let row = concept_rows
+            .get(&(record.bundle_id, record.concept_id.clone()))
+            .or_else(|| bundle_rows.get(&record.bundle_id));
+        let Some(row) = row else { continue };
+        record.freshness = Freshness {
+            state: row.try_get(3)?,
+            reasons: row.try_get(4)?,
+            scope: row.try_get(1)?,
+            stale_since: row.try_get(5)?,
+            observed_revision: row.try_get(6)?,
+            indexed_revision: row.try_get(7)?,
+            published_revision: row.try_get(8)?,
+            catalog_generation: row.try_get(9)?,
+            last_reconciled_at: row.try_get(10)?,
+        };
+    }
+    Ok(())
+}
+
+/// Fill each package record's `member_freshness`: every member's own
+/// effective freshness (a concept-scope override when one is recorded,
+/// otherwise the bundle row), keyed by the member's concept id. Resolved
+/// here, before the stale policy and before sources load, so the policy
+/// sees a stale member and the member's state survives the resource dedup
+/// and the whole-package load. Members with no freshness row stay out of
+/// the map ([`Freshness::unknown`]).
+async fn apply_member_freshness<C: GenericClient>(
+    client: &C,
+    records: &mut [ConceptRecord],
+) -> Result<()> {
+    let packages: Vec<(i64, String)> = records
+        .iter()
+        .filter(|r| r.package.is_some())
+        .map(|r| (r.bundle_id, r.concept_id.clone()))
+        .collect();
+    if packages.is_empty() {
+        return Ok(());
+    }
+    let bundle_ids: Vec<i64> = packages.iter().map(|(b, _)| *b).collect();
+    let package_ids: Vec<String> = packages.iter().map(|(_, c)| c.clone()).collect();
+    let rows = client
+        .query(
+            "SELECT m.bundle_id, m.package_id, m.member_id, f.scope_kind, f.state,
+                    coalesce(f.reasons, '{}'),
+                    to_char(f.stale_since AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),
+                    f.observed_revision, f.indexed_revision, f.published_revision,
+                    f.catalog_generation,
+                    to_char(f.last_reconciled_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
+             FROM (
+                 SELECT c.bundle_id,
+                        coalesce(s.package_concept_id, d.package_concept_id) AS package_id,
+                        c.id AS member_id
+                 FROM pgokf.concepts c
+                 JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled AND b.retired_at IS NULL
+                 LEFT JOIN pgokf.scripts s
+                        ON s.bundle_id = c.bundle_id AND s.concept_id = c.id
+                 LEFT JOIN pgokf.reference_documents d
+                        ON d.bundle_id = c.bundle_id AND d.concept_id = c.id
+                 JOIN (SELECT * FROM unnest($1::bigint[], $2::text[])) AS wanted(b, id)
+                   ON wanted.b = c.bundle_id
+                  AND coalesce(s.package_concept_id, d.package_concept_id) = wanted.id
+             ) m
+             LEFT JOIN pgokf.effective_freshness f
+                    ON f.bundle_id = m.bundle_id
+                   AND ((f.scope_kind = 'concept' AND f.scope_key = m.member_id)
+                        OR f.scope_kind = 'bundle')",
+            &[&bundle_ids, &package_ids],
+        )
+        .await
+        .context("reading the package members' effective freshness")?;
+    // A member with both a concept row and the bundle row appears twice;
+    // the concept-scope override wins, exactly as for selected records.
+    let mut members: std::collections::BTreeMap<(i64, String, String), &tokio_postgres::Row> =
+        std::collections::BTreeMap::new();
+    for row in &rows {
+        let scope: Option<String> = row.try_get(3)?;
+        let Some(scope) = scope else { continue };
+        let key = (
+            row.try_get(0)?,
+            row.try_get::<_, String>(1)?,
+            row.try_get::<_, String>(2)?,
+        );
+        if scope == "concept" || !members.contains_key(&key) {
+            members.insert(key, row);
+        }
+    }
+    for record in records.iter_mut() {
+        let Some(package) = &mut record.package else {
+            continue;
+        };
+        for ((bundle_id, package_id, member_id), row) in &members {
+            if *bundle_id != record.bundle_id || *package_id != record.concept_id {
+                continue;
+            }
+            package.member_freshness.insert(
+                member_id.clone(),
+                Freshness {
+                    state: row.try_get(4)?,
+                    reasons: row.try_get(5)?,
+                    scope: row.try_get::<_, String>(3)?,
+                    stale_since: row.try_get(6)?,
+                    observed_revision: row.try_get(7)?,
+                    indexed_revision: row.try_get(8)?,
+                    published_revision: row.try_get(9)?,
+                    catalog_generation: row.try_get(10)?,
+                    last_reconciled_at: row.try_get(11)?,
+                },
+            );
+        }
+    }
+    Ok(())
+}
+
+/// One node a single seed's traversal returned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NeighborHit {
+    bundle_id: i64,
+    concept_id: String,
+    hops: usize,
+    /// The node this one was reached from (`None` at hop 0).
+    via: Option<ConceptRef>,
+    relation_type: Option<String>,
+}
+
+/// Merge one seed's hits into the closure's node map, keeping the shortest
+/// hop count (and its reaching edge) when several seeds reach a node.
+/// Deterministic: ties settle by first seed in sorted order, and duplicate
+/// hops keep the existing entry, so cycles cannot rewrite a settled node.
+fn merge_closure_nodes(
+    nodes: &mut std::collections::BTreeMap<(i64, String), NeighborHit>,
+    hits: Vec<NeighborHit>,
+) {
+    for hit in hits {
+        let key = (hit.bundle_id, hit.concept_id.clone());
+        match nodes.get(&key) {
+            Some(existing) if existing.hops <= hit.hops => {}
+            _ => {
+                nodes.insert(key, hit);
+            }
+        }
+    }
+}
+
+/// The most unresolved edges one closure report names.
+const MAX_UNRESOLVED_REPORTED: usize = 100;
+
+/// The records the closure's internal fetch returned keep no caller-pick
+/// origin: the fetch only fills in what the walk reached, and the synthetic
+/// pick the resolution statement sets would make an optional closure node
+/// "required" to the stale policy. A file the caller genuinely picked keeps
+/// its origin.
+fn clear_internal_pick_origins(records: &mut [ConceptRecord], caller_picks: &[ConceptRef]) {
+    for record in records.iter_mut() {
+        let caller_picked = caller_picks
+            .iter()
+            .any(|p| p.bundle_id == record.bundle_id && p.concept_id == record.concept_id);
+        if !caller_picked {
+            record.origin.pick = false;
+        }
+    }
+}
+
+/// The reached closure nodes no record materialized (they were not visible,
+/// or the trust filter rejected them), in deterministic order. A required
+/// closure refuses on these; an optional one goes without them.
+fn unmaterialized_nodes(
+    nodes: &std::collections::BTreeMap<(i64, String), NeighborHit>,
+    records: &[ConceptRecord],
+) -> Vec<ConceptRef> {
+    let materialized: BTreeSet<(i64, &str)> = records
+        .iter()
+        .map(|r| (r.bundle_id, r.concept_id.as_str()))
+        .collect();
+    nodes
+        .keys()
+        .filter(|(bundle_id, concept_id)| {
+            !materialized.contains(&(*bundle_id, concept_id.as_str()))
+        })
+        .map(|(bundle_id, concept_id)| ConceptRef {
+            bundle_id: *bundle_id,
+            concept_id: concept_id.clone(),
+        })
+        .collect()
+}
+
+/// Expand the seeds through `pgokf.concept_relationship_neighbors` — one
+/// call per seed inside the build's snapshot, merged into one visited set
+/// keyed `(bundle_id, concept_id)` — and add every reached concept to the
+/// records. The extension's traversal is already cycle-safe breadth-first
+/// with type/direction filters over the active relationship generation, so
+/// the builder holds no graph logic of its own.
+///
+/// # Errors
+///
+/// A [`BuildRefusal`] when a seed names no visible concept, when the closure
+/// would push the build past [`MAX_CONCEPTS`], or when a required closure
+/// crosses an unresolved target; a catalog failure otherwise.
+#[allow(clippy::too_many_lines)]
+async fn apply_closure<C: GenericClient>(
+    client: &C,
+    selection: &Selection,
+    records: &mut Vec<ConceptRecord>,
+) -> Result<ClosureReport> {
+    let mut seeds = selection.seeds.clone();
+    seeds.sort();
+    seeds.dedup();
+    let hops = selection.effective_hops();
+    let hop_bound = i32::try_from(hops).unwrap_or(i32::MAX);
+    let max_results = i32::try_from(MAX_CONCEPTS).unwrap_or(i32::MAX);
+    let relation_types =
+        (!selection.relation_types.is_empty()).then(|| selection.relation_types.clone());
+    let direction = selection.direction.id();
+
+    let mut nodes: std::collections::BTreeMap<(i64, String), NeighborHit> =
+        std::collections::BTreeMap::new();
+    for seed in &seeds {
+        let rows = client
+            .query(
+                "SELECT bundle_id, concept_id, hops, relation_type,
+                        path_bundle_ids, path_concept_ids
+                 FROM pgokf.concept_relationship_neighbors($1, $2, $3, $4, $5, $6)",
+                &[
+                    &seed.bundle_id,
+                    &seed.concept_id,
+                    &hop_bound,
+                    &direction,
+                    &relation_types,
+                    &max_results,
+                ],
+            )
+            .await
+            .context("walking the seed closure")?;
+        let hits = rows
+            .iter()
+            .map(|row| {
+                let node_hops = usize::try_from(row.try_get::<_, i32>(2)?).unwrap_or(0);
+                let path_bundles: Vec<i64> = row.try_get(4)?;
+                let path_concepts: Vec<String> = row.try_get(5)?;
+                let via = node_hops.checked_sub(1).and_then(|previous| {
+                    Some(ConceptRef {
+                        bundle_id: *path_bundles.get(previous)?,
+                        concept_id: path_concepts.get(previous)?.clone(),
+                    })
+                });
+                Ok(NeighborHit {
+                    bundle_id: row.try_get(0)?,
+                    concept_id: row.try_get(1)?,
+                    hops: node_hops,
+                    via,
+                    relation_type: row.try_get(3)?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        merge_closure_nodes(&mut nodes, hits);
+    }
+
+    // Every seed and every reached node must be a visible, selectable
+    // concept; fetch the missing ones through the picks branch of the one
+    // resolution statement (picks add without narrowing and are never cut by
+    // the limit).
+    let mut wanted: Vec<ConceptRef> = seeds.clone();
+    wanted.extend(nodes.keys().map(|(b, c)| ConceptRef {
+        bundle_id: *b,
+        concept_id: c.clone(),
+    }));
+    wanted.sort();
+    wanted.dedup();
+    let known: BTreeSet<(i64, &str)> = records
+        .iter()
+        .map(|r| (r.bundle_id, r.concept_id.as_str()))
+        .collect();
+    let missing: Vec<ConceptRef> = wanted
+        .iter()
+        .filter(|r| !known.contains(&(r.bundle_id, r.concept_id.as_str())))
+        .cloned()
+        .collect();
+    if records.len() + missing.len() > MAX_CONCEPTS {
+        return Err(BuildRefusal::ClosureExceedsLimit {
+            limit: MAX_CONCEPTS,
+        }
+        .into());
+    }
+    if !missing.is_empty() {
+        // The trust filter gates picks in the one resolution statement, so
+        // it gates the closure's additions the same way. The fetch is the
+        // closure's internal lookup, not a caller pick: clear the pick
+        // origin the statement set, or an optional closure node would look
+        // required to the stale policy.
+        let mut fetched = resolve(
+            client,
+            &Selection {
+                picks: missing,
+                verified_only: selection.verified_only,
+                ..Selection::default()
+            },
+        )
+        .await?;
+        clear_internal_pick_origins(&mut fetched, &selection.picks);
+        records.append(&mut fetched);
+    }
+    // Mark origins; a seed nothing visible answers to is a caller error in
+    // either policy.
+    let mut absent_seeds = Vec::new();
+    for seed in &seeds {
+        match records
+            .iter_mut()
+            .find(|r| r.bundle_id == seed.bundle_id && r.concept_id == seed.concept_id)
+        {
+            Some(record) => record.origin.seed = true,
+            None => absent_seeds.push(seed.clone()),
+        }
+    }
+    if !absent_seeds.is_empty() {
+        return Err(BuildRefusal::SeedNotFound {
+            seeds: absent_seeds,
+        }
+        .into());
+    }
+    for record in records.iter_mut() {
+        if nodes.contains_key(&(record.bundle_id, record.concept_id.clone())) {
+            record.origin.closure = true;
+        }
+    }
+    // A required closure must materialize every node it reached: a node the
+    // trust filter (or visibility) kept out of the records is a refusal with
+    // the dropped nodes named, never a silent omission from a "successful"
+    // required closure. An optional closure simply goes without them.
+    if selection.require_closure {
+        let dropped = unmaterialized_nodes(&nodes, records);
+        if !dropped.is_empty() {
+            return Err(BuildRefusal::ClosureNodesMissing { nodes: dropped }.into());
+        }
+    }
+
+    // Unresolved edges out of (or, for an inbound walk, into) the nodes the
+    // traversal could still expand: metadata when the closure is optional, a
+    // refusal when it is required.
+    let unresolved = unresolved_edges(
+        client,
+        &nodes,
+        &seeds,
+        hops,
+        direction,
+        relation_types.as_deref(),
+    )
+    .await?;
+    if selection.require_closure && !unresolved.is_empty() {
+        return Err(BuildRefusal::UnresolvedRequired { edges: unresolved }.into());
+    }
+
+    let mut report_nodes: Vec<ClosureNode> = nodes
+        .into_values()
+        .map(|hit| ClosureNode {
+            bundle_id: hit.bundle_id,
+            concept_id: hit.concept_id,
+            hops: hit.hops,
+            via: hit.via,
+            relation_type: hit.relation_type,
+        })
+        .collect();
+    report_nodes.sort_by(|a, b| {
+        a.hops
+            .cmp(&b.hops)
+            .then_with(|| a.bundle_id.cmp(&b.bundle_id))
+            .then_with(|| a.concept_id.cmp(&b.concept_id))
+    });
+    Ok(ClosureReport {
+        seeds,
+        direction: selection.direction,
+        relation_types: selection.relation_types.clone(),
+        hops,
+        required: selection.require_closure,
+        nodes: report_nodes,
+        unresolved: if selection.require_closure {
+            Vec::new()
+        } else {
+            unresolved
+        },
+    })
+}
+
+/// The unresolved-edge check, matching the walk's type and direction
+/// filters exactly. The inbound arm mirrors the extension's inbound
+/// traversal, which follows two shapes: edges whose target is a frontier
+/// node, AND outgoing `undirected` edges from a frontier node (an
+/// undirected edge is traversable both ways) - so an unresolved undirected
+/// edge leaving the frontier counts as unresolved for an inbound closure
+/// too. The outbound arm needs no such addition: forward traversal follows
+/// every edge leaving the frontier, undirected ones included.
+const UNRESOLVED_SQL: &str =
+    "SELECT r.source_bundle_id, r.source_concept_id, r.relation_type, r.direction,
+                    r.target_bundle_id, r.target_concept_id, r.external_target
+             FROM pgokf.current_relationships r
+             WHERE r.unresolved
+               AND ($3::text[] IS NULL OR r.relation_type = ANY($3))
+               AND ((($4 = 'outbound' OR $4 = 'both')
+                     AND (r.source_bundle_id, r.source_concept_id) IN
+                         (SELECT * FROM unnest($1::bigint[], $2::text[])))
+                    OR (($4 = 'inbound' OR $4 = 'both')
+                     AND ((r.target_bundle_id IS NOT NULL
+                           AND (r.target_bundle_id, r.target_concept_id) IN
+                               (SELECT * FROM unnest($1::bigint[], $2::text[])))
+                          OR (r.direction = 'undirected'
+                              AND (r.source_bundle_id, r.source_concept_id) IN
+                                  (SELECT * FROM unnest($1::bigint[], $2::text[]))))))
+             ORDER BY r.source_bundle_id, r.source_concept_id, r.relation_type
+             LIMIT $5";
+
+/// The unresolved relationship rows among the nodes a closure could still
+/// expand (every seed, and every reached node below the hop bound), matching
+/// the walk's type and direction filters.
+async fn unresolved_edges<C: GenericClient>(
+    client: &C,
+    nodes: &std::collections::BTreeMap<(i64, String), NeighborHit>,
+    seeds: &[ConceptRef],
+    hops: usize,
+    direction: &str,
+    relation_types: Option<&[String]>,
+) -> Result<Vec<UnresolvedEdge>> {
+    let mut frontier: Vec<ConceptRef> = seeds.to_vec();
+    frontier.extend(
+        nodes
+            .values()
+            .filter(|hit| hit.hops < hops)
+            .map(|hit| ConceptRef {
+                bundle_id: hit.bundle_id,
+                concept_id: hit.concept_id.clone(),
+            }),
+    );
+    frontier.sort();
+    frontier.dedup();
+    if frontier.is_empty() {
+        return Ok(Vec::new());
+    }
+    let bundles: Vec<i64> = frontier.iter().map(|r| r.bundle_id).collect();
+    let ids: Vec<String> = frontier.iter().map(|r| r.concept_id.clone()).collect();
+    let types = relation_types.map(<[String]>::to_vec);
+    let rows = client
+        .query(
+            UNRESOLVED_SQL,
+            &[
+                &bundles,
+                &ids,
+                &types,
+                &direction,
+                &i64::try_from(MAX_UNRESOLVED_REPORTED).unwrap_or(i64::MAX),
+            ],
+        )
+        .await
+        .context("checking the closure for unresolved targets")?;
+    rows.iter()
+        .map(|row| {
+            Ok(UnresolvedEdge {
+                source_bundle_id: row.try_get(0)?,
+                source_concept_id: row.try_get(1)?,
+                relation_type: row.try_get(2)?,
+                direction: row.try_get(3)?,
+                target_bundle_id: row.try_get(4)?,
+                target_concept_id: row.try_get(5)?,
+                external_target: row.try_get(6)?,
+            })
+        })
+        .collect()
+}
+
+/// Apply the stale policy after freshness is known. `warn` keeps every
+/// record (materialization labels them); `exclude` drops the stale optional
+/// ones and refuses - enumerating ids and reasons - when an exact pick, a
+/// seed, or a required closure node is stale, or when nothing fresh remains
+/// (which is also how exclusion breaking a requested closure surfaces: a
+/// required closure node is never dropped). A skill package ships byte for
+/// byte or not at all, so a package with a stale member is dropped whole
+/// (or, when required, refuses the build) and the stale member is what the
+/// enumeration names, with the package's role.
+fn apply_stale_policy(
+    selection: &Selection,
+    records: &mut Vec<ConceptRecord>,
+) -> Result<Vec<StaleConcept>> {
+    if selection.stale_policy != StalePolicy::Exclude {
+        return Ok(Vec::new());
+    }
+    let required = selection.require_closure;
+    let mut blocking: Vec<StaleConcept> = Vec::new();
+    for record in records.iter().filter(|r| r.origin.required(required)) {
+        if record.freshness.is_stale() {
+            blocking.push(StaleConcept::of(record, required));
+        }
+        for (member, freshness) in stale_members(record) {
+            blocking.push(StaleConcept::member(record, member, freshness, required));
+        }
+    }
+    if !blocking.is_empty() {
+        dedup_stale(&mut blocking);
+        return Err(BuildRefusal::StaleRequired { concepts: blocking }.into());
+    }
+    let mut excluded: Vec<StaleConcept> = Vec::new();
+    records.retain(|r| {
+        if r.freshness.is_stale() {
+            excluded.push(StaleConcept::of(r, required));
+            return false;
+        }
+        let stale: Vec<StaleConcept> = stale_members(r)
+            .map(|(member, freshness)| StaleConcept::member(r, member, freshness, required))
+            .collect();
+        if stale.is_empty() {
+            return true;
+        }
+        // The package cannot ship without the member (its hash covers every
+        // member), so the whole package goes.
+        excluded.extend(stale);
+        false
+    });
+    dedup_stale(&mut excluded);
+    if !excluded.is_empty() && records.is_empty() {
+        return Err(BuildRefusal::NoFreshConcepts { concepts: excluded }.into());
+    }
+    Ok(excluded)
+}
+
+/// Fold repeated mentions of one concept (a stale member can be both a
+/// selected record and a member of a selected package), keeping the first.
+fn dedup_stale(list: &mut Vec<StaleConcept>) {
+    let mut seen = BTreeSet::new();
+    list.retain(|c| seen.insert((c.bundle_id, c.concept_id.clone())));
+}
+
 /// One resolved row as a [`ConceptRecord`] (without content).
 fn record_from_row(r: &tokio_postgres::Row) -> Result<ConceptRecord> {
+    let picked: bool = r.try_get(19)?;
     Ok(ConceptRecord {
         bundle_id: r.try_get(0)?,
         bundle_name: r.try_get(1)?,
@@ -444,6 +1624,12 @@ fn record_from_row(r: &tokio_postgres::Row) -> Result<ConceptRecord> {
         bytes: Vec::new(),
         package: package_from_row(r)?,
         resource: resource_from_row(r)?,
+        freshness: Freshness::unknown(),
+        origin: Origin {
+            pick: picked,
+            seed: false,
+            closure: false,
+        },
     })
 }
 
@@ -461,6 +1647,7 @@ fn package_from_row(r: &tokio_postgres::Row) -> Result<Option<PackageRecord>> {
             root,
             hash,
             resources: Vec::new(),
+            member_freshness: std::collections::BTreeMap::new(),
         }),
         _ => None,
     })
@@ -650,27 +1837,13 @@ async fn load_one<C: GenericClient>(client: &C, record: &mut ConceptRecord) -> R
             None => Ok(false),
         };
     }
-    let source = client
-        .query_opt(
-            "SELECT pgokf.get_concept_source($1, $2)",
-            &[&record.bundle_id, &record.concept_id],
-        )
-        .await;
+    let source = stored_source(client, record.bundle_id, &record.concept_id).await?;
     match source {
-        Ok(Some(row)) => {
-            record.bytes = row.try_get::<_, Option<Vec<u8>>>(0)?.unwrap_or_default();
+        Some(bytes) => {
+            record.bytes = bytes;
             record.exact = !record.bytes.is_empty();
         }
-        // invalid_parameter_value: no source stored for this concept.
-        Err(error)
-            if error
-                .as_db_error()
-                .is_some_and(|e| e.code().code() == "22023") =>
-        {
-            record.exact = false;
-        }
-        Ok(None) => record.exact = false,
-        Err(error) => return Err(error).context("reading a concept's stored source"),
+        None => record.exact = false,
     }
     if !record.exact {
         let body: Option<String> = client
@@ -771,6 +1944,7 @@ async fn load_package<C: GenericClient>(client: &C, record: &mut ConceptRecord) 
         root: String::new(),
         hash: String::new(),
         resources: Vec::new(),
+        member_freshness: std::collections::BTreeMap::new(),
     });
     if let Some(name) = name {
         package.name = name;
@@ -802,6 +1976,60 @@ async fn resource_bytes<C: GenericClient>(
         Err(error) if is_invalid_parameter(&error) => Ok(None),
         Err(error) => Err(error).context("reading a package resource"),
     }
+}
+
+/// One concept's stored source through the audited reader; `None` when the
+/// catalog keeps no source for it (the reader's documented 22023), or when
+/// the concept vanished between resolving and loading.
+///
+/// The reader raises "no stored source" as an error, and any error aborts
+/// the surrounding transaction - catching it client-side does not make the
+/// build's snapshot usable again (SQLSTATE 25P02). So inside a transaction
+/// the read runs under a savepoint that is rolled back when the reader
+/// raises, leaving the snapshot live for the indexed-text fallback.
+/// On a plain client (autocommit) no savepoint exists and catching the
+/// error is already enough; the savepoint statement itself failing is how
+/// that case is detected.
+async fn stored_source<C: GenericClient>(
+    client: &C,
+    bundle_id: i64,
+    concept_id: &str,
+) -> Result<Option<Vec<u8>>> {
+    const SAVEPOINT: &str = "SAVEPOINT pgokf_workspace_source_read";
+    const ROLLBACK: &str = "ROLLBACK TO SAVEPOINT pgokf_workspace_source_read";
+    const RELEASE: &str = "RELEASE SAVEPOINT pgokf_workspace_source_read";
+    let savepoint = client.batch_execute(SAVEPOINT).await.is_ok();
+    let read = client
+        .query_opt(
+            "SELECT pgokf.get_concept_source($1, $2)",
+            &[&bundle_id, &concept_id],
+        )
+        .await;
+    let outcome = match read {
+        Ok(Some(row)) => row
+            .try_get::<_, Option<Vec<u8>>>(0)
+            .context("reading a concept's stored source"),
+        Ok(None) => Ok(None),
+        // invalid_parameter_value: no source stored for this concept (or no
+        // such visible concept).
+        Err(error) if is_invalid_parameter(&error) => {
+            if savepoint {
+                client
+                    .batch_execute(ROLLBACK)
+                    .await
+                    .context("recovering the catalog snapshot after a missing source")?;
+            }
+            Ok(None)
+        }
+        Err(error) => Err(error).context("reading a concept's stored source"),
+    };
+    if savepoint {
+        client
+            .batch_execute(RELEASE)
+            .await
+            .context("closing the source-read savepoint")?;
+    }
+    outcome
 }
 
 /// SQLSTATE 22023: the catalog's "no such (visible) concept".
@@ -853,6 +2081,22 @@ pub fn yaml_string(value: &str) -> String {
 ///
 /// A catalog query failure.
 pub async fn snapshot<C: GenericClient>(client: &C, bundle_ids: &[i64]) -> Result<Snapshot> {
+    snapshot_extended(client, bundle_ids, false).await
+}
+
+/// The catalog snapshot, extended with each bundle's catalog generation and
+/// effective freshness when `extended` (a build that engaged the freshness
+/// surface on a catalog that has it). The plain form is byte-identical to
+/// what the lockfile has always recorded.
+///
+/// # Errors
+///
+/// A catalog query failure.
+pub(crate) async fn snapshot_extended<C: GenericClient>(
+    client: &C,
+    bundle_ids: &[i64],
+    extended: bool,
+) -> Result<Snapshot> {
     let versions = client
         .query_one(
             "SELECT pgokf.version(),
@@ -862,13 +2106,21 @@ pub async fn snapshot<C: GenericClient>(client: &C, bundle_ids: &[i64]) -> Resul
         .await
         .context("reading the catalog version")?;
     let ids: Vec<i64> = bundle_ids.to_vec();
+    let sql = if extended {
+        "SELECT b.id, coalesce(b.name, regexp_replace(b.path, '^.*/', '')), b.sync_hash,
+                to_char(b.last_synced_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),
+                b.catalog_generation, ef.state, coalesce(ef.reasons, '{}'), ef.embedding_contract
+         FROM pgokf.bundles b
+         LEFT JOIN pgokf.effective_freshness ef
+                ON ef.bundle_id = b.id AND ef.scope_kind = 'bundle'
+         WHERE b.id = ANY($1) ORDER BY b.id"
+    } else {
+        "SELECT b.id, coalesce(b.name, regexp_replace(b.path, '^.*/', '')), b.sync_hash,
+                to_char(b.last_synced_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
+         FROM pgokf.bundles b WHERE b.id = ANY($1) ORDER BY b.id"
+    };
     let rows = client
-        .query(
-            "SELECT b.id, coalesce(b.name, regexp_replace(b.path, '^.*/', '')), b.sync_hash,
-                    to_char(b.last_synced_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
-             FROM pgokf.bundles b WHERE b.id = ANY($1) ORDER BY b.id",
-            &[&ids],
-        )
+        .query(sql, &[&ids])
         .await
         .context("reading the bundle states")?;
     let bundles = rows
@@ -879,6 +2131,10 @@ pub async fn snapshot<C: GenericClient>(client: &C, bundle_ids: &[i64]) -> Resul
                 name: r.try_get(1)?,
                 sync_hash: r.try_get(2)?,
                 last_synced_at: r.try_get(3)?,
+                catalog_generation: if extended { r.try_get(4)? } else { None },
+                freshness_state: if extended { r.try_get(5)? } else { None },
+                freshness_reasons: if extended { r.try_get(6)? } else { Vec::new() },
+                embedding_contract: if extended { r.try_get(7)? } else { None },
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -910,6 +2166,8 @@ mod tests {
             bytes: Vec::new(),
             package: None,
             resource: None,
+            freshness: Freshness::unknown(),
+            origin: Origin::default(),
         }
     }
 
@@ -924,6 +2182,7 @@ mod tests {
             root: "skills/deploy".to_owned(),
             hash: "p".repeat(64),
             resources: Vec::new(),
+            member_freshness: std::collections::BTreeMap::new(),
         });
         let mut owned = record();
         owned.concept_id = "skills/deploy/scripts/a.sh".to_owned();
@@ -1126,5 +2385,539 @@ mod tests {
         ));
         assert!(text.contains("Reconstructed from the catalog's indexed text"));
         assert!(text.ends_with("Body text\n"));
+    }
+
+    fn stale_record(id: &str) -> ConceptRecord {
+        let mut record = record();
+        record.concept_id = id.to_owned();
+        record.freshness = Freshness {
+            state: "stale".to_owned(),
+            reasons: vec!["upstream_changed".to_owned()],
+            scope: "bundle".to_owned(),
+            stale_since: None,
+            observed_revision: Some("r2".to_owned()),
+            indexed_revision: Some("r1".to_owned()),
+            published_revision: Some("41".to_owned()),
+            catalog_generation: Some(42),
+            last_reconciled_at: None,
+        };
+        record
+    }
+
+    #[test]
+    fn stale_policy_and_direction_parse_their_ids() {
+        // Arrange / Act / Assert
+        assert_eq!(StalePolicy::parse("warn"), Some(StalePolicy::Warn));
+        assert_eq!(StalePolicy::parse("exclude"), Some(StalePolicy::Exclude));
+        assert_eq!(StalePolicy::parse("drop"), None);
+        assert_eq!(StalePolicy::Warn.id(), "warn");
+        assert_eq!(StalePolicy::default(), StalePolicy::Warn);
+        assert_eq!(Direction::parse("outbound"), Some(Direction::Outbound));
+        assert_eq!(Direction::parse("inbound"), Some(Direction::Inbound));
+        assert_eq!(Direction::parse("both"), Some(Direction::Both));
+        assert_eq!(Direction::parse("sideways"), None);
+        assert_eq!(Direction::default().id(), "outbound");
+        assert_eq!(Direction::Both.id(), "both");
+    }
+
+    #[test]
+    fn warn_keeps_every_stale_record_and_excludes_nothing() {
+        // Arrange
+        let mut records = vec![stale_record("a"), record()];
+        let selection = Selection::default();
+
+        // Act
+        let excluded = apply_stale_policy(&selection, &mut records).expect("warn never refuses");
+
+        // Assert
+        assert_eq!(records.len(), 2);
+        assert!(excluded.is_empty());
+    }
+
+    #[test]
+    fn exclude_drops_stale_optional_records_and_reports_them() {
+        // Arrange: one stale selected record beside a fresh one.
+        let mut records = vec![stale_record("a"), record()];
+        let selection = Selection {
+            stale_policy: StalePolicy::Exclude,
+            ..Selection::default()
+        };
+
+        // Act
+        let excluded = apply_stale_policy(&selection, &mut records).expect("nothing required");
+
+        // Assert
+        assert_eq!(records.len(), 1);
+        assert_eq!(excluded.len(), 1);
+        assert_eq!(excluded[0].concept_id, "a");
+        assert_eq!(excluded[0].role, "selected");
+        assert_eq!(excluded[0].reasons, ["upstream_changed"]);
+    }
+
+    #[test]
+    fn exclude_refuses_a_stale_pick_seed_or_required_closure_node() {
+        // Arrange
+        let mut picks = stale_record("picked");
+        picks.origin.pick = true;
+        let mut seed = stale_record("seed");
+        seed.origin.seed = true;
+        let mut closure = stale_record("via-closure");
+        closure.origin.closure = true;
+        let selection = Selection {
+            stale_policy: StalePolicy::Exclude,
+            require_closure: true,
+            ..Selection::default()
+        };
+
+        // Act
+        let error = apply_stale_policy(&selection, &mut vec![picks, seed, closure, record()])
+            .expect_err("required stale concepts refuse the build");
+
+        // Assert
+        let refusal = error
+            .downcast_ref::<BuildRefusal>()
+            .expect("a structured refusal");
+        let BuildRefusal::StaleRequired { concepts } = refusal else {
+            panic!("expected StaleRequired, got {refusal:?}");
+        };
+        let roles: Vec<&str> = concepts.iter().map(|c| c.role.as_str()).collect();
+        assert_eq!(roles, ["pick", "seed", "required-closure"]);
+        for concept in concepts {
+            assert_eq!(concept.state, "stale");
+            assert_eq!(concept.reasons, ["upstream_changed"]);
+        }
+        // The message enumerates ids and reasons.
+        let text = refusal.to_string();
+        assert!(
+            text.contains("1:picked (pick, state stale, reasons: upstream_changed)"),
+            "{text}"
+        );
+        assert_eq!(refusal.to_json()["refused"], serde_json::Value::Bool(true));
+    }
+
+    #[test]
+    fn exclude_without_required_closure_drops_a_stale_closure_node() {
+        // Arrange
+        let mut closure = stale_record("via-closure");
+        closure.origin.closure = true;
+        let selection = Selection {
+            stale_policy: StalePolicy::Exclude,
+            ..Selection::default()
+        };
+
+        // Act
+        let excluded =
+            apply_stale_policy(&selection, &mut vec![closure, record()]).expect("optional closure");
+
+        // Assert
+        assert_eq!(excluded[0].role, "closure");
+    }
+
+    #[test]
+    fn exclude_refuses_when_nothing_fresh_remains() {
+        // Arrange
+        let selection = Selection {
+            stale_policy: StalePolicy::Exclude,
+            ..Selection::default()
+        };
+
+        // Act
+        let error = apply_stale_policy(&selection, &mut vec![stale_record("a"), stale_record("b")])
+            .expect_err("an empty build is refused");
+
+        // Assert
+        let refusal = error.downcast_ref::<BuildRefusal>().expect("structured");
+        let BuildRefusal::NoFreshConcepts { concepts } = refusal else {
+            panic!("expected NoFreshConcepts, got {refusal:?}");
+        };
+        assert_eq!(concepts.len(), 2);
+        assert!(refusal.to_string().contains("1:a"));
+    }
+
+    #[test]
+    fn closure_nodes_merge_by_shortest_hops_and_cycles_cannot_rewrite() {
+        // Arrange: two seeds reach the same node; the later (longer) path
+        // must not replace the shorter one, and a cycle back to a settled
+        // node changes nothing.
+        let mut nodes = std::collections::BTreeMap::new();
+        let hit = |concept: &str, hops: usize, via: Option<ConceptRef>| NeighborHit {
+            bundle_id: 1,
+            concept_id: concept.to_owned(),
+            hops,
+            via,
+            relation_type: Some("ns:rel".to_owned()),
+        };
+
+        // Act
+        merge_closure_nodes(&mut nodes, vec![hit("a", 2, None)]);
+        merge_closure_nodes(
+            &mut nodes,
+            vec![
+                hit("a", 3, None),
+                hit(
+                    "b",
+                    1,
+                    Some(ConceptRef {
+                        bundle_id: 1,
+                        concept_id: "seed".to_owned(),
+                    }),
+                ),
+            ],
+        );
+        merge_closure_nodes(&mut nodes, vec![hit("b", 4, None)]);
+
+        // Assert
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[&(1, "a".to_owned())].hops, 2);
+        let b = &nodes[&(1, "b".to_owned())];
+        assert_eq!(b.hops, 1);
+        assert_eq!(
+            b.via,
+            Some(ConceptRef {
+                bundle_id: 1,
+                concept_id: "seed".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn seeds_make_a_selection_non_empty_and_described() {
+        // Arrange
+        let seeded = Selection {
+            seeds: vec![ConceptRef {
+                bundle_id: 1,
+                concept_id: "a".to_owned(),
+            }],
+            relation_types: vec!["ns:depends".to_owned()],
+            ..Selection::default()
+        };
+
+        // Act / Assert
+        assert!(!seeded.is_empty());
+        assert!(!seeded.has_filters(), "seeds add without narrowing");
+        assert_eq!(
+            seeded.describe(),
+            "the closure of 1 seed within 2 hops of type ns:depends"
+        );
+        assert!(engaged(&seeded, &[]));
+        assert!(!engaged(&Selection::default(), &[record()]));
+        assert!(engaged(&Selection::default(), &[stale_record("a")]));
+        assert!(
+            engaged(
+                &Selection {
+                    stale_policy: StalePolicy::Exclude,
+                    ..Selection::default()
+                },
+                &[record()]
+            ),
+            "an explicit exclude policy is recorded even when nothing is stale"
+        );
+        assert_eq!(seeded.effective_hops(), DEFAULT_HOPS);
+        assert_eq!(
+            Selection {
+                hops: Some(99),
+                ..Selection::default()
+            }
+            .effective_hops(),
+            MAX_HOPS
+        );
+    }
+
+    #[test]
+    fn the_capability_probe_never_calls_a_function_that_may_not_exist() {
+        // Discovery goes through the catalog tables: a legacy catalog
+        // yields no row, and no error ever aborts the build's transaction.
+        assert!(CAPABILITY_PROBE_SQL.contains("pg_catalog.pg_proc"));
+        assert!(CAPABILITY_PROBE_SQL.contains("proname = 'capabilities'"));
+        assert!(
+            !CAPABILITY_PROBE_SQL.contains("capabilities()"),
+            "the probe must not call the function it checks for"
+        );
+    }
+
+    #[test]
+    fn the_capability_declaration_defaults_to_nothing_and_reads_versions() {
+        // Arrange / Act / Assert
+        assert_eq!(parse_capabilities(None), Capabilities::default());
+        assert_eq!(
+            parse_capabilities(Some(&serde_json::json!({
+                "effective_freshness": 1,
+                "catalog_generation": 1,
+                "typed_relationships": 2
+            }))),
+            Capabilities {
+                freshness: true,
+                catalog_generation: true,
+                typed_relationships: true,
+            }
+        );
+        assert_eq!(
+            parse_capabilities(Some(&serde_json::json!({ "effective_freshness": 0 }))),
+            Capabilities::default(),
+            "a version below 1 is not offered"
+        );
+    }
+
+    /// A fresh skill package whose member concept the catalog flagged stale.
+    fn package_with_stale_member() -> ConceptRecord {
+        let mut package = record();
+        package.concept_id = "skills/deploy/SKILL".to_owned();
+        package.package = Some(PackageRecord {
+            name: "deploy".to_owned(),
+            root: "skills/deploy".to_owned(),
+            hash: "p".repeat(64),
+            resources: Vec::new(),
+            member_freshness: std::collections::BTreeMap::from([(
+                "skills/deploy/scripts/run.sh".to_owned(),
+                stale_record("skills/deploy/scripts/run.sh").freshness,
+            )]),
+        });
+        package
+    }
+
+    #[test]
+    fn exclude_drops_a_package_with_a_stale_member_and_names_the_member() {
+        // Arrange: a fresh package beside a fresh document; only the
+        // package's script is stale.
+        let package = package_with_stale_member();
+        let mut records = vec![package, record()];
+        let selection = Selection {
+            stale_policy: StalePolicy::Exclude,
+            ..Selection::default()
+        };
+
+        // Act
+        let excluded = apply_stale_policy(&selection, &mut records).expect("nothing required");
+
+        // Assert: a package ships byte for byte or not at all, so the whole
+        // package goes, and the enumeration names the stale member with the
+        // package's role.
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].concept_id, "runbooks/a");
+        assert_eq!(excluded.len(), 1);
+        assert_eq!(excluded[0].concept_id, "skills/deploy/scripts/run.sh");
+        assert_eq!(excluded[0].role, "selected");
+        assert_eq!(excluded[0].state, "stale");
+        assert_eq!(excluded[0].reasons, ["upstream_changed"]);
+    }
+
+    #[test]
+    fn exclude_refuses_a_required_package_with_a_stale_member() {
+        // Arrange: the package is an exact pick.
+        let mut package = package_with_stale_member();
+        package.origin.pick = true;
+        let selection = Selection {
+            stale_policy: StalePolicy::Exclude,
+            ..Selection::default()
+        };
+
+        // Act
+        let error =
+            apply_stale_policy(&selection, &mut vec![package]).expect_err("a required package");
+
+        // Assert: the refusal names the member, not just the package.
+        let refusal = error.downcast_ref::<BuildRefusal>().expect("structured");
+        let BuildRefusal::StaleRequired { concepts } = refusal else {
+            panic!("expected StaleRequired, got {refusal:?}");
+        };
+        assert_eq!(concepts.len(), 1);
+        assert_eq!(concepts[0].concept_id, "skills/deploy/scripts/run.sh");
+        assert_eq!(concepts[0].role, "pick");
+        assert!(
+            refusal
+                .to_string()
+                .contains("1:skills/deploy/scripts/run.sh (pick, state stale"),
+            "{refusal}"
+        );
+    }
+
+    #[test]
+    fn exclude_names_a_doubly_selected_stale_member_once() {
+        // Arrange: the probe's exact shape - the fresh package and its stale
+        // script are both selected by concept id, beside a fresh document.
+        let package = package_with_stale_member();
+        let member = stale_record("skills/deploy/scripts/run.sh");
+        let mut records = vec![package, member, record()];
+        let selection = Selection {
+            stale_policy: StalePolicy::Exclude,
+            ..Selection::default()
+        };
+
+        // Act
+        let excluded = apply_stale_policy(&selection, &mut records).expect("nothing required");
+
+        // Assert: both records go, the member is enumerated once.
+        assert_eq!(records.len(), 1);
+        assert_eq!(excluded.len(), 1, "{excluded:?}");
+        assert_eq!(excluded[0].concept_id, "skills/deploy/scripts/run.sh");
+    }
+
+    #[test]
+    fn warn_keeps_a_package_with_a_stale_member_and_engages_the_surface() {
+        // Arrange / Act
+        let mut records = vec![package_with_stale_member()];
+        let excluded =
+            apply_stale_policy(&Selection::default(), &mut records).expect("warn never refuses");
+
+        // Assert: the member stays (materialization labels it), and the
+        // build counts as having engaged the freshness surface.
+        assert!(excluded.is_empty());
+        assert_eq!(records.len(), 1);
+        assert!(engaged(&Selection::default(), &records));
+    }
+
+    #[test]
+    fn the_internal_closure_fetch_clears_the_synthetic_pick_origin() {
+        // Arrange: a closure node fetched through the picks branch (which
+        // marks every row a pick) and one record the caller genuinely
+        // picked.
+        let mut child = record();
+        child.concept_id = "child".to_owned();
+        child.origin.pick = true;
+        child.origin.closure = true;
+        let mut genuine = record();
+        genuine.concept_id = "picked".to_owned();
+        genuine.origin.pick = true;
+        let caller_picks = vec![ConceptRef {
+            bundle_id: 1,
+            concept_id: "picked".to_owned(),
+        }];
+        let mut fetched = vec![child, genuine];
+
+        // Act
+        clear_internal_pick_origins(&mut fetched, &caller_picks);
+
+        // Assert: the internal lookup is not a caller pick, so an optional
+        // stale closure node is dropped rather than refused (W7); what the
+        // caller named keeps its origin.
+        assert!(!fetched[0].origin.pick, "the synthetic pick is cleared");
+        assert!(fetched[0].origin.closure, "the closure origin stays");
+        assert!(
+            fetched[1].origin.pick,
+            "a genuine caller pick keeps its origin"
+        );
+    }
+
+    #[test]
+    fn an_optional_stale_closure_node_is_dropped_not_refused() {
+        // Arrange: the W7 reproduction's decision point - a stale node that
+        // entered only through the optional closure, no caller picks.
+        let mut child = stale_record("child");
+        child.origin.closure = true;
+        let selection = Selection {
+            stale_policy: StalePolicy::Exclude,
+            ..Selection::default()
+        };
+
+        // Act
+        let excluded =
+            apply_stale_policy(&selection, &mut vec![record(), child]).expect("optional closure");
+
+        // Assert
+        assert_eq!(excluded.len(), 1);
+        assert_eq!(excluded[0].concept_id, "child");
+        assert_eq!(excluded[0].role, "closure");
+    }
+
+    #[test]
+    fn unmaterialized_closure_nodes_are_exactly_the_dropped_ones() {
+        // Arrange: the W6 reproduction's decision point - the walk reached a
+        // child, but only the seed was materialized (the child fell to the
+        // trust filter); another reached node was selected by the filters.
+        let hit = |concept: &str| NeighborHit {
+            bundle_id: 1,
+            concept_id: concept.to_owned(),
+            hops: 1,
+            via: Some(ConceptRef {
+                bundle_id: 1,
+                concept_id: "seed".to_owned(),
+            }),
+            relation_type: Some("ns:rel".to_owned()),
+        };
+        let mut nodes = std::collections::BTreeMap::new();
+        nodes.insert((1, "child".to_owned()), hit("child"));
+        nodes.insert((1, "kept".to_owned()), hit("kept"));
+        let mut seed = record();
+        seed.concept_id = "seed".to_owned();
+        let mut kept = record();
+        kept.concept_id = "kept".to_owned();
+        let records = vec![seed, kept];
+
+        // Act
+        let dropped = unmaterialized_nodes(&nodes, &records);
+
+        // Assert
+        assert_eq!(
+            dropped,
+            [ConceptRef {
+                bundle_id: 1,
+                concept_id: "child".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_required_closure_refusal_names_the_dropped_nodes() {
+        // Arrange / Act
+        let refusal = BuildRefusal::ClosureNodesMissing {
+            nodes: vec![ConceptRef {
+                bundle_id: 1,
+                concept_id: "child".to_owned(),
+            }],
+        };
+
+        // Assert
+        let text = refusal.to_string();
+        assert!(
+            text.contains("required closure cannot be completed"),
+            "{text}"
+        );
+        assert!(text.contains("1:child"), "{text}");
+        assert!(text.contains("trust filter"), "{text}");
+        assert_eq!(refusal.to_json()["reason"], "closure_nodes_missing");
+        assert_eq!(refusal.to_json()["refused"], serde_json::Value::Bool(true));
+    }
+
+    #[test]
+    fn the_inbound_unresolved_check_covers_undirected_edges_from_the_frontier() {
+        // The extension's inbound traversal follows edges into the frontier
+        // and outgoing undirected edges from it; the unresolved check must
+        // see the same edges (W8).
+        let inbound = UNRESOLVED_SQL
+            .find("$4 = 'inbound'")
+            .expect("an inbound arm");
+        let undirected = UNRESOLVED_SQL
+            .find("r.direction = 'undirected'")
+            .expect("undirected edges are considered");
+        assert!(
+            undirected > inbound,
+            "the undirected arm belongs to the inbound branch"
+        );
+        let source_after =
+            UNRESOLVED_SQL[undirected..].contains("r.source_bundle_id, r.source_concept_id");
+        assert!(
+            source_after,
+            "an undirected edge counts by its source end for an inbound walk"
+        );
+    }
+
+    #[test]
+    fn unknown_freshness_is_not_stale() {
+        // Arrange / Act / Assert
+        assert!(!Freshness::unknown().is_stale());
+        assert!(
+            !Freshness {
+                state: "fresh".to_owned(),
+                ..Freshness::unknown()
+            }
+            .is_stale()
+        );
+        assert!(
+            Freshness {
+                state: "reconciling".to_owned(),
+                ..Freshness::unknown()
+            }
+            .is_stale()
+        );
     }
 }

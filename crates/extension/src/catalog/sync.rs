@@ -27,7 +27,17 @@
 //!    storage, a no-op under the default `store_source`-off policy) - with the
 //!    staged concepts;
 //! 8. update the bundle row (file count, `last_synced_at`, aggregate
-//!    `sync_hash`) last.
+//!    `sync_hash`, and the monotonic `catalog_generation`) last;
+//! 9. activate the staged relationship publication expecting exactly the
+//!    accepted generation and supersede the prior generation's publications
+//!    ([`crate::catalog::relationships`]), marking the bundle stale when its
+//!    relationship coverage disappeared;
+//! 10. commit the durable outbox event ([`crate::catalog::change_event`]) and
+//!     the audit row linked to it, initialize the bundle's freshness row on
+//!     first registration, evaluate the enabled freshness dependencies whose
+//!     source is this bundle ([`crate::catalog::freshness`]), and prune
+//!     acknowledged events past the `change_event_retention_days` window - all
+//!     in the same transaction.
 //!
 //! Because `pgrx` functions execute inside the caller's transaction and every
 //! failure is raised as a `PostgreSQL` error, a failed sync rolls back
@@ -1251,19 +1261,26 @@ fn update_bundle_row(
     bundle_id: i64,
     sync_hash: &str,
     okf_version: Option<&str>,
-) -> Result<(), CatalogError> {
-    Spi::run_with_args(
+) -> Result<i64, CatalogError> {
+    // The catalog generation advances exactly once per accepted sync, inside
+    // the same statement (and the same transaction, under the bundle advisory
+    // lock) as the sync-state update, so the generation and the sync hash a
+    // durable change event records can never disagree.
+    Spi::get_one_with_args::<i64>(
         "UPDATE pgokf.bundles b
          SET file_count = (SELECT count(*)::integer
                            FROM pgokf.concepts c
                            WHERE c.bundle_id = b.id),
              last_synced_at = pg_catalog.now(),
              sync_hash = $2,
-             okf_version = $3
-         WHERE b.id = $1",
+             okf_version = $3,
+             catalog_generation = b.catalog_generation + 1
+         WHERE b.id = $1
+         RETURNING catalog_generation",
         &[bundle_id.into(), sync_hash.into(), okf_version.into()],
     )
-    .map_err(|error| spi_error("failed to update bundle sync state", &error))
+    .map_err(|error| spi_error("failed to update bundle sync state", &error))?
+    .ok_or_else(|| CatalogError::internal("bundle update returned no row", Path::new("")))
 }
 
 /// Apply the durable `okf_version_policy` to a bundle's declared OKF version.
@@ -1300,14 +1317,17 @@ fn apply_okf_version_policy(
 /// Emit the opt-in change notification for a completed sync.
 ///
 /// Fires `pg_notify(<channel>, <json>)` with a JSON payload of the bundle id,
-/// operation, and change counts. The channel and payload are bound as
-/// parameters, never interpolated. Off by default (no channel configured), so
-/// this is only called when `notify_channel` is set.
+/// operation, change counts, and the durable outbox event id. The channel and
+/// payload are bound as parameters, never interpolated. Off by default (no
+/// channel configured), so this is only called when `notify_channel` is set.
+/// The notification is a non-durable wake-up hint only: the durable record is
+/// the `pgokf.catalog_change_event` row the payload points at.
 fn emit_change_notification(
     channel: &str,
     bundle_id: i64,
     op: SyncOp,
     report: &SyncReport,
+    event_id: i64,
 ) -> Result<(), CatalogError> {
     Spi::run_with_args(
         "SELECT pg_catalog.pg_notify($1, pg_catalog.jsonb_build_object(
@@ -1316,7 +1336,8 @@ fn emit_change_notification(
              'added', $4::integer,
              'updated', $5::integer,
              'removed', $6::integer,
-             'total', $7::integer)::text)",
+             'total', $7::integer,
+             'event_id', $8::bigint)::text)",
         &[
             channel.into(),
             bundle_id.into(),
@@ -1325,6 +1346,7 @@ fn emit_change_notification(
             count_to_i32(report.updated).into(),
             count_to_i32(report.removed).into(),
             count_to_i32(report.total()).into(),
+            event_id.into(),
         ],
     )
     .map_err(|error| spi_error("failed to emit change notification", &error))
@@ -1408,11 +1430,17 @@ fn project_bundle_logs<S: ByteSource>(
 /// `pgokf_private.sync_log` row and the `pg_notify` announcement commit
 /// atomically with the sync transaction, so a logged row (or a delivered
 /// notification, on commit) always corresponds to a committed operation.
+///
+/// `context` is the producer's change-provenance context (the
+/// `pgokf.sync_context` GUC, or the explicit `context` argument of
+/// `pgokf.register_bundle_content_with_context`): the durable outbox event the
+/// tail commits carries its origin/causation/reconciliation keys verbatim.
 pub(crate) fn run_bundle_sync<S: ByteSource>(
     bundle_id: i64,
     source: &S,
     op: SyncOp,
     bundle_path: &str,
+    context: &crate::catalog::change_event::ChangeContext,
 ) -> Result<SyncReport, CatalogError> {
     let defaults = crate::catalog::config::sync_defaults()?;
     let projection = load_stored_projection(bundle_id)?;
@@ -1459,7 +1487,10 @@ pub(crate) fn run_bundle_sync<S: ByteSource>(
                 .cloned()
         })
         .collect();
-    let mut stored = projection.hashes;
+    // Clone the pre-sync `path -> file_hash` map: the outbox event's change
+    // records read the pre-sync state (including reclassified paths) while
+    // `stored` below is viewed without them for the change manifest/history.
+    let mut stored = projection.hashes.clone();
     for entry in &staged {
         if projection
             .ids
@@ -1477,6 +1508,21 @@ pub(crate) fn run_bundle_sync<S: ByteSource>(
 
     delete_removed_concepts(bundle_id, &delta.removed_paths)?;
     delete_reclassified_concepts(bundle_id, &staged)?;
+
+    // Embedding invalidation, in this transaction and immediately around the
+    // concept DML: every staged (re-written) concept loses its embedding row,
+    // so no old vector coexists with the new concept text past commit.
+    // Removed and reclassified concepts cascade their embedding rows through
+    // the concept-delete foreign key; the embedder's missing-row poll
+    // re-embeds whatever this clears.
+    crate::catalog::embedding::invalidate_synced_concepts(
+        bundle_id,
+        &staged
+            .iter()
+            .map(|entry| entry.concept.id.clone())
+            .collect::<Vec<_>>(),
+    )?;
+
     upsert_concepts(bundle_id, &staged, &defaults.text_search_config)?;
     replace_concept_metadata(bundle_id, &staged)?;
 
@@ -1516,11 +1562,31 @@ pub(crate) fn run_bundle_sync<S: ByteSource>(
     let okf_version =
         apply_okf_version_policy(source.root_okf_version(), &defaults.okf_version_policy)?;
     let sync_hash = bundle_sync_hash(&current);
-    update_bundle_row(bundle_id, &sync_hash, okf_version.as_deref())?;
+    let catalog_generation = update_bundle_row(bundle_id, &sync_hash, okf_version.as_deref())?;
 
-    // Audit trail: append exactly one row for this operation and prune history
-    // to the retention policy - the mechanism that activates
-    // sync_log_retention_days. Commits atomically with the sync.
+    // Relationship generation activation, in this transaction and after the
+    // new catalog generation exists: the staged publication expecting exactly
+    // this generation becomes the bundle's visible relationship set, the prior
+    // generation's publications are superseded, and a bundle whose coverage
+    // disappeared stays stale - new concepts never combine with old-generation
+    // relationships. See crate::catalog::relationships.
+    let coverage_missing =
+        crate::catalog::relationships::activate_staged(bundle_id, catalog_generation)?;
+
+    let event_id = record_event_and_evaluate(
+        bundle_id,
+        &projection,
+        &staged,
+        &delta.removed_paths,
+        context,
+        catalog_generation,
+        &sync_hash,
+        coverage_missing,
+    )?;
+
+    // Audit trail: append exactly one row for this operation (linked to the
+    // outbox event) and prune history to the retention policy - the mechanism
+    // that activates sync_log_retention_days. Commits atomically with the sync.
     let sync_id = crate::catalog::audit::record(
         bundle_id,
         bundle_path,
@@ -1528,6 +1594,7 @@ pub(crate) fn run_bundle_sync<S: ByteSource>(
         Some(&delta.report),
         Some(&sync_hash),
         defaults.sync_log_retention_days,
+        Some(event_id),
     )?;
 
     // Per-concept change manifest: hang the concrete added/updated/removed
@@ -1538,10 +1605,89 @@ pub(crate) fn run_bundle_sync<S: ByteSource>(
     // Opt-in change notification (LISTEN/NOTIFY). Zero overhead when the
     // notify_channel key is empty (no channel resolved).
     if let Some(channel) = &defaults.notify_channel {
-        emit_change_notification(channel, bundle_id, op, &delta.report)?;
+        emit_change_notification(channel, bundle_id, op, &delta.report, event_id)?;
     }
 
     Ok(delta.report)
+}
+
+/// Record the durable outbox event for one accepted sync, initialize the
+/// bundle's freshness row on first registration, evaluate the enabled
+/// freshness dependencies sourced at this bundle against the event, and prune
+/// acknowledged events past the retention window - all inside the sync
+/// transaction, under the bundle advisory lock the caller holds.
+///
+/// Returns the event id so the audit row and the change notification can point
+/// at it.
+#[allow(clippy::too_many_arguments)]
+fn record_event_and_evaluate(
+    bundle_id: i64,
+    projection: &StoredProjection,
+    staged: &[StagedConcept],
+    removed_paths: &[String],
+    context: &crate::catalog::change_event::ChangeContext,
+    catalog_generation: i64,
+    sync_hash: &str,
+    relationship_coverage_missing: bool,
+) -> Result<i64, CatalogError> {
+    // Durable outbox event: exactly one row per accepted sync, carrying the new
+    // catalog generation, a bounded change summary, and the producer's
+    // provenance context. Committed in this transaction, before dependency
+    // evaluation, so no catalog update can exist without its event. The
+    // pre-existing LISTEN/NOTIFY remains a non-durable wake-up hint pointing at
+    // this event id.
+    let changes = crate::catalog::change_event::build_changes(
+        &projection.hashes,
+        &projection.ids,
+        staged,
+        removed_paths,
+    );
+    let event_id = crate::catalog::change_event::record(
+        bundle_id,
+        context.operation_for_sync(),
+        catalog_generation,
+        &changes,
+        context,
+        Some(sync_hash),
+    )?;
+
+    // Freshness: a first registration is born fresh (the current sync hash is
+    // its initial materialization evidence); a resync never clears staleness
+    // on its own (a producer compare-and-set does that).
+    crate::catalog::freshness::initialize_bundle(
+        bundle_id,
+        catalog_generation,
+        sync_hash,
+        context,
+    )?;
+
+    // Required relationship coverage: a refresh that superseded the bundle's
+    // active relationship publications without activating a matching staged
+    // replacement keeps the bundle stale (reason relationship_coverage_missing)
+    // until the producer publishes the matching generation; the CAS mark_fresh
+    // refuses while that reason stands.
+    if relationship_coverage_missing {
+        crate::catalog::freshness::mark_relationship_coverage_missing(bundle_id)?;
+    }
+
+    // Dependency evaluation: every enabled freshness dependency whose source
+    // is this bundle is evaluated against this event, in this transaction, so
+    // affected targets are stale before the change commits.
+    crate::catalog::freshness::evaluate_dependencies(
+        bundle_id,
+        event_id,
+        catalog_generation,
+        false,
+        &changes,
+        crate::catalog::change_event::is_truncated(&changes),
+        context.causation_key.as_deref(),
+    )?;
+
+    // Retention: prune acknowledged outbox events past the
+    // change_event_retention_days window (unacknowledged events are never
+    // pruned), in the same transaction as the new event.
+    crate::catalog::change_event::prune(crate::catalog::config::change_event_retention_days()?)?;
+    Ok(event_id)
 }
 
 fn lookup_bundle_id_by_path(canonical_path: &str) -> Result<Option<i64>, CatalogError> {
@@ -1633,11 +1779,13 @@ fn register_bundle_impl(
     }
 
     let bundle_id = insert_bundle_row(&canonical_text, name, options)?;
+    let context = crate::catalog::change_event::ChangeContext::from_session()?;
     let report = run_bundle_sync(
         bundle_id,
         &FilesystemSource::new(canonical_root),
         SyncOp::Register,
         &canonical_text,
+        &context,
     )?;
     Ok((bundle_id, canonical_text, report))
 }
@@ -1675,11 +1823,13 @@ fn refresh_bundle_impl(bundle_id: i64) -> Result<(String, SyncReport), CatalogEr
     // root before touching the filesystem.
     acquire_bundle_lock(&stored_path)?;
     let canonical_root = resolve_bundle_root(&stored_path)?;
+    let context = crate::catalog::change_event::ChangeContext::from_session()?;
     let report = run_bundle_sync(
         bundle_id,
         &FilesystemSource::new(canonical_root),
         SyncOp::Refresh,
         &stored_path,
+        &context,
     )?;
     Ok((stored_path, report))
 }
