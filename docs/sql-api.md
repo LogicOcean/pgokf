@@ -51,6 +51,7 @@ exercised against a live PostgreSQL 18 cluster.
 | `concept_search_semantic(query_embedding, bundle_id, limit_count)` | `SETOF concept_search_result` | STABLE | invoker | `pgokf_reader` |
 | `concept_search_hybrid(query, query_embedding, bundle_id, limit_count)` | `SETOF concept_search_result` | STABLE | invoker | `pgokf_reader` |
 | `set_concept_embedding(bundle_id, concept_id, embedding)` | `void` | VOLATILE | DEFINER | `pgokf_writer` |
+| `set_concept_embedding_cas(bundle_id, concept_id, embedding, expected_file_hash, input_hash, model, contract)` | `boolean` | VOLATILE | DEFINER | `pgokf_writer` |
 | `rebuild_embedding_index()` | `boolean` | VOLATILE | DEFINER | `pgokf_admin` |
 | `concept_neighbors(concept_id, max_hops, bundle_id)` | `SETOF concept_neighbor` | STABLE | invoker | `pgokf_reader` |
 | `list_bundle_log(bundle_id, directory, max_rows)` | `SETOF bundle_log_entry` | STABLE | invoker | `pgokf_reader` |
@@ -102,7 +103,8 @@ exercised against a live PostgreSQL 18 cluster.
 default-valued) arguments and are therefore **not** declared `STRICT`; every
 other function - including `list_bundles`, `bundle_info`, `catalog_stats`,
 `health`, `search_index_status`, `retire_bundle`, `unretire_bundle`,
-`list_sync_changes`, `set_concept_embedding`, `rebuild_embedding_index`,
+`list_sync_changes`, `set_concept_embedding`, `set_concept_embedding_cas`,
+`rebuild_embedding_index`,
 `schedule_refresh`, and `unschedule_refresh` - is `STRICT`.
 `concept_search`, `search_facets`, `find_similar`, `concept_search_semantic`,
 `concept_search_hybrid`, `concept_neighbors`, `list_bundle_log`, `catalog_stats`,
@@ -519,8 +521,18 @@ BM25 backend, `pgokf` takes **no static dependency** on it: `CREATE EXTENSION
 pgokf` succeeds without pgvector, embeddings are stored as the builtin `real[]`
 in `pgokf.concept_embedding`, and the `vector` type is used only at query and
 index time. `pgokf` never computes embeddings - a companion embedder streams
-caller-computed vectors in via `set_concept_embedding` (see
+caller-computed vectors in via `set_concept_embedding_cas` (see
 [search-guide.md](search-guide.md)).
+
+Only **eligible** embeddings rank: a row whose `source_file_hash` equals the
+concept's current `file_hash`, whose model/dimension/contract match the durable
+`embedding_model` / `embedding_dim` / `embedding_contract` policy, and whose
+concept is effectively fresh (bundle freshness `fresh`, no covering
+concept/path scope override). A sync that re-stages a concept deletes its
+embedding row in the same transaction, and changing an embedding contract key
+marks every embedding-holding bundle stale before new vectors can be queued.
+Ineligible rows may physically remain in the table and the HNSW index; they are
+never returned.
 
 ### `pgokf.set_concept_embedding(bundle_id bigint, concept_id text, embedding real[]) → void`
 
@@ -529,9 +541,31 @@ Store or replace one concept's embedding. `STRICT`, `SECURITY DEFINER`,
 `length(embedding)` equals the durable `embedding_dim` config key (`22023`
 otherwise), then upserts into `pgokf.concept_embedding`.
 
+This is the 0.2.0 compatibility signature: it carries no provenance, so the row
+it writes (or overwrites) has NULL `model` / `source_file_hash` / `input_hash` /
+`contract` and is **never eligible for semantic ranking** - the embedding
+watcher re-embeds it through the compare-and-set setter below.
+
+### `pgokf.set_concept_embedding_cas(bundle_id bigint, concept_id text, embedding real[], expected_file_hash text, input_hash text, model text, contract text) → boolean`
+
+Store or replace one concept's embedding **with full provenance**,
+compare-and-set against the concept's current `file_hash`. `STRICT`,
+`SECURITY DEFINER`, **requires `pgokf_writer`**. All four provenance arguments
+must be non-empty (`22023` otherwise, as for a wrong length or an unknown
+concept): `expected_file_hash` is the concept's `file_hash` the caller read when
+it built the embedding input, `input_hash` is the caller-computed hash of the
+exact bounded input text it embedded, `model` the embedding model, and
+`contract` the render-contract identity (input construction and truncation
+version, e.g. `pgokf-embed/v1/max-chars:8000`). The write commits only when the
+concept's current `file_hash` still equals `expected_file_hash` under a row
+lock; a mismatch returns `false` having written nothing - a **retryable**
+rejection (re-read and re-embed), never an error.
+
 ```sql
-SELECT pgokf.set_concept_embedding(1, 'runbooks/database-failover',
-                                   ARRAY[0.0123, -0.0456, ...]::real[]);
+SELECT pgokf.set_concept_embedding_cas(1, 'runbooks/database-failover',
+                                       ARRAY[0.0123, -0.0456, ...]::real[],
+                                       '<file_hash at read time>', '<input hash>',
+                                       'my-model', 'my-embedder/v1');
 ```
 
 ### `pgokf.concept_search_semantic(query_embedding real[], bundle_id bigint DEFAULT NULL, limit_count int DEFAULT 10) → SETOF pgokf.concept_search_result`
@@ -544,8 +578,10 @@ dimensions.
 
 **Requires pgvector.** Because semantic search has no lexical equivalent, when
 pgvector is not installed this raises `22023` naming the missing dependency
-(`CREATE EXTENSION vector`) rather than silently returning nothing. Only enabled
-bundles are searched.
+(`CREATE EXTENSION vector`) rather than silently returning nothing. Only active
+bundles are searched, and only **eligible** embeddings rank (see the
+eligibility rule in the section introduction); a stale or legacy vector is
+never returned.
 
 ```sql
 SELECT concept_id, round(rank::numeric, 4) AS cosine_similarity
@@ -556,11 +592,17 @@ FROM pgokf.concept_search_semantic(ARRAY[0.0123, -0.0456, ...]::real[]);
 
 Fuse the **lexical** result of `query` (through the configured `search_backend`)
 with the **semantic** result of `query_embedding` using **Reciprocal Rank
-Fusion** (RRF, k = 60), entirely in SQL. `STABLE PARALLEL SAFE`, invoker rights,
+Fusion** (RRF, k = 60), entirely in SQL. `STABLE PARALLEL RESTRICTED` (the
+lexical half may execute the BM25 provider's parallel-unsafe scoring), invoker
+rights,
 **requires `pgokf_reader`**. The `rank` column is the fused RRF score; a concept
-strong in *both* lists outranks one strong in only one. When pgvector is not
-installed, hybrid **degrades to lexical-only** with a `WARNING` (RRF needs no
-model, so this fallback is sensible - unlike pure semantic search).
+strong in *both* lists outranks one strong in only one. The semantic component
+ranks eligible embeddings only (the predicate in the section introduction), so
+an ineligible vector never leaks into the fused result; the lexical component
+may still return a stale concept, labeled by `concept_search_fresh`. When
+pgvector is not installed, hybrid **degrades to lexical-only** with a `WARNING`
+(RRF needs no model, so this fallback is sensible - unlike pure semantic
+search).
 
 ```sql
 SELECT concept_id, round(rank::numeric, 6) AS rrf
@@ -831,7 +873,8 @@ SELECT jsonb_pretty(pgokf.capabilities());
 -- {
 --   "catalog_generation": 1,   "publication_fence": 1,
 --   "freshness_dependency": 1, "effective_freshness": 1,
---   "catalog_change_event": 1, "search_freshness": 1
+--   "catalog_change_event": 1, "search_freshness": 1,
+--   "embedding_freshness": 1
 -- }
 ```
 
@@ -906,9 +949,14 @@ and result type are unchanged): `freshness` is `any` (default) / `fresh` /
 `stale`, applied before pagination, and every hit is annotated with its
 effective freshness (state, reasons, scope, opaque revisions, catalog
 generation) with concept > path > bundle override precedence. Lexical results
-may include stale concepts, always labeled. This variant ranks with the native
-FTS pipeline (BM25 composition is deferred), and no semantic/embedding gating
-is applied yet.
+may include stale concepts, always labeled. Every hit also carries its
+embedding provenance: `embedding_state` (`missing` / `current` / `stale` under
+the semantic eligibility predicate), `embedding_model`, `embedding_dim`,
+`embedding_input_hash`, and `embedded_at`. Semantic ranking itself
+(`concept_search_semantic`, and the semantic component of
+`concept_search_hybrid`) **excludes** ineligible embeddings rather than
+labeling them - a stale or legacy vector never ranks. This variant ranks with
+the native FTS pipeline (BM25 composition is deferred).
 
 ---
 

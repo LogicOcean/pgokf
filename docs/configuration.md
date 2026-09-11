@@ -132,6 +132,8 @@ admin-only).
 | `notify_channel` | string | `""` | empty (disabled) or a safe channel identifier (letters, digits, underscore; leading letter/underscore; ≤ 63 bytes) |
 | `okf_version_policy` | string | `"warn"` | one of `"warn"`, `"reject"` |
 | `embedding_dim` | integer | `1536` | between `1` and `16000` |
+| `embedding_model` | string | `""` | empty (unpinned) or non-blank, ≤ 200 bytes, NUL-free |
+| `embedding_contract` | string | `""` | empty (unpinned) or non-blank, ≤ 200 bytes, NUL-free |
 | `track_history` | boolean | `false` | must be a boolean |
 | `history_retention_days` | integer | `0` | `>= 0` and fits `integer` |
 | `change_event_retention_days` | integer | `30` | `>= 0` and fits `integer` |
@@ -157,7 +159,9 @@ both indexing and querying, **honors `store_source`**, `search_backend`,
 | `sync_log_retention_days` | **Applied (new in 0.1.5).** After each successful sync appends its `pgokf_private.sync_log` audit row, history older than `now() - this many days` is pruned in the same transaction. `0` (or no older rows) keeps history indefinitely. See the audit-log section below. |
 | `notify_channel` | **Applied (new in 0.1.5).** When non-empty, a successful sync emits `pg_notify(<channel>, <json>)`; empty (default) disables it with zero overhead. See the change-notification section below. |
 | `okf_version_policy` | **Applied (new in 0.1.5).** Governs how sync treats a bundle that declares an unsupported OKF `okf_version`: `warn` (default) logs a `WARNING` and indexes anyway, `reject` aborts with `22023`. See the version-policy section below. |
-| `embedding_dim` | **Applied (new in 0.1.6).** The expected length of caller-supplied embeddings: `pgokf.set_concept_embedding` rejects any `real[]` whose length differs, and `pgokf.rebuild_embedding_index` builds its pgvector HNSW index with the `vector(embedding_dim)` typmod. See the embeddings section below. |
+| `embedding_dim` | **Applied (new in 0.1.6).** The expected length of caller-supplied embeddings: `pgokf.set_concept_embedding` rejects any `real[]` whose length differs, and `pgokf.rebuild_embedding_index` builds its pgvector HNSW index with the `vector(embedding_dim)` typmod. Since 0.3.0 it is also an eligibility pin: a stored row whose `dim` differs never ranks, and changing the key marks every embedding-holding bundle stale (`embedding_contract_changed`) in the same transaction. See the embeddings section below. |
+| `embedding_model` | **Applied (new in 0.3.0).** Optional pin on the model a stored vector must carry to rank semantically: empty (default) accepts any non-NULL `model`; a non-empty value requires an exact match. A change marks every embedding-holding bundle stale (`embedding_contract_changed`) in the same transaction, before new vectors are queued. See the embeddings section below. |
+| `embedding_contract` | **Applied (new in 0.3.0).** Optional pin on the render-contract identity (input construction and truncation version, e.g. `pgokf-embed/v1/max-chars:8000`) a stored vector must carry to rank semantically: empty (default) accepts any non-NULL `contract`; a non-empty value requires an exact match. A change invalidates like `embedding_model`. See the embeddings section below. |
 | `track_history` | **Applied (new in 0.1.11).** When `true`, each sync records an SCD-2 version trail of every changed concept into `pgokf.concept_history` (read via `pgokf.concept_history` / `pgokf.concept_as_of`); when `false` (default) it records nothing, with zero storage/behavior change. See the version-history section below and [Version History](version-history.md). |
 | `history_retention_days` | **Applied (new in 0.1.11).** When `track_history` is on and this is positive, closed history versions older than `now() - this many days` are pruned in the same transaction after each sync; the current open version is never pruned. `0` (default) keeps history indefinitely. See the version-history section below. |
 | `change_event_retention_days` | **Applied (new in 0.3.0).** After each successful sync commits its durable outbox events, ACKNOWLEDGED `pgokf.catalog_change_event` rows whose `acknowledged_at` is older than `now() - this many days` are pruned in the same transaction. Pending or claimed-but-unacknowledged events are NEVER pruned (delivery is at-least-once). `0` keeps acknowledged events indefinitely. Default `30`. |
@@ -251,10 +255,11 @@ enable-BM25 walkthrough, the provider comparison (query syntax, tokenizers,
 > (and, for `pg_search`, requires `pgvector` too). If you cannot or do not
 > want that dependency, stay on `native`.
 
-### Embedding dimension - `embedding_dim`
+### Embedding contract - `embedding_dim`, `embedding_model`, `embedding_contract`
 
 `embedding_dim` (default `1536`) is the expected length of the caller-computed
-embedding vectors streamed in through `pgokf.set_concept_embedding`, and the
+embedding vectors streamed in through `pgokf.set_concept_embedding` /
+`pgokf.set_concept_embedding_cas`, and the
 typmod (`vector(embedding_dim)`) that `pgokf.rebuild_embedding_index` builds its
 pgvector HNSW index with.
 
@@ -262,6 +267,24 @@ pgvector HNSW index with.
 -- match your embedding model (e.g. a 768-dim model)
 SELECT pgokf.set_config('embedding_dim', '768'::jsonb);
 ```
+
+`embedding_model` and `embedding_contract` (both default `""` = unpinned) are
+the optional identity pins of the embedding contract: when set, semantic ranking
+accepts only stored vectors whose `model` / `contract` match exactly (a row with
+NULL provenance - pre-0.3.0 or written through the compatibility setter - never
+ranks regardless). `embedding_dim` is always pinned.
+
+```sql
+SELECT pgokf.set_config('embedding_model', '"text-embedding-3-small"'::jsonb);
+SELECT pgokf.set_config('embedding_contract', '"pgokf-embed/v1/max-chars:8000"'::jsonb);
+```
+
+**Changing any of the three keys is a catalog event for embedding purposes**:
+the configuration change marks every bundle holding embedding rows stale (reason
+`embedding_contract_changed`) in its own transaction, before new vectors can be
+queued. The physical rows are kept (they are already ineligible under the new
+policy); the embedding watcher re-embeds the now-stale rows, and a producer
+compare-and-set (`pgokf.mark_fresh`) re-establishes currency.
 
 `pgokf` **never computes embeddings** and takes **no static dependency on
 pgvector** - the `pgokf.concept_embedding` table stores each vector as the
@@ -272,9 +295,11 @@ only at query time, and only when pgvector is installed. See
 [`search-guide.md`](search-guide.md) for the embedding-companion integration and
 the full semantic/hybrid walkthrough.
 
-> **Not retroactive.** Changing `embedding_dim` does not rewrite already-stored
-> embeddings; re-ingest them at the new dimension and re-run
-> `pgokf.rebuild_embedding_index()`. HNSW indexing applies up to pgvector's
+> **Not retroactive.** Changing `embedding_dim` (or a contract pin) does not
+> rewrite already-stored embeddings: it revokes their semantic eligibility and
+> marks the affected bundles stale; the watcher then re-embeds them at the new
+> contract, after which an admin re-runs `pgokf.rebuild_embedding_index()`.
+> HNSW indexing applies up to pgvector's
 > 2000-dimension index limit; above it semantic search still works via an exact
 > scan.
 
