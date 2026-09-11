@@ -2807,8 +2807,8 @@ An added concept for the resync diff.\n";
 
     /// Read the five reader-visible counts a non-superuser `pgokf_iso_reader`
     /// sees for the current session's `pgokf.tenant`: bundles and concepts (direct
-    /// RLS-filtered table reads), and list_bundles / concept_search('peregrine') /
-    /// list_sync_log (the reader functions). Returns
+    /// RLS-filtered table reads), and `list_bundles` / `concept_search`('peregrine') /
+    /// `list_sync_log` (the reader functions). Returns
     /// `(bundles, concepts, listed, searched, logs)`.
     fn iso_reader_counts() -> (i64, i64, i64, i64, i64) {
         Spi::connect(|client| {
@@ -2980,6 +2980,8 @@ An added concept for the resync diff.\n";
         );
     }
 
+    // Keep the setup and successive assertions of this database scenario together.
+    #[allow(clippy::too_many_lines)]
     #[pg_test]
     fn bundle_addressed_mutators_and_exports_are_confined_to_the_active_tenant() {
         // Arrange: one on-disk fixture registered under two tenants, so acme owns
@@ -3150,7 +3152,7 @@ An added concept for the resync diff.\n";
         .expect("a matching sync_log row exists")
     }
 
-    /// The change_kind recorded for one concept under a sync, via the reader.
+    /// The `change_kind` recorded for one concept under a sync, via the reader.
     fn change_kind_of(sync_id: i64, concept_id: &str) -> Option<String> {
         Spi::get_one_with_args::<String>(
             "SELECT change_kind FROM pgokf.list_sync_changes($1) WHERE concept_id = $2",
@@ -3490,7 +3492,7 @@ An added concept for the resync diff.\n";
 
     /// Register a content bundle of `count` concepts that all match the term
     /// `paginationterm`, alternating the term frequency so consecutive concepts
-    /// tie on rank - exercising the (bundle_id, concept_id) tiebreak. Returns the
+    /// tie on rank - exercising the (`bundle_id`, `concept_id`) tiebreak. Returns the
     /// bundle id.
     fn register_pagination_bundle(count: usize) -> i64 {
         let mut paths = Vec::with_capacity(count);
@@ -4481,6 +4483,8 @@ The anchor concept never changes across the runbook's revisions.\n";
         );
     }
 
+    // Keep the setup and successive assertions of this database scenario together.
+    #[allow(clippy::too_many_lines)]
     #[pg_test]
     fn concept_as_of_returns_the_snapshot_valid_at_each_instant() {
         // Arrange: the same add -> update -> update -> remove chain.
@@ -4745,7 +4749,7 @@ The anchor concept never changes across the runbook's revisions.\n";
     // ---------------------------------------------------------------------
 
     /// Every extension-owned table and sequence must be registered with
-    /// pg_extension_config_dump, or pg_dump silently skips its rows and a
+    /// `pg_extension_config_dump`, or `pg_dump` silently skips its rows and a
     /// restore comes back as an empty catalog.
     #[pg_test]
     fn every_catalog_table_and_sequence_is_registered_for_pg_dump() {
@@ -4868,9 +4872,9 @@ The anchor concept never changes across the runbook's revisions.\n";
         assert_eq!(reset, "auto");
     }
 
-    /// The pg_textsearch provider must serve a non-superuser reader under
+    /// The `pg_textsearch` provider must serve a non-superuser reader under
     /// row-level security with plain invoker rights, agree with the direct
-    /// operator, and honour the tenant scope. Requires pg_textsearch to be
+    /// operator, and honour the tenant scope. Requires `pg_textsearch` to be
     /// installed and preloaded; skips with a NOTICE otherwise.
     #[pg_test]
     fn pg_textsearch_provider_serves_a_non_superuser_reader_under_rls() {
@@ -5219,7 +5223,7 @@ The anchor concept never changes across the runbook's revisions.\n";
         Spi::run("SELECT pgokf.set_config('store_source', 'true'::jsonb)")
             .expect("store_source is settable");
         Spi::run("SET pgokf.tenant = 'acme'").expect("pgokf.tenant is settable");
-        let _acme_id = register_fixture(&bundle);
+        let acme_id = register_fixture(&bundle);
         Spi::run("SET pgokf.tenant = ''").expect("pgokf.tenant is resettable");
         Spi::run("SELECT pgokf.set_config('require_tenant', 'true'::jsonb)")
             .expect("policy is settable");
@@ -5262,7 +5266,7 @@ The anchor concept never changes across the runbook's revisions.\n";
         let probe = |label: &str| {
             Spi::get_one_with_args::<pgrx::JsonB>(
                 "SELECT pg_catalog.to_jsonb(r) FROM pg_temp.req_reader_counts($1, $2) r",
-                &[sync_id.into(), _acme_id.into()],
+                &[sync_id.into(), acme_id.into()],
             )
             .unwrap_or_else(|error| panic!("{label} probe executes: {error}"))
             .expect("probe row")
@@ -5385,9 +5389,9 @@ The anchor concept never changes across the runbook's revisions.\n";
 
     /// The bm25 backend must serve a non-superuser reader. Row-level security
     /// wraps the catalog tables for non-owners in a security-barrier subquery
-    /// that pg_search cannot plan its custom scan over, so the backend runs its
+    /// that `pg_search` cannot plan its custom scan over, so the backend runs its
     /// hit query through the SECURITY DEFINER `pgokf.bm25_hits` helper, which
-    /// applies the tenant predicate explicitly. Requires pg_search to be
+    /// applies the tenant predicate explicitly. Requires `pg_search` to be
     /// installed AND preloaded in the test cluster (it refuses to be created
     /// otherwise); skips with a NOTICE when it is not, so the suite stays green
     /// on servers without it.
@@ -6493,6 +6497,8 @@ Use the solo skill on its own.\n";
         assert!(restored, "the refresh restores the skill row");
     }
 
+    // Keep the setup and successive assertions of this database scenario together.
+    #[allow(clippy::too_many_lines)]
     #[pg_test]
     fn skill_package_projects_virtual_concepts_typed_rows_and_edges() {
         // Arrange / Act
@@ -6601,7 +6607,10 @@ Use the solo skill on its own.\n";
         });
         assert_eq!(language.as_deref(), Some("bash"));
         assert_eq!(executable.as_deref(), Some("/usr/bin/env bash"));
-        assert_eq!(size, Some(PACKAGE_SCRIPT.len() as i64));
+        assert_eq!(
+            size,
+            Some(i64::try_from(PACKAGE_SCRIPT.len()).expect("fixture size fits i64"))
+        );
         assert_eq!(sha_matches, Some(true));
         assert_eq!(package.as_deref(), Some(SKILL_ID));
 
@@ -6689,6 +6698,8 @@ Use the solo skill on its own.\n";
         assert_eq!(guide_hit, GUIDE_ID);
     }
 
+    // Keep the setup and successive assertions of this database scenario together.
+    #[allow(clippy::too_many_lines)]
     #[pg_test]
     fn get_skill_script_and_reference_return_exact_bytes_and_are_audited() {
         // Arrange
@@ -6948,7 +6959,10 @@ Use the solo skill on its own.\n";
         .expect("size not NULL");
 
         // Assert
-        assert_eq!(size, PACKAGE_SCRIPT.len() as i64);
+        assert_eq!(
+            size,
+            i64::try_from(PACKAGE_SCRIPT.len()).expect("fixture size fits i64")
+        );
     }
 
     #[pg_test]
@@ -7696,6 +7710,8 @@ Use the solo skill on its own.\n";
         .expect("a dependency id is returned")
     }
 
+    // Keep the setup and successive assertions of this database scenario together.
+    #[allow(clippy::too_many_lines)]
     #[pg_test]
     fn dependency_evaluation_marks_targets_and_suppresses_causation() {
         // Arrange: source and target bundles, and a bundle-scope dependency
@@ -8190,6 +8206,8 @@ Use the solo skill on its own.\n";
         );
     }
 
+    // The short names mirror the graph vertices in the scenario diagrams.
+    #[allow(clippy::many_single_char_names)]
     #[pg_test]
     fn dependency_invalidation_walks_transitively_and_cycle_safely() {
         // Part 1 - chain: A -> B -> C; changing A stales B AND C in the same
@@ -9880,6 +9898,8 @@ Use the solo skill on its own.\n";
         assert_eq!(publication_states(bundle_id), "superseded:2,active:0");
     }
 
+    // Keep the setup and successive assertions of this database scenario together.
+    #[allow(clippy::too_many_lines)]
     #[pg_test]
     fn typed_neighbors_traverse_directions_types_and_cycles_with_freshness() {
         // Arrange: two bundles; cross-bundle edges both ways (a cycle), a
@@ -10020,6 +10040,8 @@ Use the solo skill on its own.\n";
         );
     }
 
+    // Keep the setup and successive assertions of this database scenario together.
+    #[allow(clippy::too_many_lines)]
     #[pg_test]
     fn relationship_visibility_follows_bundle_lifecycle_and_tenancy() {
         // Arrange: one bundle per tenant, each with an active publication;
