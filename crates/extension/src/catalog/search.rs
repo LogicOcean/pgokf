@@ -18,6 +18,11 @@
 //! equal-rank results order stably, and the returned
 //! `pgokf.concept_search_result` shape is identical.
 //!
+//! Since 0.3.0 the module also hosts the additive freshness-aware variant
+//! `pgokf.concept_search_fresh` (same contract plus a `freshness` filter and a
+//! per-hit freshness annotation; see [`concept_search_fresh_impl`]); the
+//! original signature and result type are unchanged.
+//!
 //! # Security model
 //!
 //! `concept_search` deliberately runs with **invoker rights** (no `SECURITY
@@ -240,6 +245,240 @@ fn concept_search_impl(
     run_ranked_search(query, bundle_id, limit, filters, after)
 }
 
+// ---------------------------------------------------------------------
+// Freshness-aware variant (additive, 0.3.0): `pgokf.concept_search_fresh`.
+// ---------------------------------------------------------------------
+
+/// The accepted `freshness` filter values of `concept_search_fresh`.
+const FRESHNESS_FILTERS: [&str; 3] = ["any", "fresh", "stale"];
+
+/// Validate the `freshness` filter: `any` (the default) is no filter and binds
+/// `NULL`; `fresh` and `stale` filter the result set. SQLSTATE `22023`
+/// otherwise.
+fn validate_freshness_filter(freshness: &str) -> Result<Option<&str>, CatalogError> {
+    match freshness {
+        "any" => Ok(None),
+        "fresh" => Ok(Some("fresh")),
+        "stale" => Ok(Some("stale")),
+        other => Err(CatalogError::invalid_parameter(
+            format!(
+                "freshness must be one of {}, got {other}",
+                FRESHNESS_FILTERS
+                    .map(|filter| format!("'{filter}'"))
+                    .join(", ")
+            ),
+            Path::new(""),
+        )),
+    }
+}
+
+/// One ranked hit with its effective freshness annotation, as
+/// `pgokf.concept_search_fresh_result`.
+struct FreshSearchHit {
+    hit: SearchHit,
+    freshness_state: String,
+    freshness_reasons: Vec<String>,
+    freshness_scope: String,
+    stale_since: Option<pgrx::datum::TimestampWithTimeZone>,
+    observed_revision: Option<String>,
+    indexed_revision: Option<String>,
+    published_revision: Option<String>,
+    catalog_generation: i64,
+    last_reconciled_at: Option<pgrx::datum::TimestampWithTimeZone>,
+}
+
+/// Authorize, validate, and run the freshness-aware search.
+///
+/// The ranked candidate set is the **native FTS pipeline's** hit subquery
+/// ([`search_backend::NATIVE_HITS_QUERY`], shared verbatim so the match/rank/
+/// filter semantics never fork); each hit is then annotated from
+/// `pgokf.effective_freshness` with the precedence concept override, then path
+/// override, then bundle state (a concept with no recorded row is `fresh`).
+/// The `freshness` filter applies inside the query - before the keyset
+/// predicate and `LIMIT` - so a filtered page is a true page of the filtered
+/// set, never a truncated unfiltered one.
+///
+/// The function runs with invoker rights like [`concept_search`]: the
+/// `effective_freshness` view is the one reader-granted freshness surface and
+/// applies the opt-in tenant predicate inline, so a reader sees exactly its
+/// own tenant's states. Composition with the optional BM25 backend is
+/// deferred; this variant always ranks with the native FTS pipeline.
+fn concept_search_fresh_impl(
+    query: &str,
+    bundle_id: Option<i64>,
+    limit_count: i32,
+    freshness: &str,
+    filters: Filters,
+    after: Option<&Cursor>,
+) -> Result<Vec<FreshSearchHit>, CatalogError> {
+    security::authorize_current_user(security::Operation::Search, Path::new(""))?;
+    validate_query(query)?;
+    let limit = validate_limit_count(limit_count)?;
+    let freshness = validate_freshness_filter(freshness)?;
+    let text_search_config = effective_text_search_config()?;
+
+    let statement = format!(
+        "
+    SELECT hits.bundle_id,
+           hits.concept_id,
+           hits.path,
+           hits.title,
+           hits.type,
+           hits.rank,
+           hits.headline,
+           COALESCE(fc.state, fp.state, fb.state, 'fresh') AS freshness_state,
+           COALESCE(fc.reasons, fp.reasons, fb.reasons, '{{}}'::text[]) AS freshness_reasons,
+           COALESCE(fc.scope_kind || ':' || fc.scope_key,
+                    fp.scope_kind || ':' || fp.scope_key,
+                    'bundle') AS freshness_scope,
+           COALESCE(fc.stale_since, fp.stale_since, fb.stale_since) AS stale_since,
+           COALESCE(fc.observed_revision, fp.observed_revision, fb.observed_revision)
+               AS observed_revision,
+           COALESCE(fc.indexed_revision, fp.indexed_revision, fb.indexed_revision)
+               AS indexed_revision,
+           COALESCE(fc.published_revision, fp.published_revision, fb.published_revision)
+               AS published_revision,
+           b.catalog_generation,
+           COALESCE(fc.last_reconciled_at, fp.last_reconciled_at, fb.last_reconciled_at)
+               AS last_reconciled_at
+    FROM ({hits}) AS hits
+    JOIN pgokf.bundles b ON b.id = hits.bundle_id
+    LEFT JOIN pgokf.effective_freshness fc
+           ON fc.bundle_id = hits.bundle_id
+          AND fc.scope_kind = 'concept' AND fc.scope_key = hits.concept_id
+    LEFT JOIN pgokf.effective_freshness fp
+           ON fp.bundle_id = hits.bundle_id
+          AND fp.scope_kind = 'path' AND fp.scope_key = hits.path
+    LEFT JOIN pgokf.effective_freshness fb
+           ON fb.bundle_id = hits.bundle_id AND fb.scope_kind = 'bundle'
+    WHERE ($12::text IS NULL
+           OR COALESCE(fc.state, fp.state, fb.state, 'fresh') = $12)
+      AND {keyset}
+    ORDER BY hits.rank DESC, hits.bundle_id ASC, hits.concept_id ASC
+    LIMIT $3",
+        hits = search_backend::NATIVE_HITS_QUERY,
+        keyset = search_backend::KEYSET_PREDICATE,
+    );
+
+    Spi::connect(|client| {
+        let table = client
+            .select(
+                statement.as_str(),
+                None,
+                &[
+                    query.into(),
+                    bundle_id.into(),
+                    limit.into(),
+                    text_search_config.into(),
+                    filters.concept_type.into(),
+                    filters.tags.map(<[String]>::to_vec).into(),
+                    filters.status.into(),
+                    filters.trust_tier.into(),
+                    after.map(|cursor| cursor.rank).into(),
+                    after.map(|cursor| cursor.bundle_id).into(),
+                    after.map(|cursor| cursor.concept_id.as_str()).into(),
+                    freshness.into(),
+                ],
+            )
+            .map_err(spi_error("freshness-aware search query failed"))?;
+        let mut hits = Vec::with_capacity(table.len());
+        for row in table {
+            let reader = crate::catalog::spi_read::RowReader::new(
+                &row,
+                "failed to read freshness-aware search row",
+                "concept_search_fresh_result",
+            );
+            hits.push(FreshSearchHit {
+                hit: SearchHit {
+                    bundle_id: reader.required(1, "bundle_id")?,
+                    concept_id: reader.required(2, "concept_id")?,
+                    path: reader.required(3, "path")?,
+                    title: reader.optional(4)?,
+                    concept_type: reader.optional(5)?,
+                    rank: reader.required(6, "rank")?,
+                    headline: reader.optional(7)?,
+                },
+                freshness_state: reader.required(8, "freshness_state")?,
+                freshness_reasons: reader.required(9, "freshness_reasons")?,
+                freshness_scope: reader.required(10, "freshness_scope")?,
+                stale_since: reader.optional(11)?,
+                observed_revision: reader.optional(12)?,
+                indexed_revision: reader.optional(13)?,
+                published_revision: reader.optional(14)?,
+                catalog_generation: reader.required(15, "catalog_generation")?,
+                last_reconciled_at: reader.optional(16)?,
+            });
+        }
+        Ok(hits)
+    })
+}
+
+/// Pack a [`FreshSearchHit`] into a `pgokf.concept_search_fresh_result` heap
+/// tuple.
+fn fresh_composite_error(error: impl std::fmt::Display) -> CatalogError {
+    CatalogError::internal(
+        format!("failed to build pgokf.concept_search_fresh_result composite: {error}"),
+        Path::new(""),
+    )
+}
+
+fn fresh_search_result(
+    hit: FreshSearchHit,
+) -> Result<pgrx::heap_tuple::PgHeapTuple<'static, pgrx::AllocatedByRust>, CatalogError> {
+    let mut tuple =
+        pgrx::heap_tuple::PgHeapTuple::new_composite_type("pgokf.concept_search_fresh_result")
+            .map_err(fresh_composite_error)?;
+    tuple
+        .set_by_name("bundle_id", hit.hit.bundle_id)
+        .map_err(fresh_composite_error)?;
+    tuple
+        .set_by_name("concept_id", hit.hit.concept_id)
+        .map_err(fresh_composite_error)?;
+    tuple
+        .set_by_name("path", hit.hit.path)
+        .map_err(fresh_composite_error)?;
+    tuple
+        .set_by_name("title", hit.hit.title)
+        .map_err(fresh_composite_error)?;
+    tuple
+        .set_by_name("type", hit.hit.concept_type)
+        .map_err(fresh_composite_error)?;
+    tuple
+        .set_by_name("rank", hit.hit.rank)
+        .map_err(fresh_composite_error)?;
+    tuple
+        .set_by_name("headline", hit.hit.headline)
+        .map_err(fresh_composite_error)?;
+    tuple
+        .set_by_name("freshness_state", hit.freshness_state)
+        .map_err(fresh_composite_error)?;
+    tuple
+        .set_by_name("freshness_reasons", hit.freshness_reasons)
+        .map_err(fresh_composite_error)?;
+    tuple
+        .set_by_name("freshness_scope", hit.freshness_scope)
+        .map_err(fresh_composite_error)?;
+    tuple
+        .set_by_name("stale_since", hit.stale_since)
+        .map_err(fresh_composite_error)?;
+    tuple
+        .set_by_name("observed_revision", hit.observed_revision)
+        .map_err(fresh_composite_error)?;
+    tuple
+        .set_by_name("indexed_revision", hit.indexed_revision)
+        .map_err(fresh_composite_error)?;
+    tuple
+        .set_by_name("published_revision", hit.published_revision)
+        .map_err(fresh_composite_error)?;
+    tuple
+        .set_by_name("catalog_generation", hit.catalog_generation)
+        .map_err(fresh_composite_error)?;
+    tuple
+        .set_by_name("last_reconciled_at", hit.last_reconciled_at)
+        .map_err(fresh_composite_error)?;
+    Ok(tuple)
+}
+
 /// SQL-facing search entry point, installed into the `pgokf` schema.
 #[pgrx::pg_schema]
 mod pgokf {
@@ -320,6 +559,86 @@ COMMENT ON FUNCTION pgokf.concept_search(text, bigint, integer, text, text[], te
         name = "search_function_hardening",
         requires = [concept_search]
     );
+
+    extension_sql!(
+        r"
+CREATE TYPE pgokf.concept_search_fresh_result AS (
+    bundle_id          bigint,
+    concept_id         text,
+    path               text,
+    title              text,
+    type               text,
+    rank               real,
+    headline           text,
+    freshness_state    text,
+    freshness_reasons  text[],
+    freshness_scope    text,
+    stale_since        timestamptz,
+    observed_revision  text,
+    indexed_revision   text,
+    published_revision text,
+    catalog_generation bigint,
+    last_reconciled_at timestamptz
+);
+
+COMMENT ON TYPE pgokf.concept_search_fresh_result IS
+    'One ranked hit from pgokf.concept_search_fresh: the concept_search_result columns plus the concept''s effective freshness annotation - state, reason codes, the scope the state was recorded at, stale_since, the producer''s opaque observed/indexed revisions, the catalog generation the materialization covers (published_revision), the bundle''s live catalog_generation, and last_reconciled_at. Embedding provenance columns arrive with the embedding freshness capability.';
+",
+        name = "search_fresh_type",
+        requires = ["catalog_tables", "effective_freshness_view"]
+    );
+
+    /// Rank catalog concepts with their effective freshness annotation and an
+    /// optional freshness filter.
+    ///
+    /// Requires membership in `pgokf_reader` (or `pgokf_admin`). Identical
+    /// match/rank/filter/pagination semantics to `concept_search` (the native
+    /// FTS pipeline), plus a `freshness` filter - `any` (the default),
+    /// `fresh`, or `stale` - and a freshness annotation on every hit:
+    /// lexical results may include stale concepts, always labeled. A concept
+    /// with no recorded freshness row reports `fresh`.
+    #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+    #[pg_extern(stable, parallel_restricted, requires = ["search_fresh_type"])]
+    fn concept_search_fresh(
+        query: &str,
+        bundle_id: default!(Option<i64>, "NULL"),
+        limit_count: default!(i32, 20),
+        freshness: default!(&str, "'any'"),
+        concept_type: default!(Option<&str>, "NULL"),
+        tags: default!(Option<Vec<String>>, "NULL"),
+        status: default!(Option<&str>, "NULL"),
+        trust_tier: default!(Option<&str>, "NULL"),
+        after_cursor: default!(Option<pgrx::JsonB>, "NULL"),
+    ) -> SetOfIterator<'static, pgrx::composite_type!('static, "pgokf.concept_search_fresh_result")>
+    {
+        let filters = Filters::new(concept_type, tags.as_deref(), status, trust_tier);
+        let after = super::parse_cursor(after_cursor).unwrap_or_else(|error| error.raise());
+        let hits = super::concept_search_fresh_impl(
+            query,
+            bundle_id,
+            limit_count,
+            freshness,
+            filters,
+            after.as_ref(),
+        )
+        .unwrap_or_else(|error| error.raise());
+        let rows: Vec<_> = hits
+            .into_iter()
+            .map(|hit| super::fresh_search_result(hit).unwrap_or_else(|error| error.raise()))
+            .collect();
+        SetOfIterator::new(rows)
+    }
+
+    extension_sql!(
+        r"
+REVOKE ALL ON FUNCTION pgokf.concept_search_fresh(text, bigint, integer, text, text, text[], text, text, jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pgokf.concept_search_fresh(text, bigint, integer, text, text, text[], text, text, jsonb) TO pgokf_reader;
+COMMENT ON FUNCTION pgokf.concept_search_fresh(text, bigint, integer, text, text, text[], text, text, jsonb) IS
+    'Rank catalog concepts with effective freshness: the concept_search contract plus a freshness filter (any - the default - fresh, or stale; 22023 otherwise) and a per-hit freshness annotation (state, reasons, scope, stale_since, opaque observed/indexed revisions, published_revision, catalog_generation, last_reconciled_at) with concept > path > bundle override precedence; a concept with no recorded row is fresh. Lexical results may include stale concepts, always labeled; the filter applies before pagination. Reader-level and tenant-scoped like concept_search. This variant always ranks with the native FTS pipeline; composition with the optional BM25 backend is deferred. Semantic/embedding freshness gating is a later capability and is not applied here.';
+",
+        name = "search_fresh_function_hardening",
+        requires = [concept_search_fresh]
+    );
 }
 
 #[cfg(test)]
@@ -394,5 +713,30 @@ mod tests {
         assert_eq!(filters.tags.map(<[String]>::len), Some(1));
         assert_eq!(filters.status, Some("stable"));
         assert_eq!(filters.trust_tier, None);
+    }
+
+    #[test]
+    fn validate_freshness_filter_maps_any_to_no_filter() {
+        // Arrange / Act / Assert
+        assert_eq!(validate_freshness_filter("any").expect("any"), None);
+        assert_eq!(
+            validate_freshness_filter("fresh").expect("fresh"),
+            Some("fresh")
+        );
+        assert_eq!(
+            validate_freshness_filter("stale").expect("stale"),
+            Some("stale")
+        );
+    }
+
+    #[test]
+    fn validate_freshness_filter_rejects_unknown_values() {
+        // Arrange / Act
+        let error =
+            validate_freshness_filter("unknown").expect_err("unknown filters must be rejected");
+
+        // Assert
+        assert_eq!(error.kind(), ErrorKind::InvalidParameter);
+        assert_eq!(error.sqlstate(), "22023");
     }
 }
