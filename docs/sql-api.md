@@ -906,7 +906,18 @@ afterward are born `fresh`. Writers transition state with `mark_stale` /
 `mark_scope_stale` / `mark_reconciling` / `mark_blocked`, and complete a
 reconciliation with the compare-and-set `mark_fresh`, which refuses (returns
 `false`) when the observed source revision or the catalog generation has moved
-meanwhile - a superseded attempt can never clear staleness. Admins inspect the
+meanwhile - a superseded attempt can never clear staleness. `mark_fresh`
+additionally refuses while the bundle's dependency invalidation epoch exceeds
+the epoch the attempt claimed with `mark_reconciling`: every dependency-driven
+invalidation (direct, transitive, unprovable-scope, or source removal) bumps
+the epoch, so a completion prepared before the newest invalidation landed must
+be re-claimed before it can complete. The `relationship_coverage_missing`
+evidence lives on its own column, which no state transition (including
+`mark_reconciling`) erases; `mark_fresh` refuses until coverage is genuinely
+re-established or an admin repairs the row. The completion's check runs under
+the bundle advisory lock every register/refresh/lifecycle mutation holds, so
+it never certifies a generation or epoch older than a committed mutation it
+waited behind. Admins inspect the
 registry with `list_freshness_dependencies` and repair with
 `repair_bundle_freshness`.
 
@@ -917,11 +928,20 @@ target bundle/scope. The selector grammar is exact and case-sensitive (no glob
 or regex): `selector_kind` is `bundle` (empty `selector_value`), `concept`
 (exact concept id), `path` (exact bundle-relative path), or `path_prefix`.
 Evaluation is idempotent by source catalog generation (each dependency tracks
-its watermark, starting from the source's generation at registration). When a
-change's scope cannot be proved against a narrowed selector - a lifecycle
-event carries no concept detail, or a change summary exceeded its bound - the
-*source* bundle itself is marked stale (`change_scope_unknown`) and no target
-is guessed.
+its watermark, starting from the source's generation at registration - read
+under the source bundle's advisory lock, so registration serializes against an
+in-flight source change). Invalidation is transitive: a bundle marked `stale`
+at bundle scope feeds the same-transaction walk of the bundle-scope
+dependencies sourced at it, so a change to A stales B and C along A → B → C
+(the walk is cycle-safe - cycles and self-loops terminate - and bounded).
+When a change's scope cannot be proved against a narrowed selector - a
+lifecycle event carries no concept detail, or a change summary exceeded its
+bound - the *source* bundle itself is marked stale (`change_scope_unknown`)
+and the dependency's *registered* dependent is invalidated directly at its
+registered target scope; no unregistered target is guessed. Unregistering or
+purging a source invalidates its registered dependents
+(`dependency_source_changed`) in the same transaction, before the dependency
+rows cascade away with the source.
 
 **Outbox delivery.** A dispatcher claims with
 `pgokf.claim_catalog_change_events(producer, limit, lease_seconds) → SETOF
@@ -976,19 +996,33 @@ immediately (superseding the producer's prior active publication);
 generation, at which point the sync transaction itself activates it and
 supersedes the prior generation's publications, so no query ever combines new
 concept content with old-generation relationships; any other value is
-`22023`. A refresh that supersedes a bundle's relationship coverage without
-activating a matching staged replacement keeps the bundle `stale` (reason
-`relationship_coverage_missing`), and the compare-and-set `mark_fresh`
+`22023`. When competing staged attempts of one `(tenant, producer, bundle)`
+scope expect the accepted generation (the producer staged, re-fenced, and
+staged again), only the newest `publication_generation` activates and the
+rest are superseded, so an empty winning set really replaces the prior one.
+Activation validates endpoints against the accepted concept set: a
+still-absent declared target stays `unresolved`, and a row whose **source**
+concept does not exist in the accepted set is quarantined (deleted) - a
+nonexistent source never appears in `current_relationships` or in any
+traversal path. A refresh that supersedes a bundle's relationship coverage
+without activating a matching staged replacement keeps the bundle `stale`
+(reason `relationship_coverage_missing`), and the compare-and-set `mark_fresh`
 refuses until the producer publishes the matching replacement (which clears
 the reason). Readers see only the active generation through the tenant-scoped
 `pgokf.current_relationships` view (the raw tables are granted to no role);
 retiring or disabling a bundle removes its current relationship visibility
-without touching the retained publication audit rows, and
+without touching the retained publication audit rows. Superseded retention is
+bounded: every activation (immediate or refresh-time) hard-deletes the
+bundle's superseded publications whose supersession is more than 30 days old
+(their rows cascade), while the immediately previous superseded set is always
+retained with its rows and activation evidence.
 `concept_relationship_neighbors(start_bundle_id, start_concept_id, max_hops,
 direction, relation_types, max_results) → SETOF pgokf.relationship_neighbor`
 walks the current set cycle-safely (`outbound` / `inbound` / `both`, optional
 type filter, hop and result ceilings), returning each node's effective
-freshness and embedding provenance exactly as `concept_search_fresh` does.
+freshness and embedding provenance exactly as `concept_search_fresh` does. An
+`undirected` row is traversable both ways under every direction mode -
+`outbound` follows it in reverse from the target side as well.
 
 **Search surfacing.** `pgokf.concept_search_fresh(query, bundle_id,
 limit_count, freshness, ...) → SETOF pgokf.concept_search_fresh_result` is the

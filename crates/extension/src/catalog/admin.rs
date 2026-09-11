@@ -44,7 +44,11 @@
 //! ([`crate::catalog::change_event`]), drives the bundle's freshness state
 //! transition, and evaluates the freshness dependencies sourced at the bundle
 //! ([`crate::catalog::freshness`]) - all inside the same transaction and under
-//! the same advisory lock as the mutation itself. Relationship visibility
+//! the same advisory lock as the mutation itself. Unregistering or purging a
+//! bundle additionally invalidates the source's enabled registered dependents
+//! (stale, reason `dependency_source_changed`, epoch-bumped and walked
+//! transitively) in the same transaction, before the dependency rows cascade
+//! away with the source. Relationship visibility
 //! follows without extra writes: `pgokf.current_relationships` exposes only
 //! publications whose source bundle is active (`enabled AND retired_at IS
 //! NULL`), so retiring or disabling a bundle removes its current relationship
@@ -202,8 +206,9 @@ fn catalog_generation_of(bundle_id: i64) -> Result<i64, CatalogError> {
 ///
 /// A lifecycle event carries no concept change detail, so only bundle-scope
 /// selectors match it; a narrowed selector is unprovable against it and marks
-/// the source bundle itself stale (the unknown-scope rule in
-/// [`crate::catalog::freshness`]) rather than guessing a target.
+/// the source bundle itself stale, additionally invalidating the dependency's
+/// registered dependent at its registered scope (the unknown-scope rule in
+/// [`crate::catalog::freshness`]) rather than guessing an unregistered target.
 fn emit_state_change_event(
     bundle_id: i64,
     operation: &'static str,
@@ -305,8 +310,10 @@ fn unregister_bundle_impl(bundle_id: i64) -> Result<BundleInfo, CatalogError> {
     acquire_bundle_lock(&stored_path)?;
     // Commit the outbox event BEFORE the delete: the event snapshots the
     // bundle's identity, and its ON DELETE SET NULL reference then detaches
-    // (never cascades) when the bundle row goes. The dependencies sourced at
-    // this bundle cascade away with it, so there is nothing to evaluate.
+    // (never cascades) when the bundle row goes. The source's registered
+    // dependents are captured before the delete and invalidated after it (the
+    // dependency rows cascade away with the source): a dependent never stays
+    // falsely fresh after its source leaves the catalog.
     let generation = catalog_generation_of(bundle_id)?;
     let event_id = crate::catalog::change_event::record(
         bundle_id,
@@ -316,7 +323,9 @@ fn unregister_bundle_impl(bundle_id: i64) -> Result<BundleInfo, CatalogError> {
         &crate::catalog::change_event::ChangeContext::default(),
         None,
     )?;
+    let dependents = crate::catalog::freshness::departing_dependents(bundle_id)?;
     let removed = delete_bundle(bundle_id)?.ok_or_else(|| unknown_bundle_error(bundle_id))?;
+    crate::catalog::freshness::invalidate_departing_dependents(&dependents)?;
 
     // Audit trail: record the unregister in the same transaction as the delete,
     // so a logged row always means the bundle was actually removed. The counts
@@ -602,7 +611,10 @@ fn purge_retired_impl(older_than: Interval) -> Result<i64, CatalogError> {
         // Commit the outbox event BEFORE the delete (same shape as a manual
         // unregister; operation purge_bundle): it snapshots the bundle's
         // identity, and its ON DELETE SET NULL reference detaches rather than
-        // cascading.
+        // cascading. The source's registered dependents are captured before
+        // the delete and invalidated only when the delete actually happens
+        // (the dependency rows cascade away with the source), so a dependent
+        // never stays falsely fresh after its source leaves the catalog.
         let generation = catalog_generation_of(bundle_id)?;
         let event_id = crate::catalog::change_event::record(
             bundle_id,
@@ -612,7 +624,9 @@ fn purge_retired_impl(older_than: Interval) -> Result<i64, CatalogError> {
             &crate::catalog::change_event::ChangeContext::default(),
             None,
         )?;
+        let dependents = crate::catalog::freshness::departing_dependents(bundle_id)?;
         if delete_bundle_row_if_eligible(bundle_id, older_than)? {
+            crate::catalog::freshness::invalidate_departing_dependents(&dependents)?;
             // Same FK-free unregister audit row a manual unregister writes; the
             // returned sync id is unused (a purge has no per-concept manifest).
             let _ = crate::catalog::audit::record(

@@ -51,9 +51,11 @@
 //!   [`crate::catalog::sync::run_bundle_sync`] accepts exactly that
 //!   generation, at which point the sync transaction itself activates it.
 //!   Concept endpoints cannot be validated against a future concept set, so
-//!   target resolution is deferred: activation re-resolves every declared
+//!   endpoint resolution is deferred: activation re-resolves every declared
 //!   target concept against the accepted concepts (a still-absent target stays
-//!   `unresolved`).
+//!   `unresolved`) and quarantines every row whose source concept the accepted
+//!   concepts do not contain (the row is deleted, so a nonexistent source can
+//!   never surface as a graph node or in `current_relationships`).
 //! - anything else (stale or further-ahead `expected`) is rejected with
 //!   `22023`. A write computed against an old catalog generation never
 //!   becomes visible.
@@ -67,6 +69,22 @@
 //! generation) are superseded. Commit ordering therefore guarantees that no
 //! query can ever combine new concept content with old-generation
 //! relationships.
+//!
+//! **One winner per producer scope.** When competing staged attempts of the
+//! same `(tenant_id, producer, source_bundle_id)` scope expect the accepted
+//! generation (a producer staged a replacement, then re-fenced and staged
+//! again), only the newest attempt - the highest `publication_generation` -
+//! activates; the rest are superseded. Exactly one publication per producer
+//! scope activates per generation, so an empty winning set really replaces the
+//! prior set.
+//!
+//! **Bounded superseded retention.** Superseded publications are audit, but
+//! not unbounded: every activation (immediate or refresh-time) hard-deletes
+//! the bundle's superseded publications whose supersession (`updated_at`) is
+//! more than 30 days old, their rows cascading with them (the acknowledged
+//! change-event outbox precedent). The immediately previous superseded set is
+//! by construction younger than the window, so its rows and activation
+//! evidence always survive.
 //!
 //! **Required coverage.** A bundle that had relationship coverage (at least
 //! one active publication) before a refresh and activates none at the new
@@ -737,10 +755,18 @@ CREATE TABLE pgokf.relationship_publication (
         CHECK (publication_generation > 0 AND fencing_token > 0
                AND expected_catalog_generation >= 0),
     CONSTRAINT relationship_publication_activation_chk
-        CHECK (state <> 'active' OR activated_catalog_generation IS NOT NULL),
-    CONSTRAINT relationship_publication_uq UNIQUE NULLS NOT DISTINCT
-        (tenant_id, producer, source_bundle_id, publication_generation)
+        CHECK (state <> 'active' OR activated_catalog_generation IS NOT NULL)
 );
+
+-- Duplicate prevention for live bundles: one publication per
+-- (tenant_id, producer, source_bundle_id, publication_generation). The
+-- partial index excludes detached audit rows (source_bundle_id IS NULL after
+-- the ON DELETE SET NULL detach), so hard-deleting two bundles that each held
+-- the same producer/generation key never collides in the retained ledger.
+CREATE UNIQUE INDEX relationship_publication_uq
+    ON pgokf.relationship_publication
+    (tenant_id, producer, source_bundle_id, publication_generation)
+    WHERE source_bundle_id IS NOT NULL;
 
 -- The sync-time activation scan: staged/active publications of one bundle.
 CREATE INDEX relationship_publication_bundle_state_idx
@@ -817,7 +843,7 @@ REVOKE ALL ON pgokf.relationship_publication FROM PUBLIC;
 REVOKE ALL ON pgokf.relationship FROM PUBLIC;
 
 COMMENT ON TABLE pgokf.relationship_publication IS
-    'Relationship publication ledger: one immutable attempt/result record per (tenant_id, producer, source_bundle_id, publication_generation), bound to a live pgokf.publication_fence slot (fencing_token) and to the catalog generation the set was computed against (expected_catalog_generation; activated_catalog_generation once active). State staged (invisible until the matching catalog generation is accepted by a refresh) / active / superseded. relationship_set_hash is the BLAKE3 digest of the canonicalized row set and doubles as the idempotency key: an identical retried replace_relationships is a no-op, a differing one under the same key is a 23505 conflict. The bundle reference detaches (ON DELETE SET NULL) so a hard deletion never erases the audit row; source_bundle_path is the durable identity snapshot. Granted to no API role.';
+    'Relationship publication ledger: one immutable attempt/result record per (tenant_id, producer, source_bundle_id, publication_generation), bound to a live pgokf.publication_fence slot (fencing_token) and to the catalog generation the set was computed against (expected_catalog_generation; activated_catalog_generation once active). State staged (invisible until the matching catalog generation is accepted by a refresh) / active / superseded. relationship_set_hash is the BLAKE3 digest of the canonicalized row set and doubles as the idempotency key: an identical retried replace_relationships is a no-op, a differing one under the same key is a 23505 conflict. The bundle reference detaches (ON DELETE SET NULL) so a hard deletion never erases the audit row; source_bundle_path is the durable identity snapshot. Live-key uniqueness is a partial index over attached rows only, so detached ledger rows never collide. When competing staged attempts of one producer scope expect the accepted generation, only the newest publication_generation activates. Superseded retention is bounded: an activation hard-deletes superseded publications of the bundle whose updated_at is more than 30 days old (their rows cascade), while the immediately previous superseded set is always retained with its rows and activation evidence. Granted to no API role.';
 COMMENT ON COLUMN pgokf.relationship_publication.publication_id IS
     'Surrogate identity of the publication (GENERATED ALWAYS AS IDENTITY), the foreign-key target of pgokf.relationship.';
 COMMENT ON COLUMN pgokf.relationship_publication.tenant_id IS
@@ -845,7 +871,7 @@ COMMENT ON COLUMN pgokf.relationship_publication.manifest_hash IS
 COMMENT ON COLUMN pgokf.relationship_publication.state IS
     'staged (written against the next catalog generation; invisible until a refresh accepts exactly that generation), active (the current visible set for its activated generation), or superseded (replaced by a newer activation or left behind by a generation advance).';
 COMMENT ON COLUMN pgokf.relationship_publication.row_count IS
-    'Number of relationship rows in the set; 0 is a deliberate empty set (an empty replacement removes the prior set on activation).';
+    'Number of relationship rows in the set as declared at write time; 0 is a deliberate empty set (an empty replacement removes the prior set on activation). Activation-time source quarantine can remove rows, so the stored rows of an activated publication may be fewer than row_count.';
 COMMENT ON COLUMN pgokf.relationship_publication.created_by IS
     'The session_user that wrote the publication, captured by column default.';
 COMMENT ON COLUMN pgokf.relationship_publication.created_at IS
@@ -853,10 +879,10 @@ COMMENT ON COLUMN pgokf.relationship_publication.created_at IS
 COMMENT ON COLUMN pgokf.relationship_publication.activated_at IS
     'When the publication became active; retained as a historical record after supersession; NULL only while staged.';
 COMMENT ON COLUMN pgokf.relationship_publication.updated_at IS
-    'When this row last changed (activation or supersession).';
+    'When this row last changed (activation or supersession); the supersession timestamp starts the 30-day window after which the bundle''s next activation prunes the superseded publication.';
 
 COMMENT ON TABLE pgokf.relationship IS
-    'The typed relationship rows of one publication (fk pgokf.relationship_publication): source concept, producer-defined namespaced relation_type (opaque text; the catalog never enumerates or interprets it), direction, the optional resolved target (target_bundle_id, target_concept_id), an optional opaque external target identifier, opaque source_location/provenance jsonb, confidence, the unresolved/cross_bundle flags, and the canonical ordinal/row hash. Rows are written once with their publication and never mutated except by activation-time target re-resolution; publications are retained as audit, so rows are too. Granted to no API role; readers use pgokf.current_relationships.';
+    'The typed relationship rows of one publication (fk pgokf.relationship_publication): source concept, producer-defined namespaced relation_type (opaque text; the catalog never enumerates or interprets it), direction, the optional resolved target (target_bundle_id, target_concept_id), an optional opaque external target identifier, opaque source_location/provenance jsonb, confidence, the unresolved/cross_bundle flags, and the canonical ordinal/row hash. Rows are written once with their publication and never mutated except by activation-time target re-resolution; the one removal path is activation-time source validation, which quarantines (deletes) a staged row whose source concept does not exist in the accepted catalog generation, so a nonexistent source can never become a graph node or appear in pgokf.current_relationships. Publications are retained as audit, so rows are too, for as long as the publication itself is retained. Granted to no API role; readers use pgokf.current_relationships.';
 COMMENT ON COLUMN pgokf.relationship.publication_id IS
     'The publication this row belongs to (part of the primary key).';
 COMMENT ON COLUMN pgokf.relationship.ordinal IS
@@ -965,10 +991,20 @@ GRANT SELECT ON pgokf.current_relationships TO pgokf_reader;
 /// 3. staged publications expecting an older generation are superseded (their
 ///    refresh raced an intervening state mutation, which also advances the
 ///    catalog generation, so their expected generation can never be accepted);
-/// 4. staged publications expecting exactly `catalog_generation` activate;
+/// 4. staged publications expecting exactly `catalog_generation` activate -
+///    one per producer scope: when competing staged attempts of the same
+///    (tenant, producer, bundle) scope exist, only the newest attempt (the
+///    highest `publication_generation`) activates and the rest are superseded,
+///    so an empty winning set really replaces the prior one;
 /// 5. each activating publication's declared target concepts are re-resolved
 ///    against the accepted concept set (a still-absent target stays
-///    `unresolved`).
+///    `unresolved`), and every row whose source concept is absent from the
+///    accepted set is quarantined (deleted) - a nonexistent source must never
+///    surface as a graph node or in `current_relationships`;
+/// 6. the bundle's superseded publications whose supersession (`updated_at`)
+///    is more than 30 days old are pruned (their rows cascade); the
+///    immediately previous superseded set is always younger than the window
+///    and is retained with its rows and activation evidence.
 ///
 /// Returns whether required relationship coverage is now missing - the bundle
 /// HAD coverage and none activated - so the caller marks the bundle stale with
@@ -1015,17 +1051,38 @@ pub(crate) fn activate_staged(
     )
     .map_err(|error| spi_error("failed to supersede stale staged publications", &error))?;
 
+    // One winner per producer scope: rank the staged attempts expecting the
+    // accepted generation by publication_generation (the newest fence's
+    // target); the newest activates, the rest are superseded. Both updates
+    // read the same statement snapshot and touch disjoint rows.
     let activated: Vec<i64> = Spi::connect_mut(|client| {
         let table = client
-            .update(
-                "UPDATE pgokf.relationship_publication
-                 SET state = 'active',
-                     activated_catalog_generation = $2,
-                     activated_at = pg_catalog.now(),
-                     updated_at = pg_catalog.now()
-                 WHERE source_bundle_id = $1 AND state = 'staged'
-                   AND expected_catalog_generation = $2
-                 RETURNING publication_id",
+            .select(
+                "WITH attempts AS (
+                     SELECT publication_id,
+                            row_number() OVER (
+                                PARTITION BY tenant_id, producer
+                                ORDER BY publication_generation DESC) AS rank
+                     FROM pgokf.relationship_publication
+                     WHERE source_bundle_id = $1 AND state = 'staged'
+                       AND expected_catalog_generation = $2),
+                 superseded AS (
+                     UPDATE pgokf.relationship_publication p
+                     SET state = 'superseded', updated_at = pg_catalog.now()
+                     FROM attempts
+                     WHERE p.publication_id = attempts.publication_id
+                       AND attempts.rank > 1),
+                 winners AS (
+                     UPDATE pgokf.relationship_publication p
+                     SET state = 'active',
+                         activated_catalog_generation = $2,
+                         activated_at = pg_catalog.now(),
+                         updated_at = pg_catalog.now()
+                     FROM attempts
+                     WHERE p.publication_id = attempts.publication_id
+                       AND attempts.rank = 1
+                     RETURNING p.publication_id)
+                 SELECT publication_id FROM winners",
                 None,
                 &[bundle_id.into(), catalog_generation.into()],
             )
@@ -1057,10 +1114,36 @@ pub(crate) fn activate_staged(
             &[activated.clone().into()],
         )
         .map_err(|error| spi_error("failed to re-resolve relationship targets", &error))?;
+        // Activation-time source validation (the immediate write path's
+        // validate_concepts counterpart).
+        quarantine_absent_sources(&activated)?;
         crate::catalog::freshness::clear_relationship_coverage_missing(bundle_id)?;
     }
 
+    prune_aged_superseded(bundle_id)?;
+
     Ok(had_coverage && activated.is_empty())
+}
+
+/// Quarantine staged rows whose source concept the accepted concept set does
+/// not contain: a nonexistent source can never become a graph node or appear
+/// in `pgokf.current_relationships`.
+fn quarantine_absent_sources(activated: &[i64]) -> Result<(), CatalogError> {
+    Spi::run_with_args(
+        "DELETE FROM pgokf.relationship r
+         WHERE r.publication_id = ANY ($1)
+           AND NOT EXISTS (
+                 SELECT 1 FROM pgokf.concepts c
+                 WHERE c.bundle_id = r.source_bundle_id
+                   AND c.id = r.source_concept_id)",
+        &[activated.into()],
+    )
+    .map_err(|error| {
+        spi_error(
+            "failed to quarantine absent-source relationship rows",
+            &error,
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1174,6 +1257,22 @@ fn supersede_active(
         &[tenant_id.into(), producer.into(), source_bundle_id.into()],
     )
     .map_err(|error| spi_error("failed to supersede prior publications", &error))
+}
+
+/// Bound superseded retention: hard-delete the bundle's superseded
+/// publications whose supersession (`updated_at`) is more than 30 days old -
+/// the acknowledged change-event outbox precedent - cascading their rows.
+/// Runs at every activation (immediate or refresh-time). The immediately
+/// previous superseded set is by construction younger than the window, so its
+/// rows and activation evidence always survive.
+fn prune_aged_superseded(source_bundle_id: i64) -> Result<(), CatalogError> {
+    Spi::run_with_args(
+        "DELETE FROM pgokf.relationship_publication
+         WHERE source_bundle_id = $1 AND state = 'superseded'
+           AND updated_at < pg_catalog.now() - pg_catalog.make_interval(days => 30)",
+        &[source_bundle_id.into()],
+    )
+    .map_err(|error| spi_error("failed to prune aged superseded publications", &error))
 }
 
 /// Insert the publication row, returning its surrogate identity.
@@ -1651,6 +1750,7 @@ fn replace_relationships_impl(
         // Immediate activation re-establishes coverage; a standing
         // coverage-missing reason from a prior refresh clears.
         crate::catalog::freshness::clear_relationship_coverage_missing(source_bundle_id)?;
+        prune_aged_superseded(source_bundle_id)?;
     }
     load_publication_info(publication_id)
 }
@@ -1755,7 +1855,10 @@ where
 }
 
 /// The out-edge expansion of one frontier level: forward edges from frontier
-/// nodes. Sorted for deterministic discovery order.
+/// nodes, plus undirected edges whose target is a frontier node, followed in
+/// reverse (an undirected edge is traversable both ways, outbound included -
+/// the mirror of the inbound side's undirected handling). Sorted for
+/// deterministic discovery order.
 const FORWARD_EDGE_QUERY: &str = "
     SELECT r.source_bundle_id, r.source_concept_id, r.target_bundle_id,
            r.target_concept_id, r.relation_type
@@ -1764,8 +1867,15 @@ const FORWARD_EDGE_QUERY: &str = "
       ON r.source_bundle_id = f.bundle_id AND r.source_concept_id = f.concept_id
     WHERE NOT r.unresolved
       AND ($3::text[] IS NULL OR r.relation_type = ANY ($3))
-    ORDER BY r.source_bundle_id, r.source_concept_id, r.target_bundle_id,
-             r.target_concept_id, r.relation_type";
+    UNION ALL
+    SELECT r.target_bundle_id, r.target_concept_id, r.source_bundle_id,
+           r.source_concept_id, r.relation_type
+    FROM pgokf.current_relationships r
+    JOIN (SELECT * FROM unnest($1::bigint[], $2::text[])) AS f(bundle_id, concept_id)
+      ON r.target_bundle_id = f.bundle_id AND r.target_concept_id = f.concept_id
+    WHERE NOT r.unresolved AND r.direction = 'undirected'
+      AND ($3::text[] IS NULL OR r.relation_type = ANY ($3))
+    ORDER BY 1, 2, 3, 4, 5";
 
 /// The in-edge expansion of one frontier level: resolved edges whose target is
 /// a frontier node (neighbor = the edge's source), plus undirected edges

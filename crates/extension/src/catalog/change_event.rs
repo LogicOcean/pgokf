@@ -234,9 +234,10 @@ pub(crate) struct ChangeContext {
 impl ChangeContext {
     /// Parse the raw JSON text of a sync context.
     ///
-    /// Extraction runs in SQL (one bound `$1::jsonb` read), so no JSON parser
-    /// dependency is needed and an invalid or non-object value is rejected
-    /// with SQLSTATE `22023` rather than a raw cast error.
+    /// Extraction runs in SQL (one bound `$1::jsonb` read), so JSON handling
+    /// stays in SQL and the extension links no extra JSON library; an invalid
+    /// or non-object value is rejected with SQLSTATE `22023` rather than a raw
+    /// cast error.
     ///
     /// # Errors
     ///
@@ -1031,11 +1032,12 @@ COMMENT ON TYPE pgokf.catalog_change_event_info IS
 
     /// Claim pending catalog-change events for a producer.
     ///
-    /// Requires membership in `pgokf_dispatcher` (or `pgokf_admin`). Claims up
-    /// to `limit` claimable events (pending, or claimed with an expired lease)
-    /// oldest-first with `FOR UPDATE SKIP LOCKED`, sets the claim owner and
-    /// lease expiry, and increments each event's attempt counter. Scoped to
-    /// the session's tenant.
+    /// Requires membership in `pgokf_dispatcher`, the sole claim/acknowledge
+    /// role (admins inspect the outbox through `list_catalog_change_events`).
+    /// Claims up to `limit` claimable events (pending, or claimed with an
+    /// expired lease) oldest-first with `FOR UPDATE SKIP LOCKED`, sets the
+    /// claim owner and lease expiry, and increments each event's attempt
+    /// counter. Scoped to the session's tenant.
     #[pg_extern(requires = ["change_event_types"])]
     fn claim_catalog_change_events(
         producer: &str,
@@ -1053,9 +1055,11 @@ COMMENT ON TYPE pgokf.catalog_change_event_info IS
 
     /// Acknowledge a claimed catalog-change event (idempotent, producer-bound).
     ///
-    /// Requires membership in `pgokf_dispatcher` (or `pgokf_admin`). Only the
-    /// producer label holding the claim may ack; a repeated ack with the same
-    /// `acceptance_key` is a no-op. Returns whether the event is acknowledged.
+    /// Requires membership in `pgokf_dispatcher`, the sole claim/acknowledge
+    /// role (admins inspect the outbox through `list_catalog_change_events`).
+    /// Only the producer label holding the claim may ack; a repeated ack with
+    /// the same `acceptance_key` is a no-op. Returns whether the event is
+    /// acknowledged.
     #[pg_extern(requires = ["change_event_types"])]
     fn ack_catalog_change_event(event_id: i64, producer: &str, acceptance_key: &str) -> bool {
         ack_impl(event_id, producer, acceptance_key).unwrap_or_else(|error| error.raise())
@@ -1094,9 +1098,9 @@ GRANT EXECUTE ON FUNCTION pgokf.claim_catalog_change_events(text, integer, integ
 GRANT EXECUTE ON FUNCTION pgokf.ack_catalog_change_event(bigint, text, text) TO pgokf_dispatcher;
 GRANT EXECUTE ON FUNCTION pgokf.list_catalog_change_events(bigint, integer) TO pgokf_admin;
 COMMENT ON FUNCTION pgokf.claim_catalog_change_events(text, integer, integer) IS
-    'Claim up to limit (default 100) pending or expired-claim catalog-change events for producer, oldest-first, with FOR UPDATE SKIP LOCKED; sets claim owner and a lease of lease_seconds (default 300) and increments each event''s attempts. Dispatcher-tier (pgokf_dispatcher, or pgokf_admin); tenant-scoped. Delivery is at-least-once: acknowledge with pgokf.ack_catalog_change_event after the producer durably accepts the event.';
+    'Claim up to limit (default 100) pending or expired-claim catalog-change events for producer, oldest-first, with FOR UPDATE SKIP LOCKED; sets claim owner and a lease of lease_seconds (default 300) and increments each event''s attempts. Dispatcher-tier (pgokf_dispatcher only, the sole claim/acknowledge role; admins inspect the outbox through pgokf.list_catalog_change_events); tenant-scoped. Delivery is at-least-once: acknowledge with pgokf.ack_catalog_change_event after the producer durably accepts the event.';
 COMMENT ON FUNCTION pgokf.ack_catalog_change_event(bigint, text, text) IS
-    'Acknowledge a claimed catalog-change event after durable producer acceptance. Dispatcher-tier (pgokf_dispatcher, or pgokf_admin); only the producer label holding the claim may ack (42501 otherwise), a retry with the same acceptance_key is an idempotent no-op returning true, and a conflicting key or an unknown/unclaimed event raises 22023. Unacknowledged events stay retryable and are never pruned.';
+    'Acknowledge a claimed catalog-change event after durable producer acceptance. Dispatcher-tier (pgokf_dispatcher only, the sole claim/acknowledge role; admins inspect the outbox through pgokf.list_catalog_change_events); only the producer label holding the claim may ack (42501 otherwise), a retry with the same acceptance_key is an idempotent no-op returning true, and a conflicting key or an unknown/unclaimed event raises 22023. Unacknowledged events stay retryable and are never pruned.';
 COMMENT ON FUNCTION pgokf.list_catalog_change_events(bigint, integer) IS
     'Admin inspection of the catalog-change outbox: recent events as pgokf.catalog_change_event_info, newest first, optionally scoped to one bundle and bounded by max_rows. Admin-only (pgokf_admin); tenant-scoped; the raw table itself is granted to no role.';
 ",

@@ -116,6 +116,9 @@ CREATE TABLE pgokf.bundle_freshness (
     producer          text,
     manifest_hash     text,
     embedding_contract jsonb,
+    dependency_invalidation_epoch bigint NOT NULL DEFAULT 0,
+    claimed_invalidation_epoch bigint NOT NULL DEFAULT 0,
+    relationship_coverage_missing_since timestamptz,
     updated_at        timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT bundle_freshness_bundle_fk
         FOREIGN KEY (bundle_id) REFERENCES pgokf.bundles (id) ON DELETE CASCADE,
@@ -261,7 +264,7 @@ REVOKE ALL ON pgokf.freshness_dependency FROM PUBLIC;
 REVOKE ALL ON pgokf.publication_fence FROM PUBLIC;
 
 COMMENT ON TABLE pgokf.bundle_freshness IS
-    'One freshness row per bundle: generic state (fresh/stale/reconciling/blocked/retired) with machine-readable reason codes, the producer''s opaque observed/materialized source revisions, the catalog generation the materialization covers, and reconciliation timestamps. Created fresh at bundle registration; pre-0.3.0 bundles were backfilled stale (reason legacy_pre_0.3.0) and stay stale until a producer compare-and-set (pgokf.mark_fresh) re-establishes currency. Mutated only through the SECURITY DEFINER mark_* functions and dependency evaluation; granted to no API role.';
+    'One freshness row per bundle: generic state (fresh/stale/reconciling/blocked/retired) with machine-readable reason codes, the producer''s opaque observed/materialized source revisions, the catalog generation the materialization covers, reconciliation timestamps, the dependency invalidation epoch pair guarding the compare-and-set, and the relationship-coverage evidence column. Created fresh at bundle registration; pre-0.3.0 bundles were backfilled stale (reason legacy_pre_0.3.0) and stay stale until a producer compare-and-set (pgokf.mark_fresh) re-establishes currency. Mutated only through the SECURITY DEFINER mark_* functions and dependency evaluation; granted to no API role.';
 COMMENT ON COLUMN pgokf.bundle_freshness.bundle_id IS
     'The bundle this state belongs to (ON DELETE CASCADE: the row leaves with the bundle).';
 COMMENT ON COLUMN pgokf.bundle_freshness.tenant_id IS
@@ -269,7 +272,7 @@ COMMENT ON COLUMN pgokf.bundle_freshness.tenant_id IS
 COMMENT ON COLUMN pgokf.bundle_freshness.state IS
     'Effective bundle freshness: fresh, stale, reconciling (a reconciliation attempt owns the newest target; still effectively stale), blocked (a nonretryable failure; prior data stays labeled), or retired (the bundle is retired). Only registration and the compare-and-set pgokf.mark_fresh establish fresh.';
 COMMENT ON COLUMN pgokf.bundle_freshness.reason_codes IS
-    'Machine-readable, producer-supplied reason codes explaining the current non-fresh state (merged, deduplicated). Catalog-defined codes: legacy_pre_0.3.0, dependency_source_changed, change_scope_unknown, bundle_retired, bundle_restored, bundle_disabled; producers may add their own opaque codes.';
+    'Machine-readable, producer-supplied reason codes explaining the current non-fresh state (merged, deduplicated). Catalog-defined codes: legacy_pre_0.3.0, dependency_source_changed, change_scope_unknown, bundle_retired, bundle_restored, bundle_disabled, relationship_coverage_missing; producers may add their own opaque codes.';
 COMMENT ON COLUMN pgokf.bundle_freshness.observed_source_generation IS
     'The newest source revision the producer has observed for this bundle, as opaque producer-supplied text; the catalog never interprets it. pgokf.mark_fresh compares against it (compare-and-set).';
 COMMENT ON COLUMN pgokf.bundle_freshness.materialized_source_generation IS
@@ -285,7 +288,13 @@ COMMENT ON COLUMN pgokf.bundle_freshness.producer IS
 COMMENT ON COLUMN pgokf.bundle_freshness.manifest_hash IS
     'Hash of the publication manifest the current materialization was produced from (producer-supplied evidence; initialized to the registration sync hash).';
 COMMENT ON COLUMN pgokf.bundle_freshness.embedding_contract IS
-    'The embedding contract (model/dimension/render version) the producer reconciled against, as opaque jsonb evidence; semantic gating on it arrives with the embedding freshness capability.';
+    'The embedding contract (model/dimension/render version) the producer reconciled against, as opaque jsonb evidence recorded by pgokf.mark_fresh. Semantic ranking does not read this evidence: it enforces the live embedding_model / embedding_dim / embedding_contract policy against each embedding row''s own provenance.';
+COMMENT ON COLUMN pgokf.bundle_freshness.dependency_invalidation_epoch IS
+    'Monotonic counter bumped every time dependency evaluation (direct, unprovable-scope, transitive, or source-removal) marks this row non-fresh. The compare-and-set pgokf.mark_fresh refuses while it exceeds claimed_invalidation_epoch, so a completion prepared before the newest dependency invalidation can never erase it.';
+COMMENT ON COLUMN pgokf.bundle_freshness.claimed_invalidation_epoch IS
+    'The dependency_invalidation_epoch the producer''s current reconciliation attempt has claimed via pgokf.mark_reconciling (an admin repair settles it to the standing epoch). pgokf.mark_fresh completes only when the two epochs match.';
+COMMENT ON COLUMN pgokf.bundle_freshness.relationship_coverage_missing_since IS
+    'When the relationship_coverage_missing evidence was recorded (a refresh superseded the bundle''s relationship coverage without a matching replacement). Independent of the mutable state reasons: no state transition (including pgokf.mark_reconciling) erases it; only re-established coverage (pgokf.replace_relationships activation) or an admin repair clears it, and pgokf.mark_fresh refuses while it stands.';
 COMMENT ON COLUMN pgokf.bundle_freshness.updated_at IS
     'When this row last changed.';
 
@@ -317,7 +326,7 @@ COMMENT ON COLUMN pgokf.concept_freshness.updated_at IS
     'When this override last changed.';
 
 COMMENT ON TABLE pgokf.freshness_dependency IS
-    'Registered freshness dependencies: a source selector (bundle / exact concept id / exact path / path prefix, matched case-sensitively - no glob or regex in v1) on a source bundle maps to a target bundle and target scope. Evaluated in the same transaction as every catalog change to the source bundle: a match marks the target stale (idempotent by generation via last_source_catalog_generation); an unprovable scope marks the source bundle itself stale instead of guessing. Registered and removed through pgokf.register_freshness_dependency / remove_freshness_dependency (writer-tier, audited); granted to no API role.';
+    'Registered freshness dependencies: a source selector (bundle / exact concept id / exact path / path prefix, matched case-sensitively - no glob or regex in v1) on a source bundle maps to a target bundle and target scope. Evaluated in the same transaction as every catalog change to the source bundle: a match marks the target stale (idempotent by generation via last_source_catalog_generation); an unprovable scope marks the source bundle itself stale and invalidates the registered dependent at its registered scope instead of guessing; bundle-level invalidation propagates transitively through bundle-scope registrations (cycle-safe, bounded) and bumps the target row''s dependency_invalidation_epoch; removing the source invalidates its registered dependents before their rows cascade away. Registered and removed through pgokf.register_freshness_dependency / remove_freshness_dependency (writer-tier, audited); granted to no API role.';
 COMMENT ON COLUMN pgokf.freshness_dependency.dependency_id IS
     'Identity of the registration (GENERATED ALWAYS AS IDENTITY), returned by pgokf.register_freshness_dependency.';
 COMMENT ON COLUMN pgokf.freshness_dependency.tenant_id IS
@@ -893,7 +902,7 @@ GRANT EXECUTE ON FUNCTION pgokf.issue_publication_fence(bigint, text, bigint, bi
 GRANT EXECUTE ON FUNCTION pgokf.release_publication_fence(bigint, text, bigint) TO pgokf_writer;
 
 COMMENT ON FUNCTION pgokf.register_freshness_dependency(text, bigint, text, bigint, text, text, text, text) IS
-    'Register a freshness dependency (source selector -> target bundle/scope) and return its identity. Writer-tier (pgokf_writer; admin inherits). Selector grammar, exact and case-sensitive (no glob/regex in v1): selector_kind bundle (empty selector_value), concept (exact concept id), path (exact bundle-relative path), or path_prefix; target_scope_kind bundle (NULL key), concept, path, or group. Both bundles must belong to the session''s tenant (22023 otherwise); producer is an opaque label, not authorization. The dependency starts from the source bundle''s current catalog generation and is evaluated in the same transaction as every later catalog change to the source; registration is audited. Raises 23505 for an identical existing registration.';
+    'Register a freshness dependency (source selector -> target bundle/scope) and return its identity. Writer-tier (pgokf_writer; admin inherits). Selector grammar, exact and case-sensitive (no glob/regex in v1): selector_kind bundle (empty selector_value), concept (exact concept id), path (exact bundle-relative path), or path_prefix; target_scope_kind bundle (NULL key), concept, path, or group. Both bundles must belong to the session''s tenant (22023 otherwise); producer is an opaque label, not authorization. The dependency starts from the source bundle''s current catalog generation (read under the source bundle''s advisory lock, so registration serializes against an in-flight source change) and is evaluated in the same transaction as every later catalog change to the source; registration is audited. Raises 23505 for an identical existing registration.';
 COMMENT ON FUNCTION pgokf.disable_freshness_dependency(bigint) IS
     'Disable a registered freshness dependency (kept but no longer evaluated). Writer-tier; raises 22023 for an unknown or cross-tenant dependency id.';
 COMMENT ON FUNCTION pgokf.remove_freshness_dependency(bigint) IS
@@ -901,11 +910,11 @@ COMMENT ON FUNCTION pgokf.remove_freshness_dependency(bigint) IS
 COMMENT ON FUNCTION pgokf.mark_stale(bigint, text[], text, text) IS
     'Mark a bundle stale with machine-readable reason codes (default ''{producer_reported}''), optionally advancing the observed source revision (opaque text). Writer-tier; tenant-confined (22023 for an unknown or cross-tenant bundle). External-source observations must call this before the producer acknowledges the observation or queues work.';
 COMMENT ON FUNCTION pgokf.mark_reconciling(bigint, text) IS
-    'Mark a bundle reconciling: a reconciliation attempt owns the newest target. The bundle remains effectively stale (stale_since is preserved); only the compare-and-set pgokf.mark_fresh clears it. Writer-tier; tenant-confined.';
+    'Mark a bundle reconciling: a reconciliation attempt owns the newest target and claims the standing dependency invalidation epoch (pgokf.mark_fresh completes only for an attempt whose claim covers the newest epoch, so a dependency invalidation landing after the claim refuses the completion until the producer re-claims). The bundle remains effectively stale (stale_since is preserved); only the compare-and-set pgokf.mark_fresh clears it. The claim never clears the relationship_coverage_missing evidence. Writer-tier; tenant-confined.';
 COMMENT ON FUNCTION pgokf.mark_blocked(bigint, text[], text) IS
     'Mark a bundle blocked (a nonretryable failure) with reason codes; the prior data stays available, labeled stale/blocked. Writer-tier; tenant-confined.';
 COMMENT ON FUNCTION pgokf.mark_fresh(bigint, bigint, text, text, jsonb, text) IS
-    'Compare-and-set reconciliation completion: mark the bundle fresh only if its observed source revision still equals expected_observed_source_generation AND its live catalog generation equals expected_catalog_generation AND no newer materialized generation exists AND it is not retired; returns false (changing nothing) otherwise, so a superseded attempt can never clear staleness. On success records the manifest hash and embedding contract evidence and sets last_reconciled_at. Writer-tier; tenant-confined.';
+    'Compare-and-set reconciliation completion: mark the bundle fresh only if its observed source revision still equals expected_observed_source_generation AND its live catalog generation equals expected_catalog_generation AND no newer materialized generation exists AND the newest dependency invalidation epoch was claimed by pgokf.mark_reconciling after it landed (a completion based on evidence older than the latest dependency invalidation is refused) AND no relationship_coverage_missing evidence stands (a refresh that superseded the bundle''s relationship coverage must be answered with a matching pgokf.replace_relationships publication first) AND it is not retired; returns false (changing nothing) otherwise, so a superseded attempt can never clear staleness. The check runs under the bundle advisory lock, so it never certifies a generation or epoch older than a committed mutation it waited behind. On success records the manifest hash and embedding contract evidence and sets last_reconciled_at. Writer-tier; tenant-confined.';
 COMMENT ON FUNCTION pgokf.mark_scope_stale(bigint, text, text, text[], text) IS
     'Mark one scope within a bundle (scope_kind concept/path/group with an exact, case-sensitive scope_key) stale with reason codes. Writer-tier; tenant-confined. The override shadows the bundle state for that scope in pgokf.effective_freshness until cleared.';
 COMMENT ON FUNCTION pgokf.clear_freshness_scope(bigint, text, text) IS
@@ -913,7 +922,7 @@ COMMENT ON FUNCTION pgokf.clear_freshness_scope(bigint, text, text) IS
 COMMENT ON FUNCTION pgokf.list_freshness_dependencies(integer) IS
     'List every registered freshness dependency as pgokf.freshness_dependency_info, ordered by identity, bounded by max_rows (default 100). Admin-only (pgokf_admin); tenant-scoped; the raw table is granted to no role.';
 COMMENT ON FUNCTION pgokf.repair_bundle_freshness(bigint, text, text[]) IS
-    'Admin repair: set a bundle''s freshness state (fresh/stale/reconciling/blocked/retired) and reason codes directly, replacing both. Admin-only (pgokf_admin); tenant-confined. Does not establish producer currency evidence (generation/revision columns are untouched), so a repaired fresh row carries only the evidence it already had.';
+    'Admin repair: set a bundle''s freshness state (fresh/stale/reconciling/blocked/retired) and reason codes directly, replacing both. Admin-only (pgokf_admin); tenant-confined. Does not establish producer currency evidence (generation/revision columns are untouched), so a repaired fresh row carries only the evidence it already had. Settles the dependency invalidation epoch claim and resets the relationship_coverage_missing evidence consistently with the given reason set.';
 COMMENT ON FUNCTION pgokf.issue_publication_fence(bigint, text, bigint, bigint, text, integer) IS
     'Issue (or supersede) the publication fence for (tenant, producer, bundle), returning pgokf.publication_fence_info with the catalog-assigned fencing_token. Writer-tier; compare-and-set under the bundle advisory lock: raises 22023 unless expected_catalog_generation equals the bundle''s current catalog generation and target_generation advances past the slot''s current target. Lease defaults to 300 seconds.';
 COMMENT ON FUNCTION pgokf.release_publication_fence(bigint, text, bigint) IS
@@ -932,9 +941,9 @@ GRANT EXECUTE ON FUNCTION pgokf.claim_catalog_change_events(text, integer, integ
 GRANT EXECUTE ON FUNCTION pgokf.ack_catalog_change_event(bigint, text, text) TO pgokf_dispatcher;
 GRANT EXECUTE ON FUNCTION pgokf.list_catalog_change_events(bigint, integer) TO pgokf_admin;
 COMMENT ON FUNCTION pgokf.claim_catalog_change_events(text, integer, integer) IS
-    'Claim up to limit (default 100) pending or expired-claim catalog-change events for producer, oldest-first, with FOR UPDATE SKIP LOCKED; sets claim owner and a lease of lease_seconds (default 300) and increments each event''s attempts. Dispatcher-tier (pgokf_dispatcher, or pgokf_admin); tenant-scoped. Delivery is at-least-once: acknowledge with pgokf.ack_catalog_change_event after the producer durably accepts the event.';
+    'Claim up to limit (default 100) pending or expired-claim catalog-change events for producer, oldest-first, with FOR UPDATE SKIP LOCKED; sets claim owner and a lease of lease_seconds (default 300) and increments each event''s attempts. Dispatcher-tier (pgokf_dispatcher only, the sole claim/acknowledge role; admins inspect the outbox through pgokf.list_catalog_change_events); tenant-scoped. Delivery is at-least-once: acknowledge with pgokf.ack_catalog_change_event after the producer durably accepts the event.';
 COMMENT ON FUNCTION pgokf.ack_catalog_change_event(bigint, text, text) IS
-    'Acknowledge a claimed catalog-change event after durable producer acceptance. Dispatcher-tier (pgokf_dispatcher, or pgokf_admin); only the producer label holding the claim may ack (42501 otherwise), a retry with the same acceptance_key is an idempotent no-op returning true, and a conflicting key or an unknown/unclaimed event raises 22023. Unacknowledged events stay retryable and are never pruned.';
+    'Acknowledge a claimed catalog-change event after durable producer acceptance. Dispatcher-tier (pgokf_dispatcher only, the sole claim/acknowledge role; admins inspect the outbox through pgokf.list_catalog_change_events); only the producer label holding the claim may ack (42501 otherwise), a retry with the same acceptance_key is an idempotent no-op returning true, and a conflicting key or an unknown/unclaimed event raises 22023. Unacknowledged events stay retryable and are never pruned.';
 COMMENT ON FUNCTION pgokf.list_catalog_change_events(bigint, integer) IS
     'Admin inspection of the catalog-change outbox: recent events as pgokf.catalog_change_event_info, newest first, optionally scoped to one bundle and bounded by max_rows. Admin-only (pgokf_admin); tenant-scoped; the raw table itself is granted to no role.';
 
@@ -1107,10 +1116,18 @@ CREATE TABLE pgokf.relationship_publication (
         CHECK (publication_generation > 0 AND fencing_token > 0
                AND expected_catalog_generation >= 0),
     CONSTRAINT relationship_publication_activation_chk
-        CHECK (state <> 'active' OR activated_catalog_generation IS NOT NULL),
-    CONSTRAINT relationship_publication_uq UNIQUE NULLS NOT DISTINCT
-        (tenant_id, producer, source_bundle_id, publication_generation)
+        CHECK (state <> 'active' OR activated_catalog_generation IS NOT NULL)
 );
+
+-- Duplicate prevention for live bundles: one publication per
+-- (tenant_id, producer, source_bundle_id, publication_generation). The
+-- partial index excludes detached audit rows (source_bundle_id IS NULL after
+-- the ON DELETE SET NULL detach), so hard-deleting two bundles that each held
+-- the same producer/generation key never collides in the retained ledger.
+CREATE UNIQUE INDEX relationship_publication_uq
+    ON pgokf.relationship_publication
+    (tenant_id, producer, source_bundle_id, publication_generation)
+    WHERE source_bundle_id IS NOT NULL;
 
 -- The sync-time activation scan: staged/active publications of one bundle.
 CREATE INDEX relationship_publication_bundle_state_idx
@@ -1187,7 +1204,7 @@ REVOKE ALL ON pgokf.relationship_publication FROM PUBLIC;
 REVOKE ALL ON pgokf.relationship FROM PUBLIC;
 
 COMMENT ON TABLE pgokf.relationship_publication IS
-    'Relationship publication ledger: one immutable attempt/result record per (tenant_id, producer, source_bundle_id, publication_generation), bound to a live pgokf.publication_fence slot (fencing_token) and to the catalog generation the set was computed against (expected_catalog_generation; activated_catalog_generation once active). State staged (invisible until the matching catalog generation is accepted by a refresh) / active / superseded. relationship_set_hash is the BLAKE3 digest of the canonicalized row set and doubles as the idempotency key: an identical retried replace_relationships is a no-op, a differing one under the same key is a 23505 conflict. The bundle reference detaches (ON DELETE SET NULL) so a hard deletion never erases the audit row; source_bundle_path is the durable identity snapshot. Granted to no API role.';
+    'Relationship publication ledger: one immutable attempt/result record per (tenant_id, producer, source_bundle_id, publication_generation), bound to a live pgokf.publication_fence slot (fencing_token) and to the catalog generation the set was computed against (expected_catalog_generation; activated_catalog_generation once active). State staged (invisible until the matching catalog generation is accepted by a refresh) / active / superseded. relationship_set_hash is the BLAKE3 digest of the canonicalized row set and doubles as the idempotency key: an identical retried replace_relationships is a no-op, a differing one under the same key is a 23505 conflict. The bundle reference detaches (ON DELETE SET NULL) so a hard deletion never erases the audit row; source_bundle_path is the durable identity snapshot. Live-key uniqueness is a partial index over attached rows only, so detached ledger rows never collide. When competing staged attempts of one producer scope expect the accepted generation, only the newest publication_generation activates. Superseded retention is bounded: an activation hard-deletes superseded publications of the bundle whose updated_at is more than 30 days old (their rows cascade), while the immediately previous superseded set is always retained with its rows and activation evidence. Granted to no API role.';
 COMMENT ON COLUMN pgokf.relationship_publication.publication_id IS
     'Surrogate identity of the publication (GENERATED ALWAYS AS IDENTITY), the foreign-key target of pgokf.relationship.';
 COMMENT ON COLUMN pgokf.relationship_publication.tenant_id IS
@@ -1215,7 +1232,7 @@ COMMENT ON COLUMN pgokf.relationship_publication.manifest_hash IS
 COMMENT ON COLUMN pgokf.relationship_publication.state IS
     'staged (written against the next catalog generation; invisible until a refresh accepts exactly that generation), active (the current visible set for its activated generation), or superseded (replaced by a newer activation or left behind by a generation advance).';
 COMMENT ON COLUMN pgokf.relationship_publication.row_count IS
-    'Number of relationship rows in the set; 0 is a deliberate empty set (an empty replacement removes the prior set on activation).';
+    'Number of relationship rows in the set as declared at write time; 0 is a deliberate empty set (an empty replacement removes the prior set on activation). Activation-time source quarantine can remove rows, so the stored rows of an activated publication may be fewer than row_count.';
 COMMENT ON COLUMN pgokf.relationship_publication.created_by IS
     'The session_user that wrote the publication, captured by column default.';
 COMMENT ON COLUMN pgokf.relationship_publication.created_at IS
@@ -1223,10 +1240,10 @@ COMMENT ON COLUMN pgokf.relationship_publication.created_at IS
 COMMENT ON COLUMN pgokf.relationship_publication.activated_at IS
     'When the publication became active; retained as a historical record after supersession; NULL only while staged.';
 COMMENT ON COLUMN pgokf.relationship_publication.updated_at IS
-    'When this row last changed (activation or supersession).';
+    'When this row last changed (activation or supersession); the supersession timestamp starts the 30-day window after which the bundle''s next activation prunes the superseded publication.';
 
 COMMENT ON TABLE pgokf.relationship IS
-    'The typed relationship rows of one publication (fk pgokf.relationship_publication): source concept, producer-defined namespaced relation_type (opaque text; the catalog never enumerates or interprets it), direction, the optional resolved target (target_bundle_id, target_concept_id), an optional opaque external target identifier, opaque source_location/provenance jsonb, confidence, the unresolved/cross_bundle flags, and the canonical ordinal/row hash. Rows are written once with their publication and never mutated except by activation-time target re-resolution; publications are retained as audit, so rows are too. Granted to no API role; readers use pgokf.current_relationships.';
+    'The typed relationship rows of one publication (fk pgokf.relationship_publication): source concept, producer-defined namespaced relation_type (opaque text; the catalog never enumerates or interprets it), direction, the optional resolved target (target_bundle_id, target_concept_id), an optional opaque external target identifier, opaque source_location/provenance jsonb, confidence, the unresolved/cross_bundle flags, and the canonical ordinal/row hash. Rows are written once with their publication and never mutated except by activation-time target re-resolution; the one removal path is activation-time source validation, which quarantines (deletes) a staged row whose source concept does not exist in the accepted catalog generation, so a nonexistent source can never become a graph node or appear in pgokf.current_relationships. Publications are retained as audit, so rows are too, for as long as the publication itself is retained. Granted to no API role; readers use pgokf.current_relationships.';
 COMMENT ON COLUMN pgokf.relationship.publication_id IS
     'The publication this row belongs to (part of the primary key).';
 COMMENT ON COLUMN pgokf.relationship.ordinal IS
@@ -1424,7 +1441,7 @@ COMMENT ON FUNCTION pgokf.capabilities() IS
 COMMENT ON COLUMN pgokf.bundle_freshness.reason_codes IS
     'Machine-readable, producer-supplied reason codes explaining the current non-fresh state (merged, deduplicated). Catalog-defined codes: legacy_pre_0.3.0, dependency_source_changed, change_scope_unknown, bundle_retired, bundle_restored, bundle_disabled, relationship_coverage_missing; producers may add their own opaque codes.';
 COMMENT ON FUNCTION pgokf.mark_fresh(bigint, bigint, text, text, jsonb, text) IS
-    'Compare-and-set reconciliation completion: mark the bundle fresh only if its observed source revision still equals expected_observed_source_generation AND its live catalog generation equals expected_catalog_generation AND no newer materialized generation exists AND no relationship_coverage_missing reason stands (a refresh that superseded the bundle''s relationship coverage must be answered with a matching pgokf.replace_relationships publication first) AND it is not retired; returns false (changing nothing) otherwise, so a superseded attempt can never clear staleness. On success records the manifest hash and embedding contract evidence and sets last_reconciled_at. Writer-tier; tenant-confined.';
+    'Compare-and-set reconciliation completion: mark the bundle fresh only if its observed source revision still equals expected_observed_source_generation AND its live catalog generation equals expected_catalog_generation AND no newer materialized generation exists AND the newest dependency invalidation epoch was claimed by pgokf.mark_reconciling after it landed (a completion based on evidence older than the latest dependency invalidation is refused) AND no relationship_coverage_missing evidence stands (a refresh that superseded the bundle''s relationship coverage must be answered with a matching pgokf.replace_relationships publication first) AND it is not retired; returns false (changing nothing) otherwise, so a superseded attempt can never clear staleness. The check runs under the bundle advisory lock, so it never certifies a generation or epoch older than a committed mutation it waited behind. On success records the manifest hash and embedding contract evidence and sets last_reconciled_at. Writer-tier; tenant-confined.';
 
 -- Last, so the new relations are registered for pg_dump (the rule for every
 -- upgrade script since 0.1.14). Later phases insert their sections BEFORE
