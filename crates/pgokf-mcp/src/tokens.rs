@@ -67,8 +67,12 @@ pub trait ToolAccess: Sized {
 impl ToolAccess for Role {
     fn allows_tool(self, tool: &str) -> bool {
         match tool {
-            "concept_search" | "find_similar" | "concept_neighbors" | "get_concept"
-            | "get_skill" => true,
+            "concept_search"
+            | "find_similar"
+            | "concept_neighbors"
+            | "get_concept"
+            | "get_skill"
+            | "check_workspace_plugin_freshness" => true,
             "list_plugin_targets" | "build_workspace_plugin" => self >= Role::Builder,
             "list_bundles" | "put_document" | "delete_document" => self >= Role::Writer,
             "create_content_bundle" | "refresh_bundle" | "set_bundle_state" => self >= Role::Admin,
@@ -220,6 +224,7 @@ mod tests {
             "concept_neighbors",
             "get_concept",
             "get_skill",
+            "check_workspace_plugin_freshness",
         ] {
             assert!(Role::Reader.allows_tool(tool), "{tool}");
             assert!(Role::Builder.allows_tool(tool), "{tool}");
