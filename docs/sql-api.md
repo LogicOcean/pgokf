@@ -95,9 +95,12 @@ exercised against a live PostgreSQL 18 cluster.
 | `claim_catalog_change_events(producer, limit, lease_seconds)` | `SETOF claimed_change_event` | VOLATILE | DEFINER | `pgokf_dispatcher` |
 | `ack_catalog_change_event(event_id, producer, acceptance_key)` | `boolean` | VOLATILE | DEFINER | `pgokf_dispatcher` |
 | `list_catalog_change_events(bundle_id, max_rows)` | `SETOF catalog_change_event_info` | VOLATILE | DEFINER | `pgokf_admin` |
+| `replace_relationships(producer, source_bundle_id, publication_generation, expected_catalog_generation, fencing_token, rows)` | `relationship_publication_info` | VOLATILE | DEFINER | `pgokf_writer` |
+| `concept_relationship_neighbors(start_bundle_id, start_concept_id, max_hops, direction, relation_types, max_results)` | `SETOF relationship_neighbor` | STABLE | invoker | `pgokf_reader` |
 
 `register_bundle`, `concept_search`, `search_facets`, `find_similar`,
 `concept_search_semantic`, `concept_search_hybrid`, `concept_neighbors`,
+`concept_relationship_neighbors`,
 `reset_config`, `list_sync_log`, `list_access_log`, `duplicate_concepts`,
 `purge_retired`, and `stale_concepts` accept `NULL`-defaulting (or
 default-valued) arguments and are therefore **not** declared `STRICT`; every
@@ -107,7 +110,8 @@ other function - including `list_bundles`, `bundle_info`, `catalog_stats`,
 `rebuild_embedding_index`,
 `schedule_refresh`, and `unschedule_refresh` - is `STRICT`.
 `concept_search`, `search_facets`, `find_similar`, `concept_search_semantic`,
-`concept_search_hybrid`, `concept_neighbors`, `list_bundle_log`, `catalog_stats`,
+`concept_search_hybrid`, `concept_neighbors`, `concept_relationship_neighbors`,
+`list_bundle_log`, `catalog_stats`,
 `duplicate_concepts`, `stale_concepts`, `concept_history`, and `concept_as_of`
 are also `PARALLEL SAFE`.
 `list_bundle_log` accepts a `NULL`-defaulting `directory`, so it is **not**
@@ -874,7 +878,7 @@ SELECT jsonb_pretty(pgokf.capabilities());
 --   "catalog_generation": 1,   "publication_fence": 1,
 --   "freshness_dependency": 1, "effective_freshness": 1,
 --   "catalog_change_event": 1, "search_freshness": 1,
---   "embedding_freshness": 1
+--   "embedding_freshness": 1,  "typed_relationships": 1
 -- }
 ```
 
@@ -941,6 +945,50 @@ current and the target generation must advance (`22023` otherwise), and each
 issuance hands out the next `fencing_token`.
 `release_publication_fence(bundle_id, producer, fencing_token)` releases only
 the live token.
+
+**Typed relationships.** The catalog owns a producer-neutral, cross-bundle
+typed-relationship projection (separate from the same-bundle Markdown link
+graph: `concept_neighbors` is unchanged). A producer writes a source bundle's
+complete relationship set with `replace_relationships(producer,
+source_bundle_id, publication_generation, expected_catalog_generation,
+fencing_token, rows jsonb) → pgokf.relationship_publication_info`
+(`SECURITY DEFINER`, `pgokf_writer`, tenant-confined), bound to its live
+publication fence: the token must be the slot's live, unexpired one and
+`publication_generation` must equal the fence's target (`22023` otherwise, so
+a superseded or expired attempt never publishes). Each row names a
+`source_concept_id`, an arbitrary producer-defined namespaced `relation_type`
+(`<namespace>:<name>`; the catalog never enumerates or interprets the
+vocabulary), an optional `direction` (`directed` default, or `undirected`),
+and an optional target: a resolved `target_bundle_id` + `target_concept_id`
+(a concept id alone targets the source bundle), an opaque `external_target`,
+or neither (an unresolved row, returned as metadata but never materialized as
+a traversal edge). Endpoint validation never leaks: an absent, inactive, or
+cross-tenant target bundle produces the same `unresolved` row with the
+endpoint references dropped. Rows are canonicalized (sorted) and hashed, so an
+identical retried call is a no-op while the same publication key with a
+different set is a `23505` conflict; an empty `rows` array removes the prior
+set on activation.
+
+The **generation binding** decides visibility. Against the bundle's current
+catalog generation `G`: `expected_catalog_generation = G` activates the set
+immediately (superseding the producer's prior active publication);
+`G + 1` stages it - invisible until a refresh accepts exactly that
+generation, at which point the sync transaction itself activates it and
+supersedes the prior generation's publications, so no query ever combines new
+concept content with old-generation relationships; any other value is
+`22023`. A refresh that supersedes a bundle's relationship coverage without
+activating a matching staged replacement keeps the bundle `stale` (reason
+`relationship_coverage_missing`), and the compare-and-set `mark_fresh`
+refuses until the producer publishes the matching replacement (which clears
+the reason). Readers see only the active generation through the tenant-scoped
+`pgokf.current_relationships` view (the raw tables are granted to no role);
+retiring or disabling a bundle removes its current relationship visibility
+without touching the retained publication audit rows, and
+`concept_relationship_neighbors(start_bundle_id, start_concept_id, max_hops,
+direction, relation_types, max_results) → SETOF pgokf.relationship_neighbor`
+walks the current set cycle-safely (`outbound` / `inbound` / `both`, optional
+type filter, hop and result ceilings), returning each node's effective
+freshness and embedding provenance exactly as `concept_search_fresh` does.
 
 **Search surfacing.** `pgokf.concept_search_fresh(query, bundle_id,
 limit_count, freshness, ...) → SETOF pgokf.concept_search_fresh_result` is the
