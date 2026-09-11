@@ -24,10 +24,14 @@
 //! - [`similar`] - `pgokf.find_similar`, content more-like-this over the seed's
 //!   `body_tsv` dispatched through the same `SearchBackend` seam.
 //! - [`embedding`] - the optional pgvector semantic/hybrid surface
-//!   (`pgokf.concept_embedding`, `set_concept_embedding`,
+//!   (`pgokf.concept_embedding`, `set_concept_embedding` and its
+//!   provenance-carrying compare-and-set successor `set_concept_embedding_cas`,
 //!   `concept_search_semantic`, `concept_search_hybrid`,
 //!   `rebuild_embedding_index`), reached only through runtime SQL and storing
-//!   the vector as `real[]` so `CREATE EXTENSION` needs no pgvector.
+//!   the vector as `real[]` so `CREATE EXTENSION` needs no pgvector. Semantic
+//!   ranking ranks only eligible (current, fresh, policy-matching) vectors;
+//!   the sync engine deletes a re-staged concept's embedding row in the sync
+//!   transaction.
 //! - [`facets`] - `pgokf.search_facets`, faceted result counts over the same
 //!   matching set `concept_search` produces, grouped by a validated facet.
 //! - [`search_status`] - `pgokf.search_index_status`, the reader-level jsonb
