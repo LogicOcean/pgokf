@@ -11,7 +11,10 @@ use anyhow::{Context, Result};
 use tokio_postgres::Client;
 
 /// One concept that has no stored embedding yet, with the fields used to build
-/// its embedding input text.
+/// its embedding input text and the `file_hash` the concept carried when it
+/// was read (the compare-and-set token [`store_embedding`] guards the write
+/// with, so a vector computed from text a concurrent sync has since replaced is
+/// rejected server-side rather than stored).
 #[derive(Debug, Clone)]
 pub struct PendingConcept {
     pub bundle_id: i64,
@@ -19,6 +22,7 @@ pub struct PendingConcept {
     pub title: Option<String>,
     pub description: Option<String>,
     pub body_text: String,
+    pub file_hash: String,
 }
 
 impl PendingConcept {
@@ -72,6 +76,10 @@ pub async fn embedding_dim(client: &Client) -> Result<i32> {
 /// optionally scoped to a single bundle. Ordered deterministically so runs and
 /// logs are reproducible.
 ///
+/// A sync that re-writes a concept deletes its embedding row in the same
+/// transaction, so this missing-row poll covers both never-embedded concepts
+/// and concepts whose text changed since their vector was stored.
+///
 /// # Errors
 ///
 /// Returns an error if the query fails.
@@ -81,7 +89,7 @@ pub async fn pending_concepts(
 ) -> Result<Vec<PendingConcept>> {
     let rows = client
         .query(
-            "SELECT c.bundle_id, c.id, c.title, c.description, c.body_text
+            "SELECT c.bundle_id, c.id, c.title, c.description, c.body_text, c.file_hash
              FROM pgokf.concepts c
              LEFT JOIN pgokf.concept_embedding e
                  ON e.bundle_id = c.bundle_id AND e.concept_id = c.id
@@ -101,32 +109,58 @@ pub async fn pending_concepts(
             title: row.get("title"),
             description: row.get("description"),
             body_text: row.get("body_text"),
+            file_hash: row.get("file_hash"),
         })
         .collect())
 }
 
-/// Store one concept's embedding through `pgokf.set_concept_embedding`, which
-/// enforces the `pgokf_writer` role, the concept's existence, and the length ==
-/// `embedding_dim` invariant server-side.
+/// Store one concept's embedding through the guarded four-argument
+/// `pgokf.set_concept_embedding` overload, which enforces the `pgokf_writer`
+/// role, the concept's existence, and the length == `embedding_dim` invariant
+/// server-side - and rejects the write with SQLSTATE `40001` when the
+/// concept's `file_hash` no longer equals `expected_file_hash` (a sync changed
+/// the concept while its vector was being computed).
 ///
 /// # Errors
 ///
 /// Returns an error if the setter call fails (a wrong length, an unknown
-/// concept, or an insufficient role all surface here).
+/// concept, an insufficient role, or the retryable `40001` hash-mismatch guard
+/// all surface here; callers decide whether `40001` is retried).
 pub async fn store_embedding(
     client: &Client,
     bundle_id: i64,
     concept_id: &str,
     embedding: &[f32],
+    expected_file_hash: &str,
 ) -> Result<()> {
     client
         .execute(
-            "SELECT pgokf.set_concept_embedding($1, $2, $3)",
-            &[&bundle_id, &concept_id, &embedding],
+            "SELECT pgokf.set_concept_embedding($1, $2, $3, $4)",
+            &[&bundle_id, &concept_id, &embedding, &expected_file_hash],
         )
         .await
         .with_context(|| format!("failed to store embedding for concept '{concept_id}'"))?;
     Ok(())
+}
+
+/// Whether an error from [`store_embedding`] is the compare-and-set guard's
+/// retryable rejection (SQLSTATE `40001`): the concept changed while its
+/// vector was computed, so the write was refused and the row stays absent for
+/// the next pass.
+#[must_use]
+pub fn is_stale_input_rejection(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut source = Some(error);
+    while let Some(error) = source {
+        if let Some(db_error) = error
+            .downcast_ref::<tokio_postgres::Error>()
+            .and_then(tokio_postgres::Error::as_db_error)
+            && db_error.code().code() == "40001"
+        {
+            return true;
+        }
+        source = error.source();
+    }
+    false
 }
 
 #[cfg(test)]
@@ -140,6 +174,7 @@ mod tests {
             title: title.map(str::to_owned),
             description: description.map(str::to_owned),
             body_text: body.to_owned(),
+            file_hash: "hash-1".to_owned(),
         }
     }
 

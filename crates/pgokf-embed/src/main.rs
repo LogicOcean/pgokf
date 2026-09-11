@@ -242,6 +242,12 @@ async fn embed_all(cli: &Cli, pg_client: &tokio_postgres::Client) -> Result<usiz
 
 /// Embed one batch of concepts and store each returned vector. Returns the
 /// number of vectors stored.
+///
+/// A store rejected with the compare-and-set guard's SQLSTATE `40001` (the
+/// concept changed while its vector was being computed) is not a failure: the
+/// embedding row stays absent, the concept is skipped for this pass, and the
+/// next pass - or the next watch interval - re-reads the new text and
+/// re-embeds it. Every other store error aborts the batch as before.
 async fn embed_batch(
     cli: &Cli,
     pg_client: &tokio_postgres::Client,
@@ -259,6 +265,7 @@ async fn embed_batch(
         .await
         .context("calling the embeddings endpoint")?;
 
+    let mut stored = 0_usize;
     for (concept, vector) in batch.iter().zip(vectors) {
         let actual = i32::try_from(vector.len()).unwrap_or(i32::MAX);
         if actual != dim {
@@ -267,10 +274,28 @@ async fn embed_batch(
                 concept.concept_id,
             );
         }
-        db::store_embedding(pg_client, concept.bundle_id, &concept.concept_id, &vector).await?;
+        match db::store_embedding(
+            pg_client,
+            concept.bundle_id,
+            &concept.concept_id,
+            &vector,
+            &concept.file_hash,
+        )
+        .await
+        {
+            Ok(()) => stored += 1,
+            Err(error) if db::is_stale_input_rejection(error.as_ref()) => {
+                eprintln!(
+                    "pgokf-embed: concept '{}' changed while its embedding was computed; \
+                     skipping it this pass (it will be re-embedded on the next pass)",
+                    concept.concept_id,
+                );
+            }
+            Err(error) => return Err(error),
+        }
     }
 
-    Ok(batch.len())
+    Ok(stored)
 }
 
 #[cfg(test)]
