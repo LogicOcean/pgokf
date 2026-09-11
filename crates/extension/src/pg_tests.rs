@@ -2164,19 +2164,19 @@ An added concept for the resync diff.\n";
     }
 
     /// Store a synthetic embedding the way the embedder does: compare-and-set
-    /// against the concept's current file hash, with provenance.
+    /// against the concept's current file hash, with provenance. `embedding`
+    /// is a fixed test constant (e.g. `ARRAY[1,0,0,0]`), interpolated - a bound
+    /// parameter would be parsed as an array *literal*, which the ARRAY[...]
+    /// spelling is not.
     fn cas_set_embedding(bundle_id: i64, concept_id: &str, embedding: &str) {
         let file_hash = file_hash_of(bundle_id, concept_id);
         let stored = Spi::get_one_with_args::<bool>(
-            "SELECT pgokf.set_concept_embedding_cas(
-                 $1, $2, $3::real[], $4,
-                 'test-input-hash', 'test-model', 'test-contract/v1')",
-            &[
-                bundle_id.into(),
-                concept_id.into(),
-                embedding.into(),
-                file_hash.into(),
-            ],
+            &format!(
+                "SELECT pgokf.set_concept_embedding_cas(
+                     $1, $2, {embedding}::real[], $3,
+                     'test-input-hash', 'test-model', 'test-contract/v1')"
+            ),
+            &[bundle_id.into(), concept_id.into(), file_hash.into()],
         )
         .expect("set_concept_embedding_cas executes")
         .expect("the CAS outcome is not NULL");
@@ -7922,14 +7922,15 @@ Use the solo skill on its own.\n";
                             capabilities ->> 'catalog_change_event',
                             capabilities ->> 'publication_fence',
                             capabilities ->> 'effective_freshness',
-                            capabilities ->> 'search_freshness'
+                            capabilities ->> 'search_freshness',
+                            capabilities ->> 'embedding_freshness'
                      FROM (SELECT pgokf.capabilities() AS capabilities) AS declared",
                     Some(1),
                     &[],
                 )
                 .expect("capabilities query executes")
                 .first();
-            (1..=6)
+            (1..=7)
                 .map(|ordinal| {
                     row.get::<String>(ordinal)
                         .expect("capability value is readable")
@@ -7938,8 +7939,8 @@ Use the solo skill on its own.\n";
                 .collect::<Vec<_>>()
         });
 
-        // Assert: every Phase-1 capability is declared at version 1.
-        assert_eq!(capabilities, vec!["1"; 6]);
+        // Assert: every shipped capability is declared at version 1.
+        assert_eq!(capabilities, vec!["1"; 7]);
     }
 
     #[pg_test]
@@ -8170,5 +8171,473 @@ Use the solo skill on its own.\n";
         .expect("changes query executes")
         .expect("the change record exists");
         assert_eq!(changed, "alpha");
+    }
+
+    // ---------------------------------------------------------------------
+    // 0.3.0 Phase 2: embedding freshness - transactional invalidation on
+    // sync, the compare-and-set setter, eligibility gating of semantic and
+    // hybrid ranking, and embedding-contract config-change invalidation.
+    //
+    // The ranking assertions run only where pgvector is installable (the
+    // pgvector_available guard, as in the 0.1.6 S3 tests); the invalidation,
+    // CAS, and freshness assertions need no vector support.
+    // ---------------------------------------------------------------------
+
+    /// The stored embedding provenance of one concept, as
+    /// `model|contract|source_file_hash|input_hash` with `-` for NULLs, or
+    /// `None` when the concept has no embedding row (`Spi::get_one` raises on
+    /// an empty result, so this goes through `is_empty` like the catalog's own
+    /// lookups).
+    fn embedding_provenance(bundle_id: i64, concept_id: &str) -> Option<String> {
+        Spi::connect(|client| {
+            let table = client
+                .select(
+                    "SELECT coalesce(model, '-') || '|' || coalesce(contract, '-') || '|'
+                            || coalesce(source_file_hash, '-') || '|' || coalesce(input_hash, '-')
+                     FROM pgokf.concept_embedding WHERE bundle_id = $1 AND concept_id = $2",
+                    Some(1),
+                    &[bundle_id.into(), concept_id.into()],
+                )
+                .expect("embedding provenance query executes");
+            if table.is_empty() {
+                return None;
+            }
+            table.first().get_one::<String>().expect("readable")
+        })
+    }
+
+    /// The embedding annotation of the alpha hit for one query term, as
+    /// `embedding_state|embedding_model` with `-` for a NULL model.
+    fn fresh_embedding_annotation_for(query: &str) -> String {
+        Spi::get_one_with_args::<String>(
+            "SELECT embedding_state || '|' || coalesce(embedding_model, '-')
+             FROM pgokf.concept_search_fresh($1)",
+            &[query.into()],
+        )
+        .expect("freshness search executes")
+        .expect("the alpha hit exists")
+    }
+
+    /// The embedding annotation of the 'peregrine' (alpha) hit.
+    fn fresh_embedding_annotation() -> String {
+        fresh_embedding_annotation_for("peregrine")
+    }
+
+    #[pg_test]
+    fn refresh_deletes_a_re_staged_concepts_embedding_row_atomically() {
+        // Arrange: dim 4 and the fixture registered; both concepts embedded
+        // through the compare-and-set setter with full provenance.
+        Spi::run("SELECT pgokf.set_config('embedding_dim', '4'::jsonb)")
+            .expect("embedding_dim is configurable");
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        cas_set_embedding(bundle_id, "alpha", "ARRAY[1,0,0,0]");
+        cas_set_embedding(bundle_id, "beta", "ARRAY[0,1,0,0]");
+        let alpha_hash_before = file_hash_of(bundle_id, "alpha");
+
+        // Act: edit alpha's body and refresh - one updated file.
+        fs::write(bundle.root.join("alpha.md"), ALPHA_EDITED).expect("alpha edit is writable");
+        let counts = refresh_counts(bundle_id);
+        assert_eq!(counts, (0, 1, 0, 1), "the edit is the single updated file");
+
+        // Assert: alpha's embedding row is gone (a re-staged concept is
+        // invalidated in the sync's own transaction); beta's survives
+        // untouched, provenance included.
+        let remaining = Spi::get_one_with_args::<String>(
+            "SELECT coalesce(string_agg(concept_id, ',' ORDER BY concept_id), '<none>')
+             FROM pgokf.concept_embedding WHERE bundle_id = $1",
+            &[bundle_id.into()],
+        )
+        .expect("embedding rows query executes")
+        .expect("the aggregate is not NULL");
+        assert_eq!(
+            remaining, "beta",
+            "only the untouched concept keeps its row"
+        );
+        assert_eq!(
+            embedding_provenance(bundle_id, "beta").as_deref(),
+            Some(
+                format!(
+                    "test-model|test-contract/v1|{}|test-input-hash",
+                    file_hash_of(bundle_id, "beta")
+                )
+                .as_str()
+            ),
+            "beta's provenance survives intact"
+        );
+        assert_eq!(embedding_provenance(bundle_id, "alpha"), None);
+        assert_ne!(
+            file_hash_of(bundle_id, "alpha"),
+            alpha_hash_before,
+            "the refresh recorded alpha's new file hash"
+        );
+        // And the annotation (against the edited body's new term) reports the
+        // cleared row as missing.
+        assert_eq!(fresh_embedding_annotation_for("quokka"), "missing|-");
+    }
+
+    #[pg_test]
+    fn cas_setter_rejects_a_superseded_expected_hash() {
+        // Arrange: dim 4 and the fixture; the "slow worker" has polled alpha's
+        // file hash but not yet stored its vector.
+        Spi::run("SELECT pgokf.set_config('embedding_dim', '4'::jsonb)")
+            .expect("embedding_dim is configurable");
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        let polled_hash = file_hash_of(bundle_id, "alpha");
+
+        // Act: the concept changes before the worker's write arrives.
+        fs::write(bundle.root.join("alpha.md"), ALPHA_EDITED).expect("alpha edit is writable");
+        refresh_counts(bundle_id);
+
+        // Assert: the compare-and-set refuses the stale expectation - a
+        // retryable false, writing nothing.
+        let stored = Spi::get_one_with_args::<bool>(
+            "SELECT pgokf.set_concept_embedding_cas(
+                 $1, 'alpha', ARRAY[1,0,0,0]::real[], $2,
+                 'stale-input-hash', 'test-model', 'test-contract/v1')",
+            &[bundle_id.into(), polled_hash.into()],
+        )
+        .expect("set_concept_embedding_cas executes")
+        .expect("the CAS outcome is not NULL");
+        assert!(!stored, "a superseded expected hash is rejected");
+        assert_eq!(
+            embedding_provenance(bundle_id, "alpha"),
+            None,
+            "the rejected write stores no row"
+        );
+
+        // Re-polling (reading the current hash) and re-embedding succeeds.
+        cas_set_embedding(bundle_id, "alpha", "ARRAY[1,0,0,0]");
+        assert_eq!(
+            embedding_provenance(bundle_id, "alpha").as_deref(),
+            Some(
+                format!(
+                    "test-model|test-contract/v1|{}|test-input-hash",
+                    file_hash_of(bundle_id, "alpha")
+                )
+                .as_str()
+            ),
+        );
+    }
+
+    #[pg_test]
+    fn cas_setter_validates_provenance_dimension_and_concept() {
+        // Arrange: dim 4, the fixture, and a probe reporting the SQLSTATE of a
+        // CAS call with one varying argument.
+        Spi::run("SELECT pgokf.set_config('embedding_dim', '4'::jsonb)")
+            .expect("embedding_dim is configurable");
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        Spi::run(
+            "CREATE FUNCTION pg_temp.cas_sqlstate(
+                 bid bigint, cid text, dims int, expected text, input_hash text,
+                 model text, contract text)
+             RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             DECLARE
+                 v real[];
+             BEGIN
+                 SELECT array_agg(1.0::real) INTO v FROM generate_series(1, dims);
+                 PERFORM pgokf.set_concept_embedding_cas(
+                     bid, cid, v, expected, input_hash, model, contract);
+                 RETURN 'ok';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("CAS probe is creatable");
+        let hash = file_hash_of(bundle_id, "alpha");
+        let probe = |cid: &str, dims: i32, expected: &str, model: &str| -> String {
+            Spi::get_one_with_args::<String>(
+                "SELECT pg_temp.cas_sqlstate($1, $2, $3, $4, 'ih', $5, 'c/v1')",
+                &[
+                    bundle_id.into(),
+                    cid.into(),
+                    dims.into(),
+                    expected.into(),
+                    model.into(),
+                ],
+            )
+            .expect("CAS probe executes")
+            .expect("the probe reports an outcome")
+        };
+
+        // Act / Assert
+        assert_eq!(probe("alpha", 4, &hash, "test-model"), "ok");
+        assert_eq!(
+            probe("alpha", 4, &hash, ""),
+            "22023",
+            "an empty model is rejected"
+        );
+        assert_eq!(
+            probe("alpha", 4, "", "test-model"),
+            "22023",
+            "an empty expected hash is rejected"
+        );
+        assert_eq!(
+            probe("alpha", 8, &hash, "test-model"),
+            "22023",
+            "a wrong dimension is rejected"
+        );
+        assert_eq!(
+            probe("ghost", 4, &hash, "test-model"),
+            "22023",
+            "an unknown concept is rejected"
+        );
+    }
+
+    #[pg_test]
+    fn legacy_and_overwritten_embeddings_never_rank() {
+        // Arrange: the ranking assertions need pgvector.
+        if !pgvector_available() {
+            return;
+        }
+        Spi::run("CREATE EXTENSION IF NOT EXISTS vector").expect("pgvector is creatable");
+        Spi::run("SELECT pgokf.set_config('embedding_dim', '4'::jsonb)")
+            .expect("embedding_dim is configurable");
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+
+        // Act: the compatibility (0.2.0) setter writes alpha's vector - a
+        // legacy row with NULL provenance.
+        Spi::run_with_args(
+            "SELECT pgokf.set_concept_embedding($1, 'alpha', ARRAY[1,0,0,0]::real[])",
+            &[bundle_id.into()],
+        )
+        .expect("the compatibility setter still works");
+
+        // Assert: the row is stored, provably unprovenanced, never ranks
+        // semantically, does not leak into hybrid's semantic component, and is
+        // labeled stale by the freshness-aware search.
+        assert_eq!(
+            embedding_provenance(bundle_id, "alpha").as_deref(),
+            Some("-|-|-|-"),
+            "the compatibility setter writes a NULL-provenance row"
+        );
+        let semantic = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgokf.concept_search_semantic(ARRAY[1,0,0,0]::real[])",
+        )
+        .expect("semantic search executes")
+        .expect("count is not NULL");
+        assert_eq!(semantic, 0, "a legacy row never ranks semantically");
+        let hybrid = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgokf.concept_search_hybrid(
+                 'nonexistentterm', ARRAY[1,0,0,0]::real[])",
+        )
+        .expect("hybrid search executes")
+        .expect("count is not NULL");
+        assert_eq!(
+            hybrid, 0,
+            "a legacy row never leaks into hybrid's semantic component"
+        );
+        assert_eq!(fresh_embedding_annotation(), "stale|-");
+
+        // Act: the embedder re-writes the row through the CAS setter.
+        cas_set_embedding(bundle_id, "alpha", "ARRAY[1,0,0,0]");
+
+        // Assert: the current row ranks and is labeled current.
+        let nearest = Spi::get_one::<String>(
+            "SELECT concept_id FROM pgokf.concept_search_semantic(ARRAY[1,0,0,0]::real[]) LIMIT 1",
+        )
+        .expect("semantic search executes")
+        .expect("the re-embedded concept ranks");
+        assert_eq!(nearest, "alpha", "a current, provenanced vector ranks");
+        assert_eq!(fresh_embedding_annotation(), "current|test-model");
+
+        // Act: a compatibility-setter overwrite deliberately strips the
+        // provenance again.
+        Spi::run_with_args(
+            "SELECT pgokf.set_concept_embedding($1, 'alpha', ARRAY[1,0,0,0]::real[])",
+            &[bundle_id.into()],
+        )
+        .expect("the compatibility overwrite executes");
+
+        // Assert
+        assert_eq!(
+            embedding_provenance(bundle_id, "alpha").as_deref(),
+            Some("-|-|-|-"),
+            "an unprovenanced overwrite clears the provenance it cannot prove"
+        );
+        let semantic_after = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgokf.concept_search_semantic(ARRAY[1,0,0,0]::real[])",
+        )
+        .expect("semantic search executes")
+        .expect("count is not NULL");
+        assert_eq!(semantic_after, 0, "the overwritten row is ineligible again");
+    }
+
+    #[pg_test]
+    fn non_fresh_concepts_are_semantically_ineligible_but_lexically_visible() {
+        // Arrange: pgvector, dim 4, the fixture, and a current alpha vector.
+        if !pgvector_available() {
+            return;
+        }
+        Spi::run("CREATE EXTENSION IF NOT EXISTS vector").expect("pgvector is creatable");
+        Spi::run("SELECT pgokf.set_config('embedding_dim', '4'::jsonb)")
+            .expect("embedding_dim is configurable");
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        cas_set_embedding(bundle_id, "alpha", "ARRAY[1,0,0,0]");
+        let semantic_count = || -> i64 {
+            Spi::get_one::<i64>(
+                "SELECT count(*) FROM pgokf.concept_search_semantic(ARRAY[1,0,0,0]::real[])",
+            )
+            .expect("semantic search executes")
+            .expect("count is not NULL")
+        };
+        assert_eq!(
+            semantic_count(),
+            1,
+            "the current vector of a fresh concept ranks"
+        );
+
+        // Act: a concept-scope override marks alpha stale.
+        Spi::run_with_args(
+            "SELECT pgokf.mark_scope_stale($1, 'concept', 'alpha', '{content_changed}'::text[], 'producer-a')",
+            &[bundle_id.into()],
+        )
+        .expect("mark_scope_stale executes");
+
+        // Assert: the vector no longer ranks semantically, while the lexical
+        // path still returns the concept (labeled by concept_search_fresh).
+        assert_eq!(
+            semantic_count(),
+            0,
+            "a covering stale override revokes eligibility"
+        );
+        let lexical = Spi::get_one::<String>(
+            "SELECT concept_id FROM pgokf.concept_search_hybrid('peregrine', ARRAY[1,0,0,0]::real[])
+             LIMIT 1",
+        )
+        .expect("hybrid search executes")
+        .expect("the lexical side still matches alpha");
+        assert_eq!(
+            lexical, "alpha",
+            "the lexical path may still return the stale concept"
+        );
+        assert_eq!(fresh_embedding_annotation(), "stale|test-model");
+
+        // Act: clear the override; mark the whole bundle stale instead.
+        Spi::run_with_args(
+            "SELECT pgokf.clear_freshness_scope($1, 'concept', 'alpha')",
+            &[bundle_id.into()],
+        )
+        .expect("clear_freshness_scope executes");
+        Spi::run_with_args(
+            "SELECT pgokf.mark_stale($1, '{source_advanced}'::text[], 'producer-a', 'rev-2')",
+            &[bundle_id.into()],
+        )
+        .expect("mark_stale executes");
+
+        // Assert: a non-fresh bundle revokes eligibility just the same.
+        assert_eq!(semantic_count(), 0, "a stale bundle revokes eligibility");
+
+        // Act: the compare-and-set completion re-establishes currency.
+        let marked = Spi::get_one_with_args::<bool>(
+            "SELECT pgokf.mark_fresh($1, $2, 'rev-2')",
+            &[bundle_id.into(), generation_of(bundle_id).into()],
+        )
+        .expect("mark_fresh executes")
+        .expect("the CAS outcome is not NULL");
+        assert!(marked, "mark_fresh accepts the newest state");
+
+        // Assert: eligibility follows the restored freshness.
+        assert_eq!(semantic_count(), 1, "a fresh-again concept ranks again");
+    }
+
+    #[pg_test]
+    fn embedding_contract_config_change_marks_embedding_bundles_stale() {
+        // Arrange: dim 4 and the fixture (no embedding rows yet, so the dim
+        // change invalidates nothing).
+        Spi::run("SELECT pgokf.set_config('embedding_dim', '4'::jsonb)")
+            .expect("embedding_dim is configurable");
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        cas_set_embedding(bundle_id, "alpha", "ARRAY[1,0,0,0]");
+        assert_eq!(freshness_state(bundle_id), "fresh{}");
+        let mark_fresh = |bundle_id: i64| {
+            let marked = Spi::get_one_with_args::<bool>(
+                "SELECT pgokf.mark_fresh($1, $2)",
+                &[bundle_id.into(), generation_of(bundle_id).into()],
+            )
+            .expect("mark_fresh executes")
+            .expect("the CAS outcome is not NULL");
+            assert!(marked, "mark_fresh accepts the newest state");
+        };
+
+        // Act: an unrelated configuration change.
+        Spi::run("SELECT pgokf.set_config('default_strict', 'false'::jsonb)")
+            .expect("default_strict is configurable");
+
+        // Assert: the embedding scope is untouched by a non-contract key.
+        assert_eq!(
+            freshness_state(bundle_id),
+            "fresh{}",
+            "an unrelated key change does not mark the bundle stale"
+        );
+
+        // Act: pin the embedding model (a contract change, and the bundle
+        // holds an embedding row).
+        Spi::run("SELECT pgokf.set_config('embedding_model', '\"test-model\"'::jsonb)")
+            .expect("embedding_model is configurable");
+
+        // Assert: the bundle is marked stale in the same transaction, before
+        // new vectors are queued - even though the pin happens to match the
+        // stored provenance (currency must be re-established by a producer
+        // compare-and-set; the catalog never clears staleness on its own).
+        assert_eq!(
+            freshness_state(bundle_id),
+            "stale{embedding_contract_changed}",
+            "a contract change marks the embedding-holding bundle stale"
+        );
+
+        // Act/Assert: re-establish currency; re-setting the SAME value is not
+        // a change and invalidates nothing.
+        mark_fresh(bundle_id);
+        Spi::run("SELECT pgokf.set_config('embedding_model', '\"test-model\"'::jsonb)")
+            .expect("embedding_model is reconfigurable");
+        assert_eq!(
+            freshness_state(bundle_id),
+            "fresh{}",
+            "an unchanged value is not a contract change"
+        );
+
+        // Act/Assert: a reset that changes the policy invalidates too.
+        Spi::run("SELECT pgokf.reset_config('embedding_model')").expect("reset_config executes");
+        assert_eq!(
+            freshness_state(bundle_id),
+            "stale{embedding_contract_changed}",
+            "resetting a contract key is a contract change"
+        );
+
+        // Where pgvector is available, the model pin also excludes the stored
+        // rows from semantic ranking independently of the freshness mark.
+        if pgvector_available() {
+            Spi::run("CREATE EXTENSION IF NOT EXISTS vector").expect("pgvector is creatable");
+            let semantic_count = || -> i64 {
+                Spi::get_one::<i64>(
+                    "SELECT count(*) FROM pgokf.concept_search_semantic(ARRAY[1,0,0,0]::real[])",
+                )
+                .expect("semantic search executes")
+                .expect("count is not NULL")
+            };
+            // Unpinned policy: the provenanced row is eligible once the bundle
+            // is fresh again.
+            mark_fresh(bundle_id);
+            assert_eq!(
+                semantic_count(),
+                1,
+                "an unpinned model policy accepts the row"
+            );
+            // A mismatched pin excludes it even after freshness is restored.
+            Spi::run("SELECT pgokf.set_config('embedding_model', '\"other-model\"'::jsonb)")
+                .expect("embedding_model is reconfigurable");
+            mark_fresh(bundle_id);
+            assert_eq!(semantic_count(), 0, "a model-mismatched row never ranks");
+            assert_eq!(fresh_embedding_annotation(), "stale|test-model");
+        }
     }
 }
