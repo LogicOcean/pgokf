@@ -7923,14 +7923,15 @@ Use the solo skill on its own.\n";
                             capabilities ->> 'publication_fence',
                             capabilities ->> 'effective_freshness',
                             capabilities ->> 'search_freshness',
-                            capabilities ->> 'embedding_freshness'
+                            capabilities ->> 'embedding_freshness',
+                            capabilities ->> 'typed_relationships'
                      FROM (SELECT pgokf.capabilities() AS capabilities) AS declared",
                     Some(1),
                     &[],
                 )
                 .expect("capabilities query executes")
                 .first();
-            (1..=7)
+            (1..=8)
                 .map(|ordinal| {
                     row.get::<String>(ordinal)
                         .expect("capability value is readable")
@@ -7940,7 +7941,7 @@ Use the solo skill on its own.\n";
         });
 
         // Assert: every shipped capability is declared at version 1.
-        assert_eq!(capabilities, vec!["1"; 7]);
+        assert_eq!(capabilities, vec!["1"; 8]);
     }
 
     #[pg_test]
@@ -8639,5 +8640,787 @@ Use the solo skill on its own.\n";
             assert_eq!(semantic_count(), 0, "a model-mismatched row never ranks");
             assert_eq!(fresh_embedding_annotation(), "stale|test-model");
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Typed relationships (capability C).
+    // ------------------------------------------------------------------
+
+    /// Issue the producer's fence against the bundle's current generation and
+    /// return the live fencing token.
+    fn issue_fence(bundle_id: i64, producer: &str, target: i64) -> i64 {
+        Spi::get_one_with_args::<i64>(
+            "SELECT fencing_token
+             FROM pgokf.issue_publication_fence($1, $2, $3, $4)",
+            &[
+                bundle_id.into(),
+                producer.into(),
+                target.into(),
+                generation_of(bundle_id).into(),
+            ],
+        )
+        .expect("issue_publication_fence executes")
+        .expect("a fencing token is returned")
+    }
+
+    /// `replace_relationships`, returning `(state, row_count)` of the
+    /// publication it wrote (or found, on an idempotent retry).
+    fn replace_rows(
+        bundle_id: i64,
+        producer: &str,
+        publication_generation: i64,
+        expected: i64,
+        token: i64,
+        rows: &str,
+    ) -> (String, i32) {
+        Spi::connect(|client| {
+            let row = client
+                .select(
+                    "SELECT state, row_count
+                     FROM pgokf.replace_relationships($1, $2, $3, $4, $5, $6::jsonb)",
+                    Some(1),
+                    &[
+                        producer.into(),
+                        bundle_id.into(),
+                        publication_generation.into(),
+                        expected.into(),
+                        token.into(),
+                        rows.into(),
+                    ],
+                )
+                .expect("replace_relationships executes")
+                .first();
+            let state = row
+                .get::<String>(1)
+                .expect("state is readable")
+                .expect("state is not NULL");
+            let count = row
+                .get::<i32>(2)
+                .expect("row_count is readable")
+                .expect("row_count is not NULL");
+            (state, count)
+        })
+    }
+
+    /// The SQLSTATE a `replace_relationships` call raises ('ok' when none).
+    fn replace_sqlstate(
+        bundle_id: i64,
+        producer: &str,
+        publication_generation: i64,
+        expected: i64,
+        token: i64,
+        rows: &str,
+    ) -> String {
+        Spi::run(
+            "CREATE OR REPLACE FUNCTION pg_temp.replace_sqlstate(
+                 producer text, bid bigint, pub_gen bigint, expected bigint,
+                 token bigint, rows jsonb) RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.replace_relationships(producer, bid, pub_gen, expected, token, rows);
+                 RETURN 'ok';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("replace probe is creatable");
+        Spi::get_one_with_args::<String>(
+            "SELECT pg_temp.replace_sqlstate($1, $2, $3, $4, $5, $6::jsonb)",
+            &[
+                producer.into(),
+                bundle_id.into(),
+                publication_generation.into(),
+                expected.into(),
+                token.into(),
+                rows.into(),
+            ],
+        )
+        .expect("replace probe executes")
+        .expect("the probe reports a SQLSTATE")
+    }
+
+    /// The states of a bundle's publications, oldest generation first.
+    fn publication_states(bundle_id: i64) -> String {
+        Spi::get_one_with_args::<String>(
+            "SELECT coalesce(string_agg(state || ':' || row_count, ','
+                          ORDER BY publication_generation), '<none>')
+             FROM pgokf.relationship_publication WHERE source_bundle_id = $1",
+            &[bundle_id.into()],
+        )
+        .expect("publication states query executes")
+        .expect("states string is not NULL")
+    }
+
+    /// The visible current relationships of a bundle as
+    /// `source-[:type]->target` rows, ordered.
+    fn current_relationship_rows(bundle_id: i64) -> Vec<String> {
+        Spi::connect(|client| {
+            client
+                .select(
+                    "SELECT source_concept_id || '-[:' || relation_type || ']->' ||
+                            coalesce(target_bundle_id || ':' || target_concept_id,
+                                     'ext:' || external_target, '<none>') ||
+                            CASE WHEN unresolved THEN ' (unresolved)' ELSE '' END
+                     FROM pgokf.current_relationships
+                     WHERE source_bundle_id = $1
+                     ORDER BY ordinal",
+                    None,
+                    &[bundle_id.into()],
+                )
+                .expect("current_relationships query executes")
+                .map(|row| {
+                    row.get::<String>(1)
+                        .expect("row text is readable")
+                        .expect("row text is not NULL")
+                })
+                .collect::<Vec<_>>()
+        })
+    }
+
+    #[pg_test]
+    fn replace_relationships_validates_shape_endpoints_and_limits() {
+        // Arrange: a registered bundle (generation 1) and its live fence.
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        let token = issue_fence(bundle_id, "producer-a", 10);
+
+        // Assert: row-shape violations are 22023, naming the row position.
+        for bad_rows in [
+            // not an array
+            r#"{"source_concept_id": "alpha"}"#,
+            // a non-object row
+            r#"["not an object"]"#,
+            // unnamespaced relation type
+            r#"[{"source_concept_id": "alpha", "relation_type": "calls"}]"#,
+            // empty relation namespace
+            r#"[{"source_concept_id": "alpha", "relation_type": ":calls"}]"#,
+            // both a resolved and an external target
+            r#"[{"source_concept_id": "alpha", "relation_type": "ns:r", "target_concept_id": "beta", "external_target": "x"}]"#,
+            // duplicate canonical identities
+            r#"[{"source_concept_id": "alpha", "relation_type": "ns:r"},
+                {"source_concept_id": "alpha", "relation_type": "ns:r"}]"#,
+            // an unknown source concept (immediate mode validates endpoints)
+            r#"[{"source_concept_id": "ghost", "relation_type": "ns:r"}]"#,
+            // an unsupported key
+            r#"[{"source_concept_id": "alpha", "relation_type": "ns:r", "surprise": 1}]"#,
+        ] {
+            let state = replace_sqlstate(bundle_id, "producer-a", 10, 1, token, bad_rows);
+            assert_eq!(state, "22023", "rows {bad_rows}");
+        }
+
+        // Assert: the hard row limit is enforced before any catalog write.
+        let oversized = format!(
+            "[{}]",
+            vec![r#"{"source_concept_id": "alpha", "relation_type": "ns:r", "external_target": "e"}"#; 10_001]
+                .join(",")
+        );
+        let state = replace_sqlstate(bundle_id, "producer-a", 10, 1, token, &oversized);
+        assert_eq!(state, "22023", "more than 10000 rows is rejected");
+
+        // Assert: arbitrary producer-defined namespaced types are accepted, and
+        // a same-bundle concept-only target resolves.
+        let (state, count) = replace_rows(
+            bundle_id,
+            "producer-a",
+            10,
+            1,
+            token,
+            r#"[
+                {"source_concept_id": "alpha", "relation_type": "code:calls",
+                 "target_concept_id": "beta", "confidence": 0.75,
+                 "source_location": {"path": "a.rs", "line": 9}},
+                {"source_concept_id": "alpha", "relation_type": "anything:goes"},
+                {"source_concept_id": "alpha", "relation_type": "code:links",
+                 "external_target": "registry:other-thing"},
+                {"source_concept_id": "alpha", "relation_type": "code:misses",
+                 "target_concept_id": "absent"}
+            ]"#,
+        );
+        assert_eq!((state.as_str(), count), ("active", 4));
+        assert_eq!(
+            current_relationship_rows(bundle_id),
+            vec![
+                format!("alpha-[:anything:goes]-><none> (unresolved)"),
+                format!("alpha-[:code:calls]->{bundle_id}:beta"),
+                format!("alpha-[:code:links]->ext:registry:other-thing (unresolved)"),
+                format!("alpha-[:code:misses]->{bundle_id}:absent (unresolved)"),
+            ]
+        );
+    }
+
+    #[pg_test]
+    fn replace_relationships_enforces_fence_and_generation() {
+        // Arrange: a registered bundle (generation 1).
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        let rows = r#"[{"source_concept_id": "alpha", "relation_type": "ns:r"}]"#;
+
+        // Assert: no fence, a wrong token, and a publication generation that is
+        // not the fence's target are all 22023.
+        let no_fence = replace_sqlstate(bundle_id, "producer-a", 10, 1, 1, rows);
+        assert_eq!(no_fence, "22023", "a fence must exist first");
+        let token = issue_fence(bundle_id, "producer-a", 10);
+        let wrong_token = replace_sqlstate(bundle_id, "producer-a", 10, 1, token + 9, rows);
+        assert_eq!(wrong_token, "22023", "only the live token publishes");
+        let wrong_target = replace_sqlstate(bundle_id, "producer-a", 11, 1, token, rows);
+        assert_eq!(
+            wrong_target, "22023",
+            "the publication generation must equal the fence target"
+        );
+
+        // Assert: a stale expected catalog generation is rejected, as is a
+        // generation further ahead than the pending refresh.
+        let stale_expected = replace_sqlstate(bundle_id, "producer-a", 10, 99, token, rows);
+        assert_eq!(
+            stale_expected, "22023",
+            "a mismatched expected generation fails"
+        );
+        let too_far = replace_sqlstate(bundle_id, "producer-a", 10, 3, token, rows);
+        assert_eq!(too_far, "22023", "only current or next generation is valid");
+
+        // Act: publish against the current generation, then supersede the
+        // fence; the old token can no longer publish.
+        let (written, _) = replace_rows(bundle_id, "producer-a", 10, 1, token, rows);
+        assert_eq!(written, "active");
+        let token2 = issue_fence(bundle_id, "producer-a", 11);
+        assert_eq!(token2, token + 1);
+        let superseded = replace_sqlstate(bundle_id, "producer-a", 11, 1, token, rows);
+        assert_eq!(superseded, "22023", "a superseded token never publishes");
+    }
+
+    #[pg_test]
+    fn identical_retry_is_a_noop_and_a_differing_set_conflicts() {
+        // Arrange
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        let token = issue_fence(bundle_id, "producer-a", 10);
+        // Deliberately unsorted; the canonical form sorts them.
+        let rows = r#"[
+            {"source_concept_id": "beta", "relation_type": "ns:y"},
+            {"source_concept_id": "alpha", "relation_type": "ns:x"}
+        ]"#;
+        let resorted = r#"[
+            {"source_concept_id": "alpha", "relation_type": "ns:x"},
+            {"source_concept_id": "beta", "relation_type": "ns:y"}
+        ]"#;
+
+        // Act: write, then retry with the same set in another order.
+        let (state, count) = replace_rows(bundle_id, "producer-a", 10, 1, token, rows);
+        assert_eq!((state.as_str(), count), ("active", 2));
+        let (retry_state, retry_count) =
+            replace_rows(bundle_id, "producer-a", 10, 1, token, resorted);
+        assert_eq!(
+            (retry_state.as_str(), retry_count),
+            ("active", 2),
+            "an identical retry is a no-op"
+        );
+        assert_eq!(
+            publication_states(bundle_id),
+            "active:2",
+            "the retry wrote no second publication"
+        );
+
+        // Assert: the same key with a different set is a 23505 conflict.
+        let conflict = replace_sqlstate(
+            bundle_id,
+            "producer-a",
+            10,
+            1,
+            token,
+            r#"[{"source_concept_id": "alpha", "relation_type": "ns:x"}]"#,
+        );
+        assert_eq!(conflict, "23505");
+    }
+
+    #[pg_test]
+    fn staged_rows_activate_only_on_the_matching_refresh() {
+        // Arrange: bundle at generation 1; rows staged for generation 2 that
+        // target a concept the refresh will add.
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        let token = issue_fence(bundle_id, "producer-a", 10);
+        let (state, count) = replace_rows(
+            bundle_id,
+            "producer-a",
+            10,
+            2,
+            token,
+            r#"[
+                {"source_concept_id": "alpha", "relation_type": "code:calls",
+                 "target_concept_id": "gamma"},
+                {"source_concept_id": "alpha", "relation_type": "code:calls",
+                 "target_concept_id": "still-absent"}
+            ]"#,
+        );
+        assert_eq!((state.as_str(), count), ("staged", 2));
+
+        // Assert: staged rows are invisible before the refresh.
+        assert!(
+            current_relationship_rows(bundle_id).is_empty(),
+            "a staged publication is not reader-visible"
+        );
+
+        // Act: the refresh that adds gamma and accepts generation 2.
+        fs::write(
+            bundle.root.join("gamma.md"),
+            "---\ntype: Reference\ntitle: Gamma\n---\n\n# Gamma\n",
+        )
+        .expect("gamma fixture is writable");
+        let _ = refresh_counts(bundle_id);
+        assert_eq!(generation_of(bundle_id), 2);
+
+        // Assert: the publication activated in the sync transaction, and the
+        // added target re-resolved while the still-absent one stayed
+        // unresolved.
+        assert_eq!(publication_states(bundle_id), "active:2");
+        assert_eq!(
+            current_relationship_rows(bundle_id),
+            vec![
+                format!("alpha-[:code:calls]->{bundle_id}:gamma"),
+                format!("alpha-[:code:calls]->{bundle_id}:still-absent (unresolved)"),
+            ]
+        );
+
+        // Assert (after-refresh rule): a write naming the now-current
+        // generation activates immediately; one naming an older generation is
+        // rejected.
+        let token2 = issue_fence(bundle_id, "producer-a", 11);
+        let immediate = replace_sqlstate(
+            bundle_id,
+            "producer-a",
+            11,
+            2,
+            token2,
+            r#"[{"source_concept_id": "beta", "relation_type": "ns:new"}]"#,
+        );
+        assert_eq!(immediate, "ok", "the current generation activates");
+        // A different producer's fence/key, so the generation rule - not the
+        // idempotency conflict - is what fires.
+        let token_b = issue_fence(bundle_id, "producer-b", 5);
+        let stale_expected = replace_sqlstate(
+            bundle_id,
+            "producer-b",
+            5,
+            1,
+            token_b,
+            r#"[{"source_concept_id": "beta", "relation_type": "ns:old"}]"#,
+        );
+        assert_eq!(
+            stale_expected, "22023",
+            "a stale expected generation is rejected"
+        );
+    }
+
+    #[pg_test]
+    fn a_refresh_without_replacement_keeps_coverage_stale() {
+        // Arrange: an active publication at generation 1.
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        let token = issue_fence(bundle_id, "producer-a", 10);
+        let (state, _) = replace_rows(
+            bundle_id,
+            "producer-a",
+            10,
+            1,
+            token,
+            r#"[{"source_concept_id": "alpha", "relation_type": "code:calls",
+                  "target_concept_id": "beta"}]"#,
+        );
+        assert_eq!(state, "active");
+        assert_eq!(freshness_state(bundle_id), "fresh{}");
+
+        // Act: refresh to generation 2 without staging a replacement.
+        fs::write(bundle.root.join("alpha.md"), ALPHA_EDITED).expect("edit is writable");
+        let _ = refresh_counts(bundle_id);
+
+        // Assert: the old-generation publication is superseded (no
+        // mixed-generation exposure - the view is empty) and the bundle is
+        // stale with the coverage reason.
+        assert_eq!(publication_states(bundle_id), "superseded:1");
+        assert!(
+            current_relationship_rows(bundle_id).is_empty(),
+            "old-generation relationships never combine with new concepts"
+        );
+        assert_eq!(
+            freshness_state(bundle_id),
+            "stale{relationship_coverage_missing}"
+        );
+
+        // Assert: the compare-and-set completion refuses while the coverage
+        // reason stands.
+        let refused = Spi::get_one_with_args::<bool>(
+            "SELECT pgokf.mark_fresh($1, $2)",
+            &[bundle_id.into(), generation_of(bundle_id).into()],
+        )
+        .expect("mark_fresh executes")
+        .expect("a verdict is returned");
+        assert!(!refused, "mark_fresh refuses until coverage is restored");
+
+        // Act: publish the replacement against the current generation.
+        let token2 = issue_fence(bundle_id, "producer-a", 11);
+        let (state, _) = replace_rows(
+            bundle_id,
+            "producer-a",
+            11,
+            2,
+            token2,
+            r#"[{"source_concept_id": "alpha", "relation_type": "code:calls",
+                  "target_concept_id": "beta"}]"#,
+        );
+        assert_eq!(state, "active");
+        assert_eq!(
+            freshness_state(bundle_id),
+            "stale{}",
+            "the replacement cleared the coverage reason"
+        );
+
+        // Assert: the CAS now completes.
+        let reconciled = Spi::get_one_with_args::<bool>(
+            "SELECT pgokf.mark_fresh($1, $2)",
+            &[bundle_id.into(), generation_of(bundle_id).into()],
+        )
+        .expect("mark_fresh executes")
+        .expect("a verdict is returned");
+        assert!(reconciled, "coverage restored, mark_fresh completes");
+        assert_eq!(freshness_state(bundle_id), "fresh{}");
+    }
+
+    #[pg_test]
+    fn an_empty_replacement_removes_the_prior_set() {
+        // Arrange: an active two-row publication.
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        let token = issue_fence(bundle_id, "producer-a", 10);
+        let (state, _) = replace_rows(
+            bundle_id,
+            "producer-a",
+            10,
+            1,
+            token,
+            r#"[
+                {"source_concept_id": "alpha", "relation_type": "ns:x"},
+                {"source_concept_id": "beta", "relation_type": "ns:y"}
+            ]"#,
+        );
+        assert_eq!(state, "active");
+        assert_eq!(current_relationship_rows(bundle_id).len(), 2);
+
+        // Act: replace with the empty set against the same generation.
+        let token2 = issue_fence(bundle_id, "producer-a", 11);
+        let (state, count) = replace_rows(bundle_id, "producer-a", 11, 1, token2, "[]");
+
+        // Assert: the empty publication is active and the prior rows are gone
+        // from the current projection.
+        assert_eq!((state.as_str(), count), ("active", 0));
+        assert!(current_relationship_rows(bundle_id).is_empty());
+        assert_eq!(publication_states(bundle_id), "superseded:2,active:0");
+    }
+
+    #[pg_test]
+    fn typed_neighbors_traverse_directions_types_and_cycles_with_freshness() {
+        // Arrange: two bundles; cross-bundle edges both ways (a cycle), a
+        // same-bundle edge, an undirected edge, and an external edge.
+        let bundle_a = FixtureBundle::create();
+        let bundle_b = FixtureBundle::create();
+        let a = register_fixture(&bundle_a);
+        let b = register_fixture(&bundle_b);
+        let rows = format!(
+            r#"[
+                {{"source_concept_id": "alpha", "relation_type": "code:calls",
+                  "target_bundle_id": {b}, "target_concept_id": "alpha"}},
+                {{"source_concept_id": "alpha", "relation_type": "code:contains",
+                  "target_concept_id": "beta"}},
+                {{"source_concept_id": "beta", "relation_type": "code:sees",
+                  "direction": "undirected", "target_concept_id": "alpha"}},
+                {{"source_concept_id": "alpha", "relation_type": "code:links",
+                  "external_target": "registry:elsewhere"}}
+            ]"#
+        );
+        let token_a = issue_fence(a, "producer-a", 10);
+        let (state, _) = replace_rows(a, "producer-a", 10, 1, token_a, &rows);
+        assert_eq!(state, "active");
+        let rows_b = format!(
+            r#"[{{"source_concept_id": "alpha", "relation_type": "ns:back",
+                  "target_bundle_id": {a}, "target_concept_id": "alpha"}}]"#
+        );
+        let token_b = issue_fence(b, "producer-a", 10);
+        let (state, _) = replace_rows(b, "producer-a", 10, 1, token_b, &rows_b);
+        assert_eq!(state, "active");
+
+        // The traversal result as "bundle:concept@hops(via type) state" rows.
+        let walk = |seed_bundle: i64,
+                    seed: &str,
+                    direction: &str,
+                    types: Option<Vec<String>>|
+         -> Vec<String> {
+            Spi::connect(|client| {
+                client
+                    .select(
+                        "SELECT bundle_id || ':' || concept_id || '@' || hops ||
+                                '(' || relation_type || ') ' || freshness_state ||
+                                '/' || embedding_state
+                         FROM pgokf.concept_relationship_neighbors(
+                             $1, $2, 5, $3, $4::text[])
+                         ORDER BY hops, bundle_id, concept_id",
+                        None,
+                        &[
+                            seed_bundle.into(),
+                            seed.into(),
+                            direction.into(),
+                            types.into(),
+                        ],
+                    )
+                    .expect("typed neighbors executes")
+                    .map(|row| {
+                        row.get::<String>(1)
+                            .expect("row text is readable")
+                            .expect("row text is not NULL")
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+
+        // Assert (outbound): A.alpha reaches B.alpha and A.beta; the cycle back
+        // through ns:back terminates (A.alpha is never its own neighbor); the
+        // external row never becomes an edge. Freshness metadata is present.
+        assert_eq!(
+            walk(a, "alpha", "outbound", None),
+            vec![
+                format!("{a}:beta@1(code:contains) fresh/missing"),
+                format!("{b}:alpha@1(code:calls) fresh/missing"),
+            ]
+        );
+
+        // Assert (inbound): B.alpha's inbound resolved edges come from
+        // A.alpha's code:calls row.
+        assert_eq!(
+            walk(b, "alpha", "inbound", None),
+            vec![format!("{a}:alpha@1(code:calls) fresh/missing")]
+        );
+
+        // Assert (undirected): beta--alpha is traversable from alpha even
+        // though its source is beta.
+        assert_eq!(
+            walk(a, "beta", "both", None),
+            vec![format!("{a}:alpha@1(code:sees) fresh/missing")]
+        );
+
+        // Assert (type filter): only code:calls edges are followed.
+        assert_eq!(
+            walk(a, "alpha", "outbound", Some(vec!["code:calls".to_owned()])),
+            vec![format!("{b}:alpha@1(code:calls) fresh/missing")]
+        );
+
+        // Assert: a bogus direction and a sub-1 hop count are 22023; an
+        // unknown seed yields an empty result.
+        Spi::run(
+            "CREATE OR REPLACE FUNCTION pg_temp.neighbors_sqlstate(direction text, hops integer)
+             RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             BEGIN
+                 PERFORM count(*) FROM pgokf.concept_relationship_neighbors(
+                     (SELECT min(id) FROM pgokf.bundles), 'alpha', hops, direction);
+                 RETURN 'ok';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("neighbors probe is creatable");
+        for (direction, hops) in [("sideways", 2), ("outbound", 0)] {
+            let state = Spi::get_one_with_args::<String>(
+                "SELECT pg_temp.neighbors_sqlstate($1, $2)",
+                &[direction.into(), hops.into()],
+            )
+            .expect("neighbors probe executes")
+            .expect("the probe reports a SQLSTATE");
+            assert_eq!(state, "22023", "{direction}/{hops}");
+        }
+        assert!(
+            walk(a, "ghost", "both", None).is_empty(),
+            "an unknown seed traverses to nothing"
+        );
+    }
+
+    #[pg_test]
+    fn relationship_visibility_follows_bundle_lifecycle_and_tenancy() {
+        // Arrange: one bundle per tenant, each with an active publication;
+        // acme's rows target both globex's bundle (cross-tenant: unresolved,
+        // reference dropped) and its own.
+        let acme_bundle = FixtureBundle::create();
+        let globex_bundle = FixtureBundle::create();
+        Spi::run("SET pgokf.tenant = 'acme'").expect("pgokf.tenant is settable");
+        let acme = register_fixture(&acme_bundle);
+        Spi::run("SET pgokf.tenant = 'globex'").expect("pgokf.tenant is settable");
+        let globex = register_fixture(&globex_bundle);
+        let globex_token = issue_fence(globex, "producer-g", 10);
+        let (state, _) = replace_rows(
+            globex,
+            "producer-g",
+            10,
+            1,
+            globex_token,
+            r#"[{"source_concept_id": "alpha", "relation_type": "ns:g",
+                 "target_concept_id": "beta"}]"#,
+        );
+        assert_eq!(state, "active");
+        Spi::run("SET pgokf.tenant = 'acme'").expect("pgokf.tenant is settable");
+        let acme_token = issue_fence(acme, "producer-a", 10);
+        let cross_rows = format!(
+            r#"[
+                {{"source_concept_id": "alpha", "relation_type": "ns:local",
+                  "target_concept_id": "beta"}},
+                {{"source_concept_id": "alpha", "relation_type": "ns:cross",
+                  "target_bundle_id": {globex}, "target_concept_id": "alpha"}}
+            ]"#
+        );
+        let (state, _) = replace_rows(acme, "producer-a", 10, 1, acme_token, &cross_rows);
+        assert_eq!(state, "active");
+
+        // Assert: the cross-tenant target resolved to the same unresolved row
+        // an absent bundle would produce, with the bundle reference dropped.
+        let cross_reference = Spi::get_one_with_args::<String>(
+            "SELECT coalesce(target_bundle_id::text, '<dropped>') || '/' || cross_bundle
+             FROM pgokf.relationship r
+             JOIN pgokf.relationship_publication p ON p.publication_id = r.publication_id
+             WHERE p.source_bundle_id = $1 AND r.relation_type = 'ns:cross'",
+            &[acme.into()],
+        )
+        .expect("cross-target query executes")
+        .expect("the row exists");
+        assert_eq!(
+            cross_reference, "<dropped>/true",
+            "an invisible target is stored unresolved, reference dropped"
+        );
+
+        // Assert: a globex-scoped write against acme's bundle is
+        // indistinguishable from an unknown bundle (22023).
+        Spi::run("SET pgokf.tenant = 'globex'").expect("pgokf.tenant is settable");
+        let cross_write = replace_sqlstate(
+            acme,
+            "producer-g",
+            20,
+            1,
+            1,
+            r#"[{"source_concept_id": "alpha", "relation_type": "ns:r"}]"#,
+        );
+        assert_eq!(cross_write, "22023", "a cross-tenant source is unknown");
+
+        // Assert: a non-superuser reader sees only its own tenant's rows, and
+        // holds no grant on the raw tables.
+        Spi::run("CREATE ROLE pgokf_rel_reader").expect("reader role is creatable");
+        Spi::run("GRANT pgokf_reader TO pgokf_rel_reader").expect("reader role is grantable");
+        Spi::run(
+            "CREATE OR REPLACE FUNCTION pg_temp.rel_counts() RETURNS text
+             LANGUAGE plpgsql
+             SET role TO pgokf_rel_reader
+             AS $probe$
+             BEGIN
+                 RETURN (SELECT count(*) FROM pgokf.current_relationships)::text;
+             END
+             $probe$;",
+        )
+        .expect("reader count probe is creatable");
+        let globex_rows = Spi::get_one::<String>("SELECT pg_temp.rel_counts()")
+            .expect("reader count probe executes")
+            .expect("a count is returned");
+        assert_eq!(globex_rows, "1", "a globex reader sees only globex's row");
+        Spi::run(
+            "CREATE OR REPLACE FUNCTION pg_temp.rel_raw_probe() RETURNS text
+             LANGUAGE plpgsql
+             SET role TO pgokf_rel_reader
+             AS $probe$
+             BEGIN
+                 PERFORM count(*) FROM pgokf.relationship;
+                 RETURN 'not-denied';
+             EXCEPTION WHEN insufficient_privilege THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("raw-table probe is creatable");
+        let raw_denied = Spi::get_one::<String>("SELECT pg_temp.rel_raw_probe()")
+            .expect("raw-table probe executes")
+            .expect("the probe reports a SQLSTATE");
+        assert_eq!(raw_denied, "42501", "a reader cannot read the raw table");
+
+        // Assert: a reader cannot call the writer API at all.
+        Spi::run(
+            "CREATE OR REPLACE FUNCTION pg_temp.rel_write_probe() RETURNS text
+             LANGUAGE plpgsql
+             SET role TO pgokf_rel_reader
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.replace_relationships('p', 1, 1, 1, 1, '[]'::jsonb);
+                 RETURN 'not-denied';
+             EXCEPTION WHEN insufficient_privilege THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("writer probe is creatable");
+        let write_denied = Spi::get_one::<String>("SELECT pg_temp.rel_write_probe()")
+            .expect("writer probe executes")
+            .expect("the probe reports a SQLSTATE");
+        assert_eq!(write_denied, "42501", "a reader cannot publish");
+
+        // Act/Assert (lifecycle): retiring the source bundle removes its
+        // current relationship visibility; unretiring restores it.
+        Spi::run("RESET pgokf.tenant").expect("pgokf.tenant resets");
+        Spi::run_with_args("SELECT pgokf.retire_bundle($1)", &[acme.into()])
+            .expect("retire executes");
+        assert!(
+            current_relationship_rows(acme).is_empty(),
+            "retirement hides the bundle's current relationships"
+        );
+        Spi::run_with_args("SELECT pgokf.unretire_bundle($1)", &[acme.into()])
+            .expect("unretire executes");
+        assert_eq!(
+            current_relationship_rows(acme).len(),
+            2,
+            "unretirement restores the projection"
+        );
+
+        // Act/Assert: unregistering detaches the publication's live bundle
+        // reference (audit retained, visibility gone).
+        Spi::run_with_args("SELECT pgokf.unregister_bundle($1)", &[acme.into()])
+            .expect("unregister executes");
+        let (attached, retained_rows) = Spi::connect(|client| {
+            let row = client
+                .select(
+                    "SELECT p.source_bundle_id IS NOT NULL,
+                            (SELECT count(*) FROM pgokf.relationship r
+                             WHERE r.publication_id = p.publication_id)
+                     FROM pgokf.relationship_publication p
+                     WHERE p.producer = 'producer-a' AND p.publication_generation = 10",
+                    Some(1),
+                    &[],
+                )
+                .expect("retention query executes")
+                .first();
+            (
+                row.get::<bool>(1)
+                    .expect("the flag is readable")
+                    .expect("the flag is not NULL"),
+                row.get::<i64>(2)
+                    .expect("the count is readable")
+                    .expect("the count is not NULL"),
+            )
+        });
+        assert!(!attached, "the publication detached, not cascaded");
+        assert_eq!(
+            retained_rows, 2,
+            "the relationship rows are retained as audit"
+        );
+        let visible = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgokf.current_relationships
+             WHERE producer = 'producer-a'",
+        )
+        .expect("post-delete visibility query executes")
+        .expect("count is not NULL");
+        assert_eq!(visible, 0, "a deleted bundle's relationships are invisible");
     }
 }

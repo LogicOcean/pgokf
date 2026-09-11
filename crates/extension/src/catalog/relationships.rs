@@ -594,6 +594,15 @@ fn resolve_endpoints(
     rows: &mut [RelationshipRow],
     validate_concepts: bool,
 ) -> Result<(), CatalogError> {
+    // A concept-only target names a concept in the SOURCE bundle (the
+    // resolved-target bundle defaults), so every resolved-shape row carries
+    // both halves of its endpoint.
+    for row in rows.iter_mut() {
+        if row.target_concept_id.is_some() && row.target_bundle_id.is_none() {
+            row.target_bundle_id = Some(source_bundle_id);
+        }
+    }
+
     let declared_bundles: Vec<i64> = rows
         .iter()
         .filter_map(|row| row.target_bundle_id)

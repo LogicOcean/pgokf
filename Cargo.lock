@@ -2408,6 +2408,7 @@ dependencies = [
  "parquet",
  "pgrx",
  "pgrx-tests",
+ "serde_json",
 ]
 
 [[package]]
