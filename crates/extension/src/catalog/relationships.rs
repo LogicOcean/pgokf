@@ -618,9 +618,11 @@ fn resolve_endpoints(
         if let Some(target) = row.target_bundle_id
             && !visible.contains(&target)
         {
-            // Invisible/absent/inactive target bundle: unresolved, and the
-            // bundle reference is dropped so nothing about it is recorded.
+            // Invisible/absent/inactive target bundle: unresolved, and BOTH
+            // endpoint references are dropped, so nothing about the invisible
+            // endpoint is recorded (and the pair-shape CHECK holds).
             row.target_bundle_id = None;
+            row.target_concept_id = None;
             row.unresolved = true;
         }
     }
@@ -735,7 +737,7 @@ CREATE TABLE pgokf.relationship_publication (
         CHECK (publication_generation > 0 AND fencing_token > 0
                AND expected_catalog_generation >= 0),
     CONSTRAINT relationship_publication_activation_chk
-        CHECK ((state = 'active') = (activated_catalog_generation IS NOT NULL)),
+        CHECK (state <> 'active' OR activated_catalog_generation IS NOT NULL),
     CONSTRAINT relationship_publication_uq UNIQUE NULLS NOT DISTINCT
         (tenant_id, producer, source_bundle_id, publication_generation)
 );
@@ -831,7 +833,7 @@ COMMENT ON COLUMN pgokf.relationship_publication.publication_generation IS
 COMMENT ON COLUMN pgokf.relationship_publication.expected_catalog_generation IS
     'The pgokf.bundles.catalog_generation the row set was computed against: the current generation activates immediately; current + 1 stages for the imminent refresh; anything else is rejected (22023).';
 COMMENT ON COLUMN pgokf.relationship_publication.activated_catalog_generation IS
-    'The catalog generation this publication is the visible relationship set for, once active; NULL while staged or after supersession.';
+    'The catalog generation this publication is the visible relationship set for, once active; retained as a historical record after supersession; NULL only while staged.';
 COMMENT ON COLUMN pgokf.relationship_publication.fencing_token IS
     'The live fencing token of the (tenant, producer, bundle) publication fence slot at write time; a superseded or expired token is rejected, so an older producer attempt can never publish.';
 COMMENT ON COLUMN pgokf.relationship_publication.relationship_set_hash IS
@@ -849,7 +851,7 @@ COMMENT ON COLUMN pgokf.relationship_publication.created_by IS
 COMMENT ON COLUMN pgokf.relationship_publication.created_at IS
     'When the publication was written (transaction now()).';
 COMMENT ON COLUMN pgokf.relationship_publication.activated_at IS
-    'When the publication became active; NULL while staged or after supersession.';
+    'When the publication became active; retained as a historical record after supersession; NULL only while staged.';
 COMMENT ON COLUMN pgokf.relationship_publication.updated_at IS
     'When this row last changed (activation or supersession).';
 
@@ -872,7 +874,7 @@ COMMENT ON COLUMN pgokf.relationship.direction IS
 COMMENT ON COLUMN pgokf.relationship.target_bundle_id IS
     'The resolved target''s bundle, when the endpoint validated at write (or activation) time against a bundle active and visible to the writer; NULL for external and unresolved-with-dropped-reference rows. Not a foreign key: the target identity is a snapshot and a target bundle''s later deletion must not rewrite relationship audit.';
 COMMENT ON COLUMN pgokf.relationship.target_concept_id IS
-    'The resolved target''s concept id within target_bundle_id, or the producer-declared target concept retained as opaque metadata on an unresolved row; NULL for external and target-less rows.';
+    'The resolved target''s concept id within target_bundle_id, or the producer-declared target concept retained as opaque metadata on an unresolved row whose bundle IS visible but lacks the concept (when the target bundle itself was absent, inactive, or invisible to the writer, both endpoint references are dropped - the invisible and absent cases are indistinguishable); NULL for external and target-less rows.';
 COMMENT ON COLUMN pgokf.relationship.external_target IS
     'Opaque producer-defined identifier of a target outside the catalog (mutually exclusive with a resolved target concept); never resolved or traversed.';
 COMMENT ON COLUMN pgokf.relationship.source_location IS
@@ -1878,7 +1880,8 @@ struct TypedNeighborHit {
 /// concepts (active bundles only; a vanished concept drops the node, the
 /// inner-join parity of [`crate::catalog::neighbors`]) and annotated with the
 /// effective freshness (concept > path > bundle precedence) in the inner
-/// projection, then with the embedding provenance in the outer one - the same
+/// projection, then with the embedding provenance in the outer one, which
+/// re-joins `pgokf.concepts` as `c` for the contract predicate - the same
 /// shape `pgokf.concept_search_fresh` produces. `contract_match` is
 /// [`crate::catalog::embedding::contract_match_sql`] with the policy bound as
 /// `$3` (model), `$4` (dimension), and `$5` (contract).
@@ -1935,6 +1938,7 @@ fn neighbor_annotation_statement(contract_match: &str) -> String {
     LEFT JOIN pgokf.effective_freshness fb
            ON fb.bundle_id = c.bundle_id AND fb.scope_kind = 'bundle'
     ) AS ranked
+    JOIN pgokf.concepts c ON c.bundle_id = ranked.bundle_id AND c.id = ranked.concept_id
     LEFT JOIN pgokf.concept_embedding e
            ON e.bundle_id = ranked.bundle_id AND e.concept_id = ranked.concept_id"
     )

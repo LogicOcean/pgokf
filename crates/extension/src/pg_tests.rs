@@ -9194,17 +9194,26 @@ Use the solo skill on its own.\n";
         );
 
         // Assert (inbound): B.alpha's inbound resolved edges come from
-        // A.alpha's code:calls row.
+        // A.alpha's code:calls row; one hop further, the undirected
+        // code:sees edge (beta--alpha) reaches A.beta - an undirected edge is
+        // traversable in both directions under every direction mode.
         assert_eq!(
             walk(b, "alpha", "inbound", None),
-            vec![format!("{a}:alpha@1(code:calls) fresh/missing")]
+            vec![
+                format!("{a}:alpha@1(code:calls) fresh/missing"),
+                format!("{a}:beta@2(code:sees) fresh/missing"),
+            ]
         );
 
         // Assert (undirected): beta--alpha is traversable from alpha even
-        // though its source is beta.
+        // though its source is beta; one hop further, the traversal continues
+        // outbound from A.alpha across bundles.
         assert_eq!(
             walk(a, "beta", "both", None),
-            vec![format!("{a}:alpha@1(code:sees) fresh/missing")]
+            vec![
+                format!("{a}:alpha@1(code:sees) fresh/missing"),
+                format!("{b}:alpha@2(code:calls) fresh/missing"),
+            ]
         );
 
         // Assert (type filter): only code:calls edges are followed.
