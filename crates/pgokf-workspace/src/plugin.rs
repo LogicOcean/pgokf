@@ -462,14 +462,21 @@ pub fn assemble_with_report(
         entries,
     } = materialized;
 
-    // The freshness report, when the build kept or excluded stale concepts.
-    // A build with nothing stale writes none, so it stays byte-identical to
-    // one from before the freshness surface existed.
+    // The freshness report, when the build kept or excluded stale concepts
+    // (a stale package member counts). A build with nothing stale writes
+    // none, so it stays byte-identical to one from before the freshness
+    // surface existed.
     let stale: Vec<&ConceptRecord> = records.iter().filter(|r| r.freshness.is_stale()).collect();
-    let freshness_doc = if stale.is_empty() && report.excluded.is_empty() {
+    let member_stale = records
+        .iter()
+        .filter_map(|r| r.package.as_ref())
+        .flat_map(|p| p.member_freshness.values())
+        .filter(|f| f.is_stale())
+        .count();
+    let freshness_doc = if stale.is_empty() && member_stale == 0 && report.excluded.is_empty() {
         None
     } else {
-        Some(freshness_md(&stale, &report.excluded, selection))
+        Some(freshness_md(records, &report.excluded, selection))
     };
     let index_dir = layout.index_path.rsplit_once('/').map_or("", |(d, _)| d);
     let freshness_link = freshness_doc.as_ref().map(|_| {
@@ -490,7 +497,7 @@ pub fn assemble_with_report(
         packages: &packages,
         package_prefix: &package_prefix,
         freshness_link: freshness_link.as_deref(),
-        stale_count: stale.len() + report.excluded.len(),
+        stale_count: stale.len() + member_stale + report.excluded.len(),
     });
     let mut files = vec![file(layout.index_path.clone(), index.into_bytes())];
     if profile.shape == Shape::PromptBundle {
@@ -536,6 +543,26 @@ pub fn assemble_with_report(
     );
     ensure_unique_paths(&files)?;
 
+    let mut warnings: Vec<StaleConcept> = stale
+        .iter()
+        .map(|r| StaleConcept::of(r, selection.require_closure))
+        .collect();
+    for record in records {
+        let Some(package) = &record.package else {
+            continue;
+        };
+        for (member, freshness) in &package.member_freshness {
+            if freshness.is_stale() {
+                warnings.push(StaleConcept::member(
+                    record,
+                    member,
+                    freshness,
+                    selection.require_closure,
+                ));
+            }
+        }
+    }
+
     Ok(Plugin {
         target: options.target.id().to_owned(),
         name,
@@ -544,10 +571,7 @@ pub fn assemble_with_report(
         concept_count: records.len(),
         package_count: packages.len(),
         concepts: records.to_vec(),
-        warnings: stale
-            .iter()
-            .map(|r| StaleConcept::of(r, selection.require_closure))
-            .collect(),
+        warnings,
         excluded: report.excluded.clone(),
         freshness_available: report.freshness_available,
     })
@@ -690,11 +714,13 @@ fn content_files<'a>(
                 record,
                 &manifest,
                 None,
+                None,
                 Some((&package.hash, dir)),
                 engaged,
             ));
             files.push(manifest);
             for resource in &package.resources {
+                let member_freshness = package.member_freshness.get(&resource.concept_id);
                 let mut f = file(
                     format!("{base}/{}", tree_path(&resource.path)?),
                     resource.bytes.clone(),
@@ -704,9 +730,20 @@ fn content_files<'a>(
                     record,
                     &f,
                     Some(resource),
+                    member_freshness,
                     Some((&package.hash, dir)),
                     engaged,
                 ));
+                // A stale member keeps its exact bytes like the rest of the
+                // package; its own warning sits beside the member file, so a
+                // fresh package no longer ships a stale member silently.
+                if member_freshness.is_some_and(crate::selection::Freshness::is_stale) {
+                    let warning_path = adjacent_warning_path(&f.path);
+                    files.push(file(
+                        warning_path.clone(),
+                        stale_member_warning_doc(record, resource, &warning_path).into_bytes(),
+                    ));
+                }
                 files.push(f);
             }
             // The package's bytes are exact and stay exact: a stale package
@@ -743,12 +780,12 @@ fn content_files<'a>(
             let bytes = with_stale_banner(&record.bytes, &stale_banner(record));
             let mut f = file(file_path, bytes);
             f.executable = is_script;
-            entries.push(lock_entry(record, &f, None, None, engaged));
+            entries.push(lock_entry(record, &f, None, None, None, engaged));
             files.push(f);
         } else {
             let mut f = file(file_path.clone(), record.bytes.clone());
             f.executable = is_script;
-            entries.push(lock_entry(record, &f, None, None, engaged));
+            entries.push(lock_entry(record, &f, None, None, None, engaged));
             files.push(f);
             if record.freshness.is_stale() {
                 // Stored exact bytes stay untouched; the warning is adjacent.
@@ -778,12 +815,14 @@ fn content_files<'a>(
 /// package file the package hash and the directory the package was written
 /// to (which differs from its name only when two packages collided). When
 /// the build engaged the freshness surface, the entry also carries the
-/// concept's effective state, reasons, revisions, and catalog generation,
-/// and how it entered the selection.
+/// concept's effective state, reasons, revisions, and catalog generation -
+/// a member's own state, never its package's - and how it entered the
+/// selection.
 fn lock_entry(
     record: &ConceptRecord,
     f: &PluginFile,
     member: Option<&crate::selection::ResourceFile>,
+    member_freshness: Option<&crate::selection::Freshness>,
     package: Option<(&str, &str)>,
     engaged: bool,
 ) -> serde_json::Value {
@@ -806,7 +845,7 @@ fn lock_entry(
         entry["package_directory"] = json!(dir);
     }
     if engaged {
-        let freshness = &record.freshness;
+        let freshness = member_freshness.unwrap_or(&record.freshness);
         entry["freshness"] = json!({
             "state": freshness.state,
             "reasons": freshness.reasons,
@@ -851,11 +890,14 @@ fn adjacent_warning_path(path: &str) -> String {
 /// The machine-readable freshness line of a warning or banner: one JSON
 /// object in an HTML comment, so a generated file states the catalog's
 /// evidence without pretending to be prose.
-fn freshness_json_line(record: &ConceptRecord) -> String {
-    let freshness = &record.freshness;
+fn freshness_json_line(
+    bundle_id: i64,
+    concept_id: &str,
+    freshness: &crate::selection::Freshness,
+) -> String {
     let evidence = json!({
-        "bundle_id": record.bundle_id,
-        "concept_id": record.concept_id,
+        "bundle_id": bundle_id,
+        "concept_id": concept_id,
         "state": freshness.state,
         "reasons": freshness.reasons,
         "scope": freshness.scope,
@@ -872,8 +914,7 @@ fn freshness_json_line(record: &ConceptRecord) -> String {
 }
 
 /// The revisions sentence shared by the banner and the warning file.
-fn revision_sentence(record: &ConceptRecord) -> String {
-    let freshness = &record.freshness;
+fn revision_sentence(freshness: &crate::selection::Freshness) -> String {
     let mut out = format!("state `{}`", freshness.state);
     if !freshness.reasons.is_empty() {
         let _ = write!(out, ", reasons: {}", freshness.reasons.join(", "));
@@ -903,15 +944,58 @@ fn stale_banner(record: &ConceptRecord) -> String {
         "> [!WARNING]\n> **Stale catalog content** — when this workspace was built, the catalog \
          reported this concept as not fresh ({}). Rebuild the plugin to pick up the reconciled \
          version; see `FRESHNESS.md` for the full report.\n\n{}\n\n",
-        revision_sentence(record),
-        freshness_json_line(record),
+        revision_sentence(&record.freshness),
+        freshness_json_line(record.bundle_id, &record.concept_id, &record.freshness),
     )
 }
 
 /// The standalone warning file placed beside a stale exact-bytes file (the
 /// byte-exact materialization promise is never broken).
 fn stale_warning_doc(record: &ConceptRecord, warning_path: &str) -> String {
-    let title = record.title.as_deref().unwrap_or(&record.concept_id);
+    warning_doc(
+        record.bundle_id,
+        &record.concept_id,
+        record.title.as_deref(),
+        &record.path,
+        &record.freshness,
+        warning_path,
+    )
+}
+
+/// The warning file beside one stale package member: the member's own
+/// concept id and the member's own freshness evidence, never the package's.
+fn stale_member_warning_doc(
+    record: &ConceptRecord,
+    member: &crate::selection::ResourceFile,
+    warning_path: &str,
+) -> String {
+    let freshness = record
+        .package
+        .as_ref()
+        .and_then(|p| p.member_freshness.get(&member.concept_id));
+    let Some(freshness) = freshness else {
+        return String::new();
+    };
+    warning_doc(
+        record.bundle_id,
+        &member.concept_id,
+        None,
+        &member.path,
+        freshness,
+        warning_path,
+    )
+}
+
+/// The shared text of the adjacent warning files.
+fn warning_doc(
+    bundle_id: i64,
+    concept_id: &str,
+    title: Option<&str>,
+    fallback_path: &str,
+    freshness: &crate::selection::Freshness,
+    warning_path: &str,
+) -> String {
+    let title = title.unwrap_or(concept_id);
     let referred = warning_path
         .strip_suffix(STALE_WARNING_SUFFIX)
         .and_then(|stem| {
@@ -919,7 +1003,7 @@ fn stale_warning_doc(record: &ConceptRecord, warning_path: &str) -> String {
             // file's name for the prose.
             stem.rsplit_once('/').map(|(_, name)| name.to_owned())
         })
-        .unwrap_or_else(|| record.path.clone());
+        .unwrap_or_else(|| fallback_path.to_owned());
     format!(
         "# Stale content warning: {}\n\nGenerated by pgokf-workspace. When this workspace was \
          built, the catalog reported concept `({}:{})` as not fresh ({}). The document beside \
@@ -928,11 +1012,11 @@ fn stale_warning_doc(record: &ConceptRecord, warning_path: &str) -> String {
          plugin once the catalog reconciles. See `FRESHNESS.md` at the workspace root for every \
          stale entry.\n\n{}\n",
         title.replace('[', "\\[").replace(']', "\\]"),
-        record.bundle_id,
-        record.concept_id,
-        revision_sentence(record),
+        bundle_id,
+        concept_id,
+        revision_sentence(freshness),
         referred,
-        freshness_json_line(record),
+        freshness_json_line(bundle_id, concept_id, freshness),
     )
 }
 
@@ -961,9 +1045,10 @@ fn with_stale_banner(bytes: &[u8], banner: &str) -> Vec<u8> {
 }
 
 /// The top-level freshness report: every stale concept the build kept
-/// (labelled) or excluded, with the catalog's evidence, in selection order.
+/// (labelled) or excluded - a stale package member under its own id and
+/// evidence - with the catalog's evidence, in selection order.
 fn freshness_md(
-    stale: &[&ConceptRecord],
+    records: &[ConceptRecord],
     excluded: &[StaleConcept],
     selection: &Selection,
 ) -> String {
@@ -976,21 +1061,35 @@ fn freshness_md(
          workspace's `{LOCK_FILE}`.",
         selection.stale_policy.id()
     );
-    if !stale.is_empty() {
+    // Every stale thing the tree keeps: the stale records, and each stale
+    // package member under its own concept id and freshness.
+    let mut kept: Vec<(i64, &str, &crate::selection::Freshness)> = Vec::new();
+    for record in records {
+        if record.freshness.is_stale() {
+            kept.push((record.bundle_id, &record.concept_id, &record.freshness));
+        }
+        if let Some(package) = &record.package {
+            for (member, freshness) in &package.member_freshness {
+                if freshness.is_stale() {
+                    kept.push((record.bundle_id, member, freshness));
+                }
+            }
+        }
+    }
+    if !kept.is_empty() {
         let _ = write!(
             out,
             "\n## Stale content ({})\n\n| concept | state | reasons | observed revision | indexed \
              revision | published revision | catalog generation |\n|---|---|---|---|---|---|---|\n",
-            stale.len()
+            kept.len()
         );
-        for record in stale {
-            let freshness = &record.freshness;
+        for (bundle_id, concept_id, freshness) in &kept {
             let cell = |value: &Option<String>| value.as_deref().unwrap_or("—").to_owned();
             let _ = writeln!(
                 out,
                 "| `({}:{})` | {} | {} | {} | {} | {} | {} |",
-                record.bundle_id,
-                record.concept_id,
+                bundle_id,
+                concept_id,
                 freshness.state,
                 if freshness.reasons.is_empty() {
                     "—".to_owned()
@@ -1007,8 +1106,8 @@ fn freshness_md(
         }
         out.push_str(
             "\nExact packages and stored-source documents keep their bytes untouched; each stale \
-             one has a generated `*.stale-warning.md` file beside it. Reconstructed documents \
-             carry a banner at the top.\n",
+             one - a stale package member included - has a generated `*.stale-warning.md` file \
+             beside it. Reconstructed documents carry a banner at the top.\n",
         );
     }
     if !excluded.is_empty() {
@@ -2369,7 +2468,11 @@ fn index_md(
 }
 
 /// The bounded system prompt of a prompt bundle: the index, then as many
-/// documents as fit the budget, most trusted first.
+/// documents as fit the budget, most trusted first. A document the catalog
+/// reported stale is inlined with its freshness warning - the same banner a
+/// reconstructed document carries - and the warning counts against the
+/// budget like the document itself; the exported copy of the document keeps
+/// its exact bytes either way.
 fn system_prompt(title: &str, options: &BuildOptions, records: &[ConceptRecord]) -> String {
     let mut out = format!(
         "You have curated knowledge from {} (a pgokf catalog), titled {title}. Use it when relevant; say so when it does not cover a question.\n\n",
@@ -2399,12 +2502,17 @@ fn system_prompt(title: &str, options: &BuildOptions, records: &[ConceptRecord])
                 format!("; {}", r.tags.join(", "))
             }
         );
-        if used + header.len() + body.len() > PROMPT_BUDGET {
+        let notice = r.freshness.is_stale().then(|| stale_banner(r));
+        let notice_len = notice.as_deref().map_or(0, str::len);
+        if used + header.len() + notice_len + body.len() > PROMPT_BUDGET {
             continue;
         }
-        used += header.len() + body.len();
+        used += header.len() + notice_len + body.len();
         included += 1;
         out.push_str(&header);
+        if let Some(notice) = &notice {
+            out.push_str(notice);
+        }
         out.push_str(body.trim());
         out.push('\n');
     }
@@ -2615,6 +2723,7 @@ mod tests {
             name: name.to_owned(),
             root: format!("skills/{name}"),
             hash: "p".repeat(64),
+            member_freshness: std::collections::BTreeMap::new(),
             resources: vec![
                 ResourceFile {
                     concept_id: format!("skills/{name}/scripts/run.sh"),
@@ -4383,6 +4492,164 @@ mod tests {
                 .iter()
                 .any(|f| f.path.contains("a.stale-warning.md")),
             "no adjacent warning for generated bytes"
+        );
+    }
+
+    #[test]
+    fn a_stale_package_member_gets_its_own_warning_lock_entry_and_report_row() {
+        // Arrange: a fresh package whose script the catalog flagged stale.
+        let mut package = package_record(1, "deploy");
+        package.package.as_mut().unwrap().member_freshness = std::collections::BTreeMap::from([(
+            "skills/deploy/scripts/run.sh".to_owned(),
+            stale_record(1, "skills/deploy/scripts/run.sh", true).freshness,
+        )]);
+        let original_script = package.package.as_ref().unwrap().resources[0].bytes.clone();
+
+        // Act
+        let plugin = assemble_with_report(
+            &options(Target::ClaudeCode),
+            &selection(),
+            &snapshot(),
+            &[package],
+            &report(),
+        )
+        .expect("builds");
+        let bytes_of = |path: &str| {
+            plugin
+                .files
+                .iter()
+                .find(|f| f.path == path)
+                .map(|f| f.bytes.clone())
+        };
+
+        // Assert: the member's bytes stay exact, its warning sits beside the
+        // member file with the member's own evidence, the lock entry carries
+        // the member's state, and the member is in the report and warnings.
+        assert_eq!(
+            bytes_of(".claude/skills/deploy/scripts/run.sh"),
+            Some(original_script)
+        );
+        let warning = String::from_utf8(
+            bytes_of(".claude/skills/deploy/scripts/run.stale-warning.md")
+                .expect("the member gets its own adjacent warning"),
+        )
+        .expect("text");
+        assert!(warning.contains("state `stale`"), "{warning}");
+        assert!(
+            warning.contains("skills/deploy/scripts/run.sh"),
+            "{warning}"
+        );
+        assert!(warning.contains("<!-- pgokf-stale {"), "{warning}");
+        assert!(
+            bytes_of(".claude/skills/deploy/SKILL.stale-warning.md").is_none(),
+            "the fresh package itself gets no warning"
+        );
+        let lock: serde_json::Value = serde_json::from_str(
+            std::str::from_utf8(&bytes_of(LOCK_FILE).expect("lockfile")).expect("text"),
+        )
+        .expect("json");
+        assert_eq!(lock["policy"]["stale"], "warn", "the build engaged");
+        let entry = lock["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .find(|e| e["concept_id"] == "skills/deploy/scripts/run.sh")
+            .expect("the member has a lock entry");
+        assert_eq!(
+            entry["freshness"]["state"], "stale",
+            "the member's own state, not the fresh package's"
+        );
+        assert_eq!(entry["freshness"]["reasons"][0], "upstream_changed");
+        let manifest_entry = lock["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .find(|e| e["concept_id"] == "skills/deploy/SKILL")
+            .expect("the package has a lock entry");
+        assert_eq!(manifest_entry["freshness"]["state"], "unknown");
+        let report_text =
+            String::from_utf8(bytes_of(FRESHNESS_FILE).expect("report")).expect("text");
+        assert!(
+            report_text.contains("skills/deploy/scripts/run.sh"),
+            "{report_text}"
+        );
+        assert_eq!(plugin.warnings.len(), 1);
+        assert_eq!(
+            plugin.warnings[0].concept_id,
+            "skills/deploy/scripts/run.sh"
+        );
+        assert_eq!(plugin.warnings[0].role, "selected");
+    }
+
+    #[test]
+    fn a_prompt_bundle_marks_inlined_stale_documents_in_both_artifacts() {
+        // Arrange: a stale stored-source document.
+        let stale = stale_record(1, "runbooks/a", true);
+        let original = stale.bytes.clone();
+
+        // Act
+        let plugin = assemble_with_report(
+            &options(Target::Ollama),
+            &selection(),
+            &snapshot(),
+            &[stale],
+            &report(),
+        )
+        .expect("builds");
+        let text_of = |path: &str| {
+            String::from_utf8(
+                plugin
+                    .files
+                    .iter()
+                    .find(|f| f.path == path)
+                    .unwrap_or_else(|| panic!("{path} exists"))
+                    .bytes
+                    .clone(),
+            )
+            .expect("text")
+        };
+
+        // Assert: the inlined knowledge carries its freshness warning in the
+        // prompt and the Modelfile built from it, while the exported source
+        // keeps its exact bytes (with its own adjacent warning).
+        let prompt = text_of("okf-prompt/system-prompt.md");
+        assert!(prompt.contains("<!-- pgokf-stale {"), "{prompt}");
+        assert!(prompt.contains("Stale catalog content"), "{prompt}");
+        let modelfile = text_of("okf-prompt/Modelfile");
+        assert!(modelfile.contains("<!-- pgokf-stale {"), "{modelfile}");
+        assert!(modelfile.contains("Stale catalog content"), "{modelfile}");
+        let exported = plugin
+            .files
+            .iter()
+            .find(|f| f.path == "okf-prompt/knowledge/runbooks/a.md")
+            .expect("the exported source");
+        assert_eq!(exported.bytes, original, "exported bytes stay exact");
+    }
+
+    #[test]
+    fn the_stale_notice_counts_against_the_prompt_budget() {
+        // Arrange: a document that fills the budget closely enough that its
+        // stale notice no longer fits beside it.
+        let body = "y".repeat(PROMPT_BUDGET - 400);
+        let mut fresh = record(1, "big", "Big", "unverified", "");
+        fresh.bytes = body.clone().into_bytes();
+        let mut stale = stale_record(1, "big", true);
+        stale.title = Some("Big".to_owned());
+        stale.bytes = body.into_bytes();
+
+        // Act
+        let fresh_prompt = system_prompt("T", &options(Target::Ollama), &[fresh]);
+        let stale_prompt = system_prompt("T", &options(Target::Ollama), &[stale]);
+
+        // Assert
+        assert!(
+            !fresh_prompt.contains("documents inlined"),
+            "the fresh document fits on its own: {}",
+            &fresh_prompt[fresh_prompt.len().saturating_sub(120)..]
+        );
+        assert!(
+            stale_prompt.contains("0 of 1 documents inlined"),
+            "the notice spends budget like the document: {stale_prompt}"
         );
     }
 

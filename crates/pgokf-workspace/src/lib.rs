@@ -16,10 +16,12 @@
 //!
 //! [`build_in_transaction`] runs the whole build - ranking, resolution, seed
 //! closure, source reads, freshness reads, and the lock snapshot - under one
-//! `REPEATABLE READ READ ONLY` transaction, so the tree can never mix
-//! catalog generations. It also applies the selection's stale policy and
-//! seed closure; [`build`] is the same flow without the transaction and is
-//! kept for callers that cannot hand over a mutable client.
+//! `REPEATABLE READ` transaction, so the tree can never mix catalog
+//! generations. The snapshot stays writable because the audited source
+//! readers append one audit row per read inside it. It also applies the
+//! selection's stale policy and seed closure; [`build`] is the same flow
+//! without the transaction and is kept for callers that cannot hand over a
+//! mutable client.
 
 mod archive;
 mod freshness;
@@ -81,7 +83,7 @@ pub async fn build_scoped<C: GenericClient>(
     assemble_with_report(options, selection, &snapshot, &records, &report)
 }
 
-/// The one-snapshot build: open `REPEATABLE READ READ ONLY` on the caller's
+/// The one-snapshot build: open `REPEATABLE READ` on the caller's
 /// connection, run the whole build inside it, and commit only after the
 /// source reads and the lock snapshot complete. On any failure the
 /// transaction rolls back and the error propagates.
@@ -165,15 +167,64 @@ async fn snapshot_for<C: GenericClient>(
     selection::snapshot_extended(client, &bundle_ids, extended).await
 }
 
-/// Open the read-only repeatable-read transaction a build runs in.
+/// The transaction options every build snapshot opens with, as data, so the
+/// choice is testable without a database.
+#[derive(Debug, Clone, Copy)]
+struct SnapshotOptions {
+    isolation: tokio_postgres::IsolationLevel,
+    read_only: bool,
+}
+
+/// The snapshot a build runs in: `REPEATABLE READ`, so the tree never mixes
+/// catalog generations, and *not* read-only. The audited content readers
+/// (`get_concept_source`, the package readers) append one audit row per read
+/// inside the same transaction, and a read-only transaction refuses those
+/// writes (SQLSTATE 25006) - read-only mode made every stored-source build
+/// fail before materialization. The snapshot's isolation is what the
+/// one-generation promise needs; the audit writes are required and must
+/// commit with the build.
+fn snapshot_options() -> SnapshotOptions {
+    SnapshotOptions {
+        isolation: tokio_postgres::IsolationLevel::RepeatableRead,
+        read_only: false,
+    }
+}
+
+/// Open the repeatable-read transaction a build runs in.
 async fn start_snapshot(
     client: &mut tokio_postgres::Client,
 ) -> Result<tokio_postgres::Transaction<'_>> {
+    let options = snapshot_options();
     client
         .build_transaction()
-        .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
-        .read_only(true)
+        .isolation_level(options.isolation)
+        .read_only(options.read_only)
         .start()
         .await
         .context("starting the catalog snapshot")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_build_snapshot_is_repeatable_read_but_writable() {
+        // The audited source readers write one audit row per read inside the
+        // build's transaction; a read-only snapshot fails them with
+        // SQLSTATE 25006. Only the isolation level may be asserted here -
+        // the audit behaviour itself is PostgreSQL-side.
+        let options = snapshot_options();
+        assert!(
+            matches!(
+                options.isolation,
+                tokio_postgres::IsolationLevel::RepeatableRead
+            ),
+            "the one-generation promise needs a repeatable-read snapshot"
+        );
+        assert!(
+            !options.read_only,
+            "audited content reads write inside the snapshot"
+        );
+    }
 }
