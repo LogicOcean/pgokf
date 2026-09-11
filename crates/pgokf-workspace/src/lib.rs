@@ -22,6 +22,7 @@
 //! kept for callers that cannot hand over a mutable client.
 
 mod archive;
+mod freshness;
 mod plugin;
 mod profile;
 mod selection;
@@ -30,6 +31,7 @@ use anyhow::{Context, Result};
 use tokio_postgres::GenericClient;
 
 pub use archive::{write_to_dir, zip};
+pub use freshness::{BundleCheck, PluginCheck, PluginStatus, check_plugin_freshness};
 pub use plugin::{
     BuildOptions, Component, LOCK_FILE, MANIFEST_FILE, MCP_SERVER_NAME, Plugin, PluginFile,
     assemble, assemble_with_report, slug,
