@@ -52,8 +52,10 @@
 //!   bundle-scope dependencies sourced at it mark their own targets in the
 //!   same transaction (A -> B -> C: changing A stales B and C). The walk
 //!   carries a visited set, so cycles (A -> B -> A) and self-loops terminate,
-//!   and it is bounded by [`TRANSITIVE_INVALIDATION_ROW_CAP`] - past the cap
-//!   a conservative blanket invalidation marks every bundle with an enabled
+//!   and it is bounded by [`TRANSITIVE_INVALIDATION_ROW_CAP`] - past the cap,
+//!   or when a node's bounded edge fetch cannot be proved exhaustive (skipped
+//!   rows can consume the fetch budget without advancing the walk), a
+//!   conservative blanket invalidation marks every bundle with an enabled
 //!   bundle-scope dependency edge stale, so an over-cap graph never commits
 //!   with a falsely fresh remainder;
 //! - every bundle-level dependency invalidation bumps the target row's
@@ -434,8 +436,12 @@ fn invalidate_dependent_bundle(bundle_id: i64) -> Result<(), CatalogError> {
 ///
 /// Cycle-safe: `visited` (seeded with the roots, which are already stale)
 /// makes cycles and self-loops terminate, and the walk is bounded by
-/// [`TRANSITIVE_INVALIDATION_ROW_CAP`]. The cap is never a silent truncation:
-/// when it is hit, [`escalate_blanket_invalidation`] conservatively marks
+/// [`TRANSITIVE_INVALIDATION_ROW_CAP`]. Neither bound is ever a silent
+/// truncation: when the node cap is hit, or when a node's bounded edge fetch
+/// returns more rows than the remaining node budget (skipped rows - self-
+/// loops, already-visited targets, causation-suppressed edges - consume the
+/// fetch budget without growing `visited`, so a full page can hide further
+/// edges), [`escalate_blanket_invalidation`] conservatively marks
 /// every bundle that still has an enabled bundle-scope dependency edge stale
 /// (epoch-bumped), so the unwalked remainder can never stay falsely fresh -
 /// false-stale is recoverable through the documented
@@ -455,9 +461,15 @@ fn propagate_transitive(roots: &[i64], causation_key: Option<&str>) -> Result<()
             break;
         }
         // Bound the fetch: each returned edge can add at most one new visited
-        // node before the cap break below, so the remaining budget is an
-        // exact LIMIT (a causation-suppressed edge may consume budget without
-        // adding a node - conservative, and only near the cap).
+        // node before the cap break below, so the remaining node budget plus
+        // one lookahead row is an exact LIMIT. The lookahead decides whether
+        // the budgeted fetch was exhaustive: a skipped row (a self-loop, an
+        // already-visited target, or a causation-suppressed edge) consumes
+        // the LIMIT without growing `visited`, so a full budgeted page can
+        // hide further edges without the node cap ever being reached. More
+        // rows than the budget proves the node has edges the walk cannot
+        // enumerate, so the walk escalates instead of committing a possibly
+        // omitted remainder.
         let remaining = (TRANSITIVE_INVALIDATION_ROW_CAP - visited.len()) as i64;
         let edges: Vec<(i64, Option<String>)> = Spi::connect(|client| {
             let table = client
@@ -470,7 +482,7 @@ fn propagate_transitive(roots: &[i64], causation_key: Option<&str>) -> Result<()
                      ORDER BY dependency_id
                      LIMIT $2",
                     None,
-                    &[bundle_id.into(), remaining.into()],
+                    &[bundle_id.into(), (remaining + 1).into()],
                 )
                 .map_err(|error| {
                     spi_error("failed to load transitive freshness dependencies", &error)
@@ -483,6 +495,11 @@ fn propagate_transitive(roots: &[i64], causation_key: Option<&str>) -> Result<()
             }
             Ok(edges)
         })?;
+        // The lookahead row answered the exhaustiveness question: more rows
+        // than the node budget means the budgeted page was a truncation, so
+        // the unwalked remainder of this node's edges can no longer be ruled
+        // out - escalate conservatively after processing what was fetched.
+        let edge_fetch_truncated = edges.len() as i64 > remaining;
         for (target_bundle_id, edge_causation_key) in edges {
             // Causation suppression, edge by edge, with the originating key.
             if causation_key.is_some() && edge_causation_key.as_deref() == causation_key {
@@ -499,6 +516,9 @@ fn propagate_transitive(roots: &[i64], causation_key: Option<&str>) -> Result<()
             }
             frontier.push(target_bundle_id);
         }
+        if edge_fetch_truncated {
+            truncated = true;
+        }
         if truncated {
             break;
         }
@@ -509,8 +529,10 @@ fn propagate_transitive(roots: &[i64], causation_key: Option<&str>) -> Result<()
     Ok(())
 }
 
-/// Conservative escalation when the transitive walk reaches
-/// [`TRANSITIVE_INVALIDATION_ROW_CAP`]: one set-based pass marks every bundle
+/// Conservative escalation when the transitive walk cannot prove coverage -
+/// the [`TRANSITIVE_INVALIDATION_ROW_CAP`] node cap was reached, or a node's
+/// bounded edge fetch returned more rows than the remaining node budget: one
+/// set-based pass marks every bundle
 /// that still has an enabled bundle-scope dependency edge stale with
 /// `dependency_source_changed` and bumps its epoch, skipping the nodes the
 /// walk already invalidated (no double epoch bump) and retired rows.
@@ -524,7 +546,7 @@ fn propagate_transitive(roots: &[i64], causation_key: Option<&str>) -> Result<()
 fn escalate_blanket_invalidation(visited: &HashSet<i64>) -> Result<(), CatalogError> {
     let walked: Vec<i64> = visited.iter().copied().collect();
     pgrx::warning!(
-        "pgokf: transitive freshness invalidation exceeded {} nodes; conservatively marking every bundle with an enabled bundle-scope dependency stale",
+        "pgokf: transitive freshness invalidation could not be proved exhaustive within {} nodes; conservatively marking every bundle with an enabled bundle-scope dependency stale",
         TRANSITIVE_INVALIDATION_ROW_CAP
     );
     Spi::run_with_args(

@@ -8173,6 +8173,234 @@ Use the solo skill on its own.\n";
     }
 
     #[pg_test]
+    fn a_skip_consumed_edge_budget_still_invalidates_the_remainder() {
+        // The edge-fetch truncation probe: at the walk's boundary node the
+        // remaining node budget is 1, and a self-loop registered BEFORE the
+        // forward edge (lower dependency_id, fetched first) consumes that
+        // last budget row without adding a node. The bounded fetch used to
+        // stop there - the forward edge was never fetched, the node cap was
+        // never reached, and the nodes past the boundary committed falsely
+        // fresh. The fetch now carries one lookahead row, and a fetch that
+        // returns more rows than the budget escalates to the blanket
+        // invalidation. The chain is fabricated in the catalog tables, as in
+        // the over-cap test, with the self-loop on the boundary node: with a
+        // real source feeding the head, the pop of node k sees k+1 visited
+        // nodes, so node 1,022 is the one expanded with a budget of 1.
+        Spi::run(
+            "INSERT INTO pgokf.bundles (path, name)
+             SELECT '/tmp/pgokf-test-skipcap-' || n, 'skipcap-' || n
+             FROM pg_catalog.generate_series(0, 1026) n",
+        )
+        .expect("chain nodes insert");
+        Spi::run(
+            "INSERT INTO pgokf.bundle_freshness (bundle_id)
+             SELECT id FROM pgokf.bundles WHERE name LIKE 'skipcap-%'",
+        )
+        .expect("chain freshness rows insert");
+        // The self-loop lands first, so it sorts ahead of the forward edge at
+        // the boundary node and is the row the budgeted fetch sees.
+        Spi::run(
+            "INSERT INTO pgokf.freshness_dependency
+                 (producer, source_bundle_id, selector_kind, target_bundle_id)
+             SELECT 'producer-a', s.id, 'bundle', s.id
+             FROM pgokf.bundles s
+             WHERE s.name = 'skipcap-1022'",
+        )
+        .expect("self-loop edge inserts");
+        Spi::run(
+            "INSERT INTO pgokf.freshness_dependency
+                 (producer, source_bundle_id, selector_kind, target_bundle_id)
+             SELECT 'producer-a', s.id, 'bundle', t.id
+             FROM pgokf.bundles s
+             JOIN pgokf.bundles t
+               ON t.name = 'skipcap-' || (pg_catalog.substr(s.name, 9)::int + 1)
+             WHERE s.name LIKE 'skipcap-%' AND s.name <> 'skipcap-1026'",
+        )
+        .expect("chain edges insert");
+        // An unrelated registered target shows whether escalation fired.
+        Spi::run(
+            "INSERT INTO pgokf.bundles (path, name)
+             VALUES ('/tmp/pgokf-test-skipfree-source', 'skipfree-source'),
+                    ('/tmp/pgokf-test-skipfree-target', 'skipfree-target')",
+        )
+        .expect("unrelated bundles insert");
+        Spi::run(
+            "INSERT INTO pgokf.bundle_freshness (bundle_id)
+             SELECT id FROM pgokf.bundles WHERE name LIKE 'skipfree-%'",
+        )
+        .expect("unrelated freshness rows insert");
+        Spi::run(
+            "INSERT INTO pgokf.freshness_dependency
+                 (producer, source_bundle_id, selector_kind, target_bundle_id)
+             SELECT 'producer-a', s.id, 'bundle', t.id
+             FROM pgokf.bundles s
+             JOIN pgokf.bundles t ON t.name = 'skipfree-target'
+             WHERE s.name = 'skipfree-source'",
+        )
+        .expect("unrelated edge inserts");
+
+        // Arrange: one real source bundle feeding the chain head.
+        let source = FixtureBundle::create();
+        let source_id = register_fixture(&source);
+        let head = Spi::get_one::<i64>("SELECT id FROM pgokf.bundles WHERE name = 'skipcap-0'")
+            .expect("head query executes")
+            .expect("the chain head exists");
+        let _ = register_dependency("producer-a", source_id, "bundle", "", head, None);
+
+        // Act: change the source; the walk reaches the boundary node, whose
+        // budgeted edge fetch is consumed by the self-loop.
+        fs::write(source.root.join("alpha.md"), ALPHA_EDITED).expect("edit is writable");
+        let _ = refresh_counts(source_id);
+
+        // Assert: NO chain node committed falsely fresh - the walked prefix
+        // via the walk, the remainder via the escalation, every node
+        // epoch-bumped exactly once.
+        let count_by_state = |state: &str| {
+            Spi::get_one_with_args::<i64>(
+                "SELECT count(*)
+                 FROM pgokf.bundle_freshness f
+                 JOIN pgokf.bundles b ON b.id = f.bundle_id
+                 WHERE b.name LIKE 'skipcap-%' AND f.state = $1",
+                &[state.into()],
+            )
+            .expect("chain state query executes")
+            .expect("the count is not NULL")
+        };
+        assert_eq!(count_by_state("stale"), 1027, "every chain node is stale");
+        assert_eq!(count_by_state("fresh"), 0, "no falsely fresh remainder");
+        let min_epoch = Spi::get_one::<i64>(
+            "SELECT min(f.dependency_invalidation_epoch)
+             FROM pgokf.bundle_freshness f
+             JOIN pgokf.bundles b ON b.id = f.bundle_id
+             WHERE b.name LIKE 'skipcap-%'",
+        )
+        .expect("epoch query executes")
+        .expect("the chain has freshness rows");
+        let max_epoch = Spi::get_one::<i64>(
+            "SELECT max(f.dependency_invalidation_epoch)
+             FROM pgokf.bundle_freshness f
+             JOIN pgokf.bundles b ON b.id = f.bundle_id
+             WHERE b.name LIKE 'skipcap-%'",
+        )
+        .expect("epoch query executes")
+        .expect("the chain has freshness rows");
+        assert_eq!(min_epoch, 1, "every node was epoch-bumped");
+        assert_eq!(max_epoch, 1, "no node was double-bumped");
+        for n in 1023..=1026 {
+            let state = Spi::get_one_with_args::<String>(
+                "SELECT f.state
+                 FROM pgokf.bundle_freshness f
+                 JOIN pgokf.bundles b ON b.id = f.bundle_id
+                 WHERE b.name = 'skipcap-' || $1",
+                &[n.into()],
+            )
+            .expect("tail state query executes")
+            .expect("the tail node exists");
+            assert_eq!(state, "stale", "node past the boundary {n} is stale");
+        }
+        let unrelated = freshness_state(
+            Spi::get_one::<i64>("SELECT id FROM pgokf.bundles WHERE name = 'skipfree-target'")
+                .expect("unrelated query executes")
+                .expect("the unrelated target exists"),
+        );
+        assert_eq!(
+            unrelated, "stale{dependency_source_changed}",
+            "the truncated edge fetch escalated to the blanket invalidation"
+        );
+    }
+
+    #[pg_test]
+    fn duplicate_registrations_cannot_hide_a_dependent_from_the_walk() {
+        // The parallel-registration probe: one bundle registered as the
+        // target of 1,023 duplicate edges under distinct producers, plus one
+        // further dependent registered last. At the middle node the budgeted
+        // edge fetch used to return only duplicate rows - each skipped after
+        // the first without growing the visited set - so the last-registered
+        // dependent's edge was never fetched and it committed falsely fresh.
+        // The lookahead row now proves the fetch non-exhaustive and the walk
+        // escalates.
+        Spi::run(
+            "INSERT INTO pgokf.bundles (path, name)
+             VALUES ('/tmp/pgokf-test-dup-root', 'dup-root'),
+                    ('/tmp/pgokf-test-dup-mid', 'dup-mid'),
+                    ('/tmp/pgokf-test-dup-first', 'dup-first'),
+                    ('/tmp/pgokf-test-dup-omitted', 'dup-omitted')",
+        )
+        .expect("duplicate-shape bundles insert");
+        Spi::run(
+            "INSERT INTO pgokf.bundle_freshness (bundle_id)
+             SELECT id FROM pgokf.bundles WHERE name LIKE 'dup-%'",
+        )
+        .expect("duplicate-shape freshness rows insert");
+        Spi::run(
+            "INSERT INTO pgokf.freshness_dependency
+                 (producer, source_bundle_id, selector_kind, target_bundle_id)
+             SELECT 'producer-a', s.id, 'bundle', t.id
+             FROM pgokf.bundles s, pgokf.bundles t
+             WHERE s.name = 'dup-root' AND t.name = 'dup-mid'",
+        )
+        .expect("root edge inserts");
+        Spi::run(
+            "INSERT INTO pgokf.freshness_dependency
+                 (producer, source_bundle_id, selector_kind, target_bundle_id)
+             SELECT 'duplicate-' || n, s.id, 'bundle', t.id
+             FROM pg_catalog.generate_series(1, 1023) n,
+                  pgokf.bundles s, pgokf.bundles t
+             WHERE s.name = 'dup-mid' AND t.name = 'dup-first'",
+        )
+        .expect("duplicate edges insert");
+        // Registered last, so it sorts behind every duplicate and is the row
+        // the budgeted fetch cut off.
+        Spi::run(
+            "INSERT INTO pgokf.freshness_dependency
+                 (producer, source_bundle_id, selector_kind, target_bundle_id)
+             SELECT 'last', s.id, 'bundle', t.id
+             FROM pgokf.bundles s, pgokf.bundles t
+             WHERE s.name = 'dup-mid' AND t.name = 'dup-omitted'",
+        )
+        .expect("last edge inserts");
+
+        // Arrange: one real source bundle feeding the root.
+        let source = FixtureBundle::create();
+        let source_id = register_fixture(&source);
+        let root = Spi::get_one::<i64>("SELECT id FROM pgokf.bundles WHERE name = 'dup-root'")
+            .expect("root query executes")
+            .expect("the root exists");
+        let _ = register_dependency("producer-a", source_id, "bundle", "", root, None);
+
+        // Act: change the source; the walk reaches the middle node, whose
+        // budgeted edge fetch is consumed by the duplicate registrations.
+        fs::write(source.root.join("alpha.md"), ALPHA_EDITED).expect("edit is writable");
+        let _ = refresh_counts(source_id);
+
+        // Assert: every registered dependent is stale, the hidden one
+        // included, and no node was double-bumped.
+        let count_by_state = |state: &str| {
+            Spi::get_one_with_args::<i64>(
+                "SELECT count(*)
+                 FROM pgokf.bundle_freshness f
+                 JOIN pgokf.bundles b ON b.id = f.bundle_id
+                 WHERE b.name LIKE 'dup-%' AND f.state = $1",
+                &[state.into()],
+            )
+            .expect("state query executes")
+            .expect("the count is not NULL")
+        };
+        assert_eq!(count_by_state("stale"), 4, "every dependent is stale");
+        assert_eq!(count_by_state("fresh"), 0, "no falsely fresh remainder");
+        let omitted = Spi::get_one_with_args::<i64>(
+            "SELECT f.dependency_invalidation_epoch
+             FROM pgokf.bundle_freshness f
+             JOIN pgokf.bundles b ON b.id = f.bundle_id
+             WHERE b.name = 'dup-omitted' AND f.state = 'stale'",
+            &[],
+        )
+        .expect("omitted query executes")
+        .expect("the omitted dependent is stale");
+        assert_eq!(omitted, 1, "the omitted dependent was epoch-bumped once");
+    }
+
+    #[pg_test]
     fn coverage_missing_evidence_survives_mark_reconciling() {
         // The reviewer's coverage-superseded-then-reconciling probe: the
         // coverage evidence must keep blocking mark_fresh until coverage is
