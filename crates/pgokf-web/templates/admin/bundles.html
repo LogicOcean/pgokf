@@ -11,25 +11,49 @@
     <div><button type="submit" class="btn primary">Register</button></div>
   </form>
   </div>
+  <p class="muted">Freshness is the bundle producer's attestation, shown as reported. Refresh cadence schedules a recurring content refresh (a pg_cron job that re-reads the bundle's source); refreshing content does not attest freshness. Presets run on the database server's timezone.</p>
+  {% if let Some(note) = cadence_note %}<p class="notice bad">{{ note }}</p>{% endif %}
   <div class="table-wrap">
   <table class="table admin" id="pgokf-admin-bundles">
-    <thead><tr><th>Bundle</th><th>Source</th><th>State</th><th class="num">Files</th><th>Last sync</th><th>Actions</th></tr></thead>
+    <thead><tr><th>Bundle</th><th>Source</th><th>State</th><th>Freshness</th><th class="num">Files</th><th>Last sync</th><th>Refresh cadence</th><th>Actions</th></tr></thead>
     <tbody>
     {% for b in bundles %}
       <tr>
-        <td><a href="/bundles/{{ b.id }}"><strong>{{ b.name }}</strong></a><span class="desc path" title="{{ b.path }}">{{ b.path }}</span></td>
-        <td>{{ b.source_type }}</td>
-        <td>{% if b.retired %}<span class="pill muted">retired</span>{% else if !b.enabled %}<span class="pill warn">disabled</span>{% else %}<span class="pill ok">active</span>{% endif %}</td>
-        <td class="num">{{ b.file_count }}</td>
-        <td class="when">{{ b.last_synced_at.as_deref().unwrap_or("never")|datetime }}</td>
-        <td class="row-actions">
-          {% if !b.retired %}
-          {% if b.source_type.as_str() != "content" %}<form method="post" action="/admin/bundles"><input type="hidden" name="id" value="{{ b.id }}"><input type="hidden" name="action" value="refresh"><button type="submit" class="btn" title="Re-read the source and index what changed">Refresh</button></form>{% endif %}
-          <form method="post" action="/admin/bundles"><input type="hidden" name="id" value="{{ b.id }}"><input type="hidden" name="action" value="{% if b.enabled %}disable{% else %}enable{% endif %}"><button type="submit" class="btn">{% if b.enabled %}Disable{% else %}Enable{% endif %}</button></form>
-          <form method="post" action="/admin/bundles"><input type="hidden" name="id" value="{{ b.id }}"><input type="hidden" name="action" value="retire"><button type="submit" class="btn" data-confirm="Retire {{ b.name }}? It leaves search and browsing; it can be brought back until it is purged.">Retire</button></form>
+        <td><a href="/bundles/{{ b.bundle.id }}"><strong>{{ b.bundle.name }}</strong></a><span class="desc path" title="{{ b.bundle.path }}">{{ b.bundle.path }}</span></td>
+        <td>{{ b.bundle.source_type }}</td>
+        <td>{% if b.bundle.retired %}<span class="pill muted">retired</span>{% else if !b.bundle.enabled %}<span class="pill warn">disabled</span>{% else %}<span class="pill ok">active</span>{% endif %}</td>
+        <td>{% match b.bundle.freshness.as_deref() %}{% when Some("fresh") %}<span class="pill ok">fresh</span>{% when Some("stale") %}<span class="pill warn">stale</span>{% when Some("blocked") %}<span class="pill bad">blocked</span>{% when Some(state) %}<span class="pill muted">{{ state }}</span>{% when None %}<span class="muted">&mdash;</span>{% endmatch %}</td>
+        <td class="num">{{ b.bundle.file_count }}</td>
+        <td class="when">{{ b.bundle.last_synced_at.as_deref().unwrap_or("never")|datetime }}</td>
+        <td class="cadence">
+          {% if cadence_known %}
+          <form method="post" action="/admin/bundles" class="cell-form">
+            <input type="hidden" name="id" value="{{ b.bundle.id }}">
+            <input type="hidden" name="action" value="cadence">
+            <select name="cadence" data-cadence aria-label="Refresh cadence for {{ b.bundle.name }}">
+              <option value="off"{% if b.cadence.preset == "off" %} selected{% endif %}>Off</option>
+              <option value="15min"{% if b.cadence.preset == "15min" %} selected{% endif %}>Every 15 minutes</option>
+              <option value="hourly"{% if b.cadence.preset == "hourly" %} selected{% endif %}>Hourly</option>
+              <option value="6h"{% if b.cadence.preset == "6h" %} selected{% endif %}>Every 6 hours</option>
+              <option value="daily"{% if b.cadence.preset == "daily" %} selected{% endif %}>Daily</option>
+              <option value="custom"{% if b.cadence.preset == "custom" %} selected{% endif %}>Custom&hellip;</option>
+            </select>
+            <span data-cadence-custom><input type="text" name="custom_cron" value="{{ b.cadence.custom }}" placeholder="*/30 * * * *" pattern="[0-9A-Za-z*,/ -]{1,128}" maxlength="128" spellcheck="false" title="A 5-field cron expression (e.g. */30 * * * *) or an interval such as 30 minutes" aria-label="Custom cron schedule for {{ b.bundle.name }}"></span>
+            <button type="submit" class="btn">Save</button>
+            <span class="desc">Now: {{ b.cadence.label }}</span>
+          </form>
           {% else %}
-          <form method="post" action="/admin/bundles"><input type="hidden" name="id" value="{{ b.id }}"><input type="hidden" name="action" value="unretire"><button type="submit" class="btn">Bring back</button></form>
-          <form method="post" action="/admin/bundles"><input type="hidden" name="id" value="{{ b.id }}"><input type="hidden" name="action" value="unregister"><button type="submit" class="btn danger" data-confirm="Unregister {{ b.name }} now? Every concept of it is deleted from the catalog. This cannot be undone.">Unregister</button></form>
+          <span class="muted">&mdash;</span>
+          {% endif %}
+        </td>
+        <td class="row-actions">
+          {% if !b.bundle.retired %}
+          {% if b.bundle.source_type.as_str() != "content" %}<form method="post" action="/admin/bundles"><input type="hidden" name="id" value="{{ b.bundle.id }}"><input type="hidden" name="action" value="refresh"><button type="submit" class="btn" title="Re-read the source and index what changed">Refresh</button></form>{% endif %}
+          <form method="post" action="/admin/bundles"><input type="hidden" name="id" value="{{ b.bundle.id }}"><input type="hidden" name="action" value="{% if b.bundle.enabled %}disable{% else %}enable{% endif %}"><button type="submit" class="btn">{% if b.bundle.enabled %}Disable{% else %}Enable{% endif %}</button></form>
+          <form method="post" action="/admin/bundles"><input type="hidden" name="id" value="{{ b.bundle.id }}"><input type="hidden" name="action" value="retire"><button type="submit" class="btn" data-confirm="Retire {{ b.bundle.name }}? It leaves search and browsing; it can be brought back until it is purged.">Retire</button></form>
+          {% else %}
+          <form method="post" action="/admin/bundles"><input type="hidden" name="id" value="{{ b.bundle.id }}"><input type="hidden" name="action" value="unretire"><button type="submit" class="btn">Bring back</button></form>
+          <form method="post" action="/admin/bundles"><input type="hidden" name="id" value="{{ b.bundle.id }}"><input type="hidden" name="action" value="unregister"><button type="submit" class="btn danger" data-confirm="Unregister {{ b.bundle.name }} now? Every concept of it is deleted from the catalog. This cannot be undone.">Unregister</button></form>
           {% endif %}
         </td>
       </tr>

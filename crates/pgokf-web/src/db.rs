@@ -68,6 +68,32 @@ pub(crate) fn content_bundle_name(path: &str, name: Option<&str>) -> String {
         .to_owned()
 }
 
+/// The deterministic `pg_cron` job-name prefix `pgokf.schedule_refresh`
+/// fixes for a bundle's refresh job (`pgokf_refresh_<bundle_id>`); the web
+/// crate reads jobs back by this convention, the extension owns it.
+const REFRESH_JOB_PREFIX: &str = "pgokf_refresh_";
+
+/// The `cron.job` read behind [`Db::refresh_schedules`], kept as a constant
+/// so the scratch-database test executes exactly what ships.
+const REFRESH_SCHEDULES_SQL: &str = "SELECT jobname, schedule FROM cron.job
+     WHERE jobname LIKE $1 ESCAPE '\\' ORDER BY jobname";
+
+/// The LIKE pattern of the job-name convention (its underscores escaped,
+/// so they cannot act as wildcards).
+fn refresh_job_pattern() -> String {
+    REFRESH_JOB_PREFIX.replace('_', "\\_") + "%"
+}
+
+/// One `cron.job` row as a bundle's refresh schedule, or `None` when the
+/// job name is not the convention's `pgokf_refresh_<integer>` shape.
+fn refresh_schedule_of(jobname: &str, schedule: String) -> Option<RefreshSchedule> {
+    let bundle_id = jobname.strip_prefix(REFRESH_JOB_PREFIX)?.parse().ok()?;
+    Some(RefreshSchedule {
+        bundle_id,
+        schedule,
+    })
+}
+
 /// One row of `pgokf.list_bundles()`.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct BundleInfo {
@@ -137,6 +163,17 @@ pub(crate) struct AdminBundle {
     pub retired: bool,
     pub file_count: i32,
     pub last_synced_at: Option<String>,
+    /// The producer-attested freshness state (`pgokf.effective_freshness`,
+    /// bundle scope); `None` when no freshness row exists.
+    pub freshness: Option<String>,
+}
+
+/// A bundle's scheduled content refresh as `pg_cron` holds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RefreshSchedule {
+    pub bundle_id: i64,
+    /// The cron expression or interval phrase the job runs on.
+    pub schedule: String,
 }
 
 /// A concept a person produced or verified, for their profile.
@@ -1149,12 +1186,16 @@ impl Db {
         .await
     }
 
-    /// Every bundle for the admin page, retired ones included.
+    /// Every bundle for the admin page, retired ones included, each with its
+    /// producer-attested freshness state (the bundle-scope row of the
+    /// reader-granted `pgokf.effective_freshness` projection).
     pub(crate) async fn admin_bundles(&self) -> Result<Vec<AdminBundle>> {
         let sql = format!(
             "SELECT b.id, b.path, {}, b.source_type, b.enabled, (b.retired_at IS NOT NULL),
-                    b.file_count, {}
+                    b.file_count, {}, f.state
              FROM pgokf.bundles b
+             LEFT JOIN pgokf.effective_freshness f
+                    ON f.bundle_id = b.id AND f.scope_kind = 'bundle'
              ORDER BY (b.retired_at IS NOT NULL), b.id",
             display_name("b"),
             iso("b.last_synced_at")
@@ -1169,6 +1210,7 @@ impl Db {
                 retired: col(r, 5)?,
                 file_count: col(r, 6)?,
                 last_synced_at: col(r, 7)?,
+                freshness: col(r, 8)?,
             })
         })
         .await
@@ -1231,6 +1273,55 @@ impl Db {
     pub(crate) async fn unregister_bundle(&self, id: i64) -> Result<()> {
         self.bundle_op("SELECT * FROM pgokf.unregister_bundle($1)", &[&id])
             .await
+    }
+
+    /// Register (or re-schedule, idempotently) a recurring content refresh
+    /// for a bundle (`pgokf.schedule_refresh`; the `pg_cron` adapter).
+    /// Returns the deterministic job name. The function is admin-tier
+    /// (`pgokf_admin`) and raises `22023` when `pg_cron` is absent or the
+    /// schedule is malformed.
+    pub(crate) async fn schedule_refresh(&self, id: i64, schedule: &str) -> Result<String> {
+        let row = self
+            .query_opt("SELECT pgokf.schedule_refresh($1, $2)", &[&id, &schedule])
+            .await?
+            .ok_or_else(|| anyhow!("schedule_refresh returned no row"))?;
+        col(&row, 0)
+    }
+
+    /// Remove a bundle's scheduled refresh (`pgokf.unschedule_refresh`):
+    /// `true` when a job was removed, `false` for a clean no-op (no
+    /// `pg_cron`, or no such job).
+    pub(crate) async fn unschedule_refresh(&self, id: i64) -> Result<bool> {
+        let row = self
+            .query_opt("SELECT pgokf.unschedule_refresh($1)", &[&id])
+            .await?
+            .ok_or_else(|| anyhow!("unschedule_refresh returned no row"))?;
+        col(&row, 0)
+    }
+
+    /// Every scheduled content refresh, keyed by bundle.
+    ///
+    /// The extension has no reader surface that lists scheduled refreshes
+    /// (`crates/extension/src/catalog/schedule.rs` installs only the two
+    /// mutators), so this reads `pg_cron`'s own job table and matches the
+    /// deterministic `pgokf_refresh_<bundle_id>` job-name convention the
+    /// extension fixes. Role semantics decide where it may run: `pg_cron`
+    /// grants `SELECT` on `cron.job` to nobody by default, so the pooled
+    /// reader role can never answer this and the query must go over the
+    /// app's writer connection, whose login role the operator grants
+    /// `USAGE` on schema `cron` and `SELECT` on `cron.job`. Callers treat
+    /// `42P01` (no `pg_cron` in this database) and `42501` (the grant is
+    /// missing) as "schedules not visible", not as page failures.
+    pub(crate) async fn refresh_schedules(&self) -> Result<Vec<RefreshSchedule>> {
+        let rows = self
+            .query_map(REFRESH_SCHEDULES_SQL, &[&refresh_job_pattern()], |r| {
+                Ok((col::<String>(r, 0)?, col::<String>(r, 1)?))
+            })
+            .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(jobname, schedule)| refresh_schedule_of(&jobname, schedule))
+            .collect())
     }
 
     /// Register a directory bundle at a path the database server can read.
@@ -2620,6 +2711,125 @@ mod tests {
         assert_eq!(classify(&busy), Failure::Busy);
         assert_eq!(classify(&other), Failure::Other);
         assert_eq!(db_message(&other), None);
+    }
+
+    #[test]
+    fn refresh_schedule_of_matches_the_job_name_convention_exactly() {
+        // Arrange & Act & Assert: the prefix plus an integer id maps to a
+        // bundle; lookalike names stay out.
+        assert_eq!(
+            refresh_schedule_of("pgokf_refresh_42", "0 * * * *".to_owned()),
+            Some(RefreshSchedule {
+                bundle_id: 42,
+                schedule: "0 * * * *".to_owned(),
+            })
+        );
+        assert_eq!(
+            refresh_schedule_of("pgokf_refresh_7", "15 minutes".to_owned()).map(|s| s.bundle_id),
+            Some(7)
+        );
+        assert!(refresh_schedule_of("pgokf_refresh_", "0 * * * *".to_owned()).is_none());
+        assert!(refresh_schedule_of("pgokf_refresh_x", "0 * * * *".to_owned()).is_none());
+        assert!(refresh_schedule_of("pgokf_refresh_1_extra", "0 * * * *".to_owned()).is_none());
+        assert!(refresh_schedule_of("other_job", "0 * * * *".to_owned()).is_none());
+    }
+
+    #[test]
+    fn the_refresh_job_pattern_escapes_the_conventions_underscores() {
+        // Arrange & Act
+        let pattern = refresh_job_pattern();
+
+        // Assert: a LIKE wildcard `_` would let a lookalike job name through.
+        assert_eq!(pattern, "pgokf\\_refresh\\_%");
+    }
+
+    #[tokio::test]
+    async fn schedule_writes_and_the_schedule_read_issue_statements() {
+        // Arrange / Act / Assert: against a dead pool every call errors,
+        // proving each issues exactly the statement it wraps.
+        let db = dead_db();
+        assert!(db.schedule_refresh(7, "0 * * * *").await.is_err());
+        assert!(db.unschedule_refresh(7).await.is_err());
+        assert!(db.refresh_schedules().await.is_err());
+    }
+
+    /// The scratch database the schedule-read regression creates and drops.
+    const SCHEDULE_SCRATCH_DB: &str = "pgokf_web_schedule_sql_test";
+
+    /// The schedule read, executed for real over a stand-in `cron.job`
+    /// (`pg_cron` itself is not needed): only `pgokf_refresh_<id>` jobs come
+    /// back, keyed by their bundle id, and a lookalike name that LIKE's
+    /// wildcard would have matched stays out.
+    #[tokio::test]
+    async fn refresh_schedules_sql_executes_against_a_scratch_database() {
+        let Some((admin, mut config)) = scratch_admin().await else {
+            return;
+        };
+        admin
+            .batch_execute(&format!("DROP DATABASE IF EXISTS {SCHEDULE_SCRATCH_DB}"))
+            .await
+            .expect("drop a stale scratch database");
+        admin
+            .batch_execute(&format!("CREATE DATABASE {SCHEDULE_SCRATCH_DB}"))
+            .await
+            .expect("create the scratch database");
+        let result = async {
+            config.dbname(SCHEDULE_SCRATCH_DB);
+            let (client, connection) = config
+                .connect(NoTls)
+                .await
+                .context("connect to the scratch database")?;
+            tokio::spawn(async move {
+                if let Err(error) = connection.await {
+                    eprintln!("scratch connection error: {error}");
+                }
+            });
+            client
+                .batch_execute(
+                    "CREATE SCHEMA cron;
+                     CREATE TABLE cron.job (jobname text PRIMARY KEY, schedule text NOT NULL);
+                     INSERT INTO cron.job VALUES
+                         ('pgokf_refresh_7', '0 * * * *'),
+                         ('pgokf_refresh_3', '15 minutes'),
+                         ('pgokfXrefreshX9', '0 0 * * *'),
+                         ('nightly_backup', '0 3 * * *');",
+                )
+                .await?;
+            let rows = client
+                .query(REFRESH_SCHEDULES_SQL, &[&refresh_job_pattern()])
+                .await
+                .context("the schedule-read SQL executes")?;
+            let schedules: Vec<RefreshSchedule> = rows
+                .iter()
+                .filter_map(|r| {
+                    refresh_schedule_of(
+                        &r.try_get::<_, String>(0).expect("jobname"),
+                        r.try_get::<_, String>(1).expect("schedule"),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                schedules,
+                vec![
+                    RefreshSchedule {
+                        bundle_id: 3,
+                        schedule: "15 minutes".to_owned(),
+                    },
+                    RefreshSchedule {
+                        bundle_id: 7,
+                        schedule: "0 * * * *".to_owned(),
+                    },
+                ],
+                "only the convention's jobs, keyed by bundle, in job-name order"
+            );
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        admin
+            .batch_execute(&format!("DROP DATABASE IF EXISTS {SCHEDULE_SCRATCH_DB}"))
+            .await
+            .expect("drop the scratch database");
+        result.expect("schedule-read fixtures");
     }
 
     #[test]

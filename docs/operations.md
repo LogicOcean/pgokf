@@ -327,6 +327,17 @@ clear `22023` naming the missing dependency (never a silent success) and
 `SELECT pgokf.refresh_bundle(<id>)` with the id bound as a trusted integer
 literal and the schedule bound as a parameter.
 
+The web UI's Admin page (bundles tab) drives the same two functions per
+bundle: a cadence select (off, presets, or a validated custom cron
+expression) plus a column showing the current schedule, read from
+`cron.job` by the `pgokf_refresh_<id>` name convention over the app's
+writer connection. That read needs the writer login granted `USAGE` on
+schema `cron` and `SELECT` on `cron.job` (granted to nobody by default;
+the column reads as unknown and says why until then), and the writes need
+the writer login to hold `pgokf_admin`, since `schedule_refresh` is
+admin-tier. Scheduling a refresh re-reads content on a cadence; it does
+not attest freshness - that stays the producer's call.
+
 #### External scheduling
 
 Prefer an external scheduler when `pg_cron` is not available, or when you want one

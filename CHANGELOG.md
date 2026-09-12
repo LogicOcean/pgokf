@@ -160,6 +160,18 @@ semantically until the embedder rewrites them.
   evidence included - and reports
   `current|stale|retired|unknown`, never certifying `current` without
   live confirmation.
+- **Refresh-cadence controls on the web UI's Admin page.** The bundles tab
+  now shows each bundle's producer-attested freshness state (the
+  bundle-scope row of `pgokf.effective_freshness`) and offers a per-bundle
+  refresh cadence - Off, a preset (every 15 minutes, hourly, every 6 hours,
+  daily), or a validated custom cron expression - backed by
+  `pgokf.schedule_refresh` / `unschedule_refresh` through the writer
+  connection. The current cadences are read from `pg_cron`'s job table by
+  the `pgokf_refresh_<id>` job-name convention (never over the reader pool:
+  `pg_cron` grants `SELECT` on `cron.job` to no `pgokf` role by default),
+  and the column degrades to an explained "unknown" when the read is
+  impossible. Scheduling a refresh re-reads content; it does not attest
+  freshness, and the page says so.
 
 ## [0.2.0] - 2026-09-09
 
