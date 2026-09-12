@@ -23,6 +23,7 @@ mod routes;
 mod seal;
 mod session_store;
 mod store;
+mod type_groups;
 mod user_store;
 
 use std::io::Read;

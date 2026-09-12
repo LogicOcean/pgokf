@@ -23,7 +23,15 @@
       </div>
       <div class="field">
         <label for="f-type">Type</label>
-        <input id="f-type" name="type" list="pgokf-types" value="{{ form.concept_type }}" placeholder="any type">
+        <select id="f-type" name="type">
+          <option value="">Any type</option>
+          {% for g in type_groups %}
+          <optgroup label="{{ g.label }}">
+            {% if !g.all_value.is_empty() %}<option value="{{ g.all_value }}"{% if g.all_selected %} selected{% endif %}>{{ g.all_label }}</option>{% endif %}
+            {% for o in g.types %}<option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.label }}</option>{% endfor %}
+          </optgroup>
+          {% endfor %}
+        </select>
       </div>
       <div class="field">
         <label for="f-tags">Tags <span class="muted">(all of, comma-separated)</span></label>

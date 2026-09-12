@@ -92,7 +92,7 @@ input:focus, select:focus, textarea:focus, button:focus-visible, a:focus-visible
 .btn.icon { padding: 0 .6rem; }
 .btn.copied { border-color: var(--ok); color: var(--ok); }
 .field { margin-bottom: .9rem; }
-.field label { display: block; font-size: .85em; font-weight: 600; color: var(--muted); margin-bottom: .3rem; }
+.field label, .field .field-label { display: block; font-size: .85em; font-weight: 600; color: var(--muted); margin-bottom: .3rem; }
 .hint { font-size: .8em; color: var(--muted); margin: .3rem 0 0; }
 .inline-form { display: flex; align-items: center; gap: .5rem; margin-top: .6rem; }
 .inline-form select { width: auto; }

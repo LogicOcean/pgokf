@@ -46,6 +46,7 @@ use crate::oidc::OidcAuth;
 use crate::provider::{ProviderDraft, SecretChange};
 use crate::provider_settings::{ProviderKind, ProviderSettings};
 use crate::store::DocumentStore;
+use crate::type_groups;
 use crate::user_store::PeopleQuery;
 use crate::{graph, markdown};
 use pgokf_companion::documents::{Document, now_iso};
@@ -895,6 +896,90 @@ fn facet_options(buckets: Vec<Facet>, current: &str) -> Vec<FacetOption> {
     options
 }
 
+/// One `<optgroup>` of the search page's grouped type select: the group
+/// itself (an "all" option submitting its `group:` slug) and its observed
+/// member types with their counts.
+pub(crate) struct TypeSelectGroup {
+    /// The optgroup's label, e.g. "Documents (33)".
+    pub label: String,
+    /// The "all" option's value (`group:<slug>`); empty for the pseudo-group
+    /// that keeps an unmatched current choice selectable.
+    pub all_value: String,
+    pub all_label: String,
+    pub all_selected: bool,
+    pub types: Vec<FacetOption>,
+}
+
+/// Build the grouped type select from the observed type facets. Groups come
+/// from the live facets (never a closed list: unknown types appear under
+/// "Other"), only groups with observed members are listed, and a current
+/// choice nothing observed still renders, selected, so it can be cleared.
+fn type_select_groups(observed: &[Facet], current: &str) -> Vec<TypeSelectGroup> {
+    let mut selected_group = None;
+    let mut selected_type = None;
+    if !current.is_empty() {
+        match type_groups::parse_filter(current) {
+            type_groups::TypeFilter::Group(slug) => selected_group = Some(slug),
+            type_groups::TypeFilter::Exact(concept_type) => selected_type = Some(concept_type),
+        }
+    }
+    let mut groups: Vec<TypeSelectGroup> = type_groups::groups_from_facets(observed)
+        .into_iter()
+        .map(|g| {
+            let all_selected = selected_group.as_deref() == Some(g.slug);
+            let types = g
+                .types
+                .iter()
+                .map(|f| FacetOption {
+                    selected: selected_type.as_deref() == Some(f.value.as_str()),
+                    label: format!("{} ({})", f.value, f.count),
+                    value: f.value.clone(),
+                })
+                .collect();
+            TypeSelectGroup {
+                label: format!("{} ({})", g.label, g.count),
+                all_value: format!("{}{}", type_groups::GROUP_PREFIX, g.slug),
+                all_label: format!("All {}", g.label),
+                all_selected,
+                types,
+            }
+        })
+        .collect();
+    // A selected group with no observed members still shows, selected.
+    if let Some(slug) = selected_group
+        && !groups.iter().any(|g| g.all_selected)
+    {
+        let label = type_groups::label_of(&slug);
+        groups.push(TypeSelectGroup {
+            all_value: format!("{}{}", type_groups::GROUP_PREFIX, slug),
+            all_label: format!("All {label}"),
+            all_selected: true,
+            label,
+            types: Vec::new(),
+        });
+    }
+    // As does an exact type nothing observed (facet_options' pattern).
+    if let Some(concept_type) = selected_type
+        && !groups
+            .iter()
+            .flat_map(|g| g.types.iter())
+            .any(|o| o.selected)
+    {
+        groups.push(TypeSelectGroup {
+            label: "Selected type".to_owned(),
+            all_value: String::new(),
+            all_label: String::new(),
+            all_selected: false,
+            types: vec![FacetOption {
+                value: concept_type.clone(),
+                label: concept_type,
+                selected: true,
+            }],
+        });
+    }
+    groups
+}
+
 /// The provenance tab's identity rows, read across the OKF provenance
 /// families: `generated` (who produced the current content, and when; a
 /// human as readily as an agent) is shown as "Created", and the pgokf
@@ -1195,6 +1280,8 @@ struct SearchPage {
     form: SearchForm,
     bundles: Vec<BundleInfo>,
     facets: FacetsView,
+    /// The grouped type select's optgroups, built from the type facets.
+    type_groups: Vec<TypeSelectGroup>,
     results: ResultsView,
     semantic_available: bool,
     backend_label: String,
@@ -1765,11 +1852,23 @@ struct GraphPage {
     bundles: Vec<BundleInfo>,
     /// The selected bundle ids, echoed into the sidebar's multi-select.
     bundle_ids: Vec<i64>,
+    /// The type-group (and any selected exact-type) checkboxes.
+    type_filters: Vec<GraphTypeFilter>,
     limit_options: Vec<(i32, bool)>,
     /// The JSON endpoint the client draws (the client appends `hops`).
     graph_url: String,
+    /// The whole-catalog URL a seeded neighborhood links back to.
+    catalog_url: String,
     hops: i32,
     seed_label: Option<String>,
+}
+
+/// One checkbox of the graph page's type filter: a type group (value
+/// `group:<slug>`) or a selected exact type that no group covers.
+pub(crate) struct GraphTypeFilter {
+    pub value: String,
+    pub label: String,
+    pub selected: bool,
 }
 
 #[derive(Template)]
@@ -1978,6 +2077,21 @@ impl SearchParams {
             "hybrid" => "hybrid",
             _ => "lexical",
         };
+        // The `type` parameter carries either an exact type string (the
+        // legacy form) or a `group:`-prefixed group slug; the slug expands
+        // to observed member types later, once the catalog can be read.
+        let (type_group, concept_types) = match non_empty(&self.concept_type) {
+            None => (None, Vec::new()),
+            Some(raw) => match type_groups::parse_filter(&raw) {
+                type_groups::TypeFilter::Exact(concept_type) => (None, vec![concept_type]),
+                type_groups::TypeFilter::Group(slug) if type_groups::is_known_slug(&slug) => {
+                    (Some(slug), Vec::new())
+                }
+                type_groups::TypeFilter::Group(slug) => {
+                    return Err(AppError::bad_request(format!("unknown type group {slug}")));
+                }
+            },
+        };
         let form = SearchForm {
             q: self.q.trim().to_owned(),
             bundle: bundle_id.map(|b| b.to_string()).unwrap_or_default(),
@@ -1995,7 +2109,8 @@ impl SearchParams {
         let query = SearchQuery {
             query: form.q.clone(),
             bundle_id,
-            concept_type: non_empty(&form.concept_type),
+            concept_types,
+            type_group,
             tags,
             status: non_empty(&form.status),
             trust_tier: non_empty(&form.trust),
@@ -2058,6 +2173,27 @@ async fn dashboard(State(app): State<Shared>, session: Session) -> PageResult {
         stats,
         sync_log,
     })
+}
+
+/// Expand the search's selected type group into the exact types the data
+/// layer filters by. The expansion reads the catalog's observed types (in
+/// the chosen bundle's scope), so it matches what the grouped select
+/// offered; a group with no observed members leaves `concept_types` empty
+/// with `type_group` set, which the data layer reads as "matches nothing",
+/// never as "no filter".
+async fn resolve_type_group(app: &App, query: &mut SearchQuery) -> Result<(), AppError> {
+    let Some(slug) = query.type_group.clone() else {
+        return Ok(());
+    };
+    let observed: Vec<String> = app
+        .db
+        .catalog_facets(query.bundle_id, "type")
+        .await?
+        .into_iter()
+        .map(|f| f.value)
+        .collect();
+    query.concept_types = type_groups::expand_group(&slug, &observed).unwrap_or_default();
+    Ok(())
 }
 
 /// The hits for a query, or its filter-only browse, with paging state.
@@ -2183,8 +2319,14 @@ async fn browse(
         })
         .flatten();
     let mut what: Vec<String> = Vec::new();
-    if !form.concept_type.is_empty() {
-        what.push(format!("type {}", form.concept_type));
+    match type_groups::parse_filter(&form.concept_type) {
+        _ if form.concept_type.is_empty() => {}
+        type_groups::TypeFilter::Group(slug) => {
+            what.push(format!("type group {}", type_groups::label_of(&slug)));
+        }
+        type_groups::TypeFilter::Exact(concept_type) => {
+            what.push(format!("type {concept_type}"));
+        }
     }
     if !form.tags.is_empty() {
         what.push(format!("tagged {}", form.tags));
@@ -2285,7 +2427,8 @@ async fn search_page(
     session: Session,
     Query(params): Query<SearchParams>,
 ) -> PageResult {
-    let (form, query) = params.normalize()?;
+    let (form, mut query) = params.normalize()?;
+    resolve_type_group(&app, &mut query).await?;
     let health = app.db.health().await?;
     let backend_label = health["search_backend"]
         .as_str()
@@ -2298,6 +2441,7 @@ async fn search_page(
     let names: BTreeMap<i64, String> = bundles.iter().map(|b| (b.id, b.name.clone())).collect();
     let results = run_search(&app, &form, &query, &names).await?;
     let facets = load_facets(&app, &form, &query, &names).await?;
+    let type_groups = type_select_groups(&facets.types, &form.concept_type);
     let mut shell = Shell::new(&app, &session, "Search", "search");
     shell.query.clone_from(&form.q);
     shell.filters = form.filter_pairs();
@@ -2306,6 +2450,7 @@ async fn search_page(
         form,
         bundles,
         facets,
+        type_groups,
         results,
         semantic_available,
         backend_label,
@@ -2319,7 +2464,8 @@ async fn search_results(
     State(app): State<Shared>,
     Query(params): Query<SearchParams>,
 ) -> PageResult {
-    let (form, query) = params.normalize()?;
+    let (form, mut query) = params.normalize()?;
+    resolve_type_group(&app, &mut query).await?;
     let append = params.is_append();
     let names = bundle_names(&app).await?;
     let results = run_search(&app, &form, &query, &names).await?;
@@ -5128,6 +5274,9 @@ struct CatalogGraphParams {
     /// Every `bundle` value, in order: `?bundle=2&bundle=5` selects several
     /// bundles, one value still works, and none (or an empty one) means all.
     bundles: Vec<String>,
+    /// Every `type` value, in order: each is an exact type string or a
+    /// `group:`-prefixed group slug; none (or an empty one) means all types.
+    types: Vec<String>,
     limit: String,
     /// `bundle_id:concept_id` to draw a neighborhood instead.
     seed: String,
@@ -5137,9 +5286,9 @@ struct CatalogGraphParams {
 impl CatalogGraphParams {
     /// Parse the raw query string. This cannot go through `Query<T>`:
     /// `serde_urlencoded` rejects a repeated scalar field with
-    /// `duplicate field bundle`, so multi-selection would 400. `bundle`
-    /// collects every value; the remaining keys are last-wins. Keys and
-    /// values are both percent-decoded, as form encoding allows either.
+    /// `duplicate field bundle`, so multi-selection would 400. `bundle` and
+    /// `type` collect every value; the remaining keys are last-wins. Keys
+    /// and values are both percent-decoded, as form encoding allows either.
     fn parse(query: Option<&str>) -> Self {
         let mut params = Self::default();
         let Some(query) = query else { return params };
@@ -5150,6 +5299,7 @@ impl CatalogGraphParams {
             let value = filters::percent_decode(value);
             match filters::percent_decode(key).as_str() {
                 "bundle" => params.bundles.push(value),
+                "type" => params.types.push(value),
                 "limit" => params.limit = value,
                 "seed" => params.seed = value,
                 "hops" => params.hops = value,
@@ -5180,6 +5330,20 @@ impl CatalogGraphParams {
         Ok(ids)
     }
 
+    /// The raw `type` values (exact types and `group:` slugs), trimmed,
+    /// empties dropped, duplicates collapsed to their first occurrence -
+    /// the same normalisation [`Self::bundle_ids`] applies.
+    fn type_values(&self) -> Vec<String> {
+        let mut values: Vec<String> = Vec::new();
+        for raw in &self.types {
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() && !values.iter().any(|v| v == trimmed) {
+                values.push(trimmed.to_owned());
+            }
+        }
+        values
+    }
+
     fn limit(&self) -> i32 {
         self.limit
             .parse::<i32>()
@@ -5203,6 +5367,85 @@ impl CatalogGraphParams {
     }
 }
 
+/// Expand the graph's raw `type` values (exact types and `group:` slugs)
+/// into the exact types the SQL filters by. `observed` carries the
+/// catalog's live types, so groups match what the checkbox list offered.
+/// The flag is `true` when filters were given but expand to nothing (a
+/// group with no observed members): the graph must come back empty, never
+/// unfiltered.
+fn expand_graph_types(
+    raw: &[String],
+    observed: &[String],
+) -> Result<(Vec<String>, bool), AppError> {
+    let mut types: Vec<String> = Vec::new();
+    let mut filtered = false;
+    for value in raw {
+        let expanded = match type_groups::parse_filter(value) {
+            type_groups::TypeFilter::Exact(concept_type) => vec![concept_type],
+            type_groups::TypeFilter::Group(slug) => type_groups::expand_group(&slug, observed)
+                .ok_or_else(|| AppError::bad_request("unknown type group"))?,
+        };
+        filtered = true;
+        for concept_type in expanded {
+            if !types.contains(&concept_type) {
+                types.push(concept_type);
+            }
+        }
+    }
+    let impossible = filtered && types.is_empty();
+    Ok((types, impossible))
+}
+
+/// [`expand_graph_types`] with the catalog's observed types read first
+/// (only when a group slug needs them: exact types pass through).
+async fn resolve_graph_types(app: &App, raw: &[String]) -> Result<(Vec<String>, bool), AppError> {
+    let needs_observed = raw.iter().any(|v| {
+        matches!(
+            type_groups::parse_filter(v),
+            type_groups::TypeFilter::Group(_)
+        )
+    });
+    let observed = if needs_observed {
+        app.db
+            .catalog_facets(None, "type")
+            .await?
+            .into_iter()
+            .map(|f| f.value)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    expand_graph_types(raw, &observed)
+}
+
+/// The graph page's type checkboxes: one per observed group (unknown types
+/// appear under "Other", so no type is ever unfilterable), plus any
+/// selected exact type, keeping a round-tripped choice visible.
+fn graph_type_filters(observed: &[Facet], selected: &[String]) -> Vec<GraphTypeFilter> {
+    let is_selected = |value: &str| selected.iter().any(|s| s == value);
+    let mut filters: Vec<GraphTypeFilter> = type_groups::groups_from_facets(observed)
+        .into_iter()
+        .map(|g| {
+            let value = format!("{}{}", type_groups::GROUP_PREFIX, g.slug);
+            GraphTypeFilter {
+                selected: is_selected(&value),
+                label: g.label.to_owned(),
+                value,
+            }
+        })
+        .collect();
+    for value in selected {
+        if let type_groups::TypeFilter::Exact(concept_type) = type_groups::parse_filter(value) {
+            filters.push(GraphTypeFilter {
+                label: concept_type.clone(),
+                value: concept_type,
+                selected: true,
+            });
+        }
+    }
+    filters
+}
+
 /// The catalog-wide graph (or a seeded neighborhood) for the explorer.
 async fn api_catalog_graph(
     State(app): State<Shared>,
@@ -5223,10 +5466,14 @@ async fn api_catalog_graph(
             ColorBy::Hops,
         )));
     }
-    let graph = app
-        .db
-        .catalog_graph(&bundle_ids, i64::from(params.limit()))
-        .await?;
+    let (types, impossible) = resolve_graph_types(&app, &params.type_values()).await?;
+    let graph = if impossible {
+        Graph::default()
+    } else {
+        app.db
+            .catalog_graph(&bundle_ids, &types, i64::from(params.limit()))
+            .await?
+    };
     let color_by = if bundle_ids.len() == 1 {
         ColorBy::Type
     } else {
@@ -5242,9 +5489,12 @@ async fn graph_page(
 ) -> PageResult {
     let params = CatalogGraphParams::parse(query.as_deref());
     let bundle_ids = params.bundle_ids()?;
+    let type_values = params.type_values();
     let seed = params.seed()?;
     let limit = params.limit();
     let bundles = app.db.bundles().await?;
+    let type_facets = app.db.catalog_facets(None, "type").await?;
+    let type_filters = graph_type_filters(&type_facets, &type_values);
     let hops = parse_hops(&params.hops);
     let seed_label = match &seed {
         Some((b, id)) => Some(
@@ -5260,24 +5510,39 @@ async fn graph_page(
         shell: Shell::new(&app, &session, "Graph", "graph"),
         bundles,
         bundle_ids: bundle_ids.clone(),
+        type_filters,
         limit_options: GRAPH_NODE_OPTIONS
             .iter()
             .map(|n| (*n, *n == limit))
             .collect(),
         graph_url: format!(
             "/api/graph?{}",
-            graph_url_query(&bundle_ids, limit, seed.as_ref())
+            graph_url_query(&bundle_ids, &type_values, limit, seed.as_ref())
+        ),
+        catalog_url: format!(
+            "/graph?{}",
+            graph_url_query(&bundle_ids, &type_values, limit, None)
         ),
         hops,
         seed_label,
     })
 }
 
-/// The explorer endpoint's query string. `bundle` repeats once per selected
-/// bundle so every selection reaches the API (a form GET submits the checked
-/// boxes the same way).
-fn graph_url_query(bundle_ids: &[i64], limit: i32, seed: Option<&(i64, String)>) -> String {
+/// The explorer endpoint's query string. `bundle` and `type` repeat once
+/// per selection so every choice reaches the API (a form GET submits the
+/// checked boxes the same way).
+fn graph_url_query(
+    bundle_ids: &[i64],
+    types: &[String],
+    limit: i32,
+    seed: Option<&(i64, String)>,
+) -> String {
     let mut pairs: Vec<String> = bundle_ids.iter().map(|b| format!("bundle={b}")).collect();
+    pairs.extend(
+        types
+            .iter()
+            .map(|t| format!("type={}", filters::percent_encode(t))),
+    );
     pairs.push(format!("limit={limit}"));
     if let Some((b, id)) = seed {
         pairs.push(format!(
@@ -6434,6 +6699,7 @@ mod tests {
             match *k {
                 "q" => p.q = (*v).to_owned(),
                 "bundle" => p.bundle = (*v).to_owned(),
+                "type" => p.concept_type = (*v).to_owned(),
                 "tags" => p.tags = (*v).to_owned(),
                 "limit" => p.limit = (*v).to_owned(),
                 "mode" => p.mode = (*v).to_owned(),
@@ -6517,6 +6783,54 @@ mod tests {
     }
 
     #[test]
+    fn normalize_keeps_the_legacy_exact_type_param() {
+        // Arrange
+        let p = params(&[
+            ("q", "failover"),
+            ("bundle", "2"),
+            ("type", "Guide"),
+            ("mode", "hybrid"),
+        ]);
+
+        // Act
+        let (form, query) = p.normalize().ok().expect("valid params");
+
+        // Assert: one exact type, no group, everything else combined as before.
+        assert_eq!(query.concept_types, vec!["Guide".to_owned()]);
+        assert!(query.type_group.is_none());
+        assert_eq!(query.bundle_id, Some(2));
+        assert_eq!(form.mode, "hybrid");
+        assert_eq!(form.concept_type, "Guide");
+        assert!(query.has_filters());
+    }
+
+    #[test]
+    fn normalize_parses_a_type_group_slug_for_later_expansion() {
+        // Arrange
+        let p = params(&[("q", "failover"), ("type", "group:documents")]);
+
+        // Act
+        let (form, query) = p.normalize().ok().expect("valid params");
+
+        // Assert: the slug waits for expansion (no exact types yet), the raw
+        // value echoes into the form so the select can show it selected.
+        assert_eq!(query.type_group.as_deref(), Some("documents"));
+        assert!(query.concept_types.is_empty());
+        assert_eq!(form.concept_type, "group:documents");
+        assert!(query.has_filters());
+        assert!(query.type_filter_impossible());
+    }
+
+    #[test]
+    fn normalize_rejects_an_unknown_type_group_slug() {
+        // Arrange
+        let p = params(&[("q", "x"), ("type", "group:bogus")]);
+
+        // Act & Assert
+        assert!(p.normalize().is_err());
+    }
+
+    #[test]
     fn normalize_accepts_a_complete_cursor() {
         // Arrange
         let p = params(&[
@@ -6595,6 +6909,115 @@ mod tests {
         assert_eq!(unmatched.len(), 2);
         assert!(unmatched[1].selected);
         assert_eq!(unmatched[1].value, "deprecated");
+    }
+
+    fn type_facet(value: &str, count: i64) -> Facet {
+        Facet {
+            value: value.to_owned(),
+            count,
+        }
+    }
+
+    #[test]
+    fn type_select_groups_buckets_facets_and_marks_the_selected_group() {
+        // Arrange
+        let observed = vec![
+            type_facet("Code Entity", 12_006),
+            type_facet("Guide", 10),
+            type_facet("Qualia", 3),
+        ];
+
+        // Act
+        let groups = type_select_groups(&observed, "group:documents");
+
+        // Assert: group options carry counts, the selected group's "all"
+        // option is marked, and the unknown type is visible under Other.
+        assert_eq!(groups.len(), 3);
+        assert_eq!(groups[0].label, "Code (12006)");
+        assert_eq!(groups[0].all_value, "group:code");
+        assert!(!groups[0].all_selected);
+        assert_eq!(groups[0].types[0].label, "Code Entity (12006)");
+        assert_eq!(groups[1].label, "Documents (10)");
+        assert!(groups[1].all_selected);
+        assert_eq!(groups[2].label, "Other (3)");
+        assert_eq!(groups[2].types[0].value, "Qualia");
+    }
+
+    #[test]
+    fn type_select_groups_marks_a_selected_exact_type() {
+        // Arrange
+        let observed = vec![type_facet("Code Entity", 12_006), type_facet("Guide", 10)];
+
+        // Act
+        let groups = type_select_groups(&observed, "Guide");
+
+        // Assert: the exact type is selected inside its group; no "all".
+        assert_eq!(groups.len(), 2);
+        assert!(
+            groups[1]
+                .types
+                .iter()
+                .any(|o| o.selected && o.value == "Guide")
+        );
+        assert!(!groups[1].all_selected);
+        assert!(!groups[0].types.iter().any(|o| o.selected));
+    }
+
+    #[test]
+    fn type_select_groups_keeps_an_unobserved_choice_selectable() {
+        // Arrange: a round-tripped group and an exact type nothing observed.
+        let observed = vec![type_facet("Guide", 10)];
+
+        // Act
+        let with_group = type_select_groups(&observed, "group:code");
+        let with_exact = type_select_groups(&observed, "Widget");
+
+        // Assert: both still render, selected, so they can be cleared.
+        let appended_group = with_group.last().expect("the group is appended");
+        assert!(appended_group.all_selected);
+        assert_eq!(appended_group.all_value, "group:code");
+        let appended_exact = with_exact.last().expect("the type is appended");
+        assert_eq!(appended_exact.label, "Selected type");
+        assert!(appended_exact.types[0].selected);
+        assert_eq!(appended_exact.types[0].value, "Widget");
+    }
+
+    #[test]
+    fn search_page_renders_the_grouped_type_select_with_selected_state() {
+        // Arrange
+        let mut form = form("", "", "");
+        form.concept_type = "group:documents".to_owned();
+        let page = SearchPage {
+            shell: Shell::bare("Search"),
+            form,
+            bundles: Vec::new(),
+            facets: FacetsView::empty(),
+            type_groups: type_select_groups(
+                &[
+                    type_facet("Code Entity", 12_006),
+                    type_facet("Guide", 10),
+                    type_facet("Runbook", 7),
+                ],
+                "group:documents",
+            ),
+            results: ResultsView::empty("Search", "Type a query, or pick a filter to browse."),
+            semantic_available: false,
+            backend_label: "native".to_owned(),
+        };
+
+        // Act
+        let rendered = page.render().expect("the search page renders");
+
+        // Assert: one select, optgroups with counts, the group's "all"
+        // option selected, member types as options; no free-text datalist.
+        assert!(rendered.contains("<select id=\"f-type\" name=\"type\">"));
+        assert!(rendered.contains("<optgroup label=\"Code (12006)\">"));
+        assert!(rendered.contains("<optgroup label=\"Documents (17)\">"));
+        assert!(
+            rendered.contains("<option value=\"group:documents\" selected>All Documents</option>")
+        );
+        assert!(rendered.contains("<option value=\"Guide\">Guide (10)</option>"));
+        assert!(!rendered.contains("datalist"));
     }
 
     #[test]
@@ -7193,16 +7616,157 @@ mod tests {
     }
 
     #[test]
-    fn graph_url_query_repeats_the_bundle_param_per_selection() {
+    fn catalog_graph_params_collect_repeated_types_and_decode_them() {
+        // Arrange & Act
+        let multi =
+            CatalogGraphParams::parse(Some("type=group%3Acode&type=Guide&type=group%3Acode"));
+        let blank = CatalogGraphParams::parse(Some("type=&limit=100"));
+        let absent = CatalogGraphParams::parse(Some("bundle=2"));
+
+        // Assert: percent-decoded, duplicates collapsed, blanks ignored.
+        assert_eq!(
+            multi.type_values(),
+            vec!["group:code".to_owned(), "Guide".to_owned()]
+        );
+        assert!(blank.type_values().is_empty());
+        assert!(absent.type_values().is_empty());
+    }
+
+    #[test]
+    fn expand_graph_types_passes_exact_types_through_without_the_catalog() {
+        // Arrange
+        let raw = vec!["Guide".to_owned(), "Runbook".to_owned()];
+
+        // Act
+        let (types, impossible) = expand_graph_types(&raw, &[]).ok().expect("valid groups");
+
+        // Assert
+        assert_eq!(types, vec!["Guide".to_owned(), "Runbook".to_owned()]);
+        assert!(!impossible);
+    }
+
+    #[test]
+    fn expand_graph_types_expands_groups_against_the_observed_types() {
+        // Arrange: mixed group and exact selections, with a type no known
+        // group claims.
+        let observed: Vec<String> = vec![
+            "Code Entity".to_owned(),
+            "Guide".to_owned(),
+            "Qualia".to_owned(),
+        ];
+        let raw = vec![
+            "group:code".to_owned(),
+            "group:other".to_owned(),
+            "Guide".to_owned(),
+        ];
+
+        // Act
+        let (types, impossible) = expand_graph_types(&raw, &observed)
+            .ok()
+            .expect("valid groups");
+
+        // Assert: group members come from the observed types, the unknown
+        // type is reachable through "Other", duplicates collapse.
+        assert_eq!(
+            types,
+            vec![
+                "Code Entity".to_owned(),
+                "Qualia".to_owned(),
+                "Guide".to_owned()
+            ]
+        );
+        assert!(!impossible);
+    }
+
+    #[test]
+    fn expand_graph_types_flags_a_group_with_no_observed_members() {
+        // Arrange
+        let raw = vec!["group:code".to_owned()];
+        let observed: Vec<String> = vec!["Guide".to_owned()];
+
+        // Act
+        let (types, impossible) = expand_graph_types(&raw, &observed)
+            .ok()
+            .expect("valid groups");
+
+        // Assert: filters were given but match nothing - never unfiltered.
+        assert!(types.is_empty());
+        assert!(impossible);
+        // No filters at all is not impossible.
+        let (types, impossible) = expand_graph_types(&[], &observed).ok().expect("valid");
+        assert!(types.is_empty());
+        assert!(!impossible);
+    }
+
+    #[test]
+    fn expand_graph_types_rejects_an_unknown_group_slug() {
+        // Arrange
+        let raw = vec!["group:bogus".to_owned()];
+
+        // Act & Assert
+        assert!(expand_graph_types(&raw, &[]).is_err());
+    }
+
+    #[test]
+    fn graph_type_filters_lists_observed_groups_and_keeps_selected_ones() {
+        // Arrange
+        let observed = vec![
+            Facet {
+                value: "Code Entity".to_owned(),
+                count: 12_006,
+            },
+            Facet {
+                value: "Guide".to_owned(),
+                count: 10,
+            },
+            Facet {
+                value: "Qualia".to_owned(),
+                count: 3,
+            },
+        ];
+        let selected = vec!["group:documents".to_owned(), "Widget".to_owned()];
+
+        // Act
+        let filters = graph_type_filters(&observed, &selected);
+
+        // Assert: every observed group renders (unknown types under Other),
+        // the selected group is checked, and a selected exact type no group
+        // covers still shows, checked.
+        let values: Vec<(&str, &str, bool)> = filters
+            .iter()
+            .map(|f| (f.value.as_str(), f.label.as_str(), f.selected))
+            .collect();
+        assert_eq!(
+            values,
+            vec![
+                ("group:code", "Code", false),
+                ("group:documents", "Documents", true),
+                ("group:other", "Other", false),
+                ("Widget", "Widget", true),
+            ]
+        );
+    }
+
+    #[test]
+    fn graph_url_query_repeats_the_bundle_and_type_params_per_selection() {
         // Arrange & Act & Assert
         assert_eq!(
-            graph_url_query(&[2, 5], 300, None),
+            graph_url_query(&[2, 5], &[], 300, None),
             "bundle=2&bundle=5&limit=300"
         );
-        assert_eq!(graph_url_query(&[], 100, None), "limit=100");
+        assert_eq!(graph_url_query(&[], &[], 100, None), "limit=100");
         assert_eq!(
-            graph_url_query(&[5], 300, Some(&(2, "runbooks/a".to_owned()))),
+            graph_url_query(&[5], &[], 300, Some(&(2, "runbooks/a".to_owned()))),
             "bundle=5&limit=300&seed=2%3Arunbooks%2Fa"
+        );
+        assert_eq!(
+            graph_url_query(
+                &[],
+                &["group:code".to_owned(), "Guide".to_owned()],
+                300,
+                None
+            ),
+            "type=group%3Acode&type=Guide&limit=300"
         );
     }
 
@@ -7222,8 +7786,10 @@ mod tests {
             shell: Shell::bare("Graph"),
             bundles: vec![bundle(1, "alpha"), bundle(2, "docs"), bundle(5, "wiki")],
             bundle_ids: vec![2, 5],
+            type_filters: Vec::new(),
             limit_options: vec![(300, true)],
             graph_url: "/api/graph?bundle=2&bundle=5&limit=300".to_owned(),
+            catalog_url: "/graph?bundle=2&bundle=5&limit=300".to_owned(),
             hops: 2,
             seed_label: None,
         };
@@ -7256,14 +7822,60 @@ mod tests {
     }
 
     #[test]
+    fn graph_page_marks_the_selected_type_groups_in_the_checkbox_list() {
+        // Arrange
+        let group = |value: &str, label: &str, selected: bool| GraphTypeFilter {
+            value: value.to_owned(),
+            label: label.to_owned(),
+            selected,
+        };
+        let page = GraphPage {
+            shell: Shell::bare("Graph"),
+            bundles: Vec::new(),
+            bundle_ids: Vec::new(),
+            type_filters: vec![
+                group("group:code", "Code", true),
+                group("group:documents", "Documents", false),
+                group("group:other", "Other", false),
+            ],
+            limit_options: vec![(300, true)],
+            graph_url: "/api/graph?type=group%3Acode&limit=300".to_owned(),
+            catalog_url: "/graph?type=group%3Acode&limit=300".to_owned(),
+            hops: 2,
+            seed_label: None,
+        };
+
+        // Act
+        let rendered = page.render().expect("the graph page renders");
+
+        // Assert: the group list mirrors the bundle picker's pattern - the
+        // checked group submits its `group:` value as a repeated `type`
+        // param, and the hint and clear affordance match.
+        assert!(
+            rendered.contains(
+                "<input type=\"checkbox\" name=\"type\" value=\"group:code\" checked> Code"
+            )
+        );
+        assert!(rendered.contains("value=\"group:documents\"> Documents"));
+        assert!(rendered.contains("value=\"group:other\"> Other"));
+        assert!(rendered.contains("No selection = all types"));
+        assert!(rendered.contains("data-type-clear"));
+        assert!(rendered.contains("aria-describedby=\"g-type-hint\""));
+        // The drawn endpoint carries the selected group (HTML-escaped).
+        assert!(rendered.contains("/api/graph?type=group%3Acode&#38;limit=300"));
+    }
+
+    #[test]
     fn graph_page_with_no_selection_renders_the_checkbox_list_unchecked() {
         // Arrange
         let page = GraphPage {
             shell: Shell::bare("Graph"),
             bundles: Vec::new(),
             bundle_ids: Vec::new(),
+            type_filters: Vec::new(),
             limit_options: vec![(300, false)],
             graph_url: "/api/graph?limit=300".to_owned(),
+            catalog_url: "/graph?limit=300".to_owned(),
             hops: 2,
             seed_label: None,
         };
@@ -7274,6 +7886,8 @@ mod tests {
         // Assert
         assert!(rendered.contains("data-bundle-list"));
         assert!(!rendered.contains("checked"));
+        // With no observed or selected types the group list stays hidden.
+        assert!(!rendered.contains("g-type-list"));
     }
 
     #[test]
