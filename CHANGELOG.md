@@ -42,7 +42,10 @@ semantically until the embedder rewrites them.
   and the compare-and-set `mark_fresh` (which refuses superseded
   generations and any completion whose evidence predates the newest
   dependency invalidation - `mark_reconciling` claims the invalidation
-  epoch the completion must cover) are hardened `SECURITY DEFINER`
+  epoch and returns it as the attempt's claim token, which the completion
+  must present and which must cover the newest epoch and the standing
+  claim, so one attempt's claim can never validate another attempt's
+  completion) are hardened `SECURITY DEFINER`
   functions; no role holds direct DML on the tables. The
   `relationship_coverage_missing` evidence lives on its own column no
   state transition can erase, so a reconciliation attempt cannot clear
@@ -53,7 +56,10 @@ semantically until the embedder rewrites them.
   bundle/scope. Every catalog write evaluates enabled dependencies in the
   same transaction and marks matching targets stale; invalidation is
   **transitive** through bundle-scope registrations (A -> B -> C: changing
-  A stales B and C), cycle-safe and bounded, and each bundle-level
+  A stales B and C), cycle-safe and bounded - past the 1,024-visited cap a
+  conservative blanket invalidation marks every bundle with an enabled
+  bundle-scope edge stale, so an over-cap graph never commits with a
+  falsely fresh remainder - and each bundle-level
   invalidation bumps the target row's dependency invalidation epoch that
   the compare-and-set completion must have claimed. An origin/causation
   key suppresses producer self-loops, cycles settle idempotently by

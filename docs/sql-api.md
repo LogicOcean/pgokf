@@ -83,9 +83,9 @@ exercised against a live PostgreSQL 18 cluster.
 | `disable_freshness_dependency(dependency_id)` | `void` | VOLATILE | DEFINER | `pgokf_writer` |
 | `remove_freshness_dependency(dependency_id)` | `void` | VOLATILE | DEFINER | `pgokf_writer` |
 | `mark_stale(bundle_id, reason_codes, producer, observed_source_generation)` | `void` | VOLATILE | DEFINER | `pgokf_writer` |
-| `mark_reconciling(bundle_id, producer)` | `void` | VOLATILE | DEFINER | `pgokf_writer` |
+| `mark_reconciling(bundle_id, producer)` | `bigint` | VOLATILE | DEFINER | `pgokf_writer` |
 | `mark_blocked(bundle_id, reason_codes, producer)` | `void` | VOLATILE | DEFINER | `pgokf_writer` |
-| `mark_fresh(bundle_id, expected_catalog_generation, expected_observed_source_generation, manifest_hash, embedding_contract, producer)` | `boolean` | VOLATILE | DEFINER | `pgokf_writer` |
+| `mark_fresh(bundle_id, expected_catalog_generation, claimed_invalidation_epoch, expected_observed_source_generation, manifest_hash, embedding_contract, producer)` | `boolean` | VOLATILE | DEFINER | `pgokf_writer` |
 | `mark_scope_stale(bundle_id, scope_kind, scope_key, reason_codes, producer)` | `void` | VOLATILE | DEFINER | `pgokf_writer` |
 | `clear_freshness_scope(bundle_id, scope_kind, scope_key)` | `void` | VOLATILE | DEFINER | `pgokf_writer` |
 | `list_freshness_dependencies(max_rows)` | `SETOF freshness_dependency_info` | VOLATILE | DEFINER | `pgokf_admin` |
@@ -906,12 +906,15 @@ afterward are born `fresh`. Writers transition state with `mark_stale` /
 `mark_scope_stale` / `mark_reconciling` / `mark_blocked`, and complete a
 reconciliation with the compare-and-set `mark_fresh`, which refuses (returns
 `false`) when the observed source revision or the catalog generation has moved
-meanwhile - a superseded attempt can never clear staleness. `mark_fresh`
-additionally refuses while the bundle's dependency invalidation epoch exceeds
-the epoch the attempt claimed with `mark_reconciling`: every dependency-driven
-invalidation (direct, transitive, unprovable-scope, or source removal) bumps
-the epoch, so a completion prepared before the newest invalidation landed must
-be re-claimed before it can complete. The `relationship_coverage_missing`
+meanwhile - a superseded attempt can never clear staleness. `mark_reconciling`
+claims the standing dependency invalidation epoch and returns it as the
+attempt's claim token; `mark_fresh` completes only when the token the attempt
+presents covers the newest epoch and the standing claim: every
+dependency-driven invalidation (direct, transitive, unprovable-scope, or
+source removal) bumps the epoch, so a completion prepared before the newest
+invalidation landed must be re-claimed before it can complete, and a newer
+attempt's claim on the shared row can never validate an older attempt's
+evidence. The `relationship_coverage_missing`
 evidence lives on its own column, which no state transition (including
 `mark_reconciling`) erases; `mark_fresh` refuses until coverage is genuinely
 re-established or an admin repairs the row. The completion's check runs under
@@ -1012,10 +1015,12 @@ the reason). Readers see only the active generation through the tenant-scoped
 `pgokf.current_relationships` view (the raw tables are granted to no role);
 retiring or disabling a bundle removes its current relationship visibility
 without touching the retained publication audit rows. Superseded retention is
-bounded: every activation (immediate or refresh-time) hard-deletes the
-bundle's superseded publications whose supersession is more than 30 days old
-(their rows cascade), while the immediately previous superseded set is always
-retained with its rows and activation evidence.
+bounded: every activation (immediate or refresh-time) hard-deletes superseded
+publications whose supersession is more than 30 days old - the activating
+bundle's own and the detached ledger's alike (their rows cascade) - and every
+unregister/purge sweeps the aged detached rows it leaves behind, so detached
+history never outlives the window, while the immediately previous superseded
+set is always retained with its rows and activation evidence.
 `concept_relationship_neighbors(start_bundle_id, start_concept_id, max_hops,
 direction, relation_types, max_results) → SETOF pgokf.relationship_neighbor`
 walks the current set cycle-safely (`outbound` / `inbound` / `both`, optional

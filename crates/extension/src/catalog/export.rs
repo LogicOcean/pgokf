@@ -701,14 +701,21 @@ fn read_batch(
 }
 
 /// `open(2)` flag that refuses to traverse a symbolic link at the final path
-/// component (`O_NOFOLLOW`). Linux uses `0x2_0000`; macOS uses `0x0000_0100`
-/// (macOS SDK `usr/include/sys/fcntl.h`). Declaring it locally keeps the crate
-/// free of a `libc` dependency. It is applied through the safe
+/// component (`O_NOFOLLOW`). The Linux value is architecture-specific: x86_64
+/// uses `0x2_0000`, while aarch64 uses `0x8000` (verified by compiling a probe
+/// against the target's system headers); macOS uses `0x0000_0100` (macOS SDK
+/// `usr/include/sys/fcntl.h`). Declaring it locally keeps the crate free of a
+/// `libc` dependency. It is applied through the safe
 /// [`OpenOptionsExt::custom_flags`] so no `unsafe` is required.
 /// Its effect: if the target already exists and is a symlink, the
 /// open fails with `ELOOP` instead of following the link to write elsewhere.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const O_NOFOLLOW: i32 = 0x2_0000;
+
+/// Linux aarch64 `O_NOFOLLOW` (`asm-generic` fcntl.h): refuse to follow a
+/// symlink at the final path component.
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+const O_NOFOLLOW: i32 = 0x8000;
 
 /// macOS `O_NOFOLLOW` from SDK `usr/include/sys/fcntl.h`: refuse to follow
 /// a symlink at the final path component without a `libc` dependency.
@@ -716,9 +723,10 @@ const O_NOFOLLOW: i32 = 0x2_0000;
 const O_NOFOLLOW: i32 = 0x0000_0100;
 
 /// Platform `errno` returned by an `O_NOFOLLOW` open whose final component
-/// is a symbolic link (`ELOOP`): Linux uses 40; macOS uses 62 (macOS SDK
-/// `usr/include/sys/errno.h`). Used to translate that specific failure into
-/// a caller-facing `22023` refusal rather than an opaque internal error.
+/// is a symbolic link (`ELOOP`): Linux uses 40 on every architecture; macOS
+/// uses 62 (macOS SDK `usr/include/sys/errno.h`). Used to translate that
+/// specific failure into a caller-facing `22023` refusal rather than an
+/// opaque internal error.
 #[cfg(target_os = "linux")]
 const ELOOP: i32 = 40;
 
@@ -726,8 +734,15 @@ const ELOOP: i32 = 40;
 #[cfg(target_os = "macos")]
 const ELOOP: i32 = 62;
 
-// A deliberate port must verify both constants before enabling export writes.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+// A deliberate port must verify both constants against the target's system
+// headers before enabling export writes: Linux O_NOFOLLOW varies by
+// architecture (x86_64 and aarch64 are ported; any other Linux architecture
+// must be verified first).
+#[cfg(not(any(
+    target_os = "macos",
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "aarch64"),
+)))]
 compile_error!("pgokf export requires verified O_NOFOLLOW and ELOOP constants for this platform");
 
 /// Create (truncating) a fresh output file **without following a symlink** at

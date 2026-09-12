@@ -5,7 +5,9 @@
 //! bundle's sync hash and, on catalogs that have them, the catalog
 //! generation and freshness state, plus the build-time freshness evidence
 //! of every content entry - is compared with the catalog as it is now,
-//! answering `current`, `stale`, `retired`, or `unknown` with reasons.
+//! including the live concept-scope overrides (a shipped concept invalidated
+//! after the build marks the artifact stale), answering `current`, `stale`,
+//! `retired`, or `unknown` with reasons.
 
 use anyhow::{Context, Result, anyhow};
 use serde::Serialize;
@@ -104,6 +106,13 @@ struct LiveBundle {
     freshness_reasons: Vec<String>,
 }
 
+/// The live concept-scope freshness of one pinned bundle, keyed by concept
+/// id: evidence that can change *after* the plugin was built (a producer's
+/// `mark_scope_stale` on a shipped concept), which the lockfile's build-time
+/// entry evidence cannot see. Package members ride the same concept scope
+/// (`scope_key = member_id`), so this covers member evidence too.
+type LiveScopes = std::collections::HashMap<String, (String, Vec<String>)>;
+
 /// The plugin name, pinned bundles, and per-entry freshness evidence of an
 /// `okf-workspace.lock` document.
 ///
@@ -179,9 +188,10 @@ fn parse_lock(content: &str) -> Result<(Option<String>, Vec<PinnedBundle>, Vec<P
 
 /// Compare the lockfile of a downloaded plugin with the live catalog,
 /// answering `current`, `stale`, `retired`, or `unknown` with reasons. One
-/// comparison statement runs after a capability probe, so the live state is
-/// read under one snapshot; a catalog without the freshness surface is
-/// compared on the pinned sync hashes alone.
+/// comparison statement runs after a capability probe, so the live state -
+/// bundle rows and, on a catalog with the freshness surface, every pinned
+/// bundle's concept-scope overrides - is read under one snapshot; a catalog
+/// without the freshness surface is compared on the pinned sync hashes alone.
 ///
 /// # Errors
 ///
@@ -203,51 +213,74 @@ pub async fn check_plugin_freshness<C: GenericClient>(
     let extended = capabilities.freshness && capabilities.catalog_generation;
     let ids: Vec<i64> = pinned.iter().map(|p| p.id).collect();
     let sql = if extended {
-        "SELECT b.id, b.sync_hash, b.catalog_generation, b.enabled, b.retired_at IS NOT NULL,
-                ef.state, coalesce(ef.reasons, '{}')
+        // One statement, one snapshot: the bundle rows (row_kind 'bundle')
+        // plus every pinned bundle's concept-scope override rows (row_kind
+        // 'concept'), so live scoped invalidations that landed after the
+        // build are compared too.
+        "SELECT 'bundle'::text, b.id, b.sync_hash, b.catalog_generation,
+                b.enabled, b.retired_at IS NOT NULL,
+                ef.state, coalesce(ef.reasons, '{}'), NULL::text
          FROM pgokf.bundles b
          LEFT JOIN pgokf.effective_freshness ef
                 ON ef.bundle_id = b.id AND ef.scope_kind = 'bundle'
-         WHERE b.id = ANY($1)"
+         WHERE b.id = ANY($1)
+         UNION ALL
+         SELECT 'concept'::text, ef.bundle_id, NULL, NULL::bigint, true, false,
+                ef.state, coalesce(ef.reasons, '{}'), ef.scope_key
+         FROM pgokf.effective_freshness ef
+         WHERE ef.bundle_id = ANY($1) AND ef.scope_kind = 'concept'"
     } else {
-        "SELECT b.id, b.sync_hash, NULL::bigint, b.enabled, b.retired_at IS NOT NULL,
-                NULL::text, '{}'::text[]
+        "SELECT 'bundle'::text, b.id, b.sync_hash, NULL::bigint, b.enabled,
+                b.retired_at IS NOT NULL, NULL::text, '{}'::text[], NULL::text
          FROM pgokf.bundles b WHERE b.id = ANY($1)"
     };
     let rows = client
         .query(sql, &[&ids])
         .await
         .context("comparing the lockfile with the catalog")?;
-    let live: Vec<(i64, LiveBundle)> = rows
-        .iter()
-        .map(|row| {
-            Ok((
-                row.try_get(0)?,
-                LiveBundle {
-                    sync_hash: row.try_get(1)?,
-                    catalog_generation: row.try_get(2)?,
-                    enabled: row.try_get(3)?,
-                    retired: row.try_get(4)?,
-                    freshness_state: row.try_get(5)?,
-                    freshness_reasons: row.try_get(6)?,
-                },
-            ))
-        })
-        .collect::<Result<_>>()?;
+    let mut live: Vec<(i64, LiveBundle)> = Vec::new();
+    let mut live_scopes: std::collections::HashMap<i64, LiveScopes> =
+        std::collections::HashMap::new();
+    for row in &rows {
+        let row_kind: String = row.try_get(0)?;
+        let bundle_id: i64 = row.try_get(1)?;
+        if row_kind == "concept" {
+            if let Some(scope_key) = row.try_get::<_, Option<String>>(8)? {
+                live_scopes.entry(bundle_id).or_default().insert(
+                    scope_key,
+                    (row.try_get(6)?, row.try_get(7)?),
+                );
+            }
+            continue;
+        }
+        live.push((
+            bundle_id,
+            LiveBundle {
+                sync_hash: row.try_get(2)?,
+                catalog_generation: row.try_get(3)?,
+                enabled: row.try_get(4)?,
+                retired: row.try_get(5)?,
+                freshness_state: row.try_get(6)?,
+                freshness_reasons: row.try_get(7)?,
+            },
+        ));
+    }
 
+    let empty_scopes = LiveScopes::new();
     let mut checks = Vec::with_capacity(pinned.len());
     for pin in &pinned {
         let row = live.iter().find(|(id, _)| *id == pin.id).map(|(_, b)| b);
         let evidence: Vec<&PinnedEntry> =
             entries.iter().filter(|e| e.bundle_id == pin.id).collect();
-        checks.push(compare_bundle(pin, row, &evidence));
+        let scopes = live_scopes.get(&pin.id).unwrap_or(&empty_scopes);
+        checks.push(compare_bundle(pin, row, &evidence, scopes));
     }
     Ok(aggregate(name, checks))
 }
 
 /// One bundle's side of the comparison: the lockfile's pins and the
 /// build-time freshness evidence of its entries against the live row (or
-/// its absence).
+/// its absence) and the bundle's live concept-scope overrides.
 ///
 /// `current` needs live confirmation: a matched catalog generation or a
 /// live `fresh` state. A matched sync hash alone is not one - on a catalog
@@ -258,11 +291,16 @@ pub async fn check_plugin_freshness<C: GenericClient>(
 /// reported as not fresh when the plugin was built marks the artifact
 /// `stale`, however well the bundle pins match, and only rebuilding after
 /// reconciliation clears that (the check compares the bytes that shipped).
+/// Live scoped evidence is consulted as well: a shipped concept (or package
+/// member) invalidated after the build marks the artifact `stale` even when
+/// every bundle pin still matches - a fresh build is not protected against
+/// later scoped invalidation.
 #[allow(clippy::too_many_lines)]
 fn compare_bundle(
     pin: &PinnedBundle,
     live: Option<&LiveBundle>,
     entries: &[&PinnedEntry],
+    live_scopes: &LiveScopes,
 ) -> BundleCheck {
     let mut check = BundleCheck {
         bundle_id: pin.id,
@@ -347,6 +385,26 @@ fn compare_bundle(
                     format!(" ({})", entry.reasons.join(", "))
                 }
             ));
+        }
+    }
+    // The live scoped evidence the lockfile cannot record: a shipped concept
+    // (or package member) invalidated after the build. A live override that
+    // is not fresh marks the artifact stale even when every bundle pin and
+    // the bundle-scope state still match.
+    for entry in entries {
+        if let Some((state, reasons)) = live_scopes.get(&entry.concept_id) {
+            if state != "fresh" && state != "unknown" {
+                drift.push(format!(
+                    "concept {} is now {}{}",
+                    entry.concept_id,
+                    state,
+                    if reasons.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", reasons.join(", "))
+                    }
+                ));
+            }
         }
     }
     if !drift.is_empty() {
@@ -435,6 +493,17 @@ mod tests {
         }
     }
 
+    fn no_scopes() -> LiveScopes {
+        LiveScopes::new()
+    }
+
+    fn stale_scope(id: &str) -> (String, (String, Vec<String>)) {
+        (
+            id.to_owned(),
+            ("stale".to_owned(), vec!["producer_reported".to_owned()]),
+        )
+    }
+
     #[test]
     fn parse_lock_reads_the_catalog_bundles() {
         // Arrange
@@ -496,10 +565,10 @@ mod tests {
     #[test]
     fn compare_bundle_reports_a_missing_or_retired_bundle_as_retired() {
         // Arrange / Act
-        let gone = compare_bundle(&pinned(1), None, &[]);
+        let gone = compare_bundle(&pinned(1), None, &[], &no_scopes());
         let mut retired_row = live(Some("fresh"));
         retired_row.retired = true;
-        let retired = compare_bundle(&pinned(1), Some(&retired_row), &[]);
+        let retired = compare_bundle(&pinned(1), Some(&retired_row), &[], &no_scopes());
 
         // Assert
         assert_eq!(gone.status, PluginStatus::Retired);
@@ -511,12 +580,12 @@ mod tests {
     fn a_bundle_confirmed_by_generation_or_live_fresh_state_is_current() {
         // Arrange / Act / Assert
         assert_eq!(
-            compare_bundle(&pinned(1), Some(&live(Some("fresh"))), &[]).status,
+            compare_bundle(&pinned(1), Some(&live(Some("fresh"))), &[], &no_scopes()).status,
             PluginStatus::Current
         );
         // The generation match alone confirms, even with no live state row.
         assert_eq!(
-            compare_bundle(&pinned(1), Some(&live(None)), &[]).status,
+            compare_bundle(&pinned(1), Some(&live(None)), &[], &no_scopes()).status,
             PluginStatus::Current
         );
     }
@@ -529,7 +598,7 @@ mod tests {
         let evidence = entry("seed", "stale");
 
         // Act
-        let check = compare_bundle(&pinned(1), Some(&live(Some("fresh"))), &[&evidence]);
+        let check = compare_bundle(&pinned(1), Some(&live(Some("fresh"))), &[&evidence], &no_scopes());
 
         // Assert
         assert_eq!(check.status, PluginStatus::Stale);
@@ -543,7 +612,47 @@ mod tests {
         let fresh = entry("seed", "fresh");
         let unknown = entry("seed", "unknown");
         assert_eq!(
-            compare_bundle(&pinned(1), Some(&live(Some("fresh"))), &[&fresh, &unknown]).status,
+            compare_bundle(&pinned(1), Some(&live(Some("fresh"))), &[&fresh, &unknown], &no_scopes()).status,
+            PluginStatus::Current
+        );
+    }
+
+    #[test]
+    fn a_live_scope_stale_after_the_build_marks_the_artifact_stale() {
+        // Arrange: the live-W5 reproduction - the plugin shipped the concept
+        // while everything was fresh; a producer then marked the concept
+        // scope stale. Bundle pins, sync hash, generation, and the
+        // bundle-scope state all still match, and the build-time entry
+        // evidence is fresh.
+        let shipped = entry("seed", "fresh");
+        let scopes: LiveScopes = [stale_scope("seed")].into_iter().collect();
+
+        // Act
+        let check = compare_bundle(&pinned(1), Some(&live(Some("fresh"))), &[&shipped], &scopes);
+
+        // Assert
+        assert_eq!(check.status, PluginStatus::Stale);
+        assert!(
+            check.reasons[0].contains("seed is now stale"),
+            "{:?}",
+            check.reasons
+        );
+        assert!(check.reasons[0].contains("producer_reported"));
+        // A live override for a concept the plugin does not ship is not the
+        // plugin's drift; a live fresh override confirms nothing new.
+        let other: LiveScopes = [stale_scope("other")].into_iter().collect();
+        assert_eq!(
+            compare_bundle(&pinned(1), Some(&live(Some("fresh"))), &[&shipped], &other).status,
+            PluginStatus::Current
+        );
+        let live_fresh: LiveScopes = [(
+            "seed".to_owned(),
+            ("fresh".to_owned(), Vec::new()),
+        )]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            compare_bundle(&pinned(1), Some(&live(Some("fresh"))), &[&shipped], &live_fresh).status,
             PluginStatus::Current
         );
     }
@@ -559,9 +668,9 @@ mod tests {
         legacy.catalog_generation = None;
 
         // Act
-        let matching = compare_bundle(&pin, Some(&legacy), &[]);
+        let matching = compare_bundle(&pin, Some(&legacy), &[], &no_scopes());
         legacy.sync_hash = Some("different".to_owned());
-        let changed = compare_bundle(&pin, Some(&legacy), &[]);
+        let changed = compare_bundle(&pin, Some(&legacy), &[], &no_scopes());
 
         // Assert: drift is still detected, but a bare hash match cannot
         // certify currency.
@@ -582,7 +691,7 @@ mod tests {
         gap.catalog_generation = None;
 
         // Act
-        let check = compare_bundle(&pinned(1), Some(&gap), &[]);
+        let check = compare_bundle(&pinned(1), Some(&gap), &[], &no_scopes());
 
         // Assert
         assert_eq!(check.status, PluginStatus::Unknown);

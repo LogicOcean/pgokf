@@ -52,14 +52,21 @@
 //!   bundle-scope dependencies sourced at it mark their own targets in the
 //!   same transaction (A -> B -> C: changing A stales B and C). The walk
 //!   carries a visited set, so cycles (A -> B -> A) and self-loops terminate,
-//!   and it is bounded by [`TRANSITIVE_INVALIDATION_ROW_CAP`];
+//!   and it is bounded by [`TRANSITIVE_INVALIDATION_ROW_CAP`] - past the cap,
+//!   or when a node's bounded edge fetch cannot be proved exhaustive (skipped
+//!   rows can consume the fetch budget without advancing the walk), a
+//!   conservative blanket invalidation marks every bundle with an enabled
+//!   bundle-scope dependency edge stale, so an over-cap graph never commits
+//!   with a falsely fresh remainder;
 //! - every bundle-level dependency invalidation bumps the target row's
-//!   `dependency_invalidation_epoch`. The compare-and-set
-//!   [`mark_fresh`](pgokf::mark_fresh) refuses while the epoch exceeds
-//!   `claimed_invalidation_epoch`; [`mark_reconciling`](pgokf::mark_reconciling)
-//!   claims the newest epoch, so a completion prepared before an invalidation
-//!   landed can never erase it - the producer must re-claim (observing the
-//!   invalidation) before completing;
+//!   `dependency_invalidation_epoch`. [`mark_reconciling`](pgokf::mark_reconciling)
+//!   claims the standing epoch and returns it to the attempt as its claim
+//!   token; the compare-and-set [`mark_fresh`](pgokf::mark_fresh) completes
+//!   only when the token the attempt presents covers the newest epoch, so a
+//!   completion prepared before an invalidation landed can never erase it -
+//!   the producer must re-claim (observing the invalidation) and present the
+//!   new token before completing, and a newer attempt's claim can never
+//!   validate an older attempt's evidence;
 //! - a content change whose change summary was truncated (see
 //!   [`crate::catalog::change_event::CHANGE_RECORD_CAP`]) cannot be proved
 //!   against a narrowed selector, and a lifecycle event carries no concept
@@ -152,10 +159,13 @@ const REASON_SCOPE_UNKNOWN: &str = "change_scope_unknown";
 /// reconciliation can complete.
 pub(crate) const REASON_RELATIONSHIP_COVERAGE_MISSING: &str = "relationship_coverage_missing";
 
-/// Bound on the rows one transitive invalidation walk may visit. The
-/// dependency registry is explicitly registered and small; the cap only
+/// Bound on the rows one transitive invalidation walk may visit. The cap
 /// bounds a pathological registration set (the walk's visited set already
-/// makes cycles and self-loops terminate).
+/// makes cycles and self-loops terminate). Hitting the cap never commits an
+/// incomplete invalidation: [`propagate_transitive`] falls back to a
+/// conservative blanket invalidation of every bundle that still has an
+/// enabled bundle-scope dependency edge, so no dependent of the source stays
+/// falsely fresh.
 const TRANSITIVE_INVALIDATION_ROW_CAP: usize = 1024;
 
 fn spi_error(context: &str, error: &pgrx::spi::Error) -> CatalogError {
@@ -426,18 +436,41 @@ fn invalidate_dependent_bundle(bundle_id: i64) -> Result<(), CatalogError> {
 ///
 /// Cycle-safe: `visited` (seeded with the roots, which are already stale)
 /// makes cycles and self-loops terminate, and the walk is bounded by
-/// [`TRANSITIVE_INVALIDATION_ROW_CAP`]. Only bundle-scope edges propagate -
-/// a scope override does not imply the whole bundle, so it never feeds the
-/// walk. The originating event's causation key suppresses matching edges
-/// exactly as in direct evaluation, so a producer-driven reconciliation loop
-/// cannot retrigger itself through a cycle.
+/// [`TRANSITIVE_INVALIDATION_ROW_CAP`]. Neither bound is ever a silent
+/// truncation: when the node cap is hit, or when a node's bounded edge fetch
+/// returns more rows than the remaining node budget (skipped rows - self-
+/// loops, already-visited targets, causation-suppressed edges - consume the
+/// fetch budget without growing `visited`, so a full page can hide further
+/// edges), [`escalate_blanket_invalidation`] conservatively marks
+/// every bundle that still has an enabled bundle-scope dependency edge stale
+/// (epoch-bumped), so the unwalked remainder can never stay falsely fresh -
+/// false-stale is recoverable through the documented
+/// `mark_reconciling`/`mark_fresh` reconciliation, false-fresh is not. Only
+/// bundle-scope edges propagate - a scope override does not imply the whole
+/// bundle, so it never feeds the walk. The originating event's causation key
+/// suppresses matching edges exactly as in direct evaluation, so a
+/// producer-driven reconciliation loop cannot retrigger itself through a
+/// cycle.
 fn propagate_transitive(roots: &[i64], causation_key: Option<&str>) -> Result<(), CatalogError> {
     let mut visited: HashSet<i64> = roots.iter().copied().collect();
     let mut frontier: Vec<i64> = roots.to_vec();
+    let mut truncated = false;
     while let Some(bundle_id) = frontier.pop() {
         if visited.len() >= TRANSITIVE_INVALIDATION_ROW_CAP {
+            truncated = true;
             break;
         }
+        // Bound the fetch: each returned edge can add at most one new visited
+        // node before the cap break below, so the remaining node budget plus
+        // one lookahead row is an exact LIMIT. The lookahead decides whether
+        // the budgeted fetch was exhaustive: a skipped row (a self-loop, an
+        // already-visited target, or a causation-suppressed edge) consumes
+        // the LIMIT without growing `visited`, so a full budgeted page can
+        // hide further edges without the node cap ever being reached. More
+        // rows than the budget proves the node has edges the walk cannot
+        // enumerate, so the walk escalates instead of committing a possibly
+        // omitted remainder.
+        let remaining = (TRANSITIVE_INVALIDATION_ROW_CAP - visited.len()) as i64;
         let edges: Vec<(i64, Option<String>)> = Spi::connect(|client| {
             let table = client
                 .select(
@@ -446,9 +479,10 @@ fn propagate_transitive(roots: &[i64], causation_key: Option<&str>) -> Result<()
                      WHERE source_bundle_id = $1
                        AND enabled
                        AND target_scope_kind = 'bundle'
-                     ORDER BY dependency_id",
+                     ORDER BY dependency_id
+                     LIMIT $2",
                     None,
-                    &[bundle_id.into()],
+                    &[bundle_id.into(), (remaining + 1).into()],
                 )
                 .map_err(|error| {
                     spi_error("failed to load transitive freshness dependencies", &error)
@@ -461,6 +495,11 @@ fn propagate_transitive(roots: &[i64], causation_key: Option<&str>) -> Result<()
             }
             Ok(edges)
         })?;
+        // The lookahead row answered the exhaustiveness question: more rows
+        // than the node budget means the budgeted page was a truncation, so
+        // the unwalked remainder of this node's edges can no longer be ruled
+        // out - escalate conservatively after processing what was fetched.
+        let edge_fetch_truncated = edges.len() as i64 > remaining;
         for (target_bundle_id, edge_causation_key) in edges {
             // Causation suppression, edge by edge, with the originating key.
             if causation_key.is_some() && edge_causation_key.as_deref() == causation_key {
@@ -472,12 +511,70 @@ fn propagate_transitive(roots: &[i64], causation_key: Option<&str>) -> Result<()
             }
             invalidate_dependent_bundle(target_bundle_id)?;
             if visited.len() >= TRANSITIVE_INVALIDATION_ROW_CAP {
+                truncated = true;
                 break;
             }
             frontier.push(target_bundle_id);
         }
+        if edge_fetch_truncated {
+            truncated = true;
+        }
+        if truncated {
+            break;
+        }
+    }
+    if truncated {
+        escalate_blanket_invalidation(&visited)?;
     }
     Ok(())
+}
+
+/// Conservative escalation when the transitive walk cannot prove coverage -
+/// the [`TRANSITIVE_INVALIDATION_ROW_CAP`] node cap was reached, or a node's
+/// bounded edge fetch returned more rows than the remaining node budget: one
+/// set-based pass marks every bundle
+/// that still has an enabled bundle-scope dependency edge stale with
+/// `dependency_source_changed` and bumps its epoch, skipping the nodes the
+/// walk already invalidated (no double epoch bump) and retired rows.
+///
+/// The pass is deliberately broader than the unwalked remainder: reachability
+/// past the cap is exactly what could not be proved, so the safe direction is
+/// to stale every registered dependent, including ones whose only edge is
+/// causation-suppressed for this event or unreachable from these roots. A
+/// falsely staled bundle recovers through the producer's next
+/// `mark_reconciling`/`mark_fresh` cycle.
+fn escalate_blanket_invalidation(visited: &HashSet<i64>) -> Result<(), CatalogError> {
+    let walked: Vec<i64> = visited.iter().copied().collect();
+    pgrx::warning!(
+        "pgokf: transitive freshness invalidation could not be proved exhaustive within {} nodes; conservatively marking every bundle with an enabled bundle-scope dependency stale",
+        TRANSITIVE_INVALIDATION_ROW_CAP
+    );
+    Spi::run_with_args(
+        "UPDATE pgokf.bundle_freshness bf
+         SET state = 'stale',
+             reason_codes = CASE
+                 WHEN bf.state = 'stale'
+                     THEN COALESCE(
+                         (SELECT pg_catalog.array_agg(DISTINCT r)
+                          FROM pg_catalog.unnest(
+                              bf.reason_codes || ARRAY['dependency_source_changed']::text[]) AS r),
+                         '{}'::text[])
+                 ELSE ARRAY['dependency_source_changed']::text[] END,
+             stale_since = CASE
+                 WHEN bf.state = 'stale' THEN bf.stale_since
+                 ELSE pg_catalog.now() END,
+             dependency_invalidation_epoch = bf.dependency_invalidation_epoch + 1,
+             updated_at = pg_catalog.now()
+         WHERE bf.state <> 'retired'
+           AND NOT (bf.bundle_id = ANY($1))
+           AND EXISTS (SELECT 1
+                       FROM pgokf.freshness_dependency d
+                       WHERE d.target_bundle_id = bf.bundle_id
+                         AND d.enabled
+                         AND d.target_scope_kind = 'bundle')",
+        &[walked.into()],
+    )
+    .map_err(|error| spi_error("failed the blanket dependency invalidation", &error))
 }
 
 /// One enabled registered dependent of a source bundle that is leaving the
@@ -986,9 +1083,9 @@ COMMENT ON COLUMN pgokf.bundle_freshness.manifest_hash IS
 COMMENT ON COLUMN pgokf.bundle_freshness.embedding_contract IS
     'The embedding contract (model/dimension/render version) the producer reconciled against, as opaque jsonb evidence recorded by pgokf.mark_fresh. Semantic ranking does not read this evidence: it enforces the live embedding_model / embedding_dim / embedding_contract policy against each embedding row''s own provenance.';
 COMMENT ON COLUMN pgokf.bundle_freshness.dependency_invalidation_epoch IS
-    'Monotonic counter bumped every time dependency evaluation (direct, unprovable-scope, transitive, or source-removal) marks this row non-fresh. The compare-and-set pgokf.mark_fresh refuses while it exceeds claimed_invalidation_epoch, so a completion prepared before the newest dependency invalidation can never erase it.';
+    'Monotonic counter bumped every time dependency evaluation (direct, unprovable-scope, transitive, or source-removal) marks this row non-fresh. The compare-and-set pgokf.mark_fresh refuses while it exceeds the claim token the completing attempt presents (returned by its own pgokf.mark_reconciling), so a completion prepared before the newest dependency invalidation can never erase it.';
 COMMENT ON COLUMN pgokf.bundle_freshness.claimed_invalidation_epoch IS
-    'The dependency_invalidation_epoch the producer''s current reconciliation attempt has claimed via pgokf.mark_reconciling (an admin repair settles it to the standing epoch). pgokf.mark_fresh completes only when the two epochs match.';
+    'The dependency_invalidation_epoch the producer''s latest reconciliation attempt has claimed via pgokf.mark_reconciling (an admin repair settles it to the standing epoch). pgokf.mark_fresh completes only when the attempt presents a claim token covering both this standing claim and the newest dependency_invalidation_epoch, so one attempt''s claim can never validate another attempt''s completion.';
 COMMENT ON COLUMN pgokf.bundle_freshness.relationship_coverage_missing_since IS
     'When the relationship_coverage_missing evidence was recorded (a refresh superseded the bundle''s relationship coverage without a matching replacement). Independent of the mutable state reasons: no state transition (including pgokf.mark_reconciling) erases it; only re-established coverage (pgokf.replace_relationships activation) or an admin repair clears it, and pgokf.mark_fresh refuses while it stands.';
 COMMENT ON COLUMN pgokf.bundle_freshness.updated_at IS
@@ -1022,7 +1119,7 @@ COMMENT ON COLUMN pgokf.concept_freshness.updated_at IS
     'When this override last changed.';
 
 COMMENT ON TABLE pgokf.freshness_dependency IS
-    'Registered freshness dependencies: a source selector (bundle / exact concept id / exact path / path prefix, matched case-sensitively - no glob or regex in v1) on a source bundle maps to a target bundle and target scope. Evaluated in the same transaction as every catalog change to the source bundle: a match marks the target stale (idempotent by generation via last_source_catalog_generation); an unprovable scope marks the source bundle itself stale and invalidates the registered dependent at its registered scope instead of guessing; bundle-level invalidation propagates transitively through bundle-scope registrations (cycle-safe, bounded) and bumps the target row''s dependency_invalidation_epoch; removing the source invalidates its registered dependents before their rows cascade away. Registered and removed through pgokf.register_freshness_dependency / remove_freshness_dependency (writer-tier, audited); granted to no API role.';
+    'Registered freshness dependencies: a source selector (bundle / exact concept id / exact path / path prefix, matched case-sensitively - no glob or regex in v1) on a source bundle maps to a target bundle and target scope. Evaluated in the same transaction as every catalog change to the source bundle: a match marks the target stale (idempotent by generation via last_source_catalog_generation); an unprovable scope marks the source bundle itself stale and invalidates the registered dependent at its registered scope instead of guessing; bundle-level invalidation propagates transitively through bundle-scope registrations (cycle-safe, capped - past the cap a conservative blanket invalidation marks every bundle with an enabled bundle-scope edge stale, so no dependent stays falsely fresh) and bumps the target row''s dependency_invalidation_epoch; removing the source invalidates its registered dependents before their rows cascade away. Registered and removed through pgokf.register_freshness_dependency / remove_freshness_dependency (writer-tier, audited); granted to no API role.';
 COMMENT ON COLUMN pgokf.freshness_dependency.dependency_id IS
     'Identity of the registration (GENERATED ALWAYS AS IDENTITY), returned by pgokf.register_freshness_dependency.';
 COMMENT ON COLUMN pgokf.freshness_dependency.tenant_id IS
@@ -1464,24 +1561,34 @@ fn mark_stale_impl(
 /// `mark_reconciling`: a reconciliation attempt owns the newest target; the
 /// bundle remains effectively stale (`stale_since` is preserved).
 ///
-/// The attempt also claims the row's standing dependency invalidation epoch:
-/// the compare-and-set [`mark_fresh`](pgokf::mark_fresh) completes only for an
-/// attempt whose claim covers the newest epoch, so a dependency invalidation
+/// The attempt also claims the row's standing dependency invalidation epoch,
+/// returned to the caller as the attempt's claim token: the compare-and-set
+/// [`mark_fresh`](pgokf::mark_fresh) completes only for an attempt that
+/// presents a token covering the newest epoch, so a dependency invalidation
 /// that lands after the claim refuses the completion until the producer
-/// re-claims (observing the invalidation). The claim does not clear the
-/// `relationship_coverage_missing` evidence column.
-fn mark_reconciling_impl(bundle_id: i64, producer: Option<&str>) -> Result<(), CatalogError> {
+/// re-claims (observing the invalidation) - and another attempt's claim can
+/// never validate this attempt's completion, because the token is
+/// caller-supplied evidence, not a live row value. The claim does not clear
+/// the `relationship_coverage_missing` evidence column.
+fn mark_reconciling_impl(bundle_id: i64, producer: Option<&str>) -> Result<i64, CatalogError> {
     security::authorize_current_user(security::Operation::Ingest, Path::new(""))?;
     security::enforce_bundle_tenant(bundle_id)?;
     let _ = bundle_path(bundle_id)?;
     set_bundle_state(bundle_id, "reconciling", &[], producer, None)?;
-    Spi::run_with_args(
+    Spi::get_one_with_args::<i64>(
         "UPDATE pgokf.bundle_freshness
          SET claimed_invalidation_epoch = dependency_invalidation_epoch
-         WHERE bundle_id = $1",
+         WHERE bundle_id = $1
+         RETURNING claimed_invalidation_epoch",
         &[bundle_id.into()],
     )
-    .map_err(|error| spi_error("failed to claim the dependency invalidation epoch", &error))
+    .map_err(|error| spi_error("failed to claim the dependency invalidation epoch", &error))?
+    .ok_or_else(|| {
+        CatalogError::internal(
+            format!("bundle {bundle_id} has no freshness row to claim"),
+            Path::new(""),
+        )
+    })
 }
 
 /// `mark_blocked`: a nonretryable failure; prior data stays labeled.
@@ -1501,14 +1608,16 @@ fn mark_blocked_impl(
 /// The compare-and-set completion statement of [`mark_fresh_impl`]: refuses
 /// (updates zero rows) unless the observed source revision, the live catalog
 /// generation, and the materialized generation all still match the producer's
-/// evidence, the bundle is not retired, the newest dependency invalidation
-/// epoch has been claimed by a `mark_reconciling` after it landed (a
-/// completion prepared before the invalidation can never erase it), and no
-/// `relationship_coverage_missing` evidence stands - the dedicated column,
-/// which no state transition erases, is authoritative; the reason-code check
-/// is kept as defense in depth (a refresh that superseded the bundle's
-/// relationship coverage without a matching replacement must be answered with
-/// a new publication first - see [`crate::catalog::relationships`]).
+/// evidence, the bundle is not retired, the attempt's own claim token
+/// (`$7`, returned by its `mark_reconciling`) covers the newest dependency
+/// invalidation epoch and the standing claim (a completion prepared before
+/// the invalidation - or validated only by a *newer* attempt's claim on the
+/// shared row - can never erase it), and no `relationship_coverage_missing`
+/// evidence stands - the dedicated column, which no state transition erases,
+/// is authoritative; the reason-code check is kept as defense in depth (a
+/// refresh that superseded the bundle's relationship coverage without a
+/// matching replacement must be answered with a new publication first - see
+/// [`crate::catalog::relationships`]).
 const MARK_FRESH_CAS: &str = "UPDATE pgokf.bundle_freshness f
          SET state = 'fresh',
              reason_codes = '{}'::text[],
@@ -1528,7 +1637,8 @@ const MARK_FRESH_CAS: &str = "UPDATE pgokf.bundle_freshness f
            AND b.catalog_generation = $3
            AND (f.materialized_catalog_generation IS NULL
                 OR f.materialized_catalog_generation <= $3)
-           AND f.dependency_invalidation_epoch <= f.claimed_invalidation_epoch
+           AND f.dependency_invalidation_epoch <= $7
+           AND f.claimed_invalidation_epoch <= $7
            AND f.relationship_coverage_missing_since IS NULL
            AND NOT (f.reason_codes @> ARRAY['relationship_coverage_missing']::text[])
          RETURNING f.bundle_id";
@@ -1546,9 +1656,11 @@ const MARK_FRESH_CAS: &str = "UPDATE pgokf.bundle_freshness f
 ///   current catalog state);
 /// - the recorded materialized generation does not exceed the expected one
 ///   (an older attempt never clears a newer one);
-/// - the newest dependency invalidation epoch was claimed by a
-///   `mark_reconciling` after it landed (a completion based on evidence older
-///   than the latest dependency invalidation is refused);
+/// - `claimed_invalidation_epoch` - the claim token this attempt's own
+///   `mark_reconciling` returned - covers the newest dependency invalidation
+///   epoch and the standing claim (a completion based on evidence older than
+///   the latest dependency invalidation is refused, and a newer attempt's
+///   claim on the shared row can never validate this attempt's stale token);
 /// - no `relationship_coverage_missing` evidence stands (the producer must
 ///   re-establish relationship coverage first);
 /// - the bundle is not retired.
@@ -1565,6 +1677,7 @@ fn mark_fresh_impl(
     bundle_id: i64,
     expected_observed_source_generation: Option<&str>,
     expected_catalog_generation: i64,
+    claimed_invalidation_epoch: i64,
     manifest_hash: Option<&str>,
     embedding_contract: Option<pgrx::JsonB>,
     producer: Option<&str>,
@@ -1590,6 +1703,7 @@ fn mark_fresh_impl(
                     manifest_hash.into(),
                     embedding_contract.into(),
                     producer.into(),
+                    claimed_invalidation_epoch.into(),
                 ],
             )
             .map_err(|error| spi_error("failed to compare-and-set bundle freshness", &error))?;
@@ -2307,10 +2421,12 @@ COMMENT ON TYPE pgokf.publication_fence_info IS
 
     /// Mark a bundle reconciling (a reconciliation attempt owns the newest
     /// target and claims the standing dependency invalidation epoch; the
-    /// bundle remains effectively stale). Requires `pgokf_writer`.
+    /// bundle remains effectively stale). Returns the claimed epoch - the
+    /// attempt's claim token, which its `mark_fresh` completion must present
+    /// back. Requires `pgokf_writer`.
     #[pg_extern(requires = ["freshness_tables"])]
-    fn mark_reconciling(bundle_id: i64, producer: default!(Option<&str>, "NULL")) {
-        mark_reconciling_impl(bundle_id, producer).unwrap_or_else(|error| error.raise());
+    fn mark_reconciling(bundle_id: i64, producer: default!(Option<&str>, "NULL")) -> i64 {
+        mark_reconciling_impl(bundle_id, producer).unwrap_or_else(|error| error.raise())
     }
 
     /// Mark a bundle blocked (a nonretryable failure; prior data stays
@@ -2331,14 +2447,16 @@ COMMENT ON TYPE pgokf.publication_fence_info IS
     /// bundle's observed source revision has advanced past
     /// `expected_observed_source_generation`, when its live catalog generation
     /// differs from `expected_catalog_generation`, when a newer materialized
-    /// generation already exists, when the newest dependency invalidation
-    /// epoch was not claimed by a `mark_reconciling` after it landed, when
-    /// `relationship_coverage_missing` evidence stands, or when the bundle is
-    /// retired. The check runs under the bundle advisory lock.
+    /// generation already exists, when `claimed_invalidation_epoch` - the
+    /// claim token this attempt's own `mark_reconciling` returned - does not
+    /// cover the newest dependency invalidation epoch and standing claim,
+    /// when `relationship_coverage_missing` evidence stands, or when the
+    /// bundle is retired. The check runs under the bundle advisory lock.
     #[pg_extern(requires = ["freshness_tables"])]
     fn mark_fresh(
         bundle_id: i64,
         expected_catalog_generation: i64,
+        claimed_invalidation_epoch: i64,
         expected_observed_source_generation: default!(Option<&str>, "NULL"),
         manifest_hash: default!(Option<&str>, "NULL"),
         embedding_contract: default!(Option<pgrx::JsonB>, "NULL"),
@@ -2348,6 +2466,7 @@ COMMENT ON TYPE pgokf.publication_fence_info IS
             bundle_id,
             expected_observed_source_generation,
             expected_catalog_generation,
+            claimed_invalidation_epoch,
             manifest_hash,
             embedding_contract,
             producer,
@@ -2454,7 +2573,7 @@ ALTER FUNCTION pgokf.mark_reconciling(bigint, text)
     SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
 ALTER FUNCTION pgokf.mark_blocked(bigint, text[], text)
     SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
-ALTER FUNCTION pgokf.mark_fresh(bigint, bigint, text, text, jsonb, text)
+ALTER FUNCTION pgokf.mark_fresh(bigint, bigint, bigint, text, text, jsonb, text)
     SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
 ALTER FUNCTION pgokf.mark_scope_stale(bigint, text, text, text[], text)
     SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
@@ -2475,7 +2594,7 @@ REVOKE ALL ON FUNCTION pgokf.remove_freshness_dependency(bigint) FROM PUBLIC;
 REVOKE ALL ON FUNCTION pgokf.mark_stale(bigint, text[], text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION pgokf.mark_reconciling(bigint, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION pgokf.mark_blocked(bigint, text[], text) FROM PUBLIC;
-REVOKE ALL ON FUNCTION pgokf.mark_fresh(bigint, bigint, text, text, jsonb, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION pgokf.mark_fresh(bigint, bigint, bigint, text, text, jsonb, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION pgokf.mark_scope_stale(bigint, text, text, text[], text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION pgokf.clear_freshness_scope(bigint, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION pgokf.list_freshness_dependencies(integer) FROM PUBLIC;
@@ -2489,7 +2608,7 @@ GRANT EXECUTE ON FUNCTION pgokf.remove_freshness_dependency(bigint) TO pgokf_wri
 GRANT EXECUTE ON FUNCTION pgokf.mark_stale(bigint, text[], text, text) TO pgokf_writer;
 GRANT EXECUTE ON FUNCTION pgokf.mark_reconciling(bigint, text) TO pgokf_writer;
 GRANT EXECUTE ON FUNCTION pgokf.mark_blocked(bigint, text[], text) TO pgokf_writer;
-GRANT EXECUTE ON FUNCTION pgokf.mark_fresh(bigint, bigint, text, text, jsonb, text) TO pgokf_writer;
+GRANT EXECUTE ON FUNCTION pgokf.mark_fresh(bigint, bigint, bigint, text, text, jsonb, text) TO pgokf_writer;
 GRANT EXECUTE ON FUNCTION pgokf.mark_scope_stale(bigint, text, text, text[], text) TO pgokf_writer;
 GRANT EXECUTE ON FUNCTION pgokf.clear_freshness_scope(bigint, text, text) TO pgokf_writer;
 GRANT EXECUTE ON FUNCTION pgokf.list_freshness_dependencies(integer) TO pgokf_admin;
@@ -2506,11 +2625,11 @@ COMMENT ON FUNCTION pgokf.remove_freshness_dependency(bigint) IS
 COMMENT ON FUNCTION pgokf.mark_stale(bigint, text[], text, text) IS
     'Mark a bundle stale with machine-readable reason codes (default ''{producer_reported}''), optionally advancing the observed source revision (opaque text). Writer-tier; tenant-confined (22023 for an unknown or cross-tenant bundle). External-source observations must call this before the producer acknowledges the observation or queues work.';
 COMMENT ON FUNCTION pgokf.mark_reconciling(bigint, text) IS
-    'Mark a bundle reconciling: a reconciliation attempt owns the newest target and claims the standing dependency invalidation epoch (pgokf.mark_fresh completes only for an attempt whose claim covers the newest epoch, so a dependency invalidation landing after the claim refuses the completion until the producer re-claims). The bundle remains effectively stale (stale_since is preserved); only the compare-and-set pgokf.mark_fresh clears it. The claim never clears the relationship_coverage_missing evidence. Writer-tier; tenant-confined.';
+    'Mark a bundle reconciling: a reconciliation attempt owns the newest target and claims the standing dependency invalidation epoch, returned to the caller as the attempt''s claim token (pgokf.mark_fresh completes only for an attempt presenting a token that covers the newest epoch and the standing claim, so a dependency invalidation landing after the claim refuses the completion until the producer re-claims, and a newer attempt''s claim on the shared row can never validate an older attempt''s evidence). The bundle remains effectively stale (stale_since is preserved); only the compare-and-set pgokf.mark_fresh clears it. The claim never clears the relationship_coverage_missing evidence. Writer-tier; tenant-confined.';
 COMMENT ON FUNCTION pgokf.mark_blocked(bigint, text[], text) IS
     'Mark a bundle blocked (a nonretryable failure) with reason codes; the prior data stays available, labeled stale/blocked. Writer-tier; tenant-confined.';
-COMMENT ON FUNCTION pgokf.mark_fresh(bigint, bigint, text, text, jsonb, text) IS
-    'Compare-and-set reconciliation completion: mark the bundle fresh only if its observed source revision still equals expected_observed_source_generation AND its live catalog generation equals expected_catalog_generation AND no newer materialized generation exists AND the newest dependency invalidation epoch was claimed by pgokf.mark_reconciling after it landed (a completion based on evidence older than the latest dependency invalidation is refused) AND no relationship_coverage_missing evidence stands (a refresh that superseded the bundle''s relationship coverage must be answered with a matching pgokf.replace_relationships publication first) AND it is not retired; returns false (changing nothing) otherwise, so a superseded attempt can never clear staleness. The check runs under the bundle advisory lock, so it never certifies a generation or epoch older than a committed mutation it waited behind. On success records the manifest hash and embedding contract evidence and sets last_reconciled_at. Writer-tier; tenant-confined.';
+COMMENT ON FUNCTION pgokf.mark_fresh(bigint, bigint, bigint, text, text, jsonb, text) IS
+    'Compare-and-set reconciliation completion: mark the bundle fresh only if its observed source revision still equals expected_observed_source_generation AND its live catalog generation equals expected_catalog_generation AND no newer materialized generation exists AND claimed_invalidation_epoch - the claim token this attempt''s own pgokf.mark_reconciling returned - covers the newest dependency invalidation epoch and the standing claim (a completion based on evidence older than the latest dependency invalidation is refused, and a newer attempt''s claim can never validate an older attempt''s token) AND no relationship_coverage_missing evidence stands (a refresh that superseded the bundle''s relationship coverage must be answered with a matching pgokf.replace_relationships publication first) AND it is not retired; returns false (changing nothing) otherwise, so a superseded attempt can never clear staleness. The check runs under the bundle advisory lock, so it never certifies a generation or epoch older than a committed mutation it waited behind. On success records the manifest hash and embedding contract evidence and sets last_reconciled_at. Writer-tier; tenant-confined.';
 COMMENT ON FUNCTION pgokf.mark_scope_stale(bigint, text, text, text[], text) IS
     'Mark one scope within a bundle (scope_kind concept/path/group with an exact, case-sensitive scope_key) stale with reason codes. Writer-tier; tenant-confined. The override shadows the bundle state for that scope in pgokf.effective_freshness until cleared.';
 COMMENT ON FUNCTION pgokf.clear_freshness_scope(bigint, text, text) IS
