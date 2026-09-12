@@ -1676,36 +1676,13 @@ impl Db {
     }
 
     /// The catalog-wide graph: the `limit` best-connected visible concepts
-    /// (of one bundle, or all) and the resolved links among them. Degrees
-    /// come from one aggregate over the links, not a probe per concept.
-    pub(crate) async fn catalog_graph(&self, bundle_id: Option<i64>, limit: i64) -> Result<Graph> {
-        let sql = format!(
-            "WITH ends AS (
-                 SELECT l.bundle_id, l.source_id AS id FROM pgokf.links l
-                  WHERE l.resolved AND l.source_id <> l.target_id
-                    AND ($1::bigint IS NULL OR l.bundle_id = $1)
-                 UNION ALL
-                 SELECT l.bundle_id, l.target_id FROM pgokf.links l
-                  WHERE l.resolved AND l.source_id <> l.target_id
-                    AND ($1::bigint IS NULL OR l.bundle_id = $1)
-             ), deg AS (
-                 SELECT bundle_id, id, count(*)::bigint AS degree FROM ends GROUP BY 1, 2
-             ), visible AS (
-                 SELECT c.bundle_id, c.id, c.title, c.type, c.path, {} AS bundle_name,
-                        coalesce(deg.degree, 0) AS degree
-                 FROM pgokf.concepts c
-                 JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled AND b.retired_at IS NULL
-                 LEFT JOIN deg ON deg.bundle_id = c.bundle_id AND deg.id = c.id
-                 WHERE ($1::bigint IS NULL OR c.bundle_id = $1)
-             )
-             SELECT bundle_id, bundle_name, id, title, type, path, 0::int, degree,
-                    count(*) OVER ()
-             FROM visible
-             ORDER BY degree DESC, bundle_id, id
-             LIMIT $2",
-            display_name("b")
-        );
-        let rows = self.query(&sql, &[&bundle_id, &limit]).await?;
+    /// (of the selected bundles, or all when the list is empty) and the
+    /// resolved links among them. Degrees come from one aggregate over the
+    /// links, not a probe per concept.
+    pub(crate) async fn catalog_graph(&self, bundle_ids: &[i64], limit: i64) -> Result<Graph> {
+        let rows = self
+            .query(&catalog_graph_sql(), &[&bundle_ids, &limit])
+            .await?;
         let total = rows
             .first()
             .map(|r| col::<i64>(r, 8))
@@ -2108,6 +2085,38 @@ fn graph_node(r: &Row) -> Result<GraphNode> {
     })
 }
 
+/// `catalog_graph`'s query. `$1` is the selected bundle ids as `bigint[]`;
+/// an empty array means every bundle, so the membership test collapses to
+/// true.
+fn catalog_graph_sql() -> String {
+    format!(
+        "WITH ends AS (
+             SELECT l.bundle_id, l.source_id AS id FROM pgokf.links l
+              WHERE l.resolved AND l.source_id <> l.target_id
+                AND (cardinality($1::bigint[]) = 0 OR l.bundle_id = ANY($1))
+             UNION ALL
+             SELECT l.bundle_id, l.target_id FROM pgokf.links l
+              WHERE l.resolved AND l.source_id <> l.target_id
+                AND (cardinality($1::bigint[]) = 0 OR l.bundle_id = ANY($1))
+         ), deg AS (
+             SELECT bundle_id, id, count(*)::bigint AS degree FROM ends GROUP BY 1, 2
+         ), visible AS (
+             SELECT c.bundle_id, c.id, c.title, c.type, c.path, {} AS bundle_name,
+                    coalesce(deg.degree, 0) AS degree
+             FROM pgokf.concepts c
+             JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled AND b.retired_at IS NULL
+             LEFT JOIN deg ON deg.bundle_id = c.bundle_id AND deg.id = c.id
+             WHERE (cardinality($1::bigint[]) = 0 OR c.bundle_id = ANY($1))
+         )
+         SELECT bundle_id, bundle_name, id, title, type, path, 0::int, degree,
+                count(*) OVER ()
+         FROM visible
+         ORDER BY degree DESC, bundle_id, id
+         LIMIT $2",
+        display_name("b")
+    )
+}
+
 fn bundle_info(r: &Row) -> Result<BundleInfo> {
     Ok(BundleInfo {
         id: col(r, 0)?,
@@ -2252,6 +2261,19 @@ mod tests {
         assert_eq!(classify(&busy), Failure::Busy);
         assert_eq!(classify(&other), Failure::Other);
         assert_eq!(db_message(&other), None);
+    }
+
+    #[test]
+    fn catalog_graph_sql_filters_by_membership_with_empty_meaning_all() {
+        // Arrange & Act
+        let sql = catalog_graph_sql();
+
+        // Assert: the ends CTE (twice) and the visible CTE all use the same
+        // membership test, and no nullable-scalar form survives.
+        assert_eq!(sql.matches("cardinality($1::bigint[]) = 0").count(), 3);
+        assert!(sql.contains("l.bundle_id = ANY($1)"));
+        assert!(sql.contains("c.bundle_id = ANY($1)"));
+        assert!(!sql.contains("IS NULL OR"));
     }
 
     #[test]
