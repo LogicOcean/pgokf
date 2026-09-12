@@ -501,9 +501,10 @@ fn propagate_transitive(roots: &[i64], causation_key: Option<&str>) -> Result<()
         // than the node budget means the budgeted page was a truncation, so
         // the unwalked remainder of this node's edges can no longer be ruled
         // out - escalate conservatively after processing what was fetched.
-        let edge_fetch_truncated = i64::try_from(edges.len())
-            .map(|fetched| fetched > remaining)
-            .unwrap_or(true);
+        let edge_fetch_truncated = match i64::try_from(edges.len()) {
+            Ok(fetched) => fetched > remaining,
+            Err(_) => true,
+        };
         for (target_bundle_id, edge_causation_key) in edges {
             // Causation suppression, edge by edge, with the originating key.
             if causation_key.is_some() && edge_causation_key.as_deref() == causation_key {
