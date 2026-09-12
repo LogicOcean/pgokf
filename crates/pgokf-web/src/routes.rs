@@ -35,9 +35,9 @@ use tower::limit::ConcurrencyLimitLayer;
 use crate::auth::{Admission, Authenticator, Mode, Principal, Role, Session, cookie_header};
 use crate::db::{
     AdminBundle, BundleFile, BundleInfo, BundleLogEntry, BundleStat, ConceptDetail, ConceptSummary,
-    Cursor, Db, DuplicateGroup, Facet, Failure, Graph, Hit, Link, Neighbor, PackageInfo,
-    PersonalItem, ResourceInfo, ReviewItem, SearchQuery, StaleConcept, SyncLogEntry, SyncOutcome,
-    Version,
+    Cursor, Db, DuplicateGroup, EdgeSource, Facet, Failure, Graph, Hit, Link, Neighbor,
+    PackageInfo, PersonalItem, ResourceInfo, ReviewItem, SearchQuery, StaleConcept, SyncLogEntry,
+    SyncOutcome, Version,
 };
 use crate::graph::{GraphEdge, GraphNode};
 use crate::links::Resolver;
@@ -1863,6 +1863,8 @@ struct GraphPage {
     /// The type-group (and any selected exact-type) checkboxes.
     type_filters: Vec<GraphTypeFilter>,
     limit_options: Vec<(i32, bool)>,
+    /// The edge-source select as `(value, selected, label)`.
+    edge_options: Vec<(&'static str, bool, &'static str)>,
     /// The JSON endpoint the client draws (the client appends `hops`).
     graph_url: String,
     /// The whole-catalog URL a seeded neighborhood links back to.
@@ -2728,6 +2730,18 @@ fn graph_href(bundle_id: i64, concept_id: &str) -> String {
     )
 }
 
+/// The URL a node's "Explore" actions load: the source-aware seeded form of
+/// the catalog graph endpoint, so exploring from a filtered picture keeps
+/// that picture's edge source instead of resetting to the concept
+/// endpoint's both-sources default.
+fn explore_href(bundle_id: i64, concept_id: &str, edges: EdgeSource) -> String {
+    format!(
+        "/api/graph?seed={}&edges={}",
+        filters::percent_encode(&format!("{bundle_id}:{concept_id}")),
+        edges.as_str()
+    )
+}
+
 /// How the client colours a picture: by distance from a seed, or by a
 /// group (bundle, or type inside one bundle) with a legend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2738,9 +2752,20 @@ enum ColorBy {
 }
 
 /// A graph as the client draws it. Node ids are `bundle_id:concept_id`,
-/// unique across bundles; nodes carry their page and graph endpoints so the
-/// client never builds URLs from ids; links reference node ids.
-fn graph_json(seed: Option<(i64, &str)>, hops: i32, graph: &Graph, color_by: ColorBy) -> Value {
+/// unique across bundles; nodes carry their page and explore URLs so the
+/// client never builds URLs from ids, and the explore URL carries the
+/// picture's own edge source. Edges of every selected source share the
+/// `links` array, each labelled by `kind` (`link` or `relationship`) so the
+/// client styles and toggles them per source; typed edges carry their
+/// relation types, each with its own direction, and whether every folded
+/// row is undirected (the client draws an arrow unless they are).
+fn graph_json(
+    seed: Option<(i64, &str)>,
+    hops: i32,
+    graph: &Graph,
+    color_by: ColorBy,
+    edges: EdgeSource,
+) -> Value {
     let node_id = |bundle_id: i64, id: &str| format!("{bundle_id}:{id}");
     let group = |n: &crate::db::GraphNode| match color_by {
         ColorBy::Hops => n.hops.to_string(),
@@ -2771,7 +2796,7 @@ fn graph_json(seed: Option<(i64, &str)>, hops: i32, graph: &Graph, color_by: Col
                 "degree": n.degree,
                 "group": g,
                 "href": concept_href(n.bundle_id, &n.id),
-                "graph_href": graph_href(n.bundle_id, &n.id),
+                "graph_href": explore_href(n.bundle_id, &n.id, edges),
             })
         })
         .collect();
@@ -2780,13 +2805,26 @@ fn graph_json(seed: Option<(i64, &str)>, hops: i32, graph: &Graph, color_by: Col
         .iter()
         .map(|l| {
             serde_json::json!({
+                "kind": "link",
                 "source": node_id(l.bundle_id, &l.source),
                 "target": node_id(l.bundle_id, &l.target),
                 "count": l.count,
                 "relations": l.relations,
                 "texts": l.texts,
+                "undirected": false,
             })
         })
+        .chain(graph.relationships.iter().map(|r| {
+            serde_json::json!({
+                "kind": "relationship",
+                "source": node_id(r.source_bundle_id, &r.source),
+                "target": node_id(r.target_bundle_id, &r.target),
+                "count": r.count,
+                "relations": r.relations,
+                "texts": Vec::<String>::new(),
+                "undirected": r.undirected,
+            })
+        }))
         .collect();
     legend.sort();
     serde_json::json!({
@@ -5272,7 +5310,10 @@ async fn api_graph(
     Query(params): Query<ConceptParams>,
 ) -> Result<Json<Value>, AppError> {
     let hops = parse_hops(&params.hops);
-    let graph = app.db.graph(bundle_id, &concept_id, hops).await?;
+    let graph = app
+        .db
+        .graph(bundle_id, &concept_id, hops, EdgeSource::Both)
+        .await?;
     if graph.nodes.is_empty() {
         return Err(AppError::not_found("This concept"));
     }
@@ -5281,6 +5322,7 @@ async fn api_graph(
         hops,
         &graph,
         ColorBy::Hops,
+        EdgeSource::Both,
     )))
 }
 
@@ -5288,6 +5330,14 @@ async fn api_graph(
 const GRAPH_MAX_NODES: i32 = 2000;
 const GRAPH_DEFAULT_NODES: i32 = 300;
 const GRAPH_NODE_OPTIONS: [i32; 5] = [100, 300, 600, 1000, 2000];
+/// The sidebar's edge-source choices as `(value, label)`; the default -
+/// both sources, since typed relationships are the point of drawing them -
+/// is first.
+const GRAPH_EDGE_OPTIONS: [(&str, &str); 3] = [
+    ("both", "Links and relationships"),
+    ("links", "Document links only"),
+    ("rels", "Relationships only"),
+];
 
 #[derive(Debug, Default)]
 struct CatalogGraphParams {
@@ -5301,6 +5351,8 @@ struct CatalogGraphParams {
     /// parameter, so an exact type string is never read as a group.
     type_groups: Vec<String>,
     limit: String,
+    /// Which edge sources to draw: `links`, `rels`, or `both` (the default).
+    edges: String,
     /// `bundle_id:concept_id` to draw a neighborhood instead.
     seed: String,
     hops: String,
@@ -5325,6 +5377,7 @@ impl CatalogGraphParams {
                 "type" => params.types.push(value),
                 "type_group" => params.type_groups.push(value),
                 "limit" => params.limit = value,
+                "edges" => params.edges = value,
                 "seed" => params.seed = value,
                 "hops" => params.hops = value,
                 _ => {}
@@ -5373,6 +5426,18 @@ impl CatalogGraphParams {
             .ok()
             .filter(|n| (1..=GRAPH_MAX_NODES).contains(n))
             .unwrap_or(GRAPH_DEFAULT_NODES)
+    }
+
+    /// The selected edge sources. Absent or empty means the default
+    /// [`EdgeSource::Both`]; an unknown value is rejected rather than
+    /// silently widened back to the default.
+    fn edge_source(&self) -> Result<EdgeSource, AppError> {
+        match non_empty(&self.edges).as_deref() {
+            None | Some("both") => Ok(EdgeSource::Both),
+            Some("links") => Ok(EdgeSource::Links),
+            Some("rels") => Ok(EdgeSource::Relationships),
+            Some(_) => Err(AppError::bad_request("edges must be links, rels, or both")),
+        }
     }
 
     fn seed(&self) -> Result<Option<(i64, String)>, AppError> {
@@ -5499,9 +5564,10 @@ async fn api_catalog_graph(
 ) -> Result<Json<Value>, AppError> {
     let params = CatalogGraphParams::parse(query.as_deref());
     let bundle_ids = params.bundle_ids()?;
+    let edges = params.edge_source()?;
     if let Some((seed_bundle, seed_id)) = params.seed()? {
         let hops = parse_hops(&params.hops);
-        let graph = app.db.graph(seed_bundle, &seed_id, hops).await?;
+        let graph = app.db.graph(seed_bundle, &seed_id, hops, edges).await?;
         if graph.nodes.is_empty() {
             return Err(AppError::not_found("This concept"));
         }
@@ -5510,6 +5576,7 @@ async fn api_catalog_graph(
             hops,
             &graph,
             ColorBy::Hops,
+            edges,
         )));
     }
     let (types, impossible) =
@@ -5518,7 +5585,7 @@ async fn api_catalog_graph(
         Graph::default()
     } else {
         app.db
-            .catalog_graph(&bundle_ids, &types, i64::from(params.limit()))
+            .catalog_graph(&bundle_ids, &types, i64::from(params.limit()), edges)
             .await?
     };
     let color_by = if bundle_ids.len() == 1 {
@@ -5526,7 +5593,7 @@ async fn api_catalog_graph(
     } else {
         ColorBy::Bundle
     };
-    Ok(Json(graph_json(None, 0, &graph, color_by)))
+    Ok(Json(graph_json(None, 0, &graph, color_by, edges)))
 }
 
 async fn graph_page(
@@ -5538,6 +5605,7 @@ async fn graph_page(
     let bundle_ids = params.bundle_ids()?;
     let type_values = params.type_values();
     let group_slugs = params.group_slugs();
+    let edges = params.edge_source()?;
     let seed = params.seed()?;
     let limit = params.limit();
     let bundles = app.db.bundles().await?;
@@ -5563,6 +5631,10 @@ async fn graph_page(
             .iter()
             .map(|n| (*n, *n == limit))
             .collect(),
+        edge_options: GRAPH_EDGE_OPTIONS
+            .iter()
+            .map(|(value, label)| (*value, *value == edges.as_str(), *label))
+            .collect(),
         graph_url: format!(
             "/api/graph?{}",
             graph_url_query(
@@ -5570,12 +5642,13 @@ async fn graph_page(
                 &type_values,
                 &group_slugs,
                 limit,
-                seed.as_ref()
+                seed.as_ref(),
+                edges,
             )
         ),
         catalog_url: format!(
             "/graph?{}",
-            graph_url_query(&bundle_ids, &type_values, &group_slugs, limit, None)
+            graph_url_query(&bundle_ids, &type_values, &group_slugs, limit, None, edges)
         ),
         hops,
         seed_label,
@@ -5585,13 +5658,15 @@ async fn graph_page(
 /// The explorer endpoint's query string. `bundle`, `type`, and
 /// `type_group` repeat once per selection so every choice reaches the API
 /// (a form GET submits the checked boxes the same way); exact types and
-/// group slugs keep their separate parameters.
+/// group slugs keep their separate parameters. The edge source always
+/// round-trips, so a redrawn form and a shared link select the same edges.
 fn graph_url_query(
     bundle_ids: &[i64],
     types: &[String],
     groups: &[String],
     limit: i32,
     seed: Option<&(i64, String)>,
+    edges: EdgeSource,
 ) -> String {
     let mut pairs: Vec<String> = bundle_ids.iter().map(|b| format!("bundle={b}")).collect();
     pairs.extend(
@@ -5605,6 +5680,7 @@ fn graph_url_query(
             .map(|g| format!("type_group={}", filters::percent_encode(g))),
     );
     pairs.push(format!("limit={limit}"));
+    pairs.push(format!("edges={}", edges.as_str()));
     if let Some((b, id)) = seed {
         pairs.push(format!(
             "seed={}",
@@ -7622,20 +7698,154 @@ mod tests {
                 relations: vec![],
                 texts: vec![],
             }],
+            relationships: vec![],
             total: 2,
         };
 
         // Act
-        let value = graph_json(None, 0, &graph, ColorBy::Bundle);
+        let value = graph_json(None, 0, &graph, ColorBy::Bundle, EdgeSource::Both);
 
         // Assert
         assert_eq!(value["nodes"][0]["id"], "2:a/b");
         assert_eq!(value["nodes"][1]["id"], "1:a/b");
         assert_eq!(value["nodes"][0]["title"], "a/b");
         assert_eq!(value["nodes"][0]["href"], "/concepts/2/a/b");
+        assert_eq!(
+            value["nodes"][0]["graph_href"],
+            "/api/graph?seed=2%3Aa%2Fb&edges=both"
+        );
         assert_eq!(value["links"][0]["source"], "2:a/b");
+        assert_eq!(value["links"][0]["kind"], "link");
+        assert_eq!(value["links"][0]["undirected"], false);
         assert_eq!(value["legend"], serde_json::json!(["docs", "sample"]));
         assert_eq!(value["color_by"], "bundle");
+    }
+
+    #[test]
+    fn graph_json_labels_typed_edges_with_their_relation_types_and_direction() {
+        // Arrange: a cross-bundle typed edge, folded over two rows, only one
+        // of them undirected (so the fold keeps the arrow).
+        let node = |bundle_id: i64, id: &str| crate::db::GraphNode {
+            bundle_id,
+            bundle_name: "docs".to_owned(),
+            id: id.to_owned(),
+            title: None,
+            concept_type: None,
+            path: format!("{id}.md"),
+            hops: 0,
+            degree: 1,
+        };
+        let graph = Graph {
+            nodes: vec![node(1, "a"), node(2, "b")],
+            links: vec![],
+            relationships: vec![crate::db::GraphRelationship {
+                source_bundle_id: 1,
+                source: "a".to_owned(),
+                target_bundle_id: 2,
+                target: "b".to_owned(),
+                count: 2,
+                relations: vec![
+                    crate::db::RelationType {
+                        name: "tests:covers".to_owned(),
+                        undirected: false,
+                    },
+                    crate::db::RelationType {
+                        name: "tests:fixtures".to_owned(),
+                        undirected: true,
+                    },
+                ],
+                undirected: false,
+            }],
+            total: 2,
+        };
+
+        // Act
+        let value = graph_json(None, 0, &graph, ColorBy::Bundle, EdgeSource::Both);
+
+        // Assert: the edge joins the shared links array, labelled by kind,
+        // keyed by its own per-end bundle ids, carrying the relation types
+        // (opaque producer data, passed through verbatim) each with its own
+        // direction, plus the fold's all-undirected flag the canvas arrow
+        // follows.
+        let edge = &value["links"][0];
+        assert_eq!(edge["kind"], "relationship");
+        assert_eq!(edge["source"], "1:a");
+        assert_eq!(edge["target"], "2:b");
+        assert_eq!(edge["count"], 2);
+        assert_eq!(
+            edge["relations"],
+            serde_json::json!([
+                {"name": "tests:covers", "undirected": false},
+                {"name": "tests:fixtures", "undirected": true},
+            ])
+        );
+        assert_eq!(edge["undirected"], false);
+        assert_eq!(edge["texts"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn graph_json_explore_urls_carry_the_pictures_edge_source() {
+        // Arrange
+        let node = |bundle_id: i64, id: &str| crate::db::GraphNode {
+            bundle_id,
+            bundle_name: "docs".to_owned(),
+            id: id.to_owned(),
+            title: None,
+            concept_type: None,
+            path: format!("{id}.md"),
+            hops: 0,
+            degree: 1,
+        };
+        let graph = Graph {
+            nodes: vec![node(2, "runbooks/a")],
+            links: vec![],
+            relationships: vec![],
+            total: 1,
+        };
+
+        // Act & Assert: the per-node URL both Explore actions load points at
+        // the source-aware seeded endpoint with the picture's own edge
+        // source, never at the concept endpoint's both-sources default.
+        for (edges, value) in [
+            (EdgeSource::Links, "links"),
+            (EdgeSource::Relationships, "rels"),
+            (EdgeSource::Both, "both"),
+        ] {
+            let json = graph_json(None, 0, &graph, ColorBy::Bundle, edges);
+            assert_eq!(
+                json["nodes"][0]["graph_href"],
+                format!("/api/graph?seed=2%3Arunbooks%2Fa&edges={value}")
+            );
+        }
+        // The receiving endpoint parses that seed and source pair back.
+        let params = CatalogGraphParams::parse(Some("seed=2%3Arunbooks%2Fa&edges=links"));
+        assert_eq!(
+            params.seed().ok().flatten(),
+            Some((2, "runbooks/a".to_owned()))
+        );
+        assert_eq!(params.edge_source().ok(), Some(EdgeSource::Links));
+    }
+
+    #[test]
+    fn graph_js_both_explore_actions_load_the_nodes_source_aware_url() {
+        // Assert: the node card's "Explore from here" and the edge card's
+        // "Explore" buttons both carry the node's graph_href (which embeds
+        // the edge source), and the shared click handler seeds the loader
+        // with it, so exploring never silently resets the edge source.
+        let node_button = "data-explore=\"' + escapeHtml(node.graph_href)";
+        let edge_button = "data-explore=\"' + escapeHtml(to.graph_href)";
+        assert!(
+            GRAPH_JS.contains(node_button),
+            "the node card's Explore action carries graph_href"
+        );
+        assert!(
+            GRAPH_JS.contains(edge_button),
+            "the edge card's Explore action carries graph_href"
+        );
+        assert!(
+            GRAPH_JS.contains("seedUrl = explore.getAttribute('data-explore');"),
+            "the explore handler loads the action's URL as the new seed"
+        );
     }
 
     #[test]
@@ -7658,6 +7868,63 @@ mod tests {
         );
         assert_eq!(good.limit(), GRAPH_DEFAULT_NODES);
         assert!(bad.seed().is_err());
+    }
+
+    #[test]
+    fn catalog_graph_params_parse_the_edge_source_with_both_as_the_default() {
+        // Arrange & Act & Assert
+        assert_eq!(
+            CatalogGraphParams::parse(None).edge_source().ok(),
+            Some(EdgeSource::Both)
+        );
+        assert_eq!(
+            CatalogGraphParams::parse(Some("edges=")).edge_source().ok(),
+            Some(EdgeSource::Both)
+        );
+        assert_eq!(
+            CatalogGraphParams::parse(Some("edges=both"))
+                .edge_source()
+                .ok(),
+            Some(EdgeSource::Both)
+        );
+        assert_eq!(
+            CatalogGraphParams::parse(Some("edges=links"))
+                .edge_source()
+                .ok(),
+            Some(EdgeSource::Links)
+        );
+        assert_eq!(
+            CatalogGraphParams::parse(Some("edges=rels"))
+                .edge_source()
+                .ok(),
+            Some(EdgeSource::Relationships)
+        );
+        // An unknown value is rejected, not silently widened to the default.
+        assert!(
+            CatalogGraphParams::parse(Some("edges=all"))
+                .edge_source()
+                .is_err()
+        );
+        // The value percent-decodes like every other key and value.
+        assert_eq!(
+            CatalogGraphParams::parse(Some("%65dges=links"))
+                .edge_source()
+                .ok(),
+            Some(EdgeSource::Links)
+        );
+    }
+
+    #[test]
+    fn edge_source_round_trips_through_its_query_value() {
+        // Arrange & Act & Assert
+        for source in [
+            EdgeSource::Links,
+            EdgeSource::Relationships,
+            EdgeSource::Both,
+        ] {
+            let params = CatalogGraphParams::parse(Some(&format!("edges={}", source.as_str())));
+            assert_eq!(params.edge_source().ok(), Some(source));
+        }
     }
 
     #[test]
@@ -7920,17 +8187,47 @@ mod tests {
     fn graph_url_query_repeats_the_bundle_and_type_params_per_selection() {
         // Arrange & Act & Assert
         assert_eq!(
-            graph_url_query(&[2, 5], &[], &[], 300, None),
-            "bundle=2&bundle=5&limit=300"
-        );
-        assert_eq!(graph_url_query(&[], &[], &[], 100, None), "limit=100");
-        assert_eq!(
-            graph_url_query(&[5], &[], &[], 300, Some(&(2, "runbooks/a".to_owned()))),
-            "bundle=5&limit=300&seed=2%3Arunbooks%2Fa"
+            graph_url_query(&[2, 5], &[], &[], 300, None, EdgeSource::Both),
+            "bundle=2&bundle=5&limit=300&edges=both"
         );
         assert_eq!(
-            graph_url_query(&[], &["Guide".to_owned()], &["code".to_owned()], 300, None),
-            "type=Guide&type_group=code&limit=300"
+            graph_url_query(&[], &[], &[], 100, None, EdgeSource::Both),
+            "limit=100&edges=both"
+        );
+        assert_eq!(
+            graph_url_query(
+                &[5],
+                &[],
+                &[],
+                300,
+                Some(&(2, "runbooks/a".to_owned())),
+                EdgeSource::Both,
+            ),
+            "bundle=5&limit=300&edges=both&seed=2%3Arunbooks%2Fa"
+        );
+        assert_eq!(
+            graph_url_query(
+                &[],
+                &["Guide".to_owned()],
+                &["code".to_owned()],
+                300,
+                None,
+                EdgeSource::Both,
+            ),
+            "type=Guide&type_group=code&limit=300&edges=both"
+        );
+    }
+
+    #[test]
+    fn graph_url_query_round_trips_the_edge_source() {
+        // Arrange & Act & Assert: every edge source reaches the API verbatim.
+        assert_eq!(
+            graph_url_query(&[], &[], &[], 300, None, EdgeSource::Links),
+            "limit=300&edges=links"
+        );
+        assert_eq!(
+            graph_url_query(&[], &[], &[], 300, None, EdgeSource::Relationships),
+            "limit=300&edges=rels"
         );
     }
 
@@ -7952,8 +8249,13 @@ mod tests {
             bundle_ids: vec![2, 5],
             type_filters: Vec::new(),
             limit_options: vec![(300, true)],
-            graph_url: "/api/graph?bundle=2&bundle=5&limit=300".to_owned(),
-            catalog_url: "/graph?bundle=2&bundle=5&limit=300".to_owned(),
+            edge_options: vec![
+                ("both", true, "Links and relationships"),
+                ("links", false, "Document links only"),
+                ("rels", false, "Relationships only"),
+            ],
+            graph_url: "/api/graph?bundle=2&bundle=5&limit=300&edges=both".to_owned(),
+            catalog_url: "/graph?bundle=2&bundle=5&limit=300&edges=both".to_owned(),
             hops: 2,
             seed_label: None,
         };
@@ -7982,7 +8284,40 @@ mod tests {
         assert!(rendered.contains("data-bundle-clear"));
         assert!(rendered.contains("data-bundle-visible"));
         // The drawn endpoint carries every selected bundle (HTML-escaped).
-        assert!(rendered.contains("/api/graph?bundle=2&#38;bundle=5&#38;limit=300"));
+        assert!(rendered.contains("/api/graph?bundle=2&#38;bundle=5&#38;limit=300&#38;edges=both"));
+    }
+
+    #[test]
+    fn graph_page_renders_the_edge_source_select_with_the_current_choice() {
+        // Arrange
+        let page = GraphPage {
+            shell: Shell::bare("Graph"),
+            bundles: Vec::new(),
+            bundle_ids: Vec::new(),
+            type_filters: Vec::new(),
+            limit_options: vec![(300, true)],
+            edge_options: vec![
+                ("both", false, "Links and relationships"),
+                ("links", true, "Document links only"),
+                ("rels", false, "Relationships only"),
+            ],
+            graph_url: "/api/graph?limit=300&edges=links".to_owned(),
+            catalog_url: "/graph?limit=300&edges=links".to_owned(),
+            hops: 2,
+            seed_label: None,
+        };
+
+        // Act
+        let rendered = page.render().expect("the graph page renders");
+
+        // Assert: the select submits `edges` like the limit select submits
+        // `limit`, the current choice is preselected, and the generic
+        // wording carries no producer vocabulary.
+        assert!(rendered.contains("<select id=\"g-edges\" name=\"edges\">"));
+        assert!(rendered.contains("<option value=\"links\" selected>Document links only</option>"));
+        assert!(rendered.contains("<option value=\"both\" >Links and relationships</option>"));
+        assert!(rendered.contains("<option value=\"rels\" >Relationships only</option>"));
+        assert!(rendered.contains("data-graph-legend"));
     }
 
     #[test]
@@ -8005,8 +8340,9 @@ mod tests {
                 filter("Widget", "Widget", true, false),
             ],
             limit_options: vec![(300, true)],
-            graph_url: "/api/graph?type=Widget&type_group=code&limit=300".to_owned(),
-            catalog_url: "/graph?type=Widget&type_group=code&limit=300".to_owned(),
+            edge_options: vec![("both", true, "Links and relationships")],
+            graph_url: "/api/graph?type=Widget&type_group=code&limit=300&edges=both".to_owned(),
+            catalog_url: "/graph?type=Widget&type_group=code&limit=300&edges=both".to_owned(),
             hops: 2,
             seed_label: None,
         };
@@ -8034,7 +8370,11 @@ mod tests {
         assert!(rendered.contains("data-type-clear"));
         assert!(rendered.contains("aria-describedby=\"g-type-hint\""));
         // The drawn endpoint carries the selections (HTML-escaped).
-        assert!(rendered.contains("/api/graph?type=Widget&#38;type_group=code&#38;limit=300"));
+        assert!(
+            rendered.contains(
+                "/api/graph?type=Widget&#38;type_group=code&#38;limit=300&#38;edges=both"
+            )
+        );
     }
 
     #[test]
@@ -8046,8 +8386,9 @@ mod tests {
             bundle_ids: Vec::new(),
             type_filters: Vec::new(),
             limit_options: vec![(300, false)],
-            graph_url: "/api/graph?limit=300".to_owned(),
-            catalog_url: "/graph?limit=300".to_owned(),
+            edge_options: vec![("both", true, "Links and relationships")],
+            graph_url: "/api/graph?limit=300&edges=both".to_owned(),
+            catalog_url: "/graph?limit=300&edges=both".to_owned(),
             hops: 2,
             seed_label: None,
         };

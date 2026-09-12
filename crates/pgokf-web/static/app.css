@@ -315,11 +315,11 @@ html:not([data-js]) .tabs [role=tabpanel] { margin-bottom: 1.5rem; }
 [hidden] { display: none !important; }
 
 /* ---- interactive graph (concept page, links tab) ------------------------ */
-:root { --graph-h0: #2f6fed; --graph-h1: #3b9ddd; --graph-h2: #45b39d; --graph-h3: #8b93a7; --graph-link: #9aa3b2; }
+:root { --graph-h0: #2f6fed; --graph-h1: #3b9ddd; --graph-h2: #45b39d; --graph-h3: #8b93a7; --graph-link: #9aa3b2; --graph-rel: #8b5cc9; }
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) { --graph-h0: #6f9cff; --graph-h1: #5cb8f0; --graph-h2: #5ccfb5; --graph-h3: #7d8699; --graph-link: #5c677a; }
+  :root:not([data-theme="light"]) { --graph-h0: #6f9cff; --graph-h1: #5cb8f0; --graph-h2: #5ccfb5; --graph-h3: #7d8699; --graph-link: #5c677a; --graph-rel: #a58ae0; }
 }
-:root[data-theme="dark"] { --graph-h0: #6f9cff; --graph-h1: #5cb8f0; --graph-h2: #5ccfb5; --graph-h3: #7d8699; --graph-link: #5c677a; }
+:root[data-theme="dark"] { --graph-h0: #6f9cff; --graph-h1: #5cb8f0; --graph-h2: #5ccfb5; --graph-h3: #7d8699; --graph-link: #5c677a; --graph-rel: #a58ae0; }
 
 .graph3d { position: relative; height: 560px; border-radius: var(--radius); background: var(--surface-2); overflow: hidden; }
 .graph3d-canvas { position: absolute; inset: 0; }
