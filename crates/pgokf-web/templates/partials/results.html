@@ -1,12 +1,9 @@
-{% if !append %}
 <div class="results-head">
   <h1>{{ results.heading }}</h1>
   <p class="muted">{{ results.summary }}</p>
 </div>
 {% if let Some(note) = results.notice %}<p class="notice">{{ note }}</p>{% endif %}
-{% endif %}
 {% if results.hits.is_empty() %}
-  {% if !append %}
   {% if form.q.is_empty() && !results.browsing %}
   <div class="empty-state">
     <h2>Type a query to search</h2>
@@ -15,18 +12,18 @@
   {% else %}
   <div class="empty-state"><h2>No results</h2><p>Nothing matched. Try fewer words, a different mode, or clear a filter.</p></div>
   {% endif %}
-  {% endif %}
 {% else %}
 {% let hits = results.hits %}
-{% include "partials/hits.html" %}
+{% include "partials/hits-table.html" %}
 {% endif %}
-{% if let Some(next) = results.next_url %}
-<div class="more">
-  <a class="btn" href="{{ next }}" hx-get="{{ results.next_partial_url.as_deref().unwrap_or("") }}" hx-target="#pgokf-results" hx-swap="beforeend" hx-select="ol.hits > li, .more" hx-sync="this:drop" hx-disabled-elt="this">Load more</a>
-</div>
-{% else if append %}
-{# The last page still carries a (button-less) .more so the client can retire the button that fetched it. #}
-<div class="more"></div>
+{% if results.prev_url.is_some() || results.next_url.is_some() %}
+<nav class="pager" aria-label="Result pages">
+  {% if let Some(prev) = results.prev_url %}<a class="btn" href="{{ prev }}">&laquo; First page</a>{% endif %}
+  <span class="pager-status muted">{% if results.prev_url.is_some() %}a later page{% else %}page 1{% endif %}{% if results.next_url.is_some() %}, more follow{% endif %}</span>
+  {% if let Some(next) = results.next_url %}
+  <a class="btn primary" href="{{ next }}" hx-get="{{ results.next_partial_url.as_deref().unwrap_or("") }}" hx-target="#pgokf-results" hx-sync="this:drop" hx-disabled-elt="this">Next page &raquo;</a>
+  {% endif %}
+</nav>
 {% endif %}
-{% if oob && !append %}<div hx-swap-oob="true" id="pgokf-facets">{% include "partials/facets.html" %}</div>{% endif %}
-{% if oob && !append %}<div hx-swap-oob="true" id="pgokf-type-filter">{% include "partials/type-filter.html" %}</div>{% endif %}
+{% if oob %}<div hx-swap-oob="true" id="pgokf-facets">{% include "partials/facets.html" %}</div>{% endif %}
+{% if oob %}<div hx-swap-oob="true" id="pgokf-type-filter">{% include "partials/type-filter.html" %}</div>{% endif %}

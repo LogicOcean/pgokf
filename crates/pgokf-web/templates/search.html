@@ -1,7 +1,10 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="search-layout">
-  <aside class="filters">
+  {% let active_filters = form.filter_pairs().len() %}
+  <input type="checkbox" id="pgokf-filters-toggle" class="filters-state" aria-controls="pgokf-filters-panel"{% if active_filters > 0 %} checked{% endif %}>
+  <label for="pgokf-filters-toggle" class="filters-toggle">Filters{% if active_filters > 0 %} <span class="chip active">{{ active_filters }} active</span>{% endif %}</label>
+  <aside class="filters" id="pgokf-filters-panel">
     <form id="pgokf-filters" method="get" action="/search"
           hx-get="/search/results" hx-target="#pgokf-results" hx-trigger="change, submit" hx-include="#pgokf-filters">
       <input type="hidden" name="q" value="{{ form.q }}">
@@ -52,7 +55,7 @@
     <div id="pgokf-facets">{% include "partials/facets.html" %}</div>
   </aside>
   <section class="results-col">
-    <div id="pgokf-results" aria-live="polite">{% let append = false %}{% let oob = false %}{% include "partials/results.html" %}</div>
+    <div id="pgokf-results" aria-live="polite">{% let oob = false %}{% include "partials/results.html" %}</div>
   </section>
 </div>
 {% endblock %}

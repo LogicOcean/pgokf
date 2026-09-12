@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // pgokf-web client behaviour: theme toggle, keyboard focus, copy buttons,
-// tab panels, list filtering, auto-submitting selects, and "load more" list
-// merging. No framework; htmx handles the partial swaps declared in the
+// tab panels, list filtering, auto-submitting selects, and the top nav
+// strip. No framework; htmx handles the partial swaps declared in the
 // templates, and every page works without this file (see boot.js).
 (function () {
   'use strict';
@@ -519,6 +519,18 @@
     load();
   }
 
+  // ---- top nav: keep the current section in view ---------------------------
+  // The strip scrolls horizontally on narrow screens, and every navigation
+  // is a full page load that restarts it at its left edge - so the tab the
+  // user just tapped seemed to "jump to the front" (it sat off-screen right
+  // and had to be scrolled to again). Reveal the active tab inside the
+  // strip only: 'nearest' in both axes never scrolls the page itself.
+  var topnav = document.querySelector('.topnav');
+  if (topnav) {
+    var currentSection = topnav.querySelector('a[aria-current=page]');
+    if (currentSection) currentSection.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+
   // ---- tabs (ARIA tabs pattern; the hash names the tab as #tab-<name>) ----
   var TAB_PREFIX = 'tab-';
   function initTabs(container) {
@@ -636,28 +648,5 @@
         if (needle !== '') group.open = true;
       });
     });
-  });
-
-  // ---- "load more": merge appended hits into the existing list ----------
-  document.body.addEventListener('htmx:afterSwap', function (event) {
-    var results = document.getElementById('pgokf-results');
-    if (!results || event.target !== results) return;
-    var lists = results.querySelectorAll('ol.hits');
-    if (lists.length > 1) {
-      var first = lists[0];
-      for (var i = 1; i < lists.length; i++) {
-        while (lists[i].firstChild) first.appendChild(lists[i].firstChild);
-        lists[i].remove();
-      }
-    }
-    // Every appended page carries a .more (empty on the last page), so the
-    // newest one always replaces the button that fetched it.
-    var more = results.querySelectorAll('.more');
-    for (var j = 0; j < more.length - 1; j++) more[j].remove();
-    var last = more[more.length - 1];
-    if (last && !last.firstElementChild) last.remove();
-    // Orphan <li> elements appended by hx-select land after the list; fold them in.
-    var strays = Array.prototype.filter.call(results.children, function (el) { return el.tagName === 'LI'; });
-    if (strays.length && lists[0]) strays.forEach(function (li) { lists[0].appendChild(li); });
   });
 })();

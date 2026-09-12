@@ -1,0 +1,36 @@
+<div class="table-wrap hits-wrap">
+<table class="table hits-table">
+  <thead>
+    <tr>
+      <th class="col-title" scope="col">Title</th>
+      <th class="col-type" scope="col">Type</th>
+      <th class="col-bundle" scope="col">Bundle</th>
+      <th class="col-path" scope="col">Path</th>
+      <th class="col-rank num" scope="col">Rank</th>
+      <th class="col-tags" scope="col">Tags</th>
+      <th class="col-snippet" scope="col">Snippet</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for h in hits %}
+    <tr class="hit">
+      <td class="col-title">
+        <a class="hit-title" href="{{ h.href }}">{{ h.title.as_deref().unwrap_or(h.concept_id.as_str()) }}</a>
+        <details class="hit-detail">
+          <summary>Details</summary>
+          <p class="hit-meta"><a href="/bundles/{{ h.bundle_id }}">{{ h.bundle_name }}</a> <span class="muted">/ {{ h.path }}</span>{% if let Some(r) = h.rank_display %} <span class="rank" title="rank">{{ r }}</span>{% endif %}</p>
+          {% if !h.tags.is_empty() %}<p class="tags">{% for t in h.tags %}<span class="tag">{{ t }}</span>{% endfor %}</p>{% endif %}
+          {% if let Some(s) = h.headline_html %}<p class="hit-snippet">{{ s|safe }}</p>{% endif %}
+        </details>
+      </td>
+      <td class="col-type">{% if let Some(t) = h.concept_type %}<span class="pill type">{{ t }}</span>{% endif %}</td>
+      <td class="col-bundle"><a href="/bundles/{{ h.bundle_id }}">{{ h.bundle_name }}</a></td>
+      <td class="col-path"><span class="path" title="{{ h.path }}">{{ h.path }}</span></td>
+      <td class="col-rank num">{% if let Some(r) = h.rank_display %}<span class="rank" title="rank">{{ r }}</span>{% else %}<span class="muted" title="Browse listings are not ranked">—</span>{% endif %}</td>
+      <td class="col-tags">{% for t in h.tags %}<span class="tag">{{ t }}</span>{% endfor %}</td>
+      <td class="col-snippet">{% if let Some(s) = h.headline_html %}<p class="hit-snippet">{{ s|safe }}</p>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>

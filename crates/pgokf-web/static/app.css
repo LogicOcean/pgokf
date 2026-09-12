@@ -235,8 +235,25 @@ input[type=radio], input[type=checkbox] { accent-color: var(--accent); }
 .hit-meta { font-size: .85em; color: var(--muted); margin: .15rem 0 .4rem; }
 .hit-snippet { margin: 0; color: var(--text); }
 .hit-snippet b { background: color-mix(in srgb, var(--accent) 22%, transparent); color: inherit; border-radius: 3px; padding: 0 .15em; font-weight: 600; }
-.more { text-align: center; padding: 1rem; }
-.htmx-request .more .btn { opacity: .6; }
+
+/* Search results as a table: every column on a wide screen, the lower-
+   priority ones fold away on a phone (their values stay reachable through
+   the per-row Details disclosure in the Title cell). */
+.hits-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
+.hits-table td { vertical-align: middle; }
+.hits-table .col-title { min-width: 12rem; }
+.hits-table .hit-title { font-size: 1em; }
+.hits-table .hit .rank { margin-left: 0; }
+.hits-table .col-path .path { display: inline-block; max-width: 26rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+.hits-table .col-snippet { max-width: 34rem; }
+.hits-table .col-snippet .hit-snippet { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.hits-table .hit-detail { display: none; }
+.pager-status { margin-right: auto; }
+
+/* On a phone the filters collapse behind a toggle bar above the results;
+   the checkbox is the state (server ticks it when any filter is active),
+   so this works without scripting. The box itself stays focusable. */
+.filters-state, .filters-toggle { display: none; }
 
 /* ---- concept page ---- */
 .tabs .tablist { display: flex; gap: .25rem; border-bottom: 1px solid var(--border); margin-bottom: 1rem; overflow-x: auto; }
@@ -264,8 +281,24 @@ svg.graph a:hover circle { stroke-width: 3; }
   .topbar { flex-wrap: wrap; position: static; }
   .topsearch { order: 3; width: 100%; max-width: none; }
   .search-layout, .two-col, .graph-layout { grid-template-columns: 1fr; }
-  /* Results first on a phone; the filter panel follows them. */
-  .filters { position: static; order: 2; }
+  /* Order on a phone: the filter toggle bar, its collapsible panel, then
+     the results table. */
+  .filters-toggle { order: 1; display: flex; align-items: center; justify-content: space-between; gap: .5rem; padding: .55rem .9rem; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); font-weight: 600; cursor: pointer; }
+  .filters-toggle::after { content: "\25B8"; color: var(--muted); }
+  .filters-state { display: block; position: absolute; width: 1px; height: 1px; opacity: 0; margin: 0; }
+  .filters-state:checked ~ .filters-toggle::after { content: "\25BE"; }
+  .filters-state:focus-visible ~ .filters-toggle { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .filters { position: static; order: 2; display: none; }
+  .filters-state:checked ~ .filters { display: block; }
+  .results-col { order: 3; min-width: 0; }
+  /* The results stay a table on a phone; the lower-priority columns hide
+     (the per-row Details disclosure in Title keeps their values). */
+  .table.hits-table { min-width: 0; }
+  .hits-table .col-bundle, .hits-table .col-rank, .hits-table .col-tags, .hits-table .col-snippet { display: none; }
+  .hits-table .hit-detail { display: block; margin-top: .25rem; font-size: .85em; }
+  .hits-table .hit-detail > summary { cursor: pointer; font-weight: 600; color: var(--muted); }
+  .hits-table .hit-detail .hit-meta { margin: .3rem 0 .2rem; }
+  .hits-table .hit-detail .tags { margin: 0 0 .2rem; }
   .card.span2 { grid-column: auto; }
   .hero { flex-direction: column; }
   .concept-hero .hero-status { flex-direction: row; align-items: center; min-width: 0; }
@@ -306,7 +339,12 @@ html:not([data-js]) .tabs [role=tabpanel] { margin-bottom: 1.5rem; }
 /* ---- htmx (its own indicator stylesheet is disabled for the CSP) -------- */
 .htmx-indicator { opacity: 0; transition: opacity .2s ease-in; }
 .htmx-request .htmx-indicator, .htmx-request.htmx-indicator { opacity: 1; }
-.more .btn.htmx-request { opacity: .6; pointer-events: none; }
+.pager .btn.htmx-request { opacity: .6; pointer-events: none; }
+
+/* Very narrow phones: the Path column folds too (Details still has it). */
+@media (max-width: 560px) {
+  .hits-table .col-path { display: none; }
+}
 
 /* A body link the catalog knows is dead: readable, not clickable. */
 .prose .unresolved { border-bottom: 1px dashed var(--warn); cursor: help; }

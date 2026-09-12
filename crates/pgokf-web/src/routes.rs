@@ -817,6 +817,10 @@ pub(crate) struct ResultsView {
     pub notice: Option<String>,
     pub next_url: Option<String>,
     pub next_partial_url: Option<String>,
+    /// Back to the first page when this is a continued one. Keyset cursors
+    /// only move forward, so this (plus the browser's Back) is the honest
+    /// "previous".
+    pub prev_url: Option<String>,
     /// `true` when the list is a filter-only browse rather than a ranked search.
     pub browsing: bool,
     /// `true` when the requested mode could not be served and lexical
@@ -833,6 +837,7 @@ impl ResultsView {
             notice: None,
             next_url: None,
             next_partial_url: None,
+            prev_url: None,
             browsing: false,
             degraded: false,
         }
@@ -864,6 +869,7 @@ pub(crate) struct FacetsView {
 }
 
 impl FacetsView {
+    #[cfg(test)]
     fn empty() -> Self {
         Self {
             types: Vec::new(),
@@ -917,6 +923,7 @@ pub(crate) struct TypeSelects {
 }
 
 impl TypeSelects {
+    #[cfg(test)]
     fn empty() -> Self {
         Self {
             groups: Vec::new(),
@@ -1297,12 +1304,10 @@ struct SearchPage {
 struct ResultsPartial {
     form: SearchForm,
     facets: FacetsView,
-    /// Refreshed out of band with the facets on non-append responses, so
-    /// the type controls track the catalog scope of the current filters.
+    /// Refreshed out of band with the facets, so the type controls track
+    /// the catalog scope of the current filters.
     type_selects: TypeSelects,
     results: ResultsView,
-    /// `true` for a "load more" request: only the extra rows are wanted.
-    append: bool,
     /// The partial also refreshes the sidebar facets out of band; the full
     /// page renders them in place instead.
     oob: bool,
@@ -1962,9 +1967,6 @@ pub(crate) struct SearchParams {
     after_bundle: String,
     #[serde(default)]
     after_id: String,
-    /// Set by "load more": render only the additional rows.
-    #[serde(default)]
-    append: String,
 }
 
 /// The normalized form state echoed back into the filters.
@@ -2143,10 +2145,6 @@ impl SearchParams {
         };
         Ok((form, query))
     }
-
-    fn is_append(&self) -> bool {
-        matches!(self.append.as_str(), "1" | "true")
-    }
 }
 
 fn search_url(base: &str, form: &SearchForm, cursor: Option<&Cursor>) -> String {
@@ -2303,7 +2301,11 @@ async fn run_search(
             .map(|c| search_url("/search", form, Some(c))),
         next_partial_url: cursor
             .as_ref()
-            .map(|c| format!("{}&append=1", search_url("/search/results", form, Some(c)))),
+            .map(|c| search_url("/search/results", form, Some(c))),
+        prev_url: query
+            .after
+            .is_some()
+            .then(|| search_url("/search", form, None)),
         browsing: false,
         degraded,
     })
@@ -2379,7 +2381,8 @@ async fn browse(
             .map(|c| search_url("/search", form, Some(c))),
         next_partial_url: cursor
             .as_ref()
-            .map(|c| format!("{}&append=1", search_url("/search/results", form, Some(c)))),
+            .map(|c| search_url("/search/results", form, Some(c))),
+        prev_url: after.is_some().then(|| search_url("/search", form, None)),
         browsing: true,
         degraded: false,
     })
@@ -2476,35 +2479,29 @@ async fn search_page(
     })
 }
 
-/// The htmx partial: the result list (with its heading and, unless
-/// appending, the refreshed facets swapped out of band). The pushed URL is
-/// the full search URL, so reload, back, and share keep every filter.
+/// The htmx partial: the result list (with its heading and the refreshed
+/// facets swapped out of band). The pushed URL is the full search URL —
+/// cursor included — so reload, back, and share keep every filter and the
+/// page they were on.
 async fn search_results(
     State(app): State<Shared>,
     Query(params): Query<SearchParams>,
 ) -> PageResult {
     let (form, mut query) = params.normalize()?;
     resolve_type_group(&app, &mut query).await?;
-    let append = params.is_append();
     let names = bundle_names(&app).await?;
     let results = run_search(&app, &form, &query, &names).await?;
-    let (facets, type_selects) = if append {
-        (FacetsView::empty(), TypeSelects::empty())
-    } else {
-        let facets = load_facets(&app, &form, &query, &names).await?;
-        let selects = type_selects(&facets.types, &form.type_group, &form.concept_type);
-        (facets, selects)
-    };
-    let push_url = search_url("/search", &form, None);
+    let facets = load_facets(&app, &form, &query, &names).await?;
+    let type_selects = type_selects(&facets.types, &form.type_group, &form.concept_type);
+    let push_url = search_url("/search", &form, query.after.as_ref());
     let mut response = html(&ResultsPartial {
         form,
         facets,
         type_selects,
         results,
-        append,
         oob: true,
     })?;
-    if !append && let Ok(value) = HeaderValue::from_str(&push_url) {
+    if let Ok(value) = HeaderValue::from_str(&push_url) {
         response.headers_mut().insert("HX-Push-Url", value);
     }
     Ok(response)
@@ -7201,11 +7198,11 @@ mod tests {
 
     #[test]
     fn results_partial_refreshes_the_type_controls_out_of_band() {
-        // Arrange: a non-append partial response with a group selected.
+        // Arrange: a partial response with a group selected.
         let mut form = form("", "", "");
         form.type_group = "code".to_owned();
-        let partial = |append: bool| ResultsPartial {
-            form: form.clone(),
+        let partial = ResultsPartial {
+            form,
             facets: FacetsView::empty(),
             type_selects: type_selects(
                 &[type_facet("Code Entity", 12_006), type_facet("Guide", 10)],
@@ -7213,22 +7210,181 @@ mod tests {
                 "",
             ),
             results: ResultsView::empty("Search", "No matches."),
-            append,
             oob: true,
         };
 
         // Act
-        let refreshed = partial(false).render().expect("the partial renders");
-        let appended = partial(true).render().expect("the append partial renders");
+        let refreshed = partial.render().expect("the partial renders");
 
         // Assert: the type controls swap out of band with the facets, the
-        // selected group preserved; a load-more response refreshes nothing.
+        // selected group preserved.
         assert!(
             refreshed.contains("<div hx-swap-oob=\"true\" id=\"pgokf-type-filter\">"),
             "the type filter swaps out of band"
         );
         assert!(refreshed.contains("<option value=\"code\" selected>Code (12006)</option>"));
-        assert!(!appended.contains("hx-swap-oob"));
+    }
+
+    fn hit_view(title: Option<&str>, ranked: bool) -> HitView {
+        HitView {
+            bundle_id: 2,
+            bundle_name: "core".to_owned(),
+            concept_id: "runbooks/failover".to_owned(),
+            path: "runbooks/failover.md".to_owned(),
+            title: title.map(str::to_owned),
+            concept_type: Some("Runbook".to_owned()),
+            rank: ranked.then_some(0.25),
+            rank_display: ranked.then(|| "0.250".to_owned()),
+            headline_html: Some("a <b>failover</b> runbook".to_owned()),
+            tags: vec!["postgresql".to_owned()],
+            href: "/concepts/2/runbooks%2Ffailover".to_owned(),
+        }
+    }
+
+    #[test]
+    fn results_partial_renders_hits_as_a_table_with_a_pager() {
+        // Arrange: one ranked hit and one browsed (unranked) row, on a
+        // continued page that also has a next page.
+        let results = ResultsView {
+            hits: vec![hit_view(Some("Failover runbook"), true), hit_view(None, false)],
+            heading: "Results for \u{201c}failover\u{201d}".to_owned(),
+            summary: "2 more.".to_owned(),
+            notice: None,
+            next_url: Some(
+                "/search?q=failover&after_rank=0.25&after_bundle=2&after_id=runbooks%2Ffailover"
+                    .to_owned(),
+            ),
+            next_partial_url: Some(
+                "/search/results?q=failover&after_rank=0.25&after_bundle=2&after_id=runbooks%2Ffailover"
+                    .to_owned(),
+            ),
+            prev_url: Some("/search?q=failover".to_owned()),
+            browsing: false,
+            degraded: false,
+        };
+        let partial = ResultsPartial {
+            form: form("failover", "", ""),
+            facets: FacetsView::empty(),
+            type_selects: TypeSelects::empty(),
+            results,
+            oob: true,
+        };
+
+        // Act
+        let rendered = partial.render().expect("the partial renders");
+
+        // Assert: a real table - one header cell per column, one row per hit.
+        assert!(rendered.contains("<table class=\"table hits-table\">"));
+        for column in [
+            "<th class=\"col-title\" scope=\"col\">Title</th>",
+            "<th class=\"col-type\" scope=\"col\">Type</th>",
+            "<th class=\"col-bundle\" scope=\"col\">Bundle</th>",
+            "<th class=\"col-path\" scope=\"col\">Path</th>",
+            "<th class=\"col-rank num\" scope=\"col\">Rank</th>",
+            "<th class=\"col-tags\" scope=\"col\">Tags</th>",
+            "<th class=\"col-snippet\" scope=\"col\">Snippet</th>",
+        ] {
+            assert!(rendered.contains(column), "missing column {column}");
+        }
+        assert!(rendered.matches("<tr class=\"hit\">").count() == 2);
+        assert!(rendered.contains(
+            "<a class=\"hit-title\" href=\"/concepts/2/runbooks%2Ffailover\">Failover runbook</a>"
+        ));
+        // The untitled hit falls back to its id, the unranked row shows no number.
+        assert!(rendered.contains(">runbooks/failover</a>"));
+        assert!(rendered.contains("title=\"Browse listings are not ranked\">—</span>"));
+        assert!(
+            rendered
+                .contains("<td class=\"col-type\"><span class=\"pill type\">Runbook</span></td>")
+        );
+        assert!(rendered.contains("<a href=\"/bundles/2\">core</a>"));
+        assert!(rendered.contains("title=\"runbooks/failover.md\">runbooks/failover.md</span>"));
+        assert!(rendered.contains("<span class=\"tag\">postgresql</span>"));
+        assert!(rendered.contains("a <b>failover</b> runbook"));
+        // Each row carries the collapsed Details disclosure a phone shows
+        // in place of the hidden columns.
+        assert!(rendered.matches("<details class=\"hit-detail\">").count() == 2);
+
+        // Assert: the pager is keyset-honest - a First-page link (no
+        // fabricated numbers), a Next link that htmx-swaps the results
+        // container with the partial URL, and no "load more" append.
+        assert!(rendered.contains("<nav class=\"pager\" aria-label=\"Result pages\">"));
+        assert!(
+            rendered
+                .contains("<a class=\"btn\" href=\"/search?q=failover\">&laquo; First page</a>")
+        );
+        assert!(rendered.contains("a later page, more follow"));
+        assert!(rendered.contains("hx-get=\"/search/results?q=failover&#38;after_rank=0.25"));
+        assert!(rendered.contains("hx-target=\"#pgokf-results\""));
+        assert!(!rendered.contains("Load more"));
+        assert!(!rendered.contains("beforeend"));
+    }
+
+    #[test]
+    fn results_partial_hides_the_pager_on_a_single_first_page() {
+        // Arrange: a first page with nothing after it.
+        let partial = ResultsPartial {
+            form: form("failover", "", ""),
+            facets: FacetsView::empty(),
+            type_selects: TypeSelects::empty(),
+            results: ResultsView {
+                hits: vec![hit_view(Some("Failover runbook"), true)],
+                next_url: None,
+                next_partial_url: None,
+                prev_url: None,
+                ..ResultsView::empty("Results", "1 match, ranked by lexical relevance.")
+            },
+            oob: true,
+        };
+
+        // Act
+        let rendered = partial.render().expect("the partial renders");
+
+        // Assert: the table renders but no pager chrome appears.
+        assert!(rendered.contains("<table class=\"table hits-table\">"));
+        assert!(!rendered.contains("class=\"pager\""));
+    }
+
+    #[test]
+    fn search_page_renders_the_mobile_filter_toggle_with_the_active_count() {
+        // Arrange: one page with a non-default filter, one without.
+        let page_with = |form: SearchForm| SearchPage {
+            shell: Shell {
+                nav: "search".to_owned(),
+                ..Shell::bare("Search")
+            },
+            form,
+            bundles: Vec::new(),
+            facets: FacetsView::empty(),
+            type_selects: TypeSelects::empty(),
+            results: ResultsView::empty("Search", "Type a query, or pick a filter to browse."),
+            semantic_available: false,
+            backend_label: "native".to_owned(),
+        };
+
+        // Act
+        let filtered = page_with(form("failover", "", "2"))
+            .render()
+            .expect("the filtered page renders");
+        let plain = page_with(form("", "", ""))
+            .render()
+            .expect("the plain page renders");
+
+        // Assert: the toggle is checked with a count chip when a filter is
+        // active, plain otherwise; the panel keeps its hook for the label.
+        assert!(filtered.contains(
+            "id=\"pgokf-filters-toggle\" class=\"filters-state\" aria-controls=\"pgokf-filters-panel\" checked"
+        ));
+        assert!(filtered.contains("<span class=\"chip active\">1 active</span>"));
+        assert!(filtered.contains("id=\"pgokf-filters-panel\""));
+        assert!(plain.contains("class=\"filters-state\""));
+        assert!(!plain.contains("checked"));
+        assert!(!plain.contains("active</span>"));
+
+        // Assert: the current top nav tab carries aria-current (the script
+        // scrolls it into the strip's view after each load).
+        assert!(filtered.contains("href=\"/search\" class=\"active\" aria-current=\"page\""));
+        assert_eq!(filtered.matches("aria-current=\"page\"").count(), 1);
     }
 
     #[test]
