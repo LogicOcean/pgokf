@@ -407,8 +407,8 @@ pub(crate) struct Neighbor {
 
 /// A node of a graph picture: a concept with what the picture labels it by.
 /// `hops` is the distance from the seed in a neighborhood graph and 0 in the
-/// catalog-wide graph; `degree` is the number of resolved links it takes
-/// part in.
+/// catalog-wide graph; `degree` is the number of drawn edges it takes part
+/// in (per the selected [`EdgeSource`]).
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct GraphNode {
     pub bundle_id: i64,
@@ -419,6 +419,34 @@ pub(crate) struct GraphNode {
     pub path: String,
     pub hops: i32,
     pub degree: i64,
+}
+
+/// Which edges a graph picture draws: authored Markdown links, typed
+/// relationships, or both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EdgeSource {
+    Links,
+    Relationships,
+    Both,
+}
+
+impl EdgeSource {
+    /// The query-string value (`edges=<value>`).
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Links => "links",
+            Self::Relationships => "rels",
+            Self::Both => "both",
+        }
+    }
+
+    pub(crate) fn includes_links(self) -> bool {
+        matches!(self, Self::Links | Self::Both)
+    }
+
+    pub(crate) fn includes_relationships(self) -> bool {
+        matches!(self, Self::Relationships | Self::Both)
+    }
 }
 
 /// A directed edge between two graph nodes of one bundle, folded over
@@ -433,11 +461,27 @@ pub(crate) struct GraphLink {
     pub texts: Vec<String>,
 }
 
+/// A typed edge between two graph nodes, possibly across bundles, folded
+/// over parallel relationship rows and keeping the distinct relation types.
+/// `undirected` is set only when every folded row is undirected, so the
+/// client draws an arrow whenever at least one directed row remains.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct GraphRelationship {
+    pub source_bundle_id: i64,
+    pub source: String,
+    pub target_bundle_id: i64,
+    pub target: String,
+    pub count: i64,
+    pub relations: Vec<String>,
+    pub undirected: bool,
+}
+
 /// A graph picture as nodes and edges.
 #[derive(Debug, Clone, Default, Serialize)]
 pub(crate) struct Graph {
     pub nodes: Vec<GraphNode>,
     pub links: Vec<GraphLink>,
+    pub relationships: Vec<GraphRelationship>,
     /// Visible concepts that could have been drawn (the catalog-wide graph
     /// shows the best-connected `limit` of them).
     pub total: i64,
@@ -1741,13 +1785,15 @@ impl Db {
     }
 
     /// The neighborhood graph of one concept: the seed plus every concept
-    /// `pgokf.concept_neighbors()` reaches within `max_hops`, and the
-    /// resolved links among that set. Empty when the seed is not visible.
+    /// `pgokf.concept_neighbors()` reaches within `max_hops`, and the edges
+    /// the selected sources draw among that set (the node set itself is the
+    /// link neighborhood either way). Empty when the seed is not visible.
     pub(crate) async fn graph(
         &self,
         bundle_id: i64,
         concept_id: &str,
         max_hops: i32,
+        edges: EdgeSource,
     ) -> Result<Graph> {
         let sql = format!(
             "WITH n AS (
@@ -1770,26 +1816,23 @@ impl Db {
             .query_map(&sql, &[&concept_id, &max_hops, &bundle_id], graph_node)
             .await?;
         let total = i64::try_from(nodes.len()).unwrap_or(i64::MAX);
-        let links = self.links_among(&nodes).await?;
-        Ok(Graph {
-            nodes,
-            links,
-            total,
-        })
+        self.edges_among(nodes, total, edges).await
     }
 
     /// The catalog-wide graph: the `limit` best-connected visible concepts
     /// (of the selected bundles and concept types, or all when either list
-    /// is empty) and the resolved links among them. Degrees come from one
-    /// aggregate over the links, not a probe per concept.
+    /// is empty) and the edges the selected sources draw among them. The
+    /// degree that ranks and cuts the nodes counts exactly the edges the
+    /// selected sources draw, from one aggregate, not a probe per concept.
     pub(crate) async fn catalog_graph(
         &self,
         bundle_ids: &[i64],
         types: &[String],
         limit: i64,
+        edges: EdgeSource,
     ) -> Result<Graph> {
         let rows = self
-            .query(&catalog_graph_sql(), &[&bundle_ids, &limit, &types])
+            .query(&catalog_graph_sql(edges), &[&bundle_ids, &limit, &types])
             .await?;
         let total = rows
             .first()
@@ -1797,10 +1840,30 @@ impl Db {
             .transpose()?
             .unwrap_or(0);
         let nodes = rows.iter().map(graph_node).collect::<Result<Vec<_>>>()?;
-        let links = self.links_among(&nodes).await?;
+        self.edges_among(nodes, total, edges).await
+    }
+
+    /// The drawn edges of the selected sources among `nodes`.
+    async fn edges_among(
+        &self,
+        nodes: Vec<GraphNode>,
+        total: i64,
+        edges: EdgeSource,
+    ) -> Result<Graph> {
+        let links = if edges.includes_links() {
+            self.links_among(&nodes).await?
+        } else {
+            Vec::new()
+        };
+        let relationships = if edges.includes_relationships() {
+            self.relationships_among(&nodes).await?
+        } else {
+            Vec::new()
+        };
         Ok(Graph {
             nodes,
             links,
+            relationships,
             total,
         })
     }
@@ -1846,6 +1909,41 @@ impl Db {
             },
         )
         .await
+    }
+
+    /// The resolved typed relationships whose both ends are in `nodes`
+    /// (self-pairs excluded, as with links), folded per endpoint pair. Reads
+    /// `pgokf.current_relationships` - the reader-granted projection, so
+    /// active-publication filtering, tenant scoping, and target-bundle
+    /// visibility apply exactly as the extension defines them; the raw
+    /// tables stay untouched, like every other reader query here.
+    async fn relationships_among(&self, nodes: &[GraphNode]) -> Result<Vec<GraphRelationship>> {
+        if nodes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let bundles: Vec<i64> = nodes.iter().map(|n| n.bundle_id).collect();
+        let ids: Vec<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
+        self.query_map(RELATIONSHIPS_AMONG_SQL, &[&bundles, &ids], |r| {
+            // A resolved row always carries both target halves (the table
+            // CHECK guarantees it); the options are defensive, not load-bearing.
+            let Some(target_bundle_id) = col::<Option<i64>>(r, 2)? else {
+                return Ok(None);
+            };
+            let Some(target) = col::<Option<String>>(r, 3)? else {
+                return Ok(None);
+            };
+            Ok(Some(GraphRelationship {
+                source_bundle_id: col(r, 0)?,
+                source: col(r, 1)?,
+                target_bundle_id,
+                target,
+                count: col(r, 4)?,
+                relations: col::<Option<Vec<String>>>(r, 5)?.unwrap_or_default(),
+                undirected: col::<Option<bool>>(r, 6)?.unwrap_or(false),
+            }))
+        })
+        .await
+        .map(|rows| rows.into_iter().flatten().collect())
     }
 
     /// `pgokf.find_similar(concept_id, bundle_id, limit)`.
@@ -2197,17 +2295,45 @@ fn graph_node(r: &Row) -> Result<GraphNode> {
 /// and `$3` the selected concept types as `text[]`; an empty array means
 /// every bundle (or type), so the membership test collapses to true. The
 /// type constraint lives in the `visible` CTE only: degree still counts
-/// every resolved link, matching how an unfiltered graph ranks a node.
-fn catalog_graph_sql() -> String {
-    format!(
-        "WITH ends AS (
-             SELECT l.bundle_id, l.source_id AS id FROM pgokf.links l
+/// every drawn edge, matching how an unfiltered graph ranks a node.
+///
+/// The `ends` CTE counts exactly the edges the selected [`EdgeSource`]
+/// draws: `Links` reproduces the pre-relationships graph byte for byte,
+/// `Relationships` ranks by typed edges alone, and `Both` sums the two -
+/// "best connected" always means best connected in the picture being drawn.
+/// Relationship ends come from `pgokf.current_relationships`, the
+/// reader-granted projection, so the degree never counts an edge the same
+/// session could not draw.
+fn catalog_graph_sql(edges: EdgeSource) -> String {
+    let link_ends = "SELECT l.bundle_id, l.source_id AS id FROM pgokf.links l
               WHERE l.resolved AND l.source_id <> l.target_id
                 AND (cardinality($1::bigint[]) = 0 OR l.bundle_id = ANY($1))
              UNION ALL
              SELECT l.bundle_id, l.target_id FROM pgokf.links l
               WHERE l.resolved AND l.source_id <> l.target_id
-                AND (cardinality($1::bigint[]) = 0 OR l.bundle_id = ANY($1))
+                AND (cardinality($1::bigint[]) = 0 OR l.bundle_id = ANY($1))";
+    let relationship_ends =
+        "SELECT r.source_bundle_id, r.source_concept_id FROM pgokf.current_relationships r
+              WHERE NOT r.unresolved
+                AND NOT (r.source_bundle_id = r.target_bundle_id
+                         AND r.source_concept_id = r.target_concept_id)
+                AND (cardinality($1::bigint[]) = 0 OR r.source_bundle_id = ANY($1))
+             UNION ALL
+             SELECT r.target_bundle_id, r.target_concept_id FROM pgokf.current_relationships r
+              WHERE NOT r.unresolved
+                AND NOT (r.source_bundle_id = r.target_bundle_id
+                         AND r.source_concept_id = r.target_concept_id)
+                AND (cardinality($1::bigint[]) = 0 OR r.target_bundle_id = ANY($1))";
+    let ends = match edges {
+        EdgeSource::Links => link_ends.to_owned(),
+        EdgeSource::Relationships => relationship_ends.to_owned(),
+        EdgeSource::Both => {
+            format!("{link_ends}\n             UNION ALL\n             {relationship_ends}")
+        }
+    };
+    format!(
+        "WITH ends AS (
+             {ends}
          ), deg AS (
              SELECT bundle_id, id, count(*)::bigint AS degree FROM ends GROUP BY 1, 2
          ), visible AS (
@@ -2227,6 +2353,28 @@ fn catalog_graph_sql() -> String {
         display_name("b")
     )
 }
+
+/// `relationships_among`'s query: the resolved typed edges of
+/// `pgokf.current_relationships` whose both ends are drawn nodes (`$1` the
+/// node bundle ids, `$2` the concept ids, pairwise). Self-pairs are
+/// excluded (a self-edge would render as nothing, matching the links side);
+/// unresolved and external rows never join a drawn node by construction and
+/// are excluded explicitly for clarity. The fold keeps the distinct
+/// relation types and reports an edge as undirected only when every folded
+/// row is.
+const RELATIONSHIPS_AMONG_SQL: &str = "
+    WITH n AS (SELECT * FROM ROWS FROM (unnest($1::bigint[]), unnest($2::text[])) AS t(bundle_id, id))
+    SELECT r.source_bundle_id, r.source_concept_id, r.target_bundle_id, r.target_concept_id,
+           count(*)::bigint,
+           array_agg(DISTINCT r.relation_type ORDER BY r.relation_type),
+           bool_and(r.direction = 'undirected')
+    FROM pgokf.current_relationships r
+    JOIN n s ON s.bundle_id = r.source_bundle_id AND s.id = r.source_concept_id
+    JOIN n t ON t.bundle_id = r.target_bundle_id AND t.id = r.target_concept_id
+    WHERE NOT r.unresolved
+      AND NOT (r.source_bundle_id = r.target_bundle_id
+               AND r.source_concept_id = r.target_concept_id)
+    GROUP BY 1, 2, 3, 4 ORDER BY 1, 2, 3, 4";
 
 /// The single statement of a multi-type search: one bounded
 /// `concept_search` call per exact type (`$4` through `$3 + type_count`),
@@ -2450,7 +2598,7 @@ mod tests {
     #[test]
     fn catalog_graph_sql_filters_by_membership_with_empty_meaning_all() {
         // Arrange & Act
-        let sql = catalog_graph_sql();
+        let sql = catalog_graph_sql(EdgeSource::Links);
 
         // Assert: the ends CTE (twice) and the visible CTE all use the same
         // membership test, and no nullable-scalar form survives.
@@ -2463,12 +2611,76 @@ mod tests {
     #[test]
     fn catalog_graph_sql_filters_types_with_the_same_empty_means_all_shape() {
         // Arrange & Act
-        let sql = catalog_graph_sql();
+        let sql = catalog_graph_sql(EdgeSource::Links);
 
         // Assert: the type constraint is a `text[]` membership test in the
         // visible CTE, with the same cardinality guard as the bundle one.
         assert_eq!(sql.matches("cardinality($3::text[]) = 0").count(), 1);
         assert!(sql.contains("AND (cardinality($3::text[]) = 0 OR c.type = ANY($3))"));
+    }
+
+    #[test]
+    fn catalog_graph_sql_counts_degree_over_exactly_the_drawn_edge_sources() {
+        // Arrange & Act
+        let links = catalog_graph_sql(EdgeSource::Links);
+        let relationships = catalog_graph_sql(EdgeSource::Relationships);
+        let both = catalog_graph_sql(EdgeSource::Both);
+
+        // Assert: the degree's ends CTE counts link ends, relationship
+        // ends, or the sum of the two - the `links` variant stays the
+        // pre-relationships shape (no relationship table in sight), the
+        // `rels` variant never touches pgokf.links, and `both` unions the
+        // two (four end selects against the links variant's two).
+        assert!(!links.contains("pgokf.current_relationships"));
+        assert!(links.contains("FROM pgokf.links l"));
+        assert!(!relationships.contains("pgokf.links"));
+        assert_eq!(
+            relationships
+                .matches("FROM pgokf.current_relationships r")
+                .count(),
+            2
+        );
+        assert!(both.contains("FROM pgokf.links l"));
+        assert_eq!(
+            both.matches("FROM pgokf.current_relationships r").count(),
+            2
+        );
+        assert_eq!(both.matches("UNION ALL").count(), 3);
+        // Every ends branch carries the same empty-means-all bundle guard.
+        assert_eq!(
+            relationships
+                .matches("cardinality($1::bigint[]) = 0")
+                .count(),
+            3
+        );
+        assert_eq!(both.matches("cardinality($1::bigint[]) = 0").count(), 5);
+    }
+
+    #[test]
+    fn relationships_among_sql_reads_the_reader_projection_with_both_ends_drawn() {
+        // Arrange & Act
+        let sql = RELATIONSHIPS_AMONG_SQL;
+
+        // Assert: the source is the reader-granted view (active
+        // publications, tenant scope, and target visibility apply inline),
+        // never the raw tables no API role holds a grant on; both endpoints
+        // join the drawn node set; unresolved rows and self-pairs stay out;
+        // the fold keeps distinct relation types and marks an edge
+        // undirected only when every folded row is.
+        assert!(sql.contains("FROM pgokf.current_relationships r"));
+        assert!(!sql.contains("pgokf.relationship "));
+        assert!(!sql.contains("relationship_publication"));
+        assert!(sql.contains(
+            "JOIN n s ON s.bundle_id = r.source_bundle_id AND s.id = r.source_concept_id"
+        ));
+        assert!(sql.contains(
+            "JOIN n t ON t.bundle_id = r.target_bundle_id AND t.id = r.target_concept_id"
+        ));
+        assert!(sql.contains("NOT r.unresolved"));
+        assert!(sql.contains("NOT (r.source_bundle_id = r.target_bundle_id"));
+        assert!(sql.contains("array_agg(DISTINCT r.relation_type ORDER BY r.relation_type)"));
+        assert!(sql.contains("bool_and(r.direction = 'undirected')"));
+        assert!(sql.contains("GROUP BY 1, 2, 3, 4"));
     }
 
     #[test]

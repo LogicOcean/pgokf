@@ -67,6 +67,7 @@
     return {
       background: cssVar('--surface-2', '#f1f3f7'),
       link: cssVar('--graph-link', '#9aa3b2'),
+      rel: cssVar('--graph-rel', '#8b5cc9'),
       hops: [
         cssVar('--graph-h0', '#2f6fed'),
         cssVar('--graph-h1', '#3b9ddd'),
@@ -74,6 +75,12 @@
         cssVar('--graph-h3', '#8b8fa8'),
       ],
     };
+  }
+
+  // An edge's resting colour, by source: typed relationships stand apart
+  // from authored Markdown links.
+  function edgeColor(link, colors) {
+    return link.kind === 'relationship' ? colors.rel : colors.link;
   }
 
   function colorFor(node, colors) {
@@ -126,8 +133,8 @@
     if (legendBox) legendBox.hidden = !byHops;
     if (!legendList) return;
     legendList.textContent = '';
+    var colors = palette();
     if (byHops) {
-      var colors = palette();
       [['this concept', colors.hops[0]], ['1 hop', colors.hops[1]], ['2 hops', colors.hops[2]], ['3+ hops', colors.hops[3]]].forEach(function (entry) {
         legendList.appendChild(legendItem(entry[0], entry[1]));
       });
@@ -136,6 +143,11 @@
         legendList.appendChild(legendItem((data.color_by === 'bundle' ? 'bundle ' : '') + group, groupColors.get(group)));
       });
     }
+    // One entry per drawn edge source, so the two edge colours read.
+    var kinds = { link: false, relationship: false };
+    (data.links || []).forEach(function (l) { kinds[l.kind || 'link'] = true; });
+    if (kinds.link) legendList.appendChild(legendItem('document links', colors.link));
+    if (kinds.relationship) legendList.appendChild(legendItem('typed relationships', colors.rel));
   }
 
   function legendItem(label, color) {
@@ -149,7 +161,13 @@
 
   function renderStats() {
     if (!stats || !data) return;
-    var text = data.nodes.length + ' concept' + (data.nodes.length === 1 ? '' : 's') + ', ' + data.links.length + ' link' + (data.links.length === 1 ? '' : 's') + ' drawn';
+    var links = 0;
+    var rels = 0;
+    (data.links || []).forEach(function (l) { if (l.kind === 'relationship') rels += 1; else links += 1; });
+    var parts = [];
+    if (links || !rels) parts.push(links + ' link' + (links === 1 ? '' : 's'));
+    if (rels) parts.push(rels + ' relationship' + (rels === 1 ? '' : 's'));
+    var text = data.nodes.length + ' concept' + (data.nodes.length === 1 ? '' : 's') + ', ' + parts.join(' and ') + ' drawn';
     if (data.total > data.nodes.length) text += ' (of ' + data.total + ' visible; the best connected are shown)';
     stats.textContent = text + '.';
   }
@@ -293,13 +311,23 @@
       (n.type ? ' <span class="pill type">' + escapeHtml(n.type) + '</span>' : '') +
       '<div class="muted small">' + escapeHtml(n.bundle_name + ' / ' + n.path) + '</div>';
   }
+  // An edge's noun and its notable relations: a Markdown link's ubiquitous
+  // 'reference' relation is noise, while a typed edge's relation types are
+  // the whole point and always shown.
+  function edgeNoun(l, count) {
+    var noun = l.kind === 'relationship' ? 'relationship' : 'link';
+    return count + ' ' + noun + (count === 1 ? '' : 's');
+  }
+  function edgeRelations(l) {
+    return (l.relations || []).filter(function (r) { return l.kind === 'relationship' || r !== 'reference'; });
+  }
   function linkTip(l) {
     var from = nodeById(endId(l.source));
     var to = nodeById(endId(l.target));
-    var rel = (l.relations || []).filter(function (r) { return r !== 'reference'; });
+    var rel = edgeRelations(l);
     return '<div class="small">' + escapeHtml(from ? from.title : endId(l.source)) + ' → ' +
       escapeHtml(to ? to.title : endId(l.target)) + '</div>' +
-      '<div class="muted small">' + escapeHtml((rel.length ? rel.join(', ') + ' · ' : '') + l.count + ' link' + (l.count === 1 ? '' : 's') + ' · click to inspect') + '</div>';
+      '<div class="muted small">' + escapeHtml((rel.length ? rel.join(', ') + ' · ' : '') + edgeNoun(l, l.count) + ' · click to inspect') + '</div>';
   }
 
   // ---- selection cards -----------------------------------------------------
@@ -315,9 +343,11 @@
     var items = links.slice(0, 12).map(function (l, i) {
       var outgoing = endId(l.source) === node.id;
       var other = nodeById(outgoing ? endId(l.target) : endId(l.source));
+      var rel = edgeRelations(l);
       return '<li><button type="button" class="linkish" data-edge="' + i + '">' +
         (outgoing ? '→ ' : '← ') + escapeHtml(other ? other.title : '?') + '</button>' +
-        (l.count > 1 ? ' <span class="count">×' + l.count + '</span>' : '') + '</li>';
+        (l.count > 1 ? ' <span class="count">×' + l.count + '</span>' : '') +
+        (rel.length ? ' <span class="muted small">' + escapeHtml(rel.join(', ')) + '</span>' : '') + '</li>';
     }).join('');
     return '<div class="muted small">Connections' + (links.length > 12 ? ' (first 12 of ' + links.length + ')' : '') + '</div><ul class="edge-texts connections">' + items + '</ul>';
   }
@@ -354,13 +384,13 @@
     selected = null;
     highlightLink = link;
     repaint();
-    var rel = (link.relations || []).filter(function (r) { return r !== 'reference'; });
+    var rel = edgeRelations(link);
     var texts = (link.texts || []).map(function (t) { return '<li>' + escapeHtml(t) + '</li>'; }).join('');
     card.innerHTML =
       '<button type="button" class="card-close" aria-label="Close" data-close>×</button>' +
-      '<div class="muted small">Link</div>' +
+      '<div class="muted small">' + (link.kind === 'relationship' ? 'Relationship' : 'Link') + '</div>' +
       '<strong>' + escapeHtml(from.title) + '</strong> → <strong>' + escapeHtml(to.title) + '</strong>' +
-      '<div class="muted small">' + escapeHtml(link.count + ' link' + (link.count === 1 ? '' : 's') + (rel.length ? ' · ' + rel.join(', ') : '')) + '</div>' +
+      '<div class="muted small">' + escapeHtml(edgeNoun(link, link.count) + (rel.length ? ' · ' + rel.join(', ') : '')) + '</div>' +
       (texts ? '<div class="muted small">Link text:</div><ul class="edge-texts">' + texts + '</ul>' : '') +
       '<div class="graph3d-actions">' +
       '<a class="btn small" href="' + escapeHtml(from.href) + '#tab-links">Open source</a>' +
@@ -544,11 +574,13 @@
       // A lit link glows: a wide halo, and every other link recedes, so the
       // highlight reads by contrast rather than by hue and never looks like
       // one of the node colours. Nothing moves.
-      .linkColor(function (l) { return linkColorFor(l, colors.link); })
+      .linkColor(function (l) { return linkColorFor(l, edgeColor(l, colors)); })
       .linkOpacity(0.75)
       .linkWidth(function (l) { return (linkIsLit(l) ? 6 : 0) + Math.min(3, (touch ? 1.2 : 0.5) + l.count * 0.5); })
       .linkHoverPrecision(touch ? 8 : 4)
-      .linkDirectionalArrowLength(4)
+      // An undirected relationship edge gets no arrow; anything else points
+      // at its target.
+      .linkDirectionalArrowLength(function (l) { return l.undirected ? 0 : 4; })
       .linkDirectionalArrowRelPos(1)
       .linkLabel(function () { return ''; })
       .onNodeClick(function (node) { selectNode(node, true); })
@@ -572,7 +604,7 @@
       var next = palette();
       graph.backgroundColor(next.background);
       graph.nodeColor(function (n) { return colorFor(n, next); });
-      graph.linkColor(function (l) { return linkColorFor(l, next.link); });
+      graph.linkColor(function (l) { return linkColorFor(l, edgeColor(l, next)); });
       renderLegend();
     }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
   }

@@ -34,6 +34,13 @@
           {% for opt in limit_options %}<option value="{{ opt.0 }}" {% if opt.1 %}selected{% endif %}>{{ opt.0 }} best connected</option>{% endfor %}
         </select>
       </div>
+      <div class="field">
+        <label for="g-edges">Edges</label>
+        <select id="g-edges" name="edges">
+          {% for opt in edge_options %}<option value="{{ opt.0 }}" {% if opt.1 %}selected{% endif %}>{{ opt.2 }}</option>{% endfor %}
+        </select>
+        <p class="hint" id="g-edges-hint">Typed relationships are the producer-published edges; links are the ones authors wrote in Markdown.</p>
+      </div>
       <button type="submit" class="btn">Draw</button>
       {% if let Some(label) = seed_label %}<p class="hint">Showing the neighborhood of <strong>{{ label }}</strong>. <a href="{{ catalog_url }}">Show the whole catalog</a>.</p>{% endif %}
     </form>
