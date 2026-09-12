@@ -8,11 +8,11 @@
   <aside class="filters explorer-side">
     <form method="get" action="/graph" id="pgokf-explorer-form">
       <div class="field">
-        <label for="g-bundle">Bundle</label>
-        <select id="g-bundle" name="bundle">
-          <option value="">All bundles</option>
-          {% for b in bundles %}<option value="{{ b.id }}" {% if bundle.as_str() == b.id.to_string().as_str() %}selected{% endif %}>{{ b.name }}</option>{% endfor %}
+        <label for="g-bundle">Bundles</label>
+        <select id="g-bundle" name="bundle" multiple size="6" aria-describedby="g-bundle-hint">
+          {% for b in bundles %}<option value="{{ b.id }}" {% if bundle_ids.contains(&b.id) %}selected{% endif %}>{{ b.name }}</option>{% endfor %}
         </select>
+        <p class="hint" id="g-bundle-hint">No selection = all bundles. Cmd/Ctrl-click to pick several.</p>
       </div>
       <div class="field">
         <label for="g-limit">Concepts shown</label>
@@ -21,7 +21,7 @@
         </select>
       </div>
       <button type="submit" class="btn">Draw</button>
-      {% if let Some(label) = seed_label %}<p class="hint">Showing the neighborhood of <strong>{{ label }}</strong>. <a href="/graph{% if !bundle.is_empty() %}?bundle={{ bundle }}{% endif %}">Show the whole catalog</a>.</p>{% endif %}
+      {% if let Some(label) = seed_label %}<p class="hint">Showing the neighborhood of <strong>{{ label }}</strong>. <a href="/graph{% for b in bundle_ids %}{% if loop.first %}?{% else %}&{% endif %}bundle={{ b }}{% endfor %}">Show the whole catalog</a>.</p>{% endif %}
     </form>
     <div class="field">
       <label for="g-find">Find a concept</label>

@@ -14,7 +14,7 @@ use std::time::Duration;
 use askama::Template;
 use axum::body::Body;
 use axum::extract::{
-    DefaultBodyLimit, Form, FromRequestParts, Multipart, Path, Query, Request, State,
+    DefaultBodyLimit, Form, FromRequestParts, Multipart, Path, Query, RawQuery, Request, State,
 };
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
@@ -1763,8 +1763,8 @@ struct ReviewPage {
 struct GraphPage {
     shell: Shell,
     bundles: Vec<BundleInfo>,
-    /// Query-string state echoed into the sidebar.
-    bundle: String,
+    /// The selected bundle ids, echoed into the sidebar's multi-select.
+    bundle_ids: Vec<i64>,
     limit_options: Vec<(i32, bool)>,
     /// The JSON endpoint the client draws (the client appends `hops`).
     graph_url: String,
@@ -5123,28 +5123,61 @@ const GRAPH_MAX_NODES: i32 = 2000;
 const GRAPH_DEFAULT_NODES: i32 = 300;
 const GRAPH_NODE_OPTIONS: [i32; 5] = [100, 300, 600, 1000, 2000];
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default)]
 struct CatalogGraphParams {
-    #[serde(default)]
-    bundle: String,
-    #[serde(default)]
+    /// Every `bundle` value, in order: `?bundle=2&bundle=5` selects several
+    /// bundles, one value still works, and none (or an empty one) means all.
+    bundles: Vec<String>,
     limit: String,
     /// `bundle_id:concept_id` to draw a neighborhood instead.
-    #[serde(default)]
     seed: String,
-    #[serde(default)]
     hops: String,
 }
 
 impl CatalogGraphParams {
-    fn bundle_id(&self) -> Result<Option<i64>, AppError> {
-        match non_empty(&self.bundle) {
-            None => Ok(None),
-            Some(raw) => raw
-                .parse::<i64>()
-                .map(Some)
-                .map_err(|_| AppError::bad_request("bundle must be an integer id")),
+    /// Parse the raw query string. This cannot go through `Query<T>`:
+    /// `serde_urlencoded` rejects a repeated scalar field with
+    /// `duplicate field bundle`, so multi-selection would 400. `bundle`
+    /// collects every value; the remaining keys are last-wins. Keys and
+    /// values are both percent-decoded, as form encoding allows either.
+    fn parse(query: Option<&str>) -> Self {
+        let mut params = Self::default();
+        let Some(query) = query else { return params };
+        for pair in query.split('&') {
+            let Some((key, value)) = pair.split_once('=') else {
+                continue;
+            };
+            let value = filters::percent_decode(value);
+            match filters::percent_decode(key).as_str() {
+                "bundle" => params.bundles.push(value),
+                "limit" => params.limit = value,
+                "seed" => params.seed = value,
+                "hops" => params.hops = value,
+                _ => {}
+            }
         }
+        params
+    }
+
+    /// The selected bundle ids. Empty values (the legacy "all" option's
+    /// submission) are ignored, surrounding whitespace is trimmed, and
+    /// duplicates collapse to their first occurrence so a repeated id
+    /// behaves exactly like a single one.
+    fn bundle_ids(&self) -> Result<Vec<i64>, AppError> {
+        let mut ids = Vec::new();
+        for raw in &self.bundles {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let id = trimmed
+                .parse::<i64>()
+                .map_err(|_| AppError::bad_request("bundle must be an integer id"))?;
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        Ok(ids)
     }
 
     fn limit(&self) -> i32 {
@@ -5173,9 +5206,10 @@ impl CatalogGraphParams {
 /// The catalog-wide graph (or a seeded neighborhood) for the explorer.
 async fn api_catalog_graph(
     State(app): State<Shared>,
-    Query(params): Query<CatalogGraphParams>,
+    RawQuery(query): RawQuery,
 ) -> Result<Json<Value>, AppError> {
-    let bundle_id = params.bundle_id()?;
+    let params = CatalogGraphParams::parse(query.as_deref());
+    let bundle_ids = params.bundle_ids()?;
     if let Some((seed_bundle, seed_id)) = params.seed()? {
         let hops = parse_hops(&params.hops);
         let graph = app.db.graph(seed_bundle, &seed_id, hops).await?;
@@ -5191,9 +5225,9 @@ async fn api_catalog_graph(
     }
     let graph = app
         .db
-        .catalog_graph(bundle_id, i64::from(params.limit()))
+        .catalog_graph(&bundle_ids, i64::from(params.limit()))
         .await?;
-    let color_by = if bundle_id.is_some() {
+    let color_by = if bundle_ids.len() == 1 {
         ColorBy::Type
     } else {
         ColorBy::Bundle
@@ -5204,47 +5238,54 @@ async fn api_catalog_graph(
 async fn graph_page(
     State(app): State<Shared>,
     session: Session,
-    Query(params): Query<CatalogGraphParams>,
+    RawQuery(query): RawQuery,
 ) -> PageResult {
-    let bundle_id = params.bundle_id()?;
+    let params = CatalogGraphParams::parse(query.as_deref());
+    let bundle_ids = params.bundle_ids()?;
     let seed = params.seed()?;
     let limit = params.limit();
     let bundles = app.db.bundles().await?;
-    let mut pairs: Vec<(String, String)> = Vec::new();
-    if let Some(b) = bundle_id {
-        pairs.push(("bundle".to_owned(), b.to_string()));
-    }
-    pairs.push(("limit".to_owned(), limit.to_string()));
     let hops = parse_hops(&params.hops);
     let seed_label = match &seed {
-        Some((b, id)) => {
-            pairs.push(("seed".to_owned(), format!("{b}:{id}")));
-            Some(
-                app.db
-                    .concept(*b, id)
-                    .await?
-                    .and_then(|c| c.title)
-                    .unwrap_or_else(|| id.clone()),
-            )
-        }
+        Some((b, id)) => Some(
+            app.db
+                .concept(*b, id)
+                .await?
+                .and_then(|c| c.title)
+                .unwrap_or_else(|| id.clone()),
+        ),
         None => None,
     };
-    let query: Vec<String> = pairs
-        .iter()
-        .map(|(k, v)| format!("{k}={}", filters::percent_encode(v)))
-        .collect();
     html(&GraphPage {
         shell: Shell::new(&app, &session, "Graph", "graph"),
         bundles,
-        bundle: bundle_id.map(|b| b.to_string()).unwrap_or_default(),
+        bundle_ids: bundle_ids.clone(),
         limit_options: GRAPH_NODE_OPTIONS
             .iter()
             .map(|n| (*n, *n == limit))
             .collect(),
-        graph_url: format!("/api/graph?{}", query.join("&")),
+        graph_url: format!(
+            "/api/graph?{}",
+            graph_url_query(&bundle_ids, limit, seed.as_ref())
+        ),
         hops,
         seed_label,
     })
+}
+
+/// The explorer endpoint's query string. `bundle` repeats once per selected
+/// bundle so every selection reaches the API (a form GET submits the
+/// multi-select the same way).
+fn graph_url_query(bundle_ids: &[i64], limit: i32, seed: Option<&(i64, String)>) -> String {
+    let mut pairs: Vec<String> = bundle_ids.iter().map(|b| format!("bundle={b}")).collect();
+    pairs.push(format!("limit={limit}"));
+    if let Some((b, id)) = seed {
+        pairs.push(format!(
+            "seed={}",
+            filters::percent_encode(&format!("{b}:{id}"))
+        ));
+    }
+    pairs.join("&")
 }
 
 // ---------------------------------------------------------------------------
@@ -6242,6 +6283,44 @@ pub(crate) mod filters {
         out
     }
 
+    /// Percent-decode a query-string value (`+` decodes as a space, as in
+    /// form encoding). Invalid escapes pass through unchanged.
+    pub(crate) fn percent_decode(value: &str) -> String {
+        fn hex(byte: u8) -> Option<u8> {
+            match byte {
+                b'0'..=b'9' => Some(byte - b'0'),
+                b'a'..=b'f' => Some(byte - b'a' + 10),
+                b'A'..=b'F' => Some(byte - b'A' + 10),
+                _ => None,
+            }
+        }
+        let bytes = value.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'+' => {
+                    out.push(b' ');
+                    i += 1;
+                }
+                b'%' if i + 2 < bytes.len() => {
+                    if let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                        out.push(hi * 16 + lo);
+                        i += 3;
+                    } else {
+                        out.push(b'%');
+                        i += 1;
+                    }
+                }
+                byte => {
+                    out.push(byte);
+                    i += 1;
+                }
+            }
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
     /// Encode a concept id for a path: each `/`-separated segment is
     /// percent-encoded, the separators are kept.
     pub(crate) fn encode_path(value: &str) -> String {
@@ -7021,6 +7100,166 @@ mod tests {
         );
         assert_eq!(good.limit(), GRAPH_DEFAULT_NODES);
         assert!(bad.seed().is_err());
+    }
+
+    #[test]
+    fn catalog_graph_params_collect_repeated_bundles_and_keep_the_legacy_form() {
+        // Arrange & Act
+        let multi = CatalogGraphParams::parse(Some("bundle=2&bundle=5&limit=600"));
+        let legacy = CatalogGraphParams::parse(Some("bundle=5"));
+        let blank = CatalogGraphParams::parse(Some("bundle=&limit=100"));
+        let absent = CatalogGraphParams::parse(None);
+
+        // Assert
+        assert_eq!(multi.bundle_ids().ok().expect("valid"), vec![2, 5]);
+        assert_eq!(multi.limit(), 600);
+        assert_eq!(legacy.bundle_ids().ok().expect("valid"), vec![5]);
+        assert!(blank.bundle_ids().ok().expect("valid").is_empty());
+        assert!(absent.bundle_ids().ok().expect("valid").is_empty());
+    }
+
+    #[test]
+    fn catalog_graph_params_reject_a_non_integer_bundle() {
+        // Arrange & Act & Assert
+        assert!(
+            CatalogGraphParams::parse(Some("bundle=abc"))
+                .bundle_ids()
+                .is_err()
+        );
+        assert!(
+            CatalogGraphParams::parse(Some("bundle=2&bundle=x"))
+                .bundle_ids()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn catalog_graph_params_decode_encoded_keys() {
+        // Arrange & Act
+        let encoded = CatalogGraphParams::parse(Some("%62undle=5"));
+        let mixed = CatalogGraphParams::parse(Some("bundle=2&%62undle=5"));
+        let scalars =
+            CatalogGraphParams::parse(Some("%73eed=2%3Arunbooks%2Fa&%6Cimit=600&%68ops=3"));
+
+        // Assert
+        assert_eq!(encoded.bundle_ids().ok().expect("valid"), vec![5]);
+        assert_eq!(mixed.bundle_ids().ok().expect("valid"), vec![2, 5]);
+        assert_eq!(
+            scalars.seed().ok().flatten(),
+            Some((2, "runbooks/a".to_owned()))
+        );
+        assert_eq!(scalars.limit(), 600);
+        assert_eq!(parse_hops(&scalars.hops), 3);
+    }
+
+    #[test]
+    fn catalog_graph_params_dedupe_repeated_bundle_ids() {
+        // Arrange & Act
+        let params = CatalogGraphParams::parse(Some("bundle=5&bundle=5&bundle=2&bundle=5"));
+
+        // Assert
+        assert_eq!(params.bundle_ids().ok().expect("valid"), vec![5, 2]);
+        assert_eq!(
+            CatalogGraphParams::parse(Some("bundle=5&bundle=5"))
+                .bundle_ids()
+                .ok()
+                .expect("valid"),
+            vec![5]
+        );
+    }
+
+    #[test]
+    fn catalog_graph_params_trim_whitespace_around_bundle_ids() {
+        // Arrange & Act
+        let padded = CatalogGraphParams::parse(Some("bundle=%205%20"));
+        let blank = CatalogGraphParams::parse(Some("bundle=%20%20"));
+
+        // Assert
+        assert_eq!(padded.bundle_ids().ok().expect("valid"), vec![5]);
+        assert!(blank.bundle_ids().ok().expect("valid").is_empty());
+    }
+
+    #[test]
+    fn catalog_graph_params_decode_form_encoding() {
+        // Arrange & Act
+        let params = CatalogGraphParams::parse(Some("seed=2%3Arunbooks%2Fa+b&hops=3"));
+
+        // Assert
+        assert_eq!(
+            params.seed().ok().flatten(),
+            Some((2, "runbooks/a b".to_owned()))
+        );
+        assert_eq!(parse_hops(&params.hops), 3);
+    }
+
+    #[test]
+    fn graph_url_query_repeats_the_bundle_param_per_selection() {
+        // Arrange & Act & Assert
+        assert_eq!(
+            graph_url_query(&[2, 5], 300, None),
+            "bundle=2&bundle=5&limit=300"
+        );
+        assert_eq!(graph_url_query(&[], 100, None), "limit=100");
+        assert_eq!(
+            graph_url_query(&[5], 300, Some(&(2, "runbooks/a".to_owned()))),
+            "bundle=5&limit=300&seed=2%3Arunbooks%2Fa"
+        );
+    }
+
+    #[test]
+    fn graph_page_marks_every_selected_bundle_in_the_multi_select() {
+        // Arrange
+        let bundle = |id: i64, name: &str| BundleInfo {
+            id,
+            path: name.to_owned(),
+            name: name.to_owned(),
+            okf_version: None,
+            file_count: 0,
+            last_synced_at: None,
+            enabled: true,
+        };
+        let page = GraphPage {
+            shell: Shell::bare("Graph"),
+            bundles: vec![bundle(1, "alpha"), bundle(2, "docs"), bundle(5, "wiki")],
+            bundle_ids: vec![2, 5],
+            limit_options: vec![(300, true)],
+            graph_url: "/api/graph?bundle=2&bundle=5&limit=300".to_owned(),
+            hops: 2,
+            seed_label: None,
+        };
+
+        // Act
+        let rendered = page.render().expect("the graph page renders");
+
+        // Assert
+        assert!(rendered.contains("name=\"bundle\" multiple"));
+        assert!(rendered.contains("<option value=\"2\" selected>docs</option>"));
+        assert!(rendered.contains("<option value=\"5\" selected>wiki</option>"));
+        assert!(!rendered.contains("<option value=\"1\" selected>"));
+        assert!(rendered.contains("No selection = all bundles"));
+        // The drawn endpoint carries every selected bundle (HTML-escaped).
+        assert!(rendered.contains("/api/graph?bundle=2&#38;bundle=5&#38;limit=300"));
+    }
+
+    #[test]
+    fn graph_page_with_no_selection_renders_the_plain_multi_select() {
+        // Arrange
+        let page = GraphPage {
+            shell: Shell::bare("Graph"),
+            bundles: Vec::new(),
+            bundle_ids: Vec::new(),
+            limit_options: vec![(300, false)],
+            graph_url: "/api/graph?limit=300".to_owned(),
+            hops: 2,
+            seed_label: None,
+        };
+
+        // Act
+        let rendered = page.render().expect("the graph page renders");
+
+        // Assert
+        assert!(rendered.contains("name=\"bundle\" multiple"));
+        assert!(!rendered.contains("selected"));
     }
 
     #[test]

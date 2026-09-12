@@ -77,6 +77,8 @@ input[type=search], input[type=text], input[type=url], input[type=number], input
   -webkit-appearance: none; appearance: none;
 }
 select { padding-right: 2.2rem; background-image: var(--chevron); background-repeat: no-repeat; background-position: right .75rem center; background-size: .7rem auto; cursor: pointer; }
+select[multiple] { height: auto; padding: .3rem .5rem; background-image: none; cursor: default; }
+select[multiple] option { padding: .15rem .4rem; border-radius: var(--radius-sm); }
 select:disabled { cursor: default; opacity: .6; }
 textarea { height: auto; min-height: var(--control-h); padding: .5rem .7rem; line-height: 1.4; resize: vertical; }
 input[type=search]::-webkit-search-decoration { -webkit-appearance: none; }
