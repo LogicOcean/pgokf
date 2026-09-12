@@ -522,18 +522,33 @@
   // ---- top nav: keep the current section in view ---------------------------
   // The strip scrolls horizontally on narrow screens, and every navigation
   // is a full page load that restarts it at its left edge - so the tab the
-  // user just tapped seemed to "jump to the front" (it sat off-screen right
-  // and had to be scrolled to again). Reveal the active tab by adjusting
-  // only the strip's own scrollLeft; scrollIntoView would also scroll
-  // ancestor viewports, moving the page itself.
+  // user just tapped sat off-screen and had to be scrolled to again. The
+  // strip's scrollLeft is saved as the page unloads and restored on the next
+  // load; only when the active tab is not fully visible at that offset is
+  // scrollLeft shifted by the smallest amount that exposes it (aligning the
+  // nearer edge, never centering). All of this adjusts only the strip's own
+  // scrollLeft; scrollIntoView would also scroll ancestor viewports, moving
+  // the page itself.
   var topnav = document.querySelector('.topnav');
   if (topnav) {
+    var NAV_SCROLL_KEY = 'pgokf-topnav-scroll';
+    try {
+      var savedScroll = parseFloat(sessionStorage.getItem(NAV_SCROLL_KEY));
+      if (savedScroll > 0) topnav.scrollLeft = savedScroll;
+    } catch (_) { /* ignore */ }
     var currentSection = topnav.querySelector('a[aria-current=page]');
     if (currentSection) {
       var stripBox = topnav.getBoundingClientRect();
       var tabBox = currentSection.getBoundingClientRect();
-      topnav.scrollLeft += tabBox.left - stripBox.left - (stripBox.width - tabBox.width) / 2;
+      if (tabBox.left < stripBox.left) {
+        topnav.scrollLeft += tabBox.left - stripBox.left;
+      } else if (tabBox.right > stripBox.right) {
+        topnav.scrollLeft += tabBox.right - stripBox.right;
+      }
     }
+    window.addEventListener('pagehide', function () {
+      try { sessionStorage.setItem(NAV_SCROLL_KEY, String(topnav.scrollLeft)); } catch (_) { /* ignore */ }
+    });
   }
 
   // ---- tabs (ARIA tabs pattern; the hash names the tab as #tab-<name>) ----
