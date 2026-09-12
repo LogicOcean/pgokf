@@ -8,11 +8,15 @@
   <aside class="filters explorer-side">
     <form method="get" action="/graph" id="pgokf-explorer-form">
       <div class="field">
-        <label for="g-bundle">Bundles</label>
-        <select id="g-bundle" name="bundle" multiple size="6" aria-describedby="g-bundle-hint">
-          {% for b in bundles %}<option value="{{ b.id }}" {% if bundle_ids.contains(&b.id) %}selected{% endif %}>{{ b.name }}</option>{% endfor %}
-        </select>
-        <p class="hint" id="g-bundle-hint">No selection = all bundles. Cmd/Ctrl-click to pick several.</p>
+        <label for="g-bundle-filter">Bundles</label>
+        <input id="g-bundle-filter" type="search" class="filter-input js-only" placeholder="Filter by name" data-bundle-filter="#g-bundle-list" aria-label="Filter bundles by name" autocomplete="off">
+        <ul class="facet-list bundle-list" id="g-bundle-list" data-bundle-list aria-describedby="g-bundle-hint">
+          {% for b in bundles %}<li data-filter-text="{{ b.name }}"><label><input type="checkbox" name="bundle" value="{{ b.id }}" {% if bundle_ids.contains(&b.id) %}checked{% endif %}> {{ b.name }}</label></li>{% endfor %}
+          <li class="bundle-list-empty" data-bundle-empty hidden>No bundle matches the filter.</li>
+        </ul>
+        <p class="hint" id="g-bundle-hint">No selection = all bundles. Check the bundles to include.</p>
+        <p class="hint js-only" data-bundle-count aria-live="polite"></p>
+        <p class="bundle-actions js-only"><button type="button" class="btn small ghost" data-bundle-clear>Clear selection</button> <button type="button" class="btn small ghost" data-bundle-visible>Select all visible</button></p>
       </div>
       <div class="field">
         <label for="g-limit">Concepts shown</label>
