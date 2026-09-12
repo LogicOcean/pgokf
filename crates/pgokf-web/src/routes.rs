@@ -5136,9 +5136,10 @@ struct CatalogGraphParams {
 
 impl CatalogGraphParams {
     /// Parse the raw query string. This cannot go through `Query<T>`:
-    /// `serde_urlencoded` keeps only the last of a repeated key, which would
-    /// silently drop selected bundles. `bundle` collects every value; the
-    /// remaining keys are last-wins.
+    /// `serde_urlencoded` rejects a repeated scalar field with
+    /// `duplicate field bundle`, so multi-selection would 400. `bundle`
+    /// collects every value; the remaining keys are last-wins. Keys and
+    /// values are both percent-decoded, as form encoding allows either.
     fn parse(query: Option<&str>) -> Self {
         let mut params = Self::default();
         let Some(query) = query else { return params };
@@ -5147,7 +5148,7 @@ impl CatalogGraphParams {
                 continue;
             };
             let value = filters::percent_decode(value);
-            match key {
+            match filters::percent_decode(key).as_str() {
                 "bundle" => params.bundles.push(value),
                 "limit" => params.limit = value,
                 "seed" => params.seed = value,
@@ -5158,17 +5159,25 @@ impl CatalogGraphParams {
         params
     }
 
-    /// The selected bundle ids; empty values (the legacy "all" option's
-    /// submission) are ignored.
+    /// The selected bundle ids. Empty values (the legacy "all" option's
+    /// submission) are ignored, surrounding whitespace is trimmed, and
+    /// duplicates collapse to their first occurrence so a repeated id
+    /// behaves exactly like a single one.
     fn bundle_ids(&self) -> Result<Vec<i64>, AppError> {
-        self.bundles
-            .iter()
-            .filter(|raw| !raw.trim().is_empty())
-            .map(|raw| {
-                raw.parse::<i64>()
-                    .map_err(|_| AppError::bad_request("bundle must be an integer id"))
-            })
-            .collect()
+        let mut ids = Vec::new();
+        for raw in &self.bundles {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let id = trimmed
+                .parse::<i64>()
+                .map_err(|_| AppError::bad_request("bundle must be an integer id"))?;
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        Ok(ids)
     }
 
     fn limit(&self) -> i32 {
@@ -7122,6 +7131,52 @@ mod tests {
                 .bundle_ids()
                 .is_err()
         );
+    }
+
+    #[test]
+    fn catalog_graph_params_decode_encoded_keys() {
+        // Arrange & Act
+        let encoded = CatalogGraphParams::parse(Some("%62undle=5"));
+        let mixed = CatalogGraphParams::parse(Some("bundle=2&%62undle=5"));
+        let scalars =
+            CatalogGraphParams::parse(Some("%73eed=2%3Arunbooks%2Fa&%6Cimit=600&%68ops=3"));
+
+        // Assert
+        assert_eq!(encoded.bundle_ids().ok().expect("valid"), vec![5]);
+        assert_eq!(mixed.bundle_ids().ok().expect("valid"), vec![2, 5]);
+        assert_eq!(
+            scalars.seed().ok().flatten(),
+            Some((2, "runbooks/a".to_owned()))
+        );
+        assert_eq!(scalars.limit(), 600);
+        assert_eq!(parse_hops(&scalars.hops), 3);
+    }
+
+    #[test]
+    fn catalog_graph_params_dedupe_repeated_bundle_ids() {
+        // Arrange & Act
+        let params = CatalogGraphParams::parse(Some("bundle=5&bundle=5&bundle=2&bundle=5"));
+
+        // Assert
+        assert_eq!(params.bundle_ids().ok().expect("valid"), vec![5, 2]);
+        assert_eq!(
+            CatalogGraphParams::parse(Some("bundle=5&bundle=5"))
+                .bundle_ids()
+                .ok()
+                .expect("valid"),
+            vec![5]
+        );
+    }
+
+    #[test]
+    fn catalog_graph_params_trim_whitespace_around_bundle_ids() {
+        // Arrange & Act
+        let padded = CatalogGraphParams::parse(Some("bundle=%205%20"));
+        let blank = CatalogGraphParams::parse(Some("bundle=%20%20"));
+
+        // Assert
+        assert_eq!(padded.bundle_ids().ok().expect("valid"), vec![5]);
+        assert!(blank.bundle_ids().ok().expect("valid").is_empty());
     }
 
     #[test]

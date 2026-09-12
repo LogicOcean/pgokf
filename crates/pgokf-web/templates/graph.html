@@ -9,10 +9,10 @@
     <form method="get" action="/graph" id="pgokf-explorer-form">
       <div class="field">
         <label for="g-bundle">Bundles</label>
-        <select id="g-bundle" name="bundle" multiple size="6">
+        <select id="g-bundle" name="bundle" multiple size="6" aria-describedby="g-bundle-hint">
           {% for b in bundles %}<option value="{{ b.id }}" {% if bundle_ids.contains(&b.id) %}selected{% endif %}>{{ b.name }}</option>{% endfor %}
         </select>
-        <p class="hint">No selection = all bundles. Cmd/Ctrl-click to pick several.</p>
+        <p class="hint" id="g-bundle-hint">No selection = all bundles. Cmd/Ctrl-click to pick several.</p>
       </div>
       <div class="field">
         <label for="g-limit">Concepts shown</label>
