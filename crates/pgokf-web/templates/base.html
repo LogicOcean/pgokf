@@ -26,14 +26,14 @@
     <button type="submit" class="btn primary">Search</button>
   </form>
   <nav class="topnav" aria-label="Sections">
-    <a href="/" class="{% if shell.nav.as_str() == "home" %}active{% endif %}">Overview</a>
-    <a href="/search" class="{% if shell.nav.as_str() == "search" %}active{% endif %}">Search</a>
-    <a href="/bundles" class="{% if shell.nav.as_str() == "bundles" %}active{% endif %}">Bundles</a>
-    <a href="/graph" class="{% if shell.nav.as_str() == "graph" %}active{% endif %}">Graph</a>
-    <a href="/plugins" class="{% if shell.nav.as_str() == "plugins" %}active{% endif %}">Plugin builder</a>
-    {% if shell.can_upload %}<a href="/upload" class="{% if shell.nav.as_str() == "upload" %}active{% endif %}">Upload</a>{% endif %}
-    {% if shell.can_review %}<a href="/review" class="{% if shell.nav.as_str() == "review" %}active{% endif %}">Review</a>{% endif %}
-    <a href="/status" class="{% if shell.nav.as_str() == "status" %}active{% endif %}">Operations</a>
+    <a href="/" class="{% if shell.nav.as_str() == "home" %}active{% endif %}"{% if shell.nav.as_str() == "home" %} aria-current="page"{% endif %}>Overview</a>
+    <a href="/search" class="{% if shell.nav.as_str() == "search" %}active{% endif %}"{% if shell.nav.as_str() == "search" %} aria-current="page"{% endif %}>Search</a>
+    <a href="/bundles" class="{% if shell.nav.as_str() == "bundles" %}active{% endif %}"{% if shell.nav.as_str() == "bundles" %} aria-current="page"{% endif %}>Bundles</a>
+    <a href="/graph" class="{% if shell.nav.as_str() == "graph" %}active{% endif %}"{% if shell.nav.as_str() == "graph" %} aria-current="page"{% endif %}>Graph</a>
+    <a href="/plugins" class="{% if shell.nav.as_str() == "plugins" %}active{% endif %}"{% if shell.nav.as_str() == "plugins" %} aria-current="page"{% endif %}>Plugin builder</a>
+    {% if shell.can_upload %}<a href="/upload" class="{% if shell.nav.as_str() == "upload" %}active{% endif %}"{% if shell.nav.as_str() == "upload" %} aria-current="page"{% endif %}>Upload</a>{% endif %}
+    {% if shell.can_review %}<a href="/review" class="{% if shell.nav.as_str() == "review" %}active{% endif %}"{% if shell.nav.as_str() == "review" %} aria-current="page"{% endif %}>Review</a>{% endif %}
+    <a href="/status" class="{% if shell.nav.as_str() == "status" %}active{% endif %}"{% if shell.nav.as_str() == "status" %} aria-current="page"{% endif %}>Operations</a>
   </nav>
   <div class="topmeta">
     {% if let Some(t) = shell.tenant %}<span class="badge tenant" title="Session tenant (pgokf.tenant)">tenant: {{ t }}</span>{% endif %}

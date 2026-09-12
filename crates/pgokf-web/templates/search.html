@@ -1,7 +1,9 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="search-layout">
-  <aside class="filters">
+  {% let oob = false %}
+  {% include "partials/filters-toggle.html" %}
+  <aside class="filters" id="pgokf-filters-panel">
     <form id="pgokf-filters" method="get" action="/search"
           hx-get="/search/results" hx-target="#pgokf-results" hx-trigger="change, submit" hx-include="#pgokf-filters">
       <input type="hidden" name="q" value="{{ form.q }}">
@@ -52,7 +54,7 @@
     <div id="pgokf-facets">{% include "partials/facets.html" %}</div>
   </aside>
   <section class="results-col">
-    <div id="pgokf-results" aria-live="polite">{% let append = false %}{% let oob = false %}{% include "partials/results.html" %}</div>
+    <div id="pgokf-results" aria-live="polite">{% include "partials/results.html" %}</div>
   </section>
 </div>
 {% endblock %}
