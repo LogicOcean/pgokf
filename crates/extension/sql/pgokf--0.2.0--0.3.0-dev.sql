@@ -28,10 +28,18 @@
 --     pgokf.concept_relationship_neighbors typed traversal, and the
 --     relationship_coverage_missing participation in pgokf.mark_fresh.
 --
--- Every statement is additive: no row is dropped, truncated, deleted, or
--- rewritten. The one DROP is of the sync_log op CHECK constraint, immediately
--- re-created with two new operation names (a constraint carries no data - the
--- 0.2.0 script set the precedent). Existing bundles are backfilled into
+-- Every statement is additive in the sense that matters: no row is dropped,
+-- truncated, deleted, or rewritten. The DROPs are of objects that carry no
+-- data: the sync_log op CHECK constraint, immediately re-created with two new
+-- operation names (a constraint carries no data - the 0.2.0 script set the
+-- precedent), and - in section 13 - three FUNCTIONS whose signatures gain one
+-- optional trailing argument with a default (concept_search_semantic,
+-- concept_search_hybrid, and the internal bm25_hits helper). A function
+-- identity is its argument list, so the superseded overloads must be dropped
+-- before the widened ones are created (the concept_search after_cursor
+-- replacement of 0.1.8 -> 0.1.9 set the precedent); each is re-created in the
+-- same transaction as a STRICT SUPERSET that resolves every historical call
+-- through the new argument's default. Existing bundles are backfilled into
 -- pgokf.bundle_freshness as STALE (reason legacy_pre_0.3.0): freshness is
 -- never claimed without reconciliation evidence, so an upgraded bundle stays
 -- stale until a producer compare-and-set (pgokf.mark_fresh) clears it. A
@@ -1443,6 +1451,155 @@ COMMENT ON COLUMN pgokf.bundle_freshness.reason_codes IS
     'Machine-readable, producer-supplied reason codes explaining the current non-fresh state (merged, deduplicated). Catalog-defined codes: legacy_pre_0.3.0, dependency_source_changed, change_scope_unknown, bundle_retired, bundle_restored, bundle_disabled, relationship_coverage_missing; producers may add their own opaque codes.';
 COMMENT ON FUNCTION pgokf.mark_fresh(bigint, bigint, bigint, text, text, jsonb, text) IS
     'Compare-and-set reconciliation completion: mark the bundle fresh only if its observed source revision still equals expected_observed_source_generation AND its live catalog generation equals expected_catalog_generation AND no newer materialized generation exists AND claimed_invalidation_epoch - the claim token this attempt''s own pgokf.mark_reconciling returned - covers the newest dependency invalidation epoch and the standing claim (a completion based on evidence older than the latest dependency invalidation is refused, and a newer attempt''s claim can never validate an older attempt''s token) AND no relationship_coverage_missing evidence stands (a refresh that superseded the bundle''s relationship coverage must be answered with a matching pgokf.replace_relationships publication first) AND it is not retired; returns false (changing nothing) otherwise, so a superseded attempt can never clear staleness. The check runs under the bundle advisory lock, so it never certifies a generation or epoch older than a committed mutation it waited behind. On success records the manifest hash and embedding contract evidence and sets last_reconciled_at. Writer-tier; tenant-confined.';
+
+-- ===========================================================================
+-- 13. Type-constrained semantic/hybrid search: concept_search_semantic and
+--     concept_search_hybrid gain one optional trailing argument,
+--     concept_types text[] DEFAULT NULL - a type-membership filter applied
+--     inside the ranked query BEFORE the candidate list is truncated, so a
+--     type-filtered call returns up to limit_count eligible hits of the
+--     selected types even when excluded types outrank them (a caller-side
+--     post-filter of a truncated window could return an empty or underfilled
+--     page while eligible hits existed). The internal bm25_hits helper gains
+--     the same trailing parameter so the hybrid lexical half is constrained
+--     before its own truncation under the pg_search provider too.
+--
+--     A trailing-default argument list is a DIFFERENT function identity in
+--     pg_proc: the widened functions are new rows, not redefinitions, and
+--     leaving the superseded overloads in place would (a) make pg_proc carry
+--     two overloads where a fresh install carries one, and (b) make a call
+--     that omits the new argument ambiguous between the two, breaking the
+--     very backward compatibility the default preserves. The superseded
+--     overloads are therefore dropped here and replaced in the same
+--     transaction by STRICT SUPERSETS that resolve every historical call
+--     through the new argument's NULL default (= no filter, the pre-0.3.0
+--     behavior). This mirrors the concept_search after_cursor replacement of
+--     0.1.8 -> 0.1.9; a function carries no data, so no row is touched. The
+--     declarations below are verbatim those of the fresh 0.3.0-dev install
+--     (the concept_search_semantic / concept_search_hybrid pg_externs and the
+--     embedding_function_hardening block of src/catalog/embedding.rs, and the
+--     bm25_hits_function block of src/catalog/search_backend.rs).
+DROP FUNCTION IF EXISTS pgokf.concept_search_semantic(real[], bigint, integer);
+DROP FUNCTION IF EXISTS pgokf.concept_search_hybrid(text, real[], bigint, integer);
+DROP FUNCTION IF EXISTS pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text);
+
+CREATE FUNCTION pgokf."concept_search_semantic"(
+    "query_embedding" real[],
+    "bundle_id" bigint DEFAULT NULL,
+    "limit_count" INT DEFAULT 10,
+    "concept_types" TEXT[] DEFAULT NULL
+) RETURNS SETOF pgokf.concept_search_result
+STABLE PARALLEL SAFE
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'concept_search_semantic_wrapper';
+
+CREATE FUNCTION pgokf."concept_search_hybrid"(
+    "query" TEXT,
+    "query_embedding" real[],
+    "bundle_id" bigint DEFAULT NULL,
+    "limit_count" INT DEFAULT 10,
+    "concept_types" TEXT[] DEFAULT NULL
+) RETURNS SETOF pgokf.concept_search_result
+STABLE PARALLEL RESTRICTED
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'concept_search_hybrid_wrapper';
+
+REVOKE ALL ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer, text[]) FROM PUBLIC;
+REVOKE ALL ON FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer, text[]) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer, text[]) TO pgokf_reader;
+GRANT EXECUTE ON FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer, text[]) TO pgokf_reader;
+COMMENT ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer, text[]) IS
+    'Semantic nearest-neighbor search: rank concepts by pgvector cosine distance to query_embedding (rank = normalized cosine similarity). Reader-level, invoker rights; active bundles only. query_embedding must have embedding_dim dimensions; limit_count in 1..=500. Requires pgvector: raises 22023 naming the missing dependency when it is not installed (no lexical fallback). Only ELIGIBLE embeddings rank: source_file_hash equal to the concept''s current file_hash, model/dimension/contract matching the embedding_model/embedding_dim/embedding_contract policy, and the concept effectively fresh (bundle freshness fresh, no covering concept/path override); a stale or legacy (NULL-provenance) row never ranks even while the HNSW index physically retains it. concept_types is an optional type-membership filter (a hit''s type must be one of the listed types; NULL or empty is no filter) applied inside the ranked query BEFORE the candidate list is truncated to limit_count, so a filtered call returns up to limit_count eligible hits of the selected types even when excluded types outrank them.';
+COMMENT ON FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer, text[]) IS
+    'Hybrid search: Reciprocal Rank Fusion (RRF, k=60) of the lexical result of query (via the configured search_backend) and the semantic result of query_embedding, fused entirely in SQL (rank = fused RRF score). Reader-level, invoker rights; enabled bundles only; limit_count in 1..=500. The semantic component ranks eligible (current, fresh) embeddings only, so an ineligible vector never leaks into the fused result; the lexical component may still return a stale concept, labeled by pgokf.concept_search_fresh. Degrades to lexical-only with a WARNING when pgvector is not installed. concept_types is an optional type-membership filter (a hit''s type must be one of the listed types; NULL or empty is no filter) applied to BOTH ranked inputs before either is truncated to limit_count, so the fused page is exactly the type-filtered top-limit_count, never underfilled by higher-ranked excluded types.';
+
+CREATE FUNCTION pgokf.bm25_hits(
+    p_query text,
+    p_bundle_id bigint,
+    p_limit bigint,
+    p_text_search_config text,
+    p_concept_type text,
+    p_tags text[],
+    p_status text,
+    p_trust_tier text,
+    p_after_rank real,
+    p_after_bundle_id bigint,
+    p_after_concept_id text,
+    p_concept_types text[])
+RETURNS TABLE (
+    bundle_id bigint,
+    concept_id text,
+    path text,
+    title text,
+    type text,
+    rank real,
+    headline text)
+LANGUAGE plpgsql
+STABLE PARALLEL SAFE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+    -- Resolved once, up front, and bound into the query as a parameter: the
+    -- policies inline current_setting() directly, but pg_search 0.25 cannot
+    -- plan its scan under a predicate that calls a function (that inline
+    -- form is exactly what row-level security injects for non-owners, and
+    -- exactly what the Unsupported-query-shape error was about). Empty = unset.
+    v_tenant text := NULLIF(pg_catalog.current_setting('pgokf.tenant', true), '');
+BEGIN
+    -- The policies' rule, applied here because this body bypasses them: an
+    -- unscoped session sees nothing when the catalog requires a tenant.
+    IF v_tenant IS NULL AND pgokf.tenant_required() THEN
+        RETURN;
+    END IF;
+    RETURN QUERY
+    SELECT hits.bundle_id,
+           hits.concept_id,
+           hits.path,
+           hits.title,
+           hits.type,
+           hits.rank,
+           hits.headline
+    FROM (
+        SELECT c.bundle_id AS bundle_id,
+               c.id AS concept_id,
+               c.path AS path,
+               c.title AS title,
+               c.type AS type,
+               paradedb.score(c) AS rank,
+               pg_catalog.ts_headline(
+                   p_text_search_config::pg_catalog.regconfig,
+                   pg_catalog.concat_ws(' ', c.title, c.description, c.body_text),
+                   pg_catalog.websearch_to_tsquery(p_text_search_config::pg_catalog.regconfig, p_query)) AS headline
+        FROM pgokf.concepts c
+        JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled AND b.retired_at IS NULL
+        LEFT JOIN pgokf.concept_provenance cp
+               ON cp.bundle_id = c.bundle_id AND cp.concept_id = c.id
+        WHERE c.id @@@ paradedb.boolean(should => ARRAY[
+                  paradedb.match('title', p_query),
+                  paradedb.match('description', p_query),
+                  paradedb.match('body_text', p_query)])
+          AND (v_tenant IS NULL OR c.tenant_id = v_tenant)
+          AND (p_bundle_id IS NULL OR c.bundle_id = p_bundle_id)
+          AND (p_concept_type IS NULL OR c.type = p_concept_type)
+          AND (p_tags IS NULL OR c.tags @> p_tags)
+          AND (p_status IS NULL OR cp.status = p_status)
+          AND (p_trust_tier IS NULL OR cp.trust_tier = p_trust_tier)
+          AND (p_concept_types IS NULL OR c.type = ANY(p_concept_types))
+    ) AS hits
+    WHERE p_after_rank IS NULL
+       OR hits.rank < p_after_rank
+       OR (hits.rank = p_after_rank AND hits.bundle_id > p_after_bundle_id)
+       OR (hits.rank = p_after_rank AND hits.bundle_id = p_after_bundle_id AND hits.concept_id > p_after_concept_id)
+    ORDER BY hits.rank DESC, hits.bundle_id ASC, hits.concept_id ASC
+    LIMIT p_limit;
+END
+$fn$;
+
+REVOKE ALL ON FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[]) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[]) TO pgokf_reader;
+COMMENT ON FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[]) IS
+    'Internal helper behind concept_search when search_backend = bm25 resolves to the ParadeDB pg_search provider (the pg_textsearch provider runs inline with invoker rights and does not use it); not part of the stable API. Runs the ParadeDB pg_search BM25 hit query with the owner''s privileges (row-level security wraps the catalog tables in a shape pg_search cannot plan for non-owners) while applying the same pgokf.tenant scoping the policies enforce, over active bundles only, with concept_search''s filters (p_concept_types is the type-membership form concept_search_hybrid uses to constrain the lexical candidate list before truncation), keyset cursor, and limit. Reader-level; returns exactly the rows concept_search would.';
 
 -- Last, so the new relations are registered for pg_dump (the rule for every
 -- upgrade script since 0.1.14). Later phases insert their sections BEFORE

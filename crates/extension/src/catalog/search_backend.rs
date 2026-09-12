@@ -258,6 +258,12 @@ pub struct SearchRequest<'a> {
     pub text_search_config: &'a str,
     /// Optional exact `concept.type` filter; `None` is a no-op.
     pub concept_type: Option<&'a str>,
+    /// Optional `concept.type` membership filter: a hit's type must be one of
+    /// the listed types. `None` is a no-op (an empty slice is normalized to
+    /// `None` upstream, like `tags`). Independent of `concept_type` - a
+    /// request carrying both must satisfy each. The hybrid fusion path uses
+    /// this to constrain the lexical candidate list before it is truncated.
+    pub concept_types: Option<&'a [String]>,
     /// Optional tag filter with **ALL-of** semantics: a hit's `concepts.tags`
     /// must contain every listed tag (`tags @> $filter`). `None` (or empty) is
     /// a no-op.
@@ -309,24 +315,27 @@ fn spi_error(context: &'static str) -> impl Fn(pgrx::spi::Error) -> CatalogError
     move |error| CatalogError::internal(format!("{context}: {error}"), Path::new(""))
 }
 
-/// Bind one [`SearchRequest`] to the eleven positional parameters both backend
-/// queries share (`$1`..`$11`), so the native and BM25 strategies stay in
-/// lockstep on argument order and the structured-filter and cursor binding lives
-/// in one place.
+/// Bind one [`SearchRequest`] to the twelve positional parameters both
+/// backend queries share (`$1`..`$12`), so the native and BM25 strategies stay
+/// in lockstep on argument order and the structured-filter and cursor binding
+/// lives in one place.
 ///
 /// A `NULL`-typed parameter still carries its column type OID (pgrx supplies it
 /// from the Rust type), so a `NULL` filter binds as a correctly typed `NULL` and
-/// its `$n IS NULL OR ...` guard short-circuits. An empty `tags` slice is treated
-/// as no filter - `Some([])` would otherwise bind `'{}'::text[]`, which every
-/// non-NULL `tags` array contains but a `NULL` `tags` column does not, silently
-/// dropping untagged concepts - so the caller normalizes it to `None` upstream.
+/// its `$n IS NULL OR ...` guard short-circuits. An empty `tags` or
+/// `concept_types` slice is treated as no filter - `Some([])` would otherwise
+/// bind `'{}'::text[]`, which every non-NULL `tags` array contains but a `NULL`
+/// `tags` column does not, silently dropping untagged concepts (and which no
+/// `type` value is a member of) - so the caller normalizes it to `None`
+/// upstream.
 ///
-/// The final three parameters (`$9`..`$11`) are the keyset cursor - rank,
-/// `bundle_id`, `concept_id`. They are all-or-nothing: an absent cursor binds
-/// three typed `NULL`s and the `$9 IS NULL OR ...` guard makes the keyset
-/// predicate a no-op (the first page). The cursor `concept_id` binds by borrow
-/// (`as_str`), so nothing is cloned.
-fn bind_search_args<'a>(request: &'a SearchRequest) -> [DatumWithOid<'a>; 11] {
+/// The final three parameters before the type-membership filter (`$9`..`$11`)
+/// are the keyset cursor - rank, `bundle_id`, `concept_id`. They are
+/// all-or-nothing: an absent cursor binds three typed `NULL`s and the
+/// `$9 IS NULL OR ...` guard makes the keyset predicate a no-op (the first
+/// page). The cursor `concept_id` binds by borrow (`as_str`), so nothing is
+/// cloned. `$12` is the `concept_types` membership filter.
+fn bind_search_args<'a>(request: &'a SearchRequest) -> [DatumWithOid<'a>; 12] {
     [
         request.query.into(),
         request.bundle_id.into(),
@@ -342,6 +351,7 @@ fn bind_search_args<'a>(request: &'a SearchRequest) -> [DatumWithOid<'a>; 11] {
             .after
             .map(|cursor| cursor.concept_id.as_str())
             .into(),
+        request.concept_types.map(<[String]>::to_vec).into(),
     ]
 }
 
@@ -421,6 +431,13 @@ pub(crate) const KEYSET_PREDICATE: &str = "($9 IS NULL
 // `concept_provenance`'s primary key is `(bundle_id, concept_id)` - so an
 // all-NULL-filter call returns exactly what it did before.
 //
+// `concept_types` binds as $12 - after the cursor parameters, so the eleven
+// established positions ($1..$11) never move - and is the membership form of
+// the $5 exact-type filter (`c.type = ANY($12)`), a no-op when NULL. The
+// hybrid fusion path constrains its lexical candidate list with it BEFORE the
+// list is truncated, so a type-filtered hybrid search cannot return an
+// underfilled page while eligible hits of the selected types exist.
+//
 // The subquery is `pub(crate)` so the freshness-aware variant
 // (`pgokf.concept_search_fresh`, see [`crate::catalog::search`]) wraps the
 // identical match/rank/filter set instead of forking it; the shared
@@ -447,7 +464,8 @@ pub(crate) const NATIVE_HITS_QUERY: &str = "
           AND ($5 IS NULL OR c.type = $5)
           AND ($6 IS NULL OR c.tags @> $6)
           AND ($7 IS NULL OR cp.status = $7)
-          AND ($8 IS NULL OR cp.trust_tier = $8)";
+          AND ($8 IS NULL OR cp.trust_tier = $8)
+          AND ($12 IS NULL OR c.type = ANY($12))";
 
 const NATIVE_QUERY: &str = "
     SELECT hits.bundle_id,
@@ -501,11 +519,11 @@ pub struct Bm25Backend {
 // the BM25 path must run with the owner's privileges (no policy injected) and
 // apply the tenant scope itself, through a bound parameter rather than an
 // inline function call. The helper does exactly that and keeps every other
-// property of the query: the same eleven parameters as [`bind_search_args`],
+// property of the query: the same twelve parameters as [`bind_search_args`],
 // the same seven-column projection, the same keyset tail, the same limit.
 const BM25_HITS_CALL: &str = "
     SELECT bundle_id, concept_id, path, title, type, rank, headline
-    FROM pgokf.bm25_hits($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
+    FROM pgokf.bm25_hits($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)";
 
 impl Bm25Backend {
     #[must_use]
@@ -614,6 +632,7 @@ pub(crate) fn textsearch_candidate_query(schema: &str) -> String {
            AND ($6 IS NULL OR c.tags @> $6)
            AND ($7 IS NULL OR cp.status = $7)
            AND ($8 IS NULL OR cp.trust_tier = $8)
+           AND ($12 IS NULL OR c.type = ANY($12))
            AND ($9 IS NULL
                 OR {rank} < $9
                 OR ({rank} = $9 AND c.bundle_id > $10)
@@ -974,7 +993,8 @@ CREATE FUNCTION pgokf.bm25_hits(
     p_trust_tier text,
     p_after_rank real,
     p_after_bundle_id bigint,
-    p_after_concept_id text)
+    p_after_concept_id text,
+    p_concept_types text[])
 RETURNS TABLE (
     bundle_id bigint,
     concept_id text,
@@ -1034,6 +1054,7 @@ BEGIN
           AND (p_tags IS NULL OR c.tags @> p_tags)
           AND (p_status IS NULL OR cp.status = p_status)
           AND (p_trust_tier IS NULL OR cp.trust_tier = p_trust_tier)
+          AND (p_concept_types IS NULL OR c.type = ANY(p_concept_types))
     ) AS hits
     WHERE p_after_rank IS NULL
        OR hits.rank < p_after_rank
@@ -1044,10 +1065,10 @@ BEGIN
 END
 $fn$;
 
-REVOKE ALL ON FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text) TO pgokf_reader;
-COMMENT ON FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text) IS
-    'Internal helper behind concept_search when search_backend = bm25 resolves to the ParadeDB pg_search provider (the pg_textsearch provider runs inline with invoker rights and does not use it); not part of the stable API. Runs the ParadeDB pg_search BM25 hit query with the owner''s privileges (row-level security wraps the catalog tables in a shape pg_search cannot plan for non-owners) while applying the same pgokf.tenant scoping the policies enforce, over active bundles only, with concept_search''s filters, keyset cursor, and limit. Reader-level; returns exactly the rows concept_search would.';
+REVOKE ALL ON FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[]) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[]) TO pgokf_reader;
+COMMENT ON FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[]) IS
+    'Internal helper behind concept_search when search_backend = bm25 resolves to the ParadeDB pg_search provider (the pg_textsearch provider runs inline with invoker rights and does not use it); not part of the stable API. Runs the ParadeDB pg_search BM25 hit query with the owner''s privileges (row-level security wraps the catalog tables in a shape pg_search cannot plan for non-owners) while applying the same pgokf.tenant scoping the policies enforce, over active bundles only, with concept_search''s filters (p_concept_types is the type-membership form concept_search_hybrid uses to constrain the lexical candidate list before truncation), keyset cursor, and limit. Reader-level; returns exactly the rows concept_search would.';
 ",
     name = "bm25_hits_function",
     requires = ["catalog_tables", "provenance_table"]

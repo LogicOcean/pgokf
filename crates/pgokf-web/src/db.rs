@@ -1429,14 +1429,14 @@ impl Db {
     }
 
     /// Semantic (`concept_search_semantic`) or hybrid (`concept_search_hybrid`)
-    /// search with a caller-supplied query embedding. The type filter
-    /// constrains the candidate window with the same empty-means-all
-    /// `text[]` membership test `browse` uses; the extension's stable SQL
-    /// signatures take no type parameter, so the filter wraps the function
-    /// call and the window is widened to the functions' maximum
-    /// ([`EMBEDDING_CANDIDATE_LIMIT`]) when a filter is active, keeping a
-    /// filtered page full. A group that expanded to nothing short-circuits
-    /// to no rows in every mode, before any statement runs.
+    /// search with a caller-supplied query embedding. The extension functions
+    /// take the type filter as their trailing `concept_types` argument and
+    /// apply it inside the ranked query, before the candidate list is
+    /// truncated to the page size (on both fusion inputs for hybrid), so a
+    /// filtered page is exactly the type-filtered top-`limit` and can never
+    /// come back empty or underfilled while eligible hits of the selected
+    /// types exist. A group that expanded to nothing short-circuits to no
+    /// rows in every mode, before any statement runs.
     pub(crate) async fn search_with_embedding(
         &self,
         q: &SearchQuery,
@@ -1447,11 +1447,7 @@ impl Db {
             return Ok(Vec::new());
         }
         let embedding: Vec<f32> = embedding.to_vec();
-        let limit = if q.concept_types.is_empty() {
-            q.limit
-        } else {
-            EMBEDDING_CANDIDATE_LIMIT
-        };
+        let limit = q.limit;
         if hybrid {
             self.query_map(
                 embedding_search_sql(true),
@@ -2325,24 +2321,19 @@ fn facet_row(r: &Row) -> Result<Facet> {
     })
 }
 
-/// The widest candidate window `pgokf.concept_search_semantic` and
-/// `pgokf.concept_search_hybrid` accept (`limit_count` in 1..=500): bound
-/// when a type filter constrains the window so the filtered page fills.
-const EMBEDDING_CANDIDATE_LIMIT: i32 = 500;
-
-/// The semantic/hybrid statement: the extension function's candidate
-/// window, constrained to the selected exact types with the same
-/// empty-means-all `text[]` membership test the browse and graph queries
-/// use (the stable extension signatures take no type parameter).
+/// The semantic/hybrid statement. The extension functions apply the
+/// type-membership filter INSIDE the ranked query, before the candidate list
+/// is truncated to the page size (the last parameter binds the expanded
+/// exact types; `NULL` or empty is no filter), so a filtered page is exactly
+/// the type-filtered top-`limit` - never a page underfilled by higher-ranked
+/// excluded types.
 fn embedding_search_sql(hybrid: bool) -> &'static str {
     if hybrid {
         "SELECT bundle_id, concept_id, path, title, type, rank, headline
-         FROM pgokf.concept_search_hybrid($1, $2, $3, $4) AS hits
-         WHERE (cardinality($5::text[]) = 0 OR hits.type = ANY($5))"
+         FROM pgokf.concept_search_hybrid($1, $2, $3, $4, $5)"
     } else {
         "SELECT bundle_id, concept_id, path, title, type, rank, headline
-         FROM pgokf.concept_search_semantic($1, $2, $3) AS hits
-         WHERE (cardinality($4::text[]) = 0 OR hits.type = ANY($4))"
+         FROM pgokf.concept_search_semantic($1, $2, $3, $4)"
     }
 }
 
@@ -2631,15 +2622,16 @@ mod tests {
     }
 
     #[test]
-    fn embedding_search_sql_constrains_the_candidate_window_by_type() {
-        // Assert: both modes carry the empty-means-all type membership test
-        // the browse and graph queries use, so a selected group or exact
-        // type narrows semantic and hybrid results too.
+    fn embedding_search_sql_filters_by_type_inside_the_ranked_query() {
+        // Assert: both modes pass the expanded exact types as the extension
+        // function's trailing concept_types argument, so the filter applies
+        // inside the ranked query before candidate truncation - no
+        // post-filter wrapper around a truncated window.
         for sql in [embedding_search_sql(false), embedding_search_sql(true)] {
-            assert!(sql.contains("cardinality("));
-            assert!(sql.contains("::text[]) = 0 OR hits.type = ANY("));
+            assert!(!sql.to_uppercase().contains("WHERE"));
+            assert!(!sql.contains("cardinality("));
         }
-        assert!(embedding_search_sql(true).contains("concept_search_hybrid($1, $2, $3, $4)"));
-        assert!(embedding_search_sql(false).contains("concept_search_semantic($1, $2, $3)"));
+        assert!(embedding_search_sql(true).contains("concept_search_hybrid($1, $2, $3, $4, $5)"));
+        assert!(embedding_search_sql(false).contains("concept_search_semantic($1, $2, $3, $4)"));
     }
 }

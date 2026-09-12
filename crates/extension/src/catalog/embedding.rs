@@ -381,6 +381,7 @@ fn run_semantic_query(
     bundle_id: Option<i64>,
     limit: i64,
     policy: &EmbeddingPolicy,
+    concept_types: Option<&[String]>,
 ) -> Result<Vec<SearchHit>, CatalogError> {
     let dim = policy.dim;
     let eligibility = contract_match_sql(4, 5, 6);
@@ -405,6 +406,7 @@ fn run_semantic_query(
                  AND ((eo.scope_kind = 'concept' AND eo.scope_key = c.id)
                       OR (eo.scope_kind = 'path' AND eo.scope_key = c.path)))
            AND ($2 IS NULL OR c.bundle_id = $2)
+           AND ($7 IS NULL OR c.type = ANY($7))
          ORDER BY e.embedding::vector({dim}) <=> $1::vector({dim}),
                   c.bundle_id, c.id
          LIMIT $3"
@@ -421,6 +423,7 @@ fn run_semantic_query(
                     policy.model.clone().into(),
                     policy.dim.into(),
                     policy.contract.clone().into(),
+                    concept_types.map(<[String]>::to_vec).into(),
                 ],
             )
             .map_err(spi_error("semantic search query failed"))?;
@@ -643,10 +646,16 @@ pub(crate) fn invalidate_synced_concepts(
 }
 
 /// Authorize (reader), validate, require `pgvector`, and run the semantic query.
+///
+/// `concept_types` constrains the ranked set by type membership *inside* the
+/// query, before the candidate list is truncated to `limit`: a type-filtered
+/// search therefore always returns up to `limit` eligible hits of the selected
+/// types, never a page underfilled by higher-ranked excluded types.
 fn concept_search_semantic_impl(
     query_embedding: &[f32],
     bundle_id: Option<i64>,
     limit_count: i32,
+    concept_types: Option<&[String]>,
 ) -> Result<Vec<SearchHit>, CatalogError> {
     security::authorize_current_user(security::Operation::Search, Path::new(""))?;
     let limit = search::validate_limit_count(limit_count)?;
@@ -655,7 +664,8 @@ fn concept_search_semantic_impl(
     }
     let policy = effective_embedding_policy()?;
     validate_embedding_length(query_embedding.len(), policy.dim)?;
-    run_semantic_query(query_embedding, bundle_id, limit, &policy)
+    let concept_types = concept_types.filter(|types| !types.is_empty());
+    run_semantic_query(query_embedding, bundle_id, limit, &policy, concept_types)
 }
 
 /// The (`bundle_id`, `concept_id`) key of a ranked hit, in rank order - the RRF
@@ -744,19 +754,32 @@ fn fuse_rrf(
 
 /// Authorize (reader), validate, run lexical + semantic, and RRF-fuse. Degrades
 /// to lexical-only, with a `WARNING`, when `pgvector` is absent.
+///
+/// `concept_types` constrains BOTH ranked inputs by type membership before
+/// either is truncated to `limit` - the lexical list through the shared
+/// backend filter, the semantic list inside its ranked query - so the fused
+/// page is exactly the type-filtered top-`limit`, never underfilled by
+/// higher-ranked excluded types.
 fn concept_search_hybrid_impl(
     query: &str,
     query_embedding: &[f32],
     bundle_id: Option<i64>,
     limit_count: i32,
+    concept_types: Option<&[String]>,
 ) -> Result<Vec<SearchHit>, CatalogError> {
     security::authorize_current_user(security::Operation::Search, Path::new(""))?;
     search::validate_query(query)?;
     let limit = search::validate_limit_count(limit_count)?;
 
-    // Lexical list through the configured search_backend (native or BM25).
-    let lexical_hits =
-        search::run_ranked_search(query, bundle_id, limit, Filters::default(), None)?;
+    // Lexical list through the configured search_backend (native or BM25),
+    // type-constrained before its own truncation.
+    let lexical_hits = search::run_ranked_search(
+        query,
+        bundle_id,
+        limit,
+        Filters::new(None, None, None, None, concept_types),
+        None,
+    )?;
     let lexical = RankKeys::from_hits(&lexical_hits);
 
     // Semantic list when pgvector is present; otherwise degrade to lexical-only.
@@ -767,7 +790,9 @@ fn concept_search_hybrid_impl(
     let semantic = if pgvector_installed()? {
         let policy = effective_embedding_policy()?;
         validate_embedding_length(query_embedding.len(), policy.dim)?;
-        let semantic_hits = run_semantic_query(query_embedding, bundle_id, limit, &policy)?;
+        let concept_types = concept_types.filter(|types| !types.is_empty());
+        let semantic_hits =
+            run_semantic_query(query_embedding, bundle_id, limit, &policy, concept_types)?;
         RankKeys::from_hits(&semantic_hits)
     } else {
         pgrx::warning!(
@@ -934,18 +959,30 @@ mod pgokf {
     /// must match the durable embedding policy, and the concept must be
     /// effectively fresh. Stale or legacy (NULL-provenance) rows never rank,
     /// even while the HNSW index physically retains them.
+    ///
+    /// `concept_types` is an optional type-membership filter (a hit's `type`
+    /// must be one of the listed types; `NULL` or empty is no filter) applied
+    /// inside the ranked query, before the candidate list is truncated to
+    /// `limit_count`: a filtered call returns up to `limit_count` eligible
+    /// hits of the selected types even when excluded types outrank them.
     // `query_embedding` is a `Vec<f32>` because that is the SQL `real[]` boundary
     // type; it is only borrowed into the impl, so pass-by-value is inherent to the
-    // pgrx signature.
+    // pgrx signature. The same applies to the `concept_types` `Vec<String>`.
     #[allow(clippy::needless_pass_by_value)]
     #[pg_extern(stable, parallel_safe, requires = ["embedding_table"])]
     fn concept_search_semantic(
         query_embedding: Vec<f32>,
         bundle_id: default!(Option<i64>, "NULL"),
         limit_count: default!(i32, 10),
+        concept_types: default!(Option<Vec<String>>, "NULL"),
     ) -> SetOfIterator<'static, pgrx::composite_type!('static, "pgokf.concept_search_result")> {
-        let hits = concept_search_semantic_impl(&query_embedding, bundle_id, limit_count)
-            .unwrap_or_else(|error| error.raise());
+        let hits = concept_search_semantic_impl(
+            &query_embedding,
+            bundle_id,
+            limit_count,
+            concept_types.as_deref(),
+        )
+        .unwrap_or_else(|error| error.raise());
         let rows: Vec<_> = hits
             .into_iter()
             .map(|hit| types::concept_search_result(hit).unwrap_or_else(|error| error.raise()))
@@ -964,9 +1001,15 @@ mod pgokf {
     /// applies), so an ineligible vector never leaks into the fused result.
     /// When `pgvector` is not installed this **degrades to lexical-only** with
     /// a `WARNING` (RRF needs no model, so lexical-only is a sensible fallback).
+    ///
+    /// `concept_types` is an optional type-membership filter (a hit's `type`
+    /// must be one of the listed types; `NULL` or empty is no filter) applied
+    /// to BOTH ranked inputs before either is truncated to `limit_count`, so
+    /// the fused page is exactly the type-filtered top-`limit_count`, never a
+    /// page underfilled by higher-ranked excluded types.
     // `query_embedding` is a `Vec<f32>` because that is the SQL `real[]` boundary
     // type; it is only borrowed into the impl, so pass-by-value is inherent to the
-    // pgrx signature.
+    // pgrx signature. The same applies to the `concept_types` `Vec<String>`.
     #[allow(clippy::needless_pass_by_value)]
     // PARALLEL RESTRICTED like `concept_search`: the lexical half runs the
     // configured backend, which may execute the bm25 provider's scoring.
@@ -976,9 +1019,16 @@ mod pgokf {
         query_embedding: Vec<f32>,
         bundle_id: default!(Option<i64>, "NULL"),
         limit_count: default!(i32, 10),
+        concept_types: default!(Option<Vec<String>>, "NULL"),
     ) -> SetOfIterator<'static, pgrx::composite_type!('static, "pgokf.concept_search_result")> {
-        let hits = concept_search_hybrid_impl(query, &query_embedding, bundle_id, limit_count)
-            .unwrap_or_else(|error| error.raise());
+        let hits = concept_search_hybrid_impl(
+            query,
+            &query_embedding,
+            bundle_id,
+            limit_count,
+            concept_types.as_deref(),
+        )
+        .unwrap_or_else(|error| error.raise());
         let rows: Vec<_> = hits
             .into_iter()
             .map(|hit| types::concept_search_result(hit).unwrap_or_else(|error| error.raise()))
@@ -1011,22 +1061,22 @@ ALTER FUNCTION pgokf.rebuild_embedding_index()
     SECURITY DEFINER SET search_path = pg_catalog, pg_temp;
 REVOKE ALL ON FUNCTION pgokf.set_concept_embedding(bigint, text, real[]) FROM PUBLIC;
 REVOKE ALL ON FUNCTION pgokf.set_concept_embedding_cas(bigint, text, real[], text, text, text, text) FROM PUBLIC;
-REVOKE ALL ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer) FROM PUBLIC;
-REVOKE ALL ON FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer, text[]) FROM PUBLIC;
+REVOKE ALL ON FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer, text[]) FROM PUBLIC;
 REVOKE ALL ON FUNCTION pgokf.rebuild_embedding_index() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pgokf.set_concept_embedding(bigint, text, real[]) TO pgokf_writer;
 GRANT EXECUTE ON FUNCTION pgokf.set_concept_embedding_cas(bigint, text, real[], text, text, text, text) TO pgokf_writer;
-GRANT EXECUTE ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer) TO pgokf_reader;
-GRANT EXECUTE ON FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer) TO pgokf_reader;
+GRANT EXECUTE ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer, text[]) TO pgokf_reader;
+GRANT EXECUTE ON FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer, text[]) TO pgokf_reader;
 GRANT EXECUTE ON FUNCTION pgokf.rebuild_embedding_index() TO pgokf_admin;
 COMMENT ON FUNCTION pgokf.set_concept_embedding(bigint, text, real[]) IS
     'Store or replace one concept''s embedding (real[]) streamed in by a companion embedder; the extension never computes embeddings. Writer-tier (pgokf_writer; admin inherits it), SECURITY DEFINER. Validates the concept exists and len(embedding)=embedding_dim (else 22023) and upserts. The vector is stored as real[] so pgokf needs no static pgvector dependency. This 0.2.0 compatibility signature carries no provenance, so the row it writes is a legacy row (model/source_file_hash/input_hash/contract all NULL, cleared on overwrite) that never ranks semantically; use pgokf.set_concept_embedding_cas for an eligible, provenance-carrying write.';
 COMMENT ON FUNCTION pgokf.set_concept_embedding_cas(bigint, text, real[], text, text, text, text) IS
     'Store or replace one concept''s embedding with full provenance, compare-and-set against the concept''s current file_hash: the write commits only when the concept''s file_hash still equals expected_file_hash under a row lock, returning true; a mismatch returns false having written nothing (retryable - re-read and re-embed, never an error-loop). input_hash is the caller-computed hash of the exact bounded input text, model the embedding model, contract the render-contract identity; all provenance arguments must be non-empty (22023 otherwise, as for a wrong dimension or an unknown concept; 42501 outside pgokf_writer). Only rows written through this setter carry the provenance semantic ranking requires.';
-COMMENT ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer) IS
-    'Semantic nearest-neighbor search: rank concepts by pgvector cosine distance to query_embedding (rank = normalized cosine similarity). Reader-level, invoker rights; active bundles only. query_embedding must have embedding_dim dimensions; limit_count in 1..=500. Requires pgvector: raises 22023 naming the missing dependency when it is not installed (no lexical fallback). Only ELIGIBLE embeddings rank: source_file_hash equal to the concept''s current file_hash, model/dimension/contract matching the embedding_model/embedding_dim/embedding_contract policy, and the concept effectively fresh (bundle freshness fresh, no covering concept/path override); a stale or legacy (NULL-provenance) row never ranks even while the HNSW index physically retains it.';
-COMMENT ON FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer) IS
-    'Hybrid search: Reciprocal Rank Fusion (RRF, k=60) of the lexical result of query (via the configured search_backend) and the semantic result of query_embedding, fused entirely in SQL (rank = fused RRF score). Reader-level, invoker rights; enabled bundles only; limit_count in 1..=500. The semantic component ranks eligible (current, fresh) embeddings only, so an ineligible vector never leaks into the fused result; the lexical component may still return a stale concept, labeled by pgokf.concept_search_fresh. Degrades to lexical-only with a WARNING when pgvector is not installed.';
+COMMENT ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer, text[]) IS
+    'Semantic nearest-neighbor search: rank concepts by pgvector cosine distance to query_embedding (rank = normalized cosine similarity). Reader-level, invoker rights; active bundles only. query_embedding must have embedding_dim dimensions; limit_count in 1..=500. Requires pgvector: raises 22023 naming the missing dependency when it is not installed (no lexical fallback). Only ELIGIBLE embeddings rank: source_file_hash equal to the concept''s current file_hash, model/dimension/contract matching the embedding_model/embedding_dim/embedding_contract policy, and the concept effectively fresh (bundle freshness fresh, no covering concept/path override); a stale or legacy (NULL-provenance) row never ranks even while the HNSW index physically retains it. concept_types is an optional type-membership filter (a hit''s type must be one of the listed types; NULL or empty is no filter) applied inside the ranked query BEFORE the candidate list is truncated to limit_count, so a filtered call returns up to limit_count eligible hits of the selected types even when excluded types outrank them.';
+COMMENT ON FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer, text[]) IS
+    'Hybrid search: Reciprocal Rank Fusion (RRF, k=60) of the lexical result of query (via the configured search_backend) and the semantic result of query_embedding, fused entirely in SQL (rank = fused RRF score). Reader-level, invoker rights; enabled bundles only; limit_count in 1..=500. The semantic component ranks eligible (current, fresh) embeddings only, so an ineligible vector never leaks into the fused result; the lexical component may still return a stale concept, labeled by pgokf.concept_search_fresh. Degrades to lexical-only with a WARNING when pgvector is not installed. concept_types is an optional type-membership filter (a hit''s type must be one of the listed types; NULL or empty is no filter) applied to BOTH ranked inputs before either is truncated to limit_count, so the fused page is exactly the type-filtered top-limit_count, never underfilled by higher-ranked excluded types.';
 COMMENT ON FUNCTION pgokf.rebuild_embedding_index() IS
     'Admin-only. (Re)build the pgvector HNSW (cosine) index on pgokf.concept_embedding for the configured embedding_dim; returns true when built, or false (with a NOTICE) when pgvector is absent or embedding_dim exceeds pgvector''s 2000-dimension HNSW limit. The index physically retains ineligible rows; the ranking predicates, not the index, enforce eligibility.';
 ",

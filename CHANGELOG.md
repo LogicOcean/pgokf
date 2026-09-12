@@ -118,6 +118,22 @@ semantically until the embedder rewrites them.
   marks every embedded bundle stale in the same transaction. The
   `pgokf-embed` worker polls for missing **or stale** rows and treats CAS
   rejection as retryable.
+- **Type-constrained semantic and hybrid search.** `concept_search_semantic`
+  and `concept_search_hybrid` gain an optional trailing `concept_types text[]
+  DEFAULT NULL` argument - a backward-compatible signature widening (an
+  existing call that omits it keeps working, per the API-stability rules for
+  optional trailing arguments). The filter is a type-membership test applied
+  inside the ranked query *before* the candidate list is truncated, on both
+  fusion inputs for hybrid, so a type-filtered call returns up to
+  `limit_count` eligible hits of the selected types even when excluded types
+  outrank them; the internal `bm25_hits` helper gained the same trailing
+  parameter (the superseded overloads are replaced by the
+  `0.2.0 → 0.3.0-dev` upgrade script, the `concept_search` `after_cursor`
+  precedent). The web UI's search page offers type-group filters (code,
+  documents, other) in every search mode, expanded against the catalog's
+  complete visible type inventory, and the semantic/hybrid modes call the
+  constrained signatures - filtering before truncation, never a
+  post-filtered window.
 - **Freshness-aware search and plugins.** `pgokf.concept_search_fresh`
   adds the `freshness = any|fresh|stale` filter and returns the full
   freshness/embedding provenance object per hit. `build_workspace_plugin`
