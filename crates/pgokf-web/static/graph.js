@@ -608,3 +608,63 @@
     window.addEventListener('hashchange', function () { if (visible()) start(); });
   }
 })();
+
+// Bundle picker: filter the explorer's checkbox list, keep a running count.
+// Runs on its own so it still works when WebGL or the graph bundle is
+// unavailable; without JavaScript every box stays visible and submits.
+(function () {
+  'use strict';
+
+  var input = document.querySelector('[data-bundle-filter]');
+  var list = document.querySelector(input ? input.getAttribute('data-bundle-filter') : null);
+  if (!input || !list) return;
+
+  var items = Array.prototype.slice.call(list.querySelectorAll('li[data-filter-text]'));
+  var boxes = list.querySelectorAll('input[type=checkbox][name=bundle]');
+  var empty = list.querySelector('[data-bundle-empty]');
+  var count = document.querySelector('[data-bundle-count]');
+  var clearButton = document.querySelector('[data-bundle-clear]');
+  var visibleButton = document.querySelector('[data-bundle-visible]');
+
+  function updateCount() {
+    if (!count) return;
+    var picked = list.querySelectorAll('input[type=checkbox][name=bundle]:checked').length;
+    count.textContent = picked + ' of ' + boxes.length + ' bundles selected';
+    if (clearButton) clearButton.disabled = picked === 0;
+  }
+
+  // The filter only hides rows; it never touches what is checked.
+  function applyFilter() {
+    var needle = input.value.trim().toLowerCase();
+    var shown = 0;
+    items.forEach(function (item) {
+      var match = needle === '' || item.getAttribute('data-filter-text').toLowerCase().indexOf(needle) !== -1;
+      item.hidden = !match;
+      if (match) shown += 1;
+    });
+    if (empty) empty.hidden = shown !== 0;
+    if (visibleButton) visibleButton.disabled = shown === 0;
+  }
+
+  input.addEventListener('input', applyFilter);
+  list.addEventListener('change', updateCount);
+  if (clearButton) {
+    clearButton.addEventListener('click', function () {
+      boxes.forEach(function (box) { box.checked = false; });
+      updateCount();
+    });
+  }
+  if (visibleButton) {
+    visibleButton.addEventListener('click', function () {
+      items.forEach(function (item) {
+        if (item.hidden) return;
+        var box = item.querySelector('input[type=checkbox]');
+        if (box) box.checked = true;
+      });
+      updateCount();
+    });
+  }
+
+  applyFilter();
+  updateCount();
+})();

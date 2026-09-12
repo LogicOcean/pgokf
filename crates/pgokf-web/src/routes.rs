@@ -5274,8 +5274,8 @@ async fn graph_page(
 }
 
 /// The explorer endpoint's query string. `bundle` repeats once per selected
-/// bundle so every selection reaches the API (a form GET submits the
-/// multi-select the same way).
+/// bundle so every selection reaches the API (a form GET submits the checked
+/// boxes the same way).
 fn graph_url_query(bundle_ids: &[i64], limit: i32, seed: Option<&(i64, String)>) -> String {
     let mut pairs: Vec<String> = bundle_ids.iter().map(|b| format!("bundle={b}")).collect();
     pairs.push(format!("limit={limit}"));
@@ -7207,7 +7207,7 @@ mod tests {
     }
 
     #[test]
-    fn graph_page_marks_every_selected_bundle_in_the_multi_select() {
+    fn graph_page_marks_every_selected_bundle_in_the_checkbox_list() {
         // Arrange
         let bundle = |id: i64, name: &str| BundleInfo {
             id,
@@ -7232,17 +7232,31 @@ mod tests {
         let rendered = page.render().expect("the graph page renders");
 
         // Assert
-        assert!(rendered.contains("name=\"bundle\" multiple"));
-        assert!(rendered.contains("<option value=\"2\" selected>docs</option>"));
-        assert!(rendered.contains("<option value=\"5\" selected>wiki</option>"));
-        assert!(!rendered.contains("<option value=\"1\" selected>"));
+        // Checked boxes submit the same repeated `bundle` params the multi-select did.
+        assert!(
+            rendered.contains("<input type=\"checkbox\" name=\"bundle\" value=\"2\" checked> docs")
+        );
+        assert!(
+            rendered.contains("<input type=\"checkbox\" name=\"bundle\" value=\"5\" checked> wiki")
+        );
+        assert!(!rendered.contains("value=\"1\" checked"));
         assert!(rendered.contains("No selection = all bundles"));
+        // The filter, count, and clear affordances carry the hooks graph.js wires up.
+        assert!(rendered.contains("data-bundle-filter=\"#g-bundle-list\""));
+        assert!(rendered.contains("class=\"filter-input js-only\""));
+        assert!(rendered.contains("id=\"g-bundle-list\" data-bundle-list"));
+        assert!(rendered.contains("<li data-filter-text=\"docs\">"));
+        assert!(rendered.contains("data-bundle-empty"));
+        assert!(rendered.contains("data-bundle-count"));
+        assert!(rendered.contains("aria-live=\"polite\""));
+        assert!(rendered.contains("data-bundle-clear"));
+        assert!(rendered.contains("data-bundle-visible"));
         // The drawn endpoint carries every selected bundle (HTML-escaped).
         assert!(rendered.contains("/api/graph?bundle=2&#38;bundle=5&#38;limit=300"));
     }
 
     #[test]
-    fn graph_page_with_no_selection_renders_the_plain_multi_select() {
+    fn graph_page_with_no_selection_renders_the_checkbox_list_unchecked() {
         // Arrange
         let page = GraphPage {
             shell: Shell::bare("Graph"),
@@ -7258,8 +7272,8 @@ mod tests {
         let rendered = page.render().expect("the graph page renders");
 
         // Assert
-        assert!(rendered.contains("name=\"bundle\" multiple"));
-        assert!(!rendered.contains("selected"));
+        assert!(rendered.contains("data-bundle-list"));
+        assert!(!rendered.contains("checked"));
     }
 
     #[test]
