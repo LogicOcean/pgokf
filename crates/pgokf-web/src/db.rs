@@ -461,10 +461,20 @@ pub(crate) struct GraphLink {
     pub texts: Vec<String>,
 }
 
+/// A relation type folded into a typed edge, with its own direction: one
+/// pair's fold can mix directed and undirected rows, and every inspection
+/// surface renders each type with the direction it actually has.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct RelationType {
+    pub name: String,
+    pub undirected: bool,
+}
+
 /// A typed edge between two graph nodes, possibly across bundles, folded
-/// over parallel relationship rows and keeping the distinct relation types.
-/// `undirected` is set only when every folded row is undirected, so the
-/// client draws an arrow whenever at least one directed row remains.
+/// over parallel relationship rows and keeping the distinct relation types,
+/// each with its own direction. `undirected` is set only when every folded
+/// row is undirected, so the client draws an arrow whenever at least one
+/// directed row remains.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct GraphRelationship {
     pub source_bundle_id: i64,
@@ -472,7 +482,7 @@ pub(crate) struct GraphRelationship {
     pub target_bundle_id: i64,
     pub target: String,
     pub count: i64,
-    pub relations: Vec<String>,
+    pub relations: Vec<RelationType>,
     pub undirected: bool,
 }
 
@@ -1938,7 +1948,12 @@ impl Db {
                 target_bundle_id,
                 target,
                 count: col(r, 4)?,
-                relations: col::<Option<Vec<String>>>(r, 5)?.unwrap_or_default(),
+                // The fold's `[name, undirected]` jsonb pairs, in relation
+                // type order.
+                relations: serde_json::from_value::<Vec<(String, bool)>>(col(r, 5)?)?
+                    .into_iter()
+                    .map(|(name, undirected)| RelationType { name, undirected })
+                    .collect(),
                 undirected: col::<Option<bool>>(r, 6)?.unwrap_or(false),
             }))
         })
@@ -2312,8 +2327,11 @@ fn catalog_graph_sql(edges: EdgeSource) -> String {
              SELECT l.bundle_id, l.target_id FROM pgokf.links l
               WHERE l.resolved AND l.source_id <> l.target_id
                 AND (cardinality($1::bigint[]) = 0 OR l.bundle_id = ANY($1))";
+    // The aliases name the ends CTE's columns: a UNION branch's output
+    // columns take the first SELECT's names, so without them the `deg` CTE's
+    // `bundle_id, id` references would not resolve.
     let relationship_ends =
-        "SELECT r.source_bundle_id, r.source_concept_id FROM pgokf.current_relationships r
+        "SELECT r.source_bundle_id AS bundle_id, r.source_concept_id AS id FROM pgokf.current_relationships r
               WHERE NOT r.unresolved
                 AND NOT (r.source_bundle_id = r.target_bundle_id
                          AND r.source_concept_id = r.target_concept_id)
@@ -2359,21 +2377,30 @@ fn catalog_graph_sql(edges: EdgeSource) -> String {
 /// node bundle ids, `$2` the concept ids, pairwise). Self-pairs are
 /// excluded (a self-edge would render as nothing, matching the links side);
 /// unresolved and external rows never join a drawn node by construction and
-/// are excluded explicitly for clarity. The fold keeps the distinct
-/// relation types and reports an edge as undirected only when every folded
-/// row is.
+/// are excluded explicitly for clarity. The fold is two-level: rows first
+/// collapse per relation type and direction, then per endpoint pair, so the
+/// payload keeps each distinct relation type *with its own direction* (one
+/// `[name, undirected]` pair per type) - a mixed pair can show which member
+/// types are undirected, which a flat type list with one bool could not.
+/// The edge as a whole is undirected only when every folded row is.
 const RELATIONSHIPS_AMONG_SQL: &str = "
-    WITH n AS (SELECT * FROM ROWS FROM (unnest($1::bigint[]), unnest($2::text[])) AS t(bundle_id, id))
-    SELECT r.source_bundle_id, r.source_concept_id, r.target_bundle_id, r.target_concept_id,
-           count(*)::bigint,
-           array_agg(DISTINCT r.relation_type ORDER BY r.relation_type),
-           bool_and(r.direction = 'undirected')
-    FROM pgokf.current_relationships r
-    JOIN n s ON s.bundle_id = r.source_bundle_id AND s.id = r.source_concept_id
-    JOIN n t ON t.bundle_id = r.target_bundle_id AND t.id = r.target_concept_id
-    WHERE NOT r.unresolved
-      AND NOT (r.source_bundle_id = r.target_bundle_id
-               AND r.source_concept_id = r.target_concept_id)
+    WITH n AS (SELECT * FROM ROWS FROM (unnest($1::bigint[]), unnest($2::text[])) AS t(bundle_id, id)),
+         per_type AS (
+             SELECT r.source_bundle_id, r.source_concept_id, r.target_bundle_id, r.target_concept_id,
+                    r.relation_type, r.direction = 'undirected' AS undirected, count(*) AS rows
+             FROM pgokf.current_relationships r
+             JOIN n s ON s.bundle_id = r.source_bundle_id AND s.id = r.source_concept_id
+             JOIN n t ON t.bundle_id = r.target_bundle_id AND t.id = r.target_concept_id
+             WHERE NOT r.unresolved
+               AND NOT (r.source_bundle_id = r.target_bundle_id
+                        AND r.source_concept_id = r.target_concept_id)
+             GROUP BY 1, 2, 3, 4, 5, 6
+         )
+    SELECT source_bundle_id, source_concept_id, target_bundle_id, target_concept_id,
+           sum(rows)::bigint,
+           jsonb_agg(jsonb_build_array(relation_type, undirected) ORDER BY relation_type),
+           bool_and(undirected)
+    FROM per_type
     GROUP BY 1, 2, 3, 4 ORDER BY 1, 2, 3, 4";
 
 /// The single statement of a multi-type search: one bounded
@@ -2654,6 +2681,25 @@ mod tests {
             3
         );
         assert_eq!(both.matches("cardinality($1::bigint[]) = 0").count(), 5);
+        // The executed shape: a UNION's output columns take the first
+        // SELECT's names, so the relationships-first variant must alias its
+        // ends to the `bundle_id, id` the deg CTE selects and groups by.
+        // (The scratch-database test below proves all three variants
+        // actually prepare and run; these assertions pin why they do.)
+        for variant in [&relationships, &both] {
+            assert!(
+                variant.contains(
+                    "SELECT r.source_bundle_id AS bundle_id, r.source_concept_id AS id FROM"
+                ),
+                "the relationship ends expose the deg CTE's column names"
+            );
+        }
+        for variant in [&links, &relationships, &both] {
+            assert!(
+                variant.contains("SELECT bundle_id, id, count(*)::bigint AS degree FROM ends"),
+                "the deg CTE reads ends by the names its first SELECT gives"
+            );
+        }
     }
 
     #[test]
@@ -2665,7 +2711,8 @@ mod tests {
         // publications, tenant scope, and target visibility apply inline),
         // never the raw tables no API role holds a grant on; both endpoints
         // join the drawn node set; unresolved rows and self-pairs stay out;
-        // the fold keeps distinct relation types and marks an edge
+        // the two-level fold keeps each distinct relation type with its own
+        // direction (jsonb `[name, undirected]` pairs) and marks an edge
         // undirected only when every folded row is.
         assert!(sql.contains("FROM pgokf.current_relationships r"));
         assert!(!sql.contains("pgokf.relationship "));
@@ -2678,9 +2725,13 @@ mod tests {
         ));
         assert!(sql.contains("NOT r.unresolved"));
         assert!(sql.contains("NOT (r.source_bundle_id = r.target_bundle_id"));
-        assert!(sql.contains("array_agg(DISTINCT r.relation_type ORDER BY r.relation_type)"));
-        assert!(sql.contains("bool_and(r.direction = 'undirected')"));
-        assert!(sql.contains("GROUP BY 1, 2, 3, 4"));
+        assert!(sql.contains("r.direction = 'undirected' AS undirected"));
+        assert!(sql.contains("GROUP BY 1, 2, 3, 4, 5, 6"));
+        assert!(sql.contains(
+            "jsonb_agg(jsonb_build_array(relation_type, undirected) ORDER BY relation_type)"
+        ));
+        assert!(sql.contains("bool_and(undirected)"));
+        assert!(sql.contains("GROUP BY 1, 2, 3, 4 ORDER BY 1, 2, 3, 4"));
     }
 
     #[test]
@@ -2845,5 +2896,243 @@ mod tests {
         }
         assert!(embedding_search_sql(true).contains("concept_search_hybrid($1, $2, $3, $4, $5)"));
         assert!(embedding_search_sql(false).contains("concept_search_semantic($1, $2, $3, $4)"));
+    }
+
+    /// The database the SQL execution regression creates and drops.
+    const SCRATCH_DB: &str = "pgokf_web_graph_sql_test";
+
+    /// A connection to the local scratch server, or `None` (with a notice)
+    /// when none answers - string-matched SQL tests still run, but the
+    /// execution regression needs a real database. `PGOKF_WEB_TEST_DB`
+    /// overrides the default `host=localhost dbname=postgres` string. The
+    /// parsed config comes back so the fixture connection can reuse
+    /// everything but the database name.
+    async fn scratch_admin() -> Option<(tokio_postgres::Client, tokio_postgres::Config)> {
+        let config: tokio_postgres::Config = std::env::var("PGOKF_WEB_TEST_DB")
+            .unwrap_or_else(|_| {
+                let user = std::env::var("USER").unwrap_or_else(|_| "postgres".to_owned());
+                format!("host=localhost dbname=postgres user={user}")
+            })
+            .parse()
+            .expect("PGOKF_WEB_TEST_DB parses as a libpq connection string");
+        let (client, connection) = match config.connect(NoTls).await {
+            Ok(pair) => pair,
+            Err(error) => {
+                eprintln!(
+                    "skipping the graph SQL execution test: no scratch PostgreSQL answers ({error})"
+                );
+                return None;
+            }
+        };
+        tokio::spawn(async move {
+            if let Err(error) = connection.await {
+                eprintln!("scratch admin connection error: {error}");
+            }
+        });
+        Some((client, config))
+    }
+
+    /// Every graph SQL variant prepared and executed against a real
+    /// database over minimal fixtures, not string-matched: the
+    /// relationships-only ends CTE once failed at prepare time (its output
+    /// columns took the relationship table's names, not the `bundle_id, id`
+    /// the degree CTE groups by) while every string assertion passed.
+    #[tokio::test]
+    async fn graph_sql_executes_against_a_scratch_database() {
+        let Some((admin, config)) = scratch_admin().await else {
+            return;
+        };
+        admin
+            .batch_execute(&format!("DROP DATABASE IF EXISTS {SCRATCH_DB}"))
+            .await
+            .expect("drop a stale scratch database");
+        admin
+            .batch_execute(&format!("CREATE DATABASE {SCRATCH_DB}"))
+            .await
+            .expect("create the scratch database");
+        let result = run_graph_sql_fixtures(config).await;
+        admin
+            .batch_execute(&format!("DROP DATABASE IF EXISTS {SCRATCH_DB}"))
+            .await
+            .expect("drop the scratch database");
+        result.expect("graph SQL fixtures");
+    }
+
+    /// The scratch schema and rows the execution regression runs over:
+    /// every object the graph SQL references, with a mixed directed +
+    /// undirected pair, a wholly undirected pair, and self/unresolved rows
+    /// that must never fold in.
+    const SCRATCH_FIXTURES: &str = "
+        CREATE SCHEMA pgokf;
+        CREATE TABLE pgokf.bundles (id bigint PRIMARY KEY, name text, path text, enabled boolean, retired_at timestamptz);
+        CREATE TABLE pgokf.concepts (bundle_id bigint, id text, title text, type text, path text);
+        CREATE TABLE pgokf.links (bundle_id bigint, source_id text, target_id text, resolved boolean);
+        CREATE TABLE pgokf.current_relationships (
+            source_bundle_id bigint, source_concept_id text, relation_type text, direction text,
+            target_bundle_id bigint, target_concept_id text, unresolved boolean
+        );
+        INSERT INTO pgokf.bundles VALUES (1, 'one', '/one', true, null), (2, 'two', '/two', true, null);
+        INSERT INTO pgokf.concepts VALUES
+            (1, 'a', 'A', 'Guide', 'a'), (1, 'b', 'B', 'Guide', 'b'),
+            (1, 'c', 'C', 'Guide', 'c'), (1, 'd', 'D', 'Guide', 'd'),
+            (2, 'b', 'B two', 'Guide', 'b');
+        INSERT INTO pgokf.links VALUES (1, 'a', 'b', true), (1, 'a', 'c', true);
+        INSERT INTO pgokf.current_relationships VALUES
+            (1, 'a', 'probe:directed', 'directed', 2, 'b', false),
+            (1, 'a', 'probe:undirected', 'undirected', 2, 'b', false),
+            (1, 'b', 'probe:only-undirected', 'undirected', 1, 'c', false),
+            (1, 'a', 'probe:self', 'directed', 1, 'a', false),
+            (1, 'a', 'probe:unresolved', 'directed', null, null, true);";
+
+    /// The fixture body of [`graph_sql_executes_against_a_scratch_database`],
+    /// run inside one rolled-back transaction in the scratch database.
+    async fn run_graph_sql_fixtures(mut config: tokio_postgres::Config) -> Result<()> {
+        config.dbname(SCRATCH_DB);
+        let (mut client, connection) = config
+            .connect(NoTls)
+            .await
+            .context("connect to the scratch database")?;
+        let connection = tokio::spawn(async move {
+            if let Err(error) = connection.await {
+                eprintln!("scratch connection error: {error}");
+            }
+        });
+        let outcome = async {
+            let tx = client.transaction().await?;
+            tx.batch_execute(SCRATCH_FIXTURES).await?;
+            check_catalog_degrees(&tx).await?;
+            check_relationship_fold(&tx).await?;
+            tx.rollback().await?;
+            Ok(())
+        }
+        .await;
+        drop(client);
+        let _ = connection.await;
+        outcome
+    }
+
+    /// All three degree variants prepare and execute; degrees count exactly
+    /// the selected sources' ends (self-pairs and unresolved rows never
+    /// count). Nodes sort by (`bundle_id`, `id`) here.
+    async fn check_catalog_degrees(tx: &tokio_postgres::Transaction<'_>) -> Result<()> {
+        let no_bundles: Vec<i64> = Vec::new();
+        let no_types: Vec<String> = Vec::new();
+        for (variant, expected) in [
+            (
+                EdgeSource::Links,
+                vec![
+                    (1, "a", 2),
+                    (1, "b", 1),
+                    (1, "c", 1),
+                    (1, "d", 0),
+                    (2, "b", 0),
+                ],
+            ),
+            (
+                EdgeSource::Relationships,
+                vec![
+                    (1, "a", 2),
+                    (1, "b", 1),
+                    (1, "c", 1),
+                    (1, "d", 0),
+                    (2, "b", 2),
+                ],
+            ),
+            (
+                EdgeSource::Both,
+                vec![
+                    (1, "a", 4),
+                    (1, "b", 2),
+                    (1, "c", 2),
+                    (1, "d", 0),
+                    (2, "b", 2),
+                ],
+            ),
+        ] {
+            let rows = tx
+                .query(
+                    &catalog_graph_sql(variant),
+                    &[&no_bundles, &300_i64, &no_types],
+                )
+                .await
+                .with_context(|| format!("the {variant:?} catalog graph SQL executes"))?;
+            let mut degrees: Vec<(i64, String, i64)> = rows
+                .iter()
+                .map(|r| Ok((col(r, 0)?, col(r, 2)?, col(r, 7)?)))
+                .collect::<Result<_>>()?;
+            degrees.sort();
+            let mut expected: Vec<(i64, String, i64)> = expected
+                .into_iter()
+                .map(|(b, id, d)| (b, id.to_owned(), d))
+                .collect();
+            expected.sort();
+            assert_eq!(
+                degrees, expected,
+                "the {variant:?} variant's per-node degrees"
+            );
+            assert_eq!(col::<i64>(&rows[0], 8)?, 5, "every concept is visible");
+        }
+        Ok(())
+    }
+
+    /// The fold keeps each relation type's own direction: the mixed pair
+    /// (1,a)-(2,b) lists its undirected member under the fold's arrow, and
+    /// the wholly undirected pair (1,b)-(1,c) folds to undirected.
+    /// Self-pairs and unresolved rows stay out.
+    async fn check_relationship_fold(tx: &tokio_postgres::Transaction<'_>) -> Result<()> {
+        let node_bundles = vec![1_i64, 1, 1, 1, 2];
+        let node_ids = vec!["a", "b", "c", "d", "b"];
+        let rows = tx
+            .query(RELATIONSHIPS_AMONG_SQL, &[&node_bundles, &node_ids])
+            .await
+            .context("the relationships-among SQL executes")?;
+        assert_eq!(rows.len(), 2, "two drawn pairs, self/unresolved out");
+
+        let mixed = &rows[0];
+        let mixed_types: Vec<(String, bool)> =
+            serde_json::from_value(col(mixed, 5)?).context("the fold's jsonb pairs parse")?;
+        assert_eq!(
+            (
+                col::<i64>(mixed, 0)?,
+                col::<String>(mixed, 1)?,
+                col::<i64>(mixed, 2)?,
+                col::<String>(mixed, 3)?,
+                col::<i64>(mixed, 4)?,
+            ),
+            (1, "a".to_owned(), 2, "b".to_owned(), 2),
+            "the mixed pair folds both rows"
+        );
+        assert_eq!(
+            mixed_types,
+            vec![
+                ("probe:directed".to_owned(), false),
+                ("probe:undirected".to_owned(), true),
+            ],
+            "each folded type keeps its own direction"
+        );
+        assert!(!col::<bool>(mixed, 6)?, "a mixed fold keeps its arrow");
+
+        let undirected = &rows[1];
+        let undirected_types: Vec<(String, bool)> = serde_json::from_value(col(undirected, 5)?)?;
+        assert_eq!(
+            (
+                col::<i64>(undirected, 0)?,
+                col::<String>(undirected, 1)?,
+                col::<i64>(undirected, 2)?,
+                col::<String>(undirected, 3)?,
+                col::<i64>(undirected, 4)?,
+            ),
+            (1, "b".to_owned(), 1, "c".to_owned(), 1),
+            "the wholly undirected pair folds alone"
+        );
+        assert_eq!(
+            undirected_types,
+            vec![("probe:only-undirected".to_owned(), true)],
+        );
+        assert!(
+            col::<bool>(undirected, 6)?,
+            "every folded row is undirected"
+        );
+        Ok(())
     }
 }

@@ -318,14 +318,29 @@
     var noun = l.kind === 'relationship' ? 'relationship' : 'link';
     return count + ' ' + noun + (count === 1 ? '' : 's');
   }
+  // The connector between an edge's ends in inspection text: a dash for a
+  // wholly undirected relationship, an arrow otherwise (a Markdown link is
+  // always directed; a mixed fold keeps its arrow, like the canvas).
+  function edgeConnector(l) {
+    return l.undirected ? '—' : '→';
+  }
+  // The relation list as inspection text. A typed relationship's types each
+  // carry their own direction, so an undirected type reads with a dash even
+  // inside a mixed fold whose other members point; a link's relations are
+  // plain names ('reference' filtered out as noise).
   function edgeRelations(l) {
-    return (l.relations || []).filter(function (r) { return l.kind === 'relationship' || r !== 'reference'; });
+    return (l.relations || [])
+      .filter(function (r) { return l.kind === 'relationship' || r !== 'reference'; })
+      .map(function (r) {
+        if (l.kind !== 'relationship') return r;
+        return r.name + (r.undirected ? ' —' : ' →');
+      });
   }
   function linkTip(l) {
     var from = nodeById(endId(l.source));
     var to = nodeById(endId(l.target));
     var rel = edgeRelations(l);
-    return '<div class="small">' + escapeHtml(from ? from.title : endId(l.source)) + ' → ' +
+    return '<div class="small">' + escapeHtml(from ? from.title : endId(l.source)) + ' ' + edgeConnector(l) + ' ' +
       escapeHtml(to ? to.title : endId(l.target)) + '</div>' +
       '<div class="muted small">' + escapeHtml((rel.length ? rel.join(', ') + ' · ' : '') + edgeNoun(l, l.count) + ' · click to inspect') + '</div>';
   }
@@ -344,8 +359,11 @@
       var outgoing = endId(l.source) === node.id;
       var other = nodeById(outgoing ? endId(l.target) : endId(l.source));
       var rel = edgeRelations(l);
+      // An undirected relationship has no outgoing side: both ends read the
+      // same, with a dash instead of an arrow.
+      var arrow = l.undirected ? '— ' : outgoing ? '→ ' : '← ';
       return '<li><button type="button" class="linkish" data-edge="' + i + '">' +
-        (outgoing ? '→ ' : '← ') + escapeHtml(other ? other.title : '?') + '</button>' +
+        arrow + escapeHtml(other ? other.title : '?') + '</button>' +
         (l.count > 1 ? ' <span class="count">×' + l.count + '</span>' : '') +
         (rel.length ? ' <span class="muted small">' + escapeHtml(rel.join(', ')) + '</span>' : '') + '</li>';
     }).join('');
@@ -370,7 +388,7 @@
       '<strong>' + escapeHtml(node.title) + '</strong>' +
       (node.type ? ' <span class="pill type">' + escapeHtml(node.type) + '</span>' : '') +
       '<div class="muted small">' + escapeHtml(node.bundle_name + ' / ' + node.path) + ' · ' +
-      (data.color_by === 'hops' ? (node.hops === 0 ? 'this concept' : node.hops + ' hop' + (node.hops === 1 ? '' : 's') + ' away') : node.degree + ' link' + (node.degree === 1 ? '' : 's') + ' in the catalog') +
+      (data.color_by === 'hops' ? (node.hops === 0 ? 'this concept' : node.hops + ' hop' + (node.hops === 1 ? '' : 's') + ' away') : node.degree + ' edge' + (node.degree === 1 ? '' : 's') + ' in the catalog') +
       ' · ' + degree + ' drawn</div>' + actions(node) + connectionsHtml(node);
     card.hidden = false;
     if (focus) focusOn(node);
@@ -389,7 +407,7 @@
     card.innerHTML =
       '<button type="button" class="card-close" aria-label="Close" data-close>×</button>' +
       '<div class="muted small">' + (link.kind === 'relationship' ? 'Relationship' : 'Link') + '</div>' +
-      '<strong>' + escapeHtml(from.title) + '</strong> → <strong>' + escapeHtml(to.title) + '</strong>' +
+      '<strong>' + escapeHtml(from.title) + '</strong> ' + edgeConnector(link) + ' <strong>' + escapeHtml(to.title) + '</strong>' +
       '<div class="muted small">' + escapeHtml(edgeNoun(link, link.count) + (rel.length ? ' · ' + rel.join(', ') : '')) + '</div>' +
       (texts ? '<div class="muted small">Link text:</div><ul class="edge-texts">' + texts + '</ul>' : '') +
       '<div class="graph3d-actions">' +

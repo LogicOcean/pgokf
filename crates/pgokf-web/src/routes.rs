@@ -2730,6 +2730,18 @@ fn graph_href(bundle_id: i64, concept_id: &str) -> String {
     )
 }
 
+/// The URL a node's "Explore" actions load: the source-aware seeded form of
+/// the catalog graph endpoint, so exploring from a filtered picture keeps
+/// that picture's edge source instead of resetting to the concept
+/// endpoint's both-sources default.
+fn explore_href(bundle_id: i64, concept_id: &str, edges: EdgeSource) -> String {
+    format!(
+        "/api/graph?seed={}&edges={}",
+        filters::percent_encode(&format!("{bundle_id}:{concept_id}")),
+        edges.as_str()
+    )
+}
+
 /// How the client colours a picture: by distance from a seed, or by a
 /// group (bundle, or type inside one bundle) with a legend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2740,13 +2752,20 @@ enum ColorBy {
 }
 
 /// A graph as the client draws it. Node ids are `bundle_id:concept_id`,
-/// unique across bundles; nodes carry their page and graph endpoints so the
-/// client never builds URLs from ids. Edges of every selected source share
-/// the `links` array, each labelled by `kind` (`link` or `relationship`)
-/// so the client styles and toggles them per source; typed edges carry
-/// their relation types and whether every folded row is undirected (the
-/// client draws an arrow unless they are).
-fn graph_json(seed: Option<(i64, &str)>, hops: i32, graph: &Graph, color_by: ColorBy) -> Value {
+/// unique across bundles; nodes carry their page and explore URLs so the
+/// client never builds URLs from ids, and the explore URL carries the
+/// picture's own edge source. Edges of every selected source share the
+/// `links` array, each labelled by `kind` (`link` or `relationship`) so the
+/// client styles and toggles them per source; typed edges carry their
+/// relation types, each with its own direction, and whether every folded
+/// row is undirected (the client draws an arrow unless they are).
+fn graph_json(
+    seed: Option<(i64, &str)>,
+    hops: i32,
+    graph: &Graph,
+    color_by: ColorBy,
+    edges: EdgeSource,
+) -> Value {
     let node_id = |bundle_id: i64, id: &str| format!("{bundle_id}:{id}");
     let group = |n: &crate::db::GraphNode| match color_by {
         ColorBy::Hops => n.hops.to_string(),
@@ -2777,7 +2796,7 @@ fn graph_json(seed: Option<(i64, &str)>, hops: i32, graph: &Graph, color_by: Col
                 "degree": n.degree,
                 "group": g,
                 "href": concept_href(n.bundle_id, &n.id),
-                "graph_href": graph_href(n.bundle_id, &n.id),
+                "graph_href": explore_href(n.bundle_id, &n.id, edges),
             })
         })
         .collect();
@@ -5303,6 +5322,7 @@ async fn api_graph(
         hops,
         &graph,
         ColorBy::Hops,
+        EdgeSource::Both,
     )))
 }
 
@@ -5556,6 +5576,7 @@ async fn api_catalog_graph(
             hops,
             &graph,
             ColorBy::Hops,
+            edges,
         )));
     }
     let (types, impossible) =
@@ -5572,7 +5593,7 @@ async fn api_catalog_graph(
     } else {
         ColorBy::Bundle
     };
-    Ok(Json(graph_json(None, 0, &graph, color_by)))
+    Ok(Json(graph_json(None, 0, &graph, color_by, edges)))
 }
 
 async fn graph_page(
@@ -7682,13 +7703,17 @@ mod tests {
         };
 
         // Act
-        let value = graph_json(None, 0, &graph, ColorBy::Bundle);
+        let value = graph_json(None, 0, &graph, ColorBy::Bundle, EdgeSource::Both);
 
         // Assert
         assert_eq!(value["nodes"][0]["id"], "2:a/b");
         assert_eq!(value["nodes"][1]["id"], "1:a/b");
         assert_eq!(value["nodes"][0]["title"], "a/b");
         assert_eq!(value["nodes"][0]["href"], "/concepts/2/a/b");
+        assert_eq!(
+            value["nodes"][0]["graph_href"],
+            "/api/graph?seed=2%3Aa%2Fb&edges=both"
+        );
         assert_eq!(value["links"][0]["source"], "2:a/b");
         assert_eq!(value["links"][0]["kind"], "link");
         assert_eq!(value["links"][0]["undirected"], false);
@@ -7719,19 +7744,29 @@ mod tests {
                 target_bundle_id: 2,
                 target: "b".to_owned(),
                 count: 2,
-                relations: vec!["tests:covers".to_owned(), "tests:fixtures".to_owned()],
+                relations: vec![
+                    crate::db::RelationType {
+                        name: "tests:covers".to_owned(),
+                        undirected: false,
+                    },
+                    crate::db::RelationType {
+                        name: "tests:fixtures".to_owned(),
+                        undirected: true,
+                    },
+                ],
                 undirected: false,
             }],
             total: 2,
         };
 
         // Act
-        let value = graph_json(None, 0, &graph, ColorBy::Bundle);
+        let value = graph_json(None, 0, &graph, ColorBy::Bundle, EdgeSource::Both);
 
         // Assert: the edge joins the shared links array, labelled by kind,
         // keyed by its own per-end bundle ids, carrying the relation types
-        // (opaque producer data, passed through verbatim) and the fold's
-        // direction.
+        // (opaque producer data, passed through verbatim) each with its own
+        // direction, plus the fold's all-undirected flag the canvas arrow
+        // follows.
         let edge = &value["links"][0];
         assert_eq!(edge["kind"], "relationship");
         assert_eq!(edge["source"], "1:a");
@@ -7739,10 +7774,78 @@ mod tests {
         assert_eq!(edge["count"], 2);
         assert_eq!(
             edge["relations"],
-            serde_json::json!(["tests:covers", "tests:fixtures"])
+            serde_json::json!([
+                {"name": "tests:covers", "undirected": false},
+                {"name": "tests:fixtures", "undirected": true},
+            ])
         );
         assert_eq!(edge["undirected"], false);
         assert_eq!(edge["texts"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn graph_json_explore_urls_carry_the_pictures_edge_source() {
+        // Arrange
+        let node = |bundle_id: i64, id: &str| crate::db::GraphNode {
+            bundle_id,
+            bundle_name: "docs".to_owned(),
+            id: id.to_owned(),
+            title: None,
+            concept_type: None,
+            path: format!("{id}.md"),
+            hops: 0,
+            degree: 1,
+        };
+        let graph = Graph {
+            nodes: vec![node(2, "runbooks/a")],
+            links: vec![],
+            relationships: vec![],
+            total: 1,
+        };
+
+        // Act & Assert: the per-node URL both Explore actions load points at
+        // the source-aware seeded endpoint with the picture's own edge
+        // source, never at the concept endpoint's both-sources default.
+        for (edges, value) in [
+            (EdgeSource::Links, "links"),
+            (EdgeSource::Relationships, "rels"),
+            (EdgeSource::Both, "both"),
+        ] {
+            let json = graph_json(None, 0, &graph, ColorBy::Bundle, edges);
+            assert_eq!(
+                json["nodes"][0]["graph_href"],
+                format!("/api/graph?seed=2%3Arunbooks%2Fa&edges={value}")
+            );
+        }
+        // The receiving endpoint parses that seed and source pair back.
+        let params = CatalogGraphParams::parse(Some("seed=2%3Arunbooks%2Fa&edges=links"));
+        assert_eq!(
+            params.seed().ok().flatten(),
+            Some((2, "runbooks/a".to_owned()))
+        );
+        assert_eq!(params.edge_source().ok(), Some(EdgeSource::Links));
+    }
+
+    #[test]
+    fn graph_js_both_explore_actions_load_the_nodes_source_aware_url() {
+        // Assert: the node card's "Explore from here" and the edge card's
+        // "Explore" buttons both carry the node's graph_href (which embeds
+        // the edge source), and the shared click handler seeds the loader
+        // with it, so exploring never silently resets the edge source.
+        let node_button = "data-explore=\"' + escapeHtml(node.graph_href)";
+        let edge_button = "data-explore=\"' + escapeHtml(to.graph_href)";
+        assert!(
+            GRAPH_JS.contains(node_button),
+            "the node card's Explore action carries graph_href"
+        );
+        assert!(
+            GRAPH_JS.contains(edge_button),
+            "the edge card's Explore action carries graph_href"
+        );
+        assert!(
+            GRAPH_JS.contains("seedUrl = explore.getAttribute('data-explore');"),
+            "the explore handler loads the action's URL as the new seed"
+        );
     }
 
     #[test]
