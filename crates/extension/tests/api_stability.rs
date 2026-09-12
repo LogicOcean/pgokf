@@ -114,7 +114,10 @@ const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
     ("mark_stale", "bigint, text[], text, text"),
     ("mark_reconciling", "bigint, text"),
     ("mark_blocked", "bigint, text[], text"),
-    ("mark_fresh", "bigint, bigint, bigint, text, text, jsonb, text"),
+    (
+        "mark_fresh",
+        "bigint, bigint, bigint, text, text, jsonb, text",
+    ),
     ("mark_scope_stale", "bigint, text, text, text[], text"),
     ("clear_freshness_scope", "bigint, text, text"),
     ("list_freshness_dependencies", "integer"),

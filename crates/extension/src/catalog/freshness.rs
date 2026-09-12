@@ -470,7 +470,9 @@ fn propagate_transitive(roots: &[i64], causation_key: Option<&str>) -> Result<()
         // rows than the budget proves the node has edges the walk cannot
         // enumerate, so the walk escalates instead of committing a possibly
         // omitted remainder.
-        let remaining = (TRANSITIVE_INVALIDATION_ROW_CAP - visited.len()) as i64;
+        let remaining =
+            i64::try_from(TRANSITIVE_INVALIDATION_ROW_CAP.saturating_sub(visited.len()))
+                .unwrap_or(0);
         let edges: Vec<(i64, Option<String>)> = Spi::connect(|client| {
             let table = client
                 .select(
@@ -499,7 +501,9 @@ fn propagate_transitive(roots: &[i64], causation_key: Option<&str>) -> Result<()
         // than the node budget means the budgeted page was a truncation, so
         // the unwalked remainder of this node's edges can no longer be ruled
         // out - escalate conservatively after processing what was fetched.
-        let edge_fetch_truncated = edges.len() as i64 > remaining;
+        let edge_fetch_truncated = i64::try_from(edges.len())
+            .map(|fetched| fetched > remaining)
+            .unwrap_or(true);
         for (target_bundle_id, edge_causation_key) in edges {
             // Causation suppression, edge by edge, with the originating key.
             if causation_key.is_some() && edge_causation_key.as_deref() == causation_key {

@@ -8165,7 +8165,10 @@ Use the solo skill on its own.\n";
         )
         .expect("mark_fresh executes")
         .expect("a verdict is returned");
-        assert!(completed, "the attempt that claimed the newest epoch clears");
+        assert!(
+            completed,
+            "the attempt that claimed the newest epoch clears"
+        );
         assert_eq!(freshness_state(target_id), "fresh{}");
     }
 
@@ -8404,11 +8407,9 @@ Use the solo skill on its own.\n";
         // Arrange: one real source bundle feeding the chain head.
         let source = FixtureBundle::create();
         let source_id = register_fixture(&source);
-        let head = Spi::get_one::<i64>(
-            "SELECT id FROM pgokf.bundles WHERE name = 'overcap-0'",
-        )
-        .expect("head query executes")
-        .expect("the chain head exists");
+        let head = Spi::get_one::<i64>("SELECT id FROM pgokf.bundles WHERE name = 'overcap-0'")
+            .expect("head query executes")
+            .expect("the chain head exists");
         let _ = register_dependency("producer-a", source_id, "bundle", "", head, None);
 
         // Act: change the source; the invalidation walks the 1,027-node chain

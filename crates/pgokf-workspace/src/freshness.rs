@@ -246,10 +246,10 @@ pub async fn check_plugin_freshness<C: GenericClient>(
         let bundle_id: i64 = row.try_get(1)?;
         if row_kind == "concept" {
             if let Some(scope_key) = row.try_get::<_, Option<String>>(8)? {
-                live_scopes.entry(bundle_id).or_default().insert(
-                    scope_key,
-                    (row.try_get(6)?, row.try_get(7)?),
-                );
+                live_scopes
+                    .entry(bundle_id)
+                    .or_default()
+                    .insert(scope_key, (row.try_get(6)?, row.try_get(7)?));
             }
             continue;
         }
@@ -392,19 +392,20 @@ fn compare_bundle(
     // is not fresh marks the artifact stale even when every bundle pin and
     // the bundle-scope state still match.
     for entry in entries {
-        if let Some((state, reasons)) = live_scopes.get(&entry.concept_id) {
-            if state != "fresh" && state != "unknown" {
-                drift.push(format!(
-                    "concept {} is now {}{}",
-                    entry.concept_id,
-                    state,
-                    if reasons.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" ({})", reasons.join(", "))
-                    }
-                ));
-            }
+        if let Some((state, reasons)) = live_scopes.get(&entry.concept_id)
+            && state != "fresh"
+            && state != "unknown"
+        {
+            drift.push(format!(
+                "concept {} is now {}{}",
+                entry.concept_id,
+                state,
+                if reasons.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", reasons.join(", "))
+                }
+            ));
         }
     }
     if !drift.is_empty() {
@@ -598,7 +599,12 @@ mod tests {
         let evidence = entry("seed", "stale");
 
         // Act
-        let check = compare_bundle(&pinned(1), Some(&live(Some("fresh"))), &[&evidence], &no_scopes());
+        let check = compare_bundle(
+            &pinned(1),
+            Some(&live(Some("fresh"))),
+            &[&evidence],
+            &no_scopes(),
+        );
 
         // Assert
         assert_eq!(check.status, PluginStatus::Stale);
@@ -612,7 +618,13 @@ mod tests {
         let fresh = entry("seed", "fresh");
         let unknown = entry("seed", "unknown");
         assert_eq!(
-            compare_bundle(&pinned(1), Some(&live(Some("fresh"))), &[&fresh, &unknown], &no_scopes()).status,
+            compare_bundle(
+                &pinned(1),
+                Some(&live(Some("fresh"))),
+                &[&fresh, &unknown],
+                &no_scopes()
+            )
+            .status,
             PluginStatus::Current
         );
     }
@@ -645,14 +657,17 @@ mod tests {
             compare_bundle(&pinned(1), Some(&live(Some("fresh"))), &[&shipped], &other).status,
             PluginStatus::Current
         );
-        let live_fresh: LiveScopes = [(
-            "seed".to_owned(),
-            ("fresh".to_owned(), Vec::new()),
-        )]
-        .into_iter()
-        .collect();
+        let live_fresh: LiveScopes = [("seed".to_owned(), ("fresh".to_owned(), Vec::new()))]
+            .into_iter()
+            .collect();
         assert_eq!(
-            compare_bundle(&pinned(1), Some(&live(Some("fresh"))), &[&shipped], &live_fresh).status,
+            compare_bundle(
+                &pinned(1),
+                Some(&live(Some("fresh"))),
+                &[&shipped],
+                &live_fresh
+            )
+            .status,
             PluginStatus::Current
         );
     }
