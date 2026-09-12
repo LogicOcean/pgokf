@@ -48,8 +48,8 @@ exercised against a live PostgreSQL 18 cluster.
 | `search_facets(query, bundle_id, facet, concept_type, tags, status, trust_tier)` | `SETOF search_facet` | STABLE | invoker | `pgokf_reader` |
 | `search_index_status()` | `jsonb` | STABLE | invoker | `pgokf_reader` |
 | `find_similar(concept_id, bundle_id, limit_count)` | `SETOF concept_search_result` | STABLE | invoker | `pgokf_reader` |
-| `concept_search_semantic(query_embedding, bundle_id, limit_count)` | `SETOF concept_search_result` | STABLE | invoker | `pgokf_reader` |
-| `concept_search_hybrid(query, query_embedding, bundle_id, limit_count)` | `SETOF concept_search_result` | STABLE | invoker | `pgokf_reader` |
+| `concept_search_semantic(query_embedding, bundle_id, limit_count, concept_types)` | `SETOF concept_search_result` | STABLE | invoker | `pgokf_reader` |
+| `concept_search_hybrid(query, query_embedding, bundle_id, limit_count, concept_types)` | `SETOF concept_search_result` | STABLE | invoker | `pgokf_reader` |
 | `set_concept_embedding(bundle_id, concept_id, embedding)` | `void` | VOLATILE | DEFINER | `pgokf_writer` |
 | `set_concept_embedding_cas(bundle_id, concept_id, embedding, expected_file_hash, input_hash, model, contract)` | `boolean` | VOLATILE | DEFINER | `pgokf_writer` |
 | `rebuild_embedding_index()` | `boolean` | VOLATILE | DEFINER | `pgokf_admin` |
@@ -572,13 +572,17 @@ SELECT pgokf.set_concept_embedding_cas(1, 'runbooks/database-failover',
                                        'my-model', 'my-embedder/v1');
 ```
 
-### `pgokf.concept_search_semantic(query_embedding real[], bundle_id bigint DEFAULT NULL, limit_count int DEFAULT 10) → SETOF pgokf.concept_search_result`
+### `pgokf.concept_search_semantic(query_embedding real[], bundle_id bigint DEFAULT NULL, limit_count int DEFAULT 10, concept_types text[] DEFAULT NULL) → SETOF pgokf.concept_search_result`
 
 Nearest-neighbor search by pgvector cosine distance (`<=>`). `STABLE PARALLEL
 SAFE`, invoker rights, **requires `pgokf_reader`**. The `rank` column is the
 normalized cosine similarity (`1 - distance`, `1.0` for an identical vector); the
 `headline` column is `NULL`. `query_embedding` must have `embedding_dim`
-dimensions.
+dimensions. `concept_types` is an optional type-membership filter (a hit's
+`type` must be one of the listed types; `NULL` or empty is no filter) applied
+inside the ranked query, before the candidate list is truncated to
+`limit_count`, so a filtered call returns up to `limit_count` eligible hits of
+the selected types even when excluded types outrank them.
 
 **Requires pgvector.** Because semantic search has no lexical equivalent, when
 pgvector is not installed this raises `22023` naming the missing dependency
@@ -590,9 +594,14 @@ never returned.
 ```sql
 SELECT concept_id, round(rank::numeric, 4) AS cosine_similarity
 FROM pgokf.concept_search_semantic(ARRAY[0.0123, -0.0456, ...]::real[]);
+
+-- Only runbooks and guides, filtered before the candidate list is truncated:
+SELECT concept_id, round(rank::numeric, 4) AS cosine_similarity
+FROM pgokf.concept_search_semantic(ARRAY[0.0123, -0.0456, ...]::real[],
+                                   NULL, 10, '{Runbook,Guide}'::text[]);
 ```
 
-### `pgokf.concept_search_hybrid(query text, query_embedding real[], bundle_id bigint DEFAULT NULL, limit_count int DEFAULT 10) → SETOF pgokf.concept_search_result`
+### `pgokf.concept_search_hybrid(query text, query_embedding real[], bundle_id bigint DEFAULT NULL, limit_count int DEFAULT 10, concept_types text[] DEFAULT NULL) → SETOF pgokf.concept_search_result`
 
 Fuse the **lexical** result of `query` (through the configured `search_backend`)
 with the **semantic** result of `query_embedding` using **Reciprocal Rank
@@ -606,12 +615,21 @@ an ineligible vector never leaks into the fused result; the lexical component
 may still return a stale concept, labeled by `concept_search_fresh`. When
 pgvector is not installed, hybrid **degrades to lexical-only** with a `WARNING`
 (RRF needs no model, so this fallback is sensible - unlike pure semantic
-search).
+search). `concept_types` is an optional type-membership filter (`NULL` or
+empty is no filter) applied to BOTH ranked inputs before either is truncated
+to `limit_count`, so the fused page is exactly the type-filtered
+top-`limit_count`, never underfilled by higher-ranked excluded types.
 
 ```sql
 SELECT concept_id, round(rank::numeric, 6) AS rrf
 FROM pgokf.concept_search_hybrid('database failover',
                                  ARRAY[0.0123, -0.0456, ...]::real[]);
+
+-- Only code-type concepts, on both fusion inputs before truncation:
+SELECT concept_id, round(rank::numeric, 6) AS rrf
+FROM pgokf.concept_search_hybrid('database failover',
+                                 ARRAY[0.0123, -0.0456, ...]::real[],
+                                 NULL, 10, '{Code Entity,Code Reference}'::text[]);
 ```
 
 ### `pgokf.bm25_hits(...)` (internal)

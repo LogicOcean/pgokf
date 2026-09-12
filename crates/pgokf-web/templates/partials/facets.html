@@ -1,4 +1,3 @@
-  <datalist id="pgokf-types">{% for f in facets.types %}<option value="{{ f.value }}"></option>{% endfor %}</datalist>
   {% if !facets.tags.is_empty() %}
   <div class="facet-block">
     <h3>{% if form.q.is_empty() %}Tags{% else %}Tags in these results{% endif %}</h3>

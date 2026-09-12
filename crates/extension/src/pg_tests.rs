@@ -2248,6 +2248,218 @@ An added concept for the resync diff.\n";
         );
     }
 
+    /// One typed concept carrying the shared lexical term `peregrine`, for the
+    /// type-constrained search fixtures.
+    fn typed_concept(kind: &str, name: &str) -> String {
+        format!(
+            "---\ntype: {kind}\ntitle: {name}\n---\n\n# {name}\n\nThe peregrine plan for {name}.\n"
+        )
+    }
+
+    /// Register a bundle of three `Code` and two `Guide` concepts (all sharing
+    /// the lexical term `peregrine`), returning its identity. The excluded
+    /// `Code` hits can outrank the selected `Guide` hits on both the lexical
+    /// and the semantic side - exactly the rank pressure under which a filter
+    /// applied AFTER candidate truncation would return an empty or underfilled
+    /// page while eligible `Guide` hits exist.
+    fn register_typed_fixture() -> i64 {
+        let root = std::env::temp_dir().join(format!(
+            "pgokf-pg-test-typed-{}-{}",
+            std::process::id(),
+            unique_nonce()
+        ));
+        fs::create_dir_all(&root).expect("typed fixture root is creatable");
+        for (name, kind) in [
+            ("code1", "Code"),
+            ("code2", "Code"),
+            ("code3", "Code"),
+            ("guide1", "Guide"),
+            ("guide2", "Guide"),
+        ] {
+            fs::write(root.join(format!("{name}.md")), typed_concept(kind, name))
+                .expect("typed fixture concept is writable");
+        }
+        let bundle_id = Spi::get_one_with_args::<i64>(
+            "SELECT bundle_id FROM pgokf.register_bundle($1)",
+            &[root.to_str().expect("fixture path is UTF-8").into()],
+        )
+        .expect("register_bundle executes")
+        .expect("bundle_id is not NULL");
+        let added = Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgokf.concepts WHERE bundle_id = $1",
+            &[bundle_id.into()],
+        )
+        .expect("concept count query executes")
+        .expect("count is not NULL");
+        assert_eq!(added, 5, "the typed fixture registers five concepts");
+        let _ = fs::remove_dir_all(&root);
+        bundle_id
+    }
+
+    #[pg_test]
+    fn semantic_type_filter_applies_before_candidate_truncation() {
+        // Arrange: only meaningful where pgvector is installable.
+        if !pgvector_available() {
+            return;
+        }
+        Spi::run("CREATE EXTENSION IF NOT EXISTS vector").expect("pgvector is creatable");
+        Spi::run("SELECT pgokf.set_config('embedding_dim', '4'::jsonb)")
+            .expect("embedding_dim is configurable");
+        let bundle_id = register_typed_fixture();
+
+        // The Code embeddings point along axis 1 (near the query vector), the
+        // Guide embeddings along axis 2: the unfiltered top ranks are all Code.
+        for code in ["code1", "code2", "code3"] {
+            cas_set_embedding(bundle_id, code, "ARRAY[1,0.05,0,0]");
+        }
+        for guide in ["guide1", "guide2"] {
+            cas_set_embedding(bundle_id, guide, "ARRAY[0,1,0,0]");
+        }
+
+        // Act/Assert: the unfiltered page of 2 is all Code (rank pressure).
+        let code_page = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgokf.concept_search_semantic(
+                 ARRAY[1,0,0,0]::real[], NULL, 2)
+             WHERE type = 'Code'",
+        )
+        .expect("unfiltered semantic query executes")
+        .expect("count is not NULL");
+        assert_eq!(code_page, 2, "the unfiltered top-2 is all Code hits");
+
+        // The type filter applies BEFORE truncation: the filtered page is full
+        // of Guide hits even though every Code hit outranks them. A filter
+        // applied to the truncated window would return zero rows here.
+        let guide_page = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgokf.concept_search_semantic(
+                 ARRAY[1,0,0,0]::real[], NULL, 2, '{Guide}'::text[])
+             WHERE type = 'Guide'",
+        )
+        .expect("filtered semantic query executes")
+        .expect("count is not NULL");
+        assert_eq!(
+            guide_page, 2,
+            "the Guide-filtered page is full despite the higher-ranked Code hits"
+        );
+
+        // The filter never overfills and never leaks an excluded type: a page
+        // larger than the eligible set returns exactly the eligible set.
+        let eligible = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgokf.concept_search_semantic(
+                 ARRAY[1,0,0,0]::real[], NULL, 5, '{Guide}'::text[])",
+        )
+        .expect("oversized filtered query executes")
+        .expect("count is not NULL");
+        assert_eq!(eligible, 2, "only the two Guide concepts are eligible");
+
+        // NULL and empty concept_types are the same no-filter: the top hit of
+        // each matches the historical three-argument call.
+        for no_filter in ["NULL", "'{}'::text[]"] {
+            let nearest = Spi::get_one::<String>(&format!(
+                "SELECT concept_id FROM pgokf.concept_search_semantic(
+                     ARRAY[1,0,0,0]::real[], NULL, 2, {no_filter})
+                 LIMIT 1"
+            ))
+            .expect("no-filter semantic query executes")
+            .expect("a nearest concept exists");
+            assert_eq!(
+                nearest, "code1",
+                "concept_types = {no_filter} is no filter (the pre-filter behavior)"
+            );
+        }
+    }
+
+    #[pg_test]
+    fn hybrid_type_filter_constrains_both_inputs_before_truncation() {
+        // Arrange: only meaningful where pgvector is installable.
+        if !pgvector_available() {
+            return;
+        }
+        Spi::run("CREATE EXTENSION IF NOT EXISTS vector").expect("pgvector is creatable");
+        Spi::run("SELECT pgokf.set_config('embedding_dim', '4'::jsonb)")
+            .expect("embedding_dim is configurable");
+        let bundle_id = register_typed_fixture();
+        for code in ["code1", "code2", "code3"] {
+            cas_set_embedding(bundle_id, code, "ARRAY[1,0.05,0,0]");
+        }
+        for guide in ["guide1", "guide2"] {
+            cas_set_embedding(bundle_id, guide, "ARRAY[0,1,0,0]");
+        }
+
+        // Every concept matches the lexical term; the Code hits also win the
+        // semantic side, so the unfiltered fused top-2 is all Code.
+        let code_page = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgokf.concept_search_hybrid(
+                 'peregrine', ARRAY[1,0,0,0]::real[], NULL, 2)
+             WHERE type = 'Code'",
+        )
+        .expect("unfiltered hybrid query executes")
+        .expect("count is not NULL");
+        assert_eq!(code_page, 2, "the unfiltered fused top-2 is all Code hits");
+
+        // Both fusion inputs are constrained before either is truncated, so
+        // the filtered fused page is the full Guide page - not the empty or
+        // underfilled page a post-truncation filter would produce.
+        let guide_page = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgokf.concept_search_hybrid(
+                 'peregrine', ARRAY[1,0,0,0]::real[], NULL, 2, '{Guide}'::text[])
+             WHERE type = 'Guide'",
+        )
+        .expect("filtered hybrid query executes")
+        .expect("count is not NULL");
+        assert_eq!(
+            guide_page, 2,
+            "the Guide-filtered fused page is full despite the higher-ranked Code hits"
+        );
+
+        // Empty concept_types is no filter, identical to NULL.
+        let unfiltered = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgokf.concept_search_hybrid(
+                 'peregrine', ARRAY[1,0,0,0]::real[], NULL, 2, '{}'::text[])
+             WHERE type = 'Code'",
+        )
+        .expect("empty-types hybrid query executes")
+        .expect("count is not NULL");
+        assert_eq!(unfiltered, 2, "an empty concept_types list is no filter");
+    }
+
+    #[pg_test]
+    fn hybrid_type_filter_without_pgvector_still_constrains_the_lexical_list() {
+        // Arrange: this test asserts the degraded (lexical-only) behavior, so
+        // only run it when pgvector is genuinely absent from the session.
+        let installed = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pg_catalog.pg_extension WHERE extname = 'vector'",
+        )
+        .expect("pg_extension probe executes")
+        .expect("count is not NULL");
+        if installed > 0 {
+            return;
+        }
+        let _bundle_id = register_typed_fixture();
+
+        // Act: degrading to lexical-only must not drop the type filter.
+        let guide_page = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgokf.concept_search_hybrid(
+                 'peregrine', ARRAY[1,0,0,0]::real[], NULL, 5, '{Guide}'::text[])
+             WHERE type = 'Guide'",
+        )
+        .expect("degraded filtered hybrid query executes")
+        .expect("count is not NULL");
+
+        // Assert: exactly the two Guide concepts, and no Code hit leaks.
+        assert_eq!(
+            guide_page, 2,
+            "the degraded (lexical-only) hybrid still returns the full Guide page"
+        );
+        let leaked = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgokf.concept_search_hybrid(
+                 'peregrine', ARRAY[1,0,0,0]::real[], NULL, 5, '{Guide}'::text[])
+             WHERE type <> 'Guide'",
+        )
+        .expect("leak probe executes")
+        .expect("count is not NULL");
+        assert_eq!(leaked, 0, "no excluded type leaks through the filter");
+    }
+
     #[pg_test]
     fn set_concept_embedding_validates_dimension_and_concept() {
         // Arrange: embedding_dim lowered to 4; a real bundle for a valid concept.

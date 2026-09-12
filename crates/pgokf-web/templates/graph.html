@@ -18,6 +18,16 @@
         <p class="hint js-only" data-bundle-count aria-live="polite"></p>
         <p class="bundle-actions js-only"><button type="button" class="btn small ghost" data-bundle-clear>Clear selection</button> <button type="button" class="btn small ghost" data-bundle-visible>Select all visible</button></p>
       </div>
+      {% if !type_filters.is_empty() %}
+      <div class="field">
+        <span class="field-label" id="g-type-label">Type groups</span>
+        <ul class="facet-list bundle-list" id="g-type-list" aria-labelledby="g-type-label" aria-describedby="g-type-hint">
+          {% for t in type_filters %}<li><label><input type="checkbox" name="{% if t.group %}type_group{% else %}type{% endif %}" value="{{ t.value }}"{% if t.selected %} checked{% endif %}> {{ t.label }}</label></li>{% endfor %}
+        </ul>
+        <p class="hint" id="g-type-hint">No selection = all types. Check the groups to include.</p>
+        <p class="bundle-actions js-only"><button type="button" class="btn small ghost" data-type-clear>Clear selection</button></p>
+      </div>
+      {% endif %}
       <div class="field">
         <label for="g-limit">Concepts shown</label>
         <select id="g-limit" name="limit">
@@ -25,7 +35,7 @@
         </select>
       </div>
       <button type="submit" class="btn">Draw</button>
-      {% if let Some(label) = seed_label %}<p class="hint">Showing the neighborhood of <strong>{{ label }}</strong>. <a href="/graph{% for b in bundle_ids %}{% if loop.first %}?{% else %}&{% endif %}bundle={{ b }}{% endfor %}">Show the whole catalog</a>.</p>{% endif %}
+      {% if let Some(label) = seed_label %}<p class="hint">Showing the neighborhood of <strong>{{ label }}</strong>. <a href="{{ catalog_url }}">Show the whole catalog</a>.</p>{% endif %}
     </form>
     <div class="field">
       <label for="g-find">Find a concept</label>

@@ -124,31 +124,38 @@ pub(crate) fn effective_search_backend() -> Result<String, CatalogError> {
 }
 
 /// The validated, borrow-ready structured filters for one `concept_search`
-/// call. An empty `tags` slice is normalized to `None` by [`Filters::new`] so it
-/// binds as no filter rather than `'{}'::text[]`.
+/// call. An empty `tags` or `concept_types` slice is normalized to `None` by
+/// [`Filters::new`] so it binds as no filter rather than `'{}'::text[]`.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Filters<'a> {
     pub concept_type: Option<&'a str>,
     pub tags: Option<&'a [String]>,
     pub status: Option<&'a str>,
     pub trust_tier: Option<&'a str>,
+    /// Optional type-membership filter (a hit's `type` must be in the list).
+    /// Only the hybrid fusion path sets it: `concept_search` and
+    /// `concept_search_fresh` expose the single-value `concept_type` instead.
+    pub concept_types: Option<&'a [String]>,
 }
 
 impl<'a> Filters<'a> {
-    /// Build the filter set, treating an empty `tags` slice as no tag filter
-    /// (`tags @> '{}'` matches every non-NULL `tags` array but excludes untagged
-    /// concepts, so an empty request must be a true no-op).
+    /// Build the filter set, treating an empty `tags` or `concept_types` slice
+    /// as no filter (`tags @> '{}'` matches every non-NULL `tags` array but
+    /// excludes untagged concepts, and no `type` value is a member of `'{}'`,
+    /// so an empty request must be a true no-op).
     pub(crate) fn new(
         concept_type: Option<&'a str>,
         tags: Option<&'a [String]>,
         status: Option<&'a str>,
         trust_tier: Option<&'a str>,
+        concept_types: Option<&'a [String]>,
     ) -> Self {
         Self {
             concept_type,
             tags: tags.filter(|slice| !slice.is_empty()),
             status,
             trust_tier,
+            concept_types: concept_types.filter(|slice| !slice.is_empty()),
         }
     }
 }
@@ -175,6 +182,7 @@ pub(crate) fn run_ranked_search(
         limit,
         text_search_config: &text_search_config,
         concept_type: filters.concept_type,
+        concept_types: filters.concept_types,
         tags: filters.tags,
         status: filters.status,
         trust_tier: filters.trust_tier,
@@ -297,7 +305,10 @@ struct FreshSearchHit {
 /// precedence) inside, filtered and limited there, then annotated with the
 /// embedding provenance in the outer projection. `contract_match` is
 /// [`crate::catalog::embedding::contract_match_sql`] with the policy bound as
-/// `$13` (model), `$14` (dimension), and `$15` (contract).
+/// `$14` (model), `$15` (dimension), and `$16` (contract). `$12` is the
+/// type-membership filter the shared hit subquery declares (always NULL here:
+/// this variant exposes the single-value `concept_type` only), `$13` the
+/// freshness filter.
 fn fresh_search_statement(contract_match: &str) -> String {
     format!(
         "
@@ -357,8 +368,8 @@ fn fresh_search_statement(contract_match: &str) -> String {
           AND fp.scope_kind = 'path' AND fp.scope_key = hits.path
     LEFT JOIN pgokf.effective_freshness fb
            ON fb.bundle_id = hits.bundle_id AND fb.scope_kind = 'bundle'
-    WHERE ($12::text IS NULL
-           OR COALESCE(fc.state, fp.state, fb.state, 'fresh') = $12)
+    WHERE ($13::text IS NULL
+           OR COALESCE(fc.state, fp.state, fb.state, 'fresh') = $13)
       AND {keyset}
     ORDER BY hits.rank DESC, hits.bundle_id ASC, hits.concept_id ASC
     LIMIT $3
@@ -446,7 +457,7 @@ fn concept_search_fresh_impl(
     let text_search_config = effective_text_search_config()?;
     let embedding_policy = crate::catalog::embedding::effective_embedding_policy()?;
     let statement =
-        fresh_search_statement(&crate::catalog::embedding::contract_match_sql(13, 14, 15));
+        fresh_search_statement(&crate::catalog::embedding::contract_match_sql(14, 15, 16));
 
     Spi::connect(|client| {
         let table = client
@@ -465,6 +476,7 @@ fn concept_search_fresh_impl(
                     after.map(|cursor| cursor.rank).into(),
                     after.map(|cursor| cursor.bundle_id).into(),
                     after.map(|cursor| cursor.concept_id.as_str()).into(),
+                    filters.concept_types.map(<[String]>::to_vec).into(),
                     freshness.into(),
                     embedding_policy.model.clone().into(),
                     embedding_policy.dim.into(),
@@ -620,7 +632,7 @@ mod pgokf {
         trust_tier: default!(Option<&str>, "NULL"),
         after_cursor: default!(Option<pgrx::JsonB>, "NULL"),
     ) -> SetOfIterator<'static, pgrx::composite_type!('static, "pgokf.concept_search_result")> {
-        let filters = Filters::new(concept_type, tags.as_deref(), status, trust_tier);
+        let filters = Filters::new(concept_type, tags.as_deref(), status, trust_tier, None);
         let after = super::parse_cursor(after_cursor).unwrap_or_else(|error| error.raise());
         let hits = concept_search_impl(query, bundle_id, limit_count, filters, after.as_ref())
             .unwrap_or_else(|error| error.raise());
@@ -705,7 +717,7 @@ COMMENT ON TYPE pgokf.concept_search_fresh_result IS
         after_cursor: default!(Option<pgrx::JsonB>, "NULL"),
     ) -> SetOfIterator<'static, pgrx::composite_type!('static, "pgokf.concept_search_fresh_result")>
     {
-        let filters = Filters::new(concept_type, tags.as_deref(), status, trust_tier);
+        let filters = Filters::new(concept_type, tags.as_deref(), status, trust_tier, None);
         let after = super::parse_cursor(after_cursor).unwrap_or_else(|error| error.raise());
         let hits = super::concept_search_fresh_impl(
             query,
@@ -788,10 +800,26 @@ mod tests {
         let empty: Vec<String> = Vec::new();
 
         // Act
-        let filters = Filters::new(None, Some(&empty), None, None);
+        let filters = Filters::new(None, Some(&empty), None, None, None);
 
         // Assert
         assert!(filters.tags.is_none(), "an empty tag filter is dropped");
+    }
+
+    #[test]
+    fn filters_new_normalizes_an_empty_type_list_to_no_filter() {
+        // Arrange: an empty concept_types slice must not become
+        // `type = ANY('{}')` (which matches nothing); it is a true no-op.
+        let empty: Vec<String> = Vec::new();
+
+        // Act
+        let filters = Filters::new(None, None, None, None, Some(&empty));
+
+        // Assert
+        assert!(
+            filters.concept_types.is_none(),
+            "an empty type-membership filter is dropped"
+        );
     }
 
     #[test]
@@ -800,13 +828,14 @@ mod tests {
         let tags = vec!["widgets".to_owned()];
 
         // Act
-        let filters = Filters::new(Some("Reference"), Some(&tags), Some("stable"), None);
+        let filters = Filters::new(Some("Reference"), Some(&tags), Some("stable"), None, None);
 
         // Assert
         assert_eq!(filters.concept_type, Some("Reference"));
         assert_eq!(filters.tags.map(<[String]>::len), Some(1));
         assert_eq!(filters.status, Some("stable"));
         assert_eq!(filters.trust_tier, None);
+        assert_eq!(filters.concept_types, None);
     }
 
     #[test]

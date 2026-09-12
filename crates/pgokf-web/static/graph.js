@@ -668,3 +668,18 @@
   applyFilter();
   updateCount();
 })();
+
+// Type-group picker: the clear affordance, mirroring the bundle picker. The
+// list is short enough to need no filter box; without JavaScript the boxes
+// are still unchecked by hand and submit as before.
+(function () {
+  'use strict';
+
+  var clear = document.querySelector('[data-type-clear]');
+  if (!clear) return;
+  clear.addEventListener('click', function () {
+    document
+      .querySelectorAll('#g-type-list input[type=checkbox]')
+      .forEach(function (box) { box.checked = false; });
+  });
+})();

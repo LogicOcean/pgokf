@@ -194,18 +194,26 @@ pub(crate) struct Hit {
 }
 
 /// One facet bucket.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct Facet {
     pub value: String,
     pub count: i64,
 }
 
-/// The filters a search carries; `None` means "no filter" for every field.
+/// The filters a search carries; an empty `concept_types` with no
+/// `type_group` means "no type filter" for every field.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SearchQuery {
     pub query: String,
     pub bundle_id: Option<i64>,
-    pub concept_type: Option<String>,
+    /// The exact types to match. Several come from expanding a selected
+    /// type group; `pgokf.concept_search` takes one exact type, so a
+    /// multi-type query unions one bounded call per type in a single
+    /// statement the database merges.
+    pub concept_types: Vec<String>,
+    /// The selected type-group slug, kept so a group that expands to no
+    /// observed member reads as "matches nothing", never as "no filter".
+    pub type_group: Option<String>,
     pub tags: Vec<String>,
     pub status: Option<String>,
     pub trust_tier: Option<String>,
@@ -217,10 +225,17 @@ impl SearchQuery {
     /// `true` when any filter narrows the result set.
     pub(crate) fn has_filters(&self) -> bool {
         self.bundle_id.is_some()
-            || self.concept_type.is_some()
+            || !self.concept_types.is_empty()
+            || self.type_group.is_some()
             || !self.tags.is_empty()
             || self.status.is_some()
             || self.trust_tier.is_some()
+    }
+
+    /// `true` when a type group was selected but expanded to no observed
+    /// member: every typed query must come back empty.
+    pub(crate) fn type_filter_impossible(&self) -> bool {
+        self.type_group.is_some() && self.concept_types.is_empty()
     }
 
     fn tags_param(&self) -> Option<Vec<String>> {
@@ -419,7 +434,7 @@ pub(crate) struct GraphLink {
 }
 
 /// A graph picture as nodes and edges.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub(crate) struct Graph {
     pub nodes: Vec<GraphNode>,
     pub links: Vec<GraphLink>,
@@ -1257,6 +1272,9 @@ impl Db {
         after: Option<(i64, &str)>,
         limit: i64,
     ) -> Result<Vec<ConceptSummary>> {
+        if q.type_filter_impossible() {
+            return Ok(Vec::new());
+        }
         let sql = format!(
             "SELECT c.bundle_id, c.id, c.path, c.type, c.title, c.description,
                     coalesce(c.tags, '{{}}'), {}
@@ -1266,7 +1284,7 @@ impl Db {
              LEFT JOIN pgokf.concept_provenance p
                     ON p.bundle_id = c.bundle_id AND p.concept_id = c.id
              WHERE ($1::bigint IS NULL OR c.bundle_id = $1)
-               AND ($2::text IS NULL OR c.type = $2)
+               AND (cardinality($2::text[]) = 0 OR c.type = ANY($2))
                AND ($3::text[] IS NULL OR c.tags @> $3)
                AND ($4::text IS NULL OR p.status = $4)
                AND ($5::text IS NULL OR p.trust_tier = $5)
@@ -1282,7 +1300,7 @@ impl Db {
             &sql,
             &[
                 &q.bundle_id,
-                &q.concept_type,
+                &q.concept_types,
                 &q.tags_param(),
                 &q.status,
                 &q.trust_tier,
@@ -1347,7 +1365,48 @@ impl Db {
 
     /// Lexical search through `pgokf.concept_search`, asking for `limit`
     /// rows (the caller passes one more than the page to detect a next page).
+    /// `concept_search` takes one exact type, so a multi-type query (an
+    /// expanded type group) unions one bounded call per type in a single
+    /// statement whose `ORDER BY` and final `LIMIT` run in the database:
+    /// the merged order and truncation then live under the same database
+    /// collation as the per-type streams and their keyset cursor
+    /// predicates. (A Rust-side merge compares concept ids by bytes, which
+    /// a non-C collation orders differently, and tied hits can page-skip.)
+    /// The keyset cursor is a global cutoff, so passing it to every
+    /// per-type call keeps the merged pages gapless.
     pub(crate) async fn search(&self, q: &SearchQuery, limit: i32) -> Result<Vec<Hit>> {
+        if q.type_filter_impossible() {
+            return Ok(Vec::new());
+        }
+        let [first, rest @ ..] = q.concept_types.as_slice() else {
+            return self.search_one_type(q, None, limit).await;
+        };
+        if rest.is_empty() {
+            return self.search_one_type(q, Some(first), limit).await;
+        }
+        let cursor = q.after.as_ref().map(|c| {
+            serde_json::json!({"rank": c.rank, "bundle_id": c.bundle_id, "concept_id": c.concept_id})
+        });
+        let tags = q.tags_param();
+        let mut params: Vec<&(dyn ToSql + Sync)> = vec![&q.query, &q.bundle_id, &limit];
+        for concept_type in &q.concept_types {
+            params.push(concept_type);
+        }
+        params.push(&tags);
+        params.push(&q.status);
+        params.push(&q.trust_tier);
+        params.push(&cursor);
+        self.query_map(&search_many_types_sql(q.concept_types.len()), &params, hit)
+            .await
+    }
+
+    /// One [`SearchQuery::search`] stream: a single exact type (or none).
+    async fn search_one_type(
+        &self,
+        q: &SearchQuery,
+        concept_type: Option<&str>,
+        limit: i32,
+    ) -> Result<Vec<Hit>> {
         let cursor = q.after.as_ref().map(|c| {
             serde_json::json!({"rank": c.rank, "bundle_id": c.bundle_id, "concept_id": c.concept_id})
         });
@@ -1358,7 +1417,7 @@ impl Db {
                 &q.query,
                 &q.bundle_id,
                 &limit,
-                &q.concept_type,
+                &concept_type,
                 &q.tags_param(),
                 &q.status,
                 &q.trust_tier,
@@ -1370,36 +1429,80 @@ impl Db {
     }
 
     /// Semantic (`concept_search_semantic`) or hybrid (`concept_search_hybrid`)
-    /// search with a caller-supplied query embedding.
+    /// search with a caller-supplied query embedding. The extension functions
+    /// take the type filter as their trailing `concept_types` argument and
+    /// apply it inside the ranked query, before the candidate list is
+    /// truncated to the page size (on both fusion inputs for hybrid), so a
+    /// filtered page is exactly the type-filtered top-`limit` and can never
+    /// come back empty or underfilled while eligible hits of the selected
+    /// types exist. A group that expanded to nothing short-circuits to no
+    /// rows in every mode, before any statement runs.
     pub(crate) async fn search_with_embedding(
         &self,
         q: &SearchQuery,
         embedding: &[f32],
         hybrid: bool,
     ) -> Result<Vec<Hit>> {
+        if q.type_filter_impossible() {
+            return Ok(Vec::new());
+        }
         let embedding: Vec<f32> = embedding.to_vec();
+        let limit = q.limit;
         if hybrid {
             self.query_map(
-                "SELECT bundle_id, concept_id, path, title, type, rank, headline
-                 FROM pgokf.concept_search_hybrid($1, $2, $3, $4)",
-                &[&q.query, &embedding, &q.bundle_id, &q.limit],
+                embedding_search_sql(true),
+                &[&q.query, &embedding, &q.bundle_id, &limit, &q.concept_types],
                 hit,
             )
             .await
         } else {
             self.query_map(
-                "SELECT bundle_id, concept_id, path, title, type, rank, headline
-                 FROM pgokf.concept_search_semantic($1, $2, $3)",
-                &[&embedding, &q.bundle_id, &q.limit],
+                embedding_search_sql(false),
+                &[&embedding, &q.bundle_id, &limit, &q.concept_types],
                 hit,
             )
             .await
         }
     }
 
+    /// Every distinct concept type in the visible catalog (optionally one
+    /// bundle), unbounded: the membership inventory type-group expansion
+    /// uses. Kept separate from the display facets, whose top-100 cap is a
+    /// presentation bound - expanding a group against a capped list would
+    /// drop every type beyond the cap and could make a selected group
+    /// falsely match nothing.
+    pub(crate) async fn catalog_types(&self, bundle_id: Option<i64>) -> Result<Vec<String>> {
+        self.query_map(CATALOG_TYPES_SQL, &[&bundle_id], |r| col(r, 0))
+            .await
+    }
+
     /// `pgokf.search_facets` for one facet name (`type`, `bundle`, `tag`,
-    /// `status`, `trust_tier`) over the query's matches.
+    /// `status`, `trust_tier`) over the query's matches. A multi-type query
+    /// sums one bucket list per type, as [`SearchQuery::search`] does.
     pub(crate) async fn facets(&self, q: &SearchQuery, facet: &str) -> Result<Vec<Facet>> {
+        if q.type_filter_impossible() {
+            return Ok(Vec::new());
+        }
+        let [first, rest @ ..] = q.concept_types.as_slice() else {
+            return self.facets_one_type(q, None, facet).await;
+        };
+        if rest.is_empty() {
+            return self.facets_one_type(q, Some(first), facet).await;
+        }
+        let mut streams = Vec::with_capacity(q.concept_types.len());
+        for concept_type in &q.concept_types {
+            streams.push(self.facets_one_type(q, Some(concept_type), facet).await?);
+        }
+        Ok(merge_facets(streams))
+    }
+
+    /// One [`SearchQuery::facets`] stream: a single exact type (or none).
+    async fn facets_one_type(
+        &self,
+        q: &SearchQuery,
+        concept_type: Option<&str>,
+        facet: &str,
+    ) -> Result<Vec<Facet>> {
         self.query_map(
             "SELECT facet_value, count
              FROM pgokf.search_facets($1, $2, $3, $4, $5, $6, $7)
@@ -1408,7 +1511,7 @@ impl Db {
                 &q.query,
                 &q.bundle_id,
                 &facet,
-                &q.concept_type,
+                &concept_type,
                 &q.tags_param(),
                 &q.status,
                 &q.trust_tier,
@@ -1676,12 +1779,17 @@ impl Db {
     }
 
     /// The catalog-wide graph: the `limit` best-connected visible concepts
-    /// (of the selected bundles, or all when the list is empty) and the
-    /// resolved links among them. Degrees come from one aggregate over the
-    /// links, not a probe per concept.
-    pub(crate) async fn catalog_graph(&self, bundle_ids: &[i64], limit: i64) -> Result<Graph> {
+    /// (of the selected bundles and concept types, or all when either list
+    /// is empty) and the resolved links among them. Degrees come from one
+    /// aggregate over the links, not a probe per concept.
+    pub(crate) async fn catalog_graph(
+        &self,
+        bundle_ids: &[i64],
+        types: &[String],
+        limit: i64,
+    ) -> Result<Graph> {
         let rows = self
-            .query(&catalog_graph_sql(), &[&bundle_ids, &limit])
+            .query(&catalog_graph_sql(), &[&bundle_ids, &limit, &types])
             .await?;
         let total = rows
             .first()
@@ -2085,9 +2193,11 @@ fn graph_node(r: &Row) -> Result<GraphNode> {
     })
 }
 
-/// `catalog_graph`'s query. `$1` is the selected bundle ids as `bigint[]`;
-/// an empty array means every bundle, so the membership test collapses to
-/// true.
+/// `catalog_graph`'s query. `$1` is the selected bundle ids as `bigint[]`
+/// and `$3` the selected concept types as `text[]`; an empty array means
+/// every bundle (or type), so the membership test collapses to true. The
+/// type constraint lives in the `visible` CTE only: degree still counts
+/// every resolved link, matching how an unfiltered graph ranks a node.
 fn catalog_graph_sql() -> String {
     format!(
         "WITH ends AS (
@@ -2107,6 +2217,7 @@ fn catalog_graph_sql() -> String {
              JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled AND b.retired_at IS NULL
              LEFT JOIN deg ON deg.bundle_id = c.bundle_id AND deg.id = c.id
              WHERE (cardinality($1::bigint[]) = 0 OR c.bundle_id = ANY($1))
+               AND (cardinality($3::text[]) = 0 OR c.type = ANY($3))
          )
          SELECT bundle_id, bundle_name, id, title, type, path, 0::int, degree,
                 count(*) OVER ()
@@ -2115,6 +2226,55 @@ fn catalog_graph_sql() -> String {
          LIMIT $2",
         display_name("b")
     )
+}
+
+/// The single statement of a multi-type search: one bounded
+/// `concept_search` call per exact type (`$4` through `$3 + type_count`),
+/// unioned, with the merge - the rank/bundle/id total order and the final
+/// truncation - computed by the database. One collation then governs the
+/// per-type streams, the merged order, and the keyset cursor predicates
+/// alike; merging in Rust would compare concept ids by bytes instead,
+/// which diverges from the database's text collation (e.g. `en_US.UTF-8`
+/// orders `a` before `B`, bytes the reverse) and lets equal-rank hits skip
+/// a page boundary. The shared parameters are bound once and referenced
+/// from every branch: `$1` query, `$2` bundle, `$3` limit (per call and,
+/// reused, the final `LIMIT`), then after the types come tags, status,
+/// trust tier, and the cursor.
+fn search_many_types_sql(type_count: usize) -> String {
+    let tags = 4 + type_count;
+    let branch = |index: usize| {
+        format!(
+            "SELECT bundle_id, concept_id, path, title, type, rank, headline
+             FROM pgokf.concept_search($1, $2, $3, ${}, ${tags}, ${}, ${}, ${})",
+            4 + index,
+            tags + 1,
+            tags + 2,
+            tags + 3
+        )
+    };
+    let branches: Vec<String> = (0..type_count).map(branch).collect();
+    format!(
+        "{}
+         ORDER BY rank DESC, bundle_id, concept_id
+         LIMIT $3",
+        branches.join("\nUNION ALL\n")
+    )
+}
+
+/// Merge the per-type facet bucket lists of a multi-type search: counts sum
+/// per bucket value, ordered by count descending then value, as one
+/// `search_facets` call would return them.
+fn merge_facets(streams: Vec<Vec<Facet>>) -> Vec<Facet> {
+    let mut counts: BTreeMap<String, i64> = BTreeMap::new();
+    for facet in streams.into_iter().flatten() {
+        *counts.entry(facet.value).or_default() += facet.count;
+    }
+    let mut facets: Vec<Facet> = counts
+        .into_iter()
+        .map(|(value, count)| Facet { value, count })
+        .collect();
+    facets.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.value.cmp(&b.value)));
+    facets
 }
 
 fn bundle_info(r: &Row) -> Result<BundleInfo> {
@@ -2160,6 +2320,30 @@ fn facet_row(r: &Row) -> Result<Facet> {
         count: col(r, 1)?,
     })
 }
+
+/// The semantic/hybrid statement. The extension functions apply the
+/// type-membership filter INSIDE the ranked query, before the candidate list
+/// is truncated to the page size (the last parameter binds the expanded
+/// exact types; `NULL` or empty is no filter), so a filtered page is exactly
+/// the type-filtered top-`limit` - never a page underfilled by higher-ranked
+/// excluded types.
+fn embedding_search_sql(hybrid: bool) -> &'static str {
+    if hybrid {
+        "SELECT bundle_id, concept_id, path, title, type, rank, headline
+         FROM pgokf.concept_search_hybrid($1, $2, $3, $4, $5)"
+    } else {
+        "SELECT bundle_id, concept_id, path, title, type, rank, headline
+         FROM pgokf.concept_search_semantic($1, $2, $3, $4)"
+    }
+}
+
+/// The complete visible-type inventory group membership expands against:
+/// deliberately no `LIMIT`, unlike the top-100 display facets.
+const CATALOG_TYPES_SQL: &str = "SELECT DISTINCT c.type
+             FROM pgokf.concepts c
+             JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled AND b.retired_at IS NULL
+             WHERE ($1::bigint IS NULL OR c.bundle_id = $1)
+             ORDER BY 1";
 
 /// The union of both resource tables in one column shape (the nine columns
 /// [`resource`] reads, then `bundle_id` for grouping).
@@ -2277,6 +2461,96 @@ mod tests {
     }
 
     #[test]
+    fn catalog_graph_sql_filters_types_with_the_same_empty_means_all_shape() {
+        // Arrange & Act
+        let sql = catalog_graph_sql();
+
+        // Assert: the type constraint is a `text[]` membership test in the
+        // visible CTE, with the same cardinality guard as the bundle one.
+        assert_eq!(sql.matches("cardinality($3::text[]) = 0").count(), 1);
+        assert!(sql.contains("AND (cardinality($3::text[]) = 0 OR c.type = ANY($3))"));
+    }
+
+    #[test]
+    fn search_many_types_sql_unions_one_bounded_call_per_type() {
+        // Arrange & Act
+        let sql = search_many_types_sql(3);
+
+        // Assert: one statement, one call per type with its own type slot,
+        // the shared parameters referenced from every branch.
+        assert_eq!(sql.matches("pgokf.concept_search(").count(), 3);
+        assert_eq!(sql.matches("UNION ALL").count(), 2);
+        assert!(sql.contains("concept_search($1, $2, $3, $4, $7, $8, $9, $10)"));
+        assert!(sql.contains("concept_search($1, $2, $3, $5, $7, $8, $9, $10)"));
+        assert!(sql.contains("concept_search($1, $2, $3, $6, $7, $8, $9, $10)"));
+    }
+
+    #[test]
+    fn search_many_types_sql_leaves_the_merge_order_and_truncation_to_the_database() {
+        // Arrange & Act
+        let sql = search_many_types_sql(2);
+
+        // Assert: the merged order is the function's total order computed by
+        // the database - under the same collation as the per-type streams
+        // and their cursor predicates, so equal-rank hits cannot page-skip
+        // the way a byte-ordered Rust merge did under a non-C collation
+        // (SQL `a, B` vs Rust `B, a`): the ORDER BY comes after the last
+        // UNION ALL branch and the final LIMIT reuses the per-call bound.
+        let order = sql.find("ORDER BY rank DESC, bundle_id, concept_id");
+        let last_branch = sql.rfind("concept_search($1, $2, $3, $5");
+        assert!(order.is_some_and(|at| last_branch.is_some_and(|b| at > b)));
+        assert_eq!(sql.matches("ORDER BY").count(), 1);
+        assert!(sql.trim_end().ends_with("LIMIT $3"));
+    }
+
+    #[test]
+    fn merge_facets_sums_buckets_and_orders_like_search_facets() {
+        // Arrange
+        let facet = |value: &str, count: i64| Facet {
+            value: value.to_owned(),
+            count,
+        };
+        let guides = vec![facet("stable", 4), facet("draft", 1)];
+        let runbooks = vec![facet("stable", 3), facet("review", 2)];
+
+        // Act
+        let merged = merge_facets(vec![guides, runbooks]);
+
+        // Assert
+        assert_eq!(
+            merged,
+            vec![facet("stable", 7), facet("review", 2), facet("draft", 1)]
+        );
+    }
+
+    #[test]
+    fn type_filter_impossible_only_when_a_group_expanded_to_nothing() {
+        // Arrange
+        let unfiltered = SearchQuery::default();
+        let exact = SearchQuery {
+            concept_types: vec!["Guide".to_owned()],
+            ..SearchQuery::default()
+        };
+        let grouped = SearchQuery {
+            type_group: Some("code".to_owned()),
+            concept_types: vec!["Code Entity".to_owned()],
+            ..SearchQuery::default()
+        };
+        let empty_group = SearchQuery {
+            type_group: Some("other".to_owned()),
+            ..SearchQuery::default()
+        };
+
+        // Act & Assert
+        assert!(!unfiltered.type_filter_impossible());
+        assert!(!exact.type_filter_impossible());
+        assert!(!grouped.type_filter_impossible());
+        assert!(empty_group.type_filter_impossible());
+        assert!(empty_group.has_filters());
+        assert!(!unfiltered.has_filters());
+    }
+
+    #[test]
     fn has_filters_ignores_query_text_and_paging() {
         // Arrange
         let bare = SearchQuery {
@@ -2292,5 +2566,72 @@ mod tests {
         // Act & Assert
         assert!(!bare.has_filters());
         assert!(tagged.has_filters());
+    }
+
+    #[tokio::test]
+    async fn search_with_embedding_constrains_nothing_and_errors_without_a_server() {
+        // Arrange: an unfiltered semantic query still reaches the database.
+        let q = SearchQuery {
+            query: "failover".to_owned(),
+            ..SearchQuery::default()
+        };
+
+        // Act & Assert: the dead pool errors, proving a statement was issued.
+        assert!(
+            dead_db()
+                .search_with_embedding(&q, &[0.1, 0.2], false)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_impossible_type_group_matches_nothing_in_every_search_mode() {
+        // Arrange: a group that expanded to no observed member, run through
+        // every mode's entry point against a dead pool - any issued
+        // statement would error instead of returning rows.
+        let q = SearchQuery {
+            query: "failover".to_owned(),
+            type_group: Some("code".to_owned()),
+            ..SearchQuery::default()
+        };
+
+        // Act
+        let lexical = dead_db().search(&q, 21).await;
+        let semantic = dead_db()
+            .search_with_embedding(&q, &[0.1, 0.2], false)
+            .await;
+        let hybrid = dead_db().search_with_embedding(&q, &[0.1, 0.2], true).await;
+        let browse = dead_db().browse(&q, None, 21).await;
+        let facets = dead_db().facets(&q, "type").await;
+
+        // Assert: zero results in every mode, before any statement runs.
+        for rows in [lexical, semantic, hybrid] {
+            assert!(rows.expect("no statement runs").is_empty());
+        }
+        assert!(browse.expect("no statement runs").is_empty());
+        assert!(facets.expect("no statement runs").is_empty());
+    }
+
+    #[test]
+    fn catalog_types_sql_is_a_complete_inventory_without_the_display_cap() {
+        // Assert: membership never expands against the top-100 display
+        // facets, so a type beyond the cap still joins its group.
+        assert!(CATALOG_TYPES_SQL.contains("SELECT DISTINCT c.type"));
+        assert!(!CATALOG_TYPES_SQL.to_uppercase().contains("LIMIT"));
+    }
+
+    #[test]
+    fn embedding_search_sql_filters_by_type_inside_the_ranked_query() {
+        // Assert: both modes pass the expanded exact types as the extension
+        // function's trailing concept_types argument, so the filter applies
+        // inside the ranked query before candidate truncation - no
+        // post-filter wrapper around a truncated window.
+        for sql in [embedding_search_sql(false), embedding_search_sql(true)] {
+            assert!(!sql.to_uppercase().contains("WHERE"));
+            assert!(!sql.contains("cardinality("));
+        }
+        assert!(embedding_search_sql(true).contains("concept_search_hybrid($1, $2, $3, $4, $5)"));
+        assert!(embedding_search_sql(false).contains("concept_search_semantic($1, $2, $3, $4)"));
     }
 }

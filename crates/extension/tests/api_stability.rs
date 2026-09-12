@@ -73,8 +73,11 @@ const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
     ("schedule_refresh", "bigint, text"),
     ("unschedule_refresh", "bigint"),
     ("find_similar", "text, bigint, integer"),
-    ("concept_search_semantic", "real[], bigint, integer"),
-    ("concept_search_hybrid", "text, real[], bigint, integer"),
+    ("concept_search_semantic", "real[], bigint, integer, text[]"),
+    (
+        "concept_search_hybrid",
+        "text, real[], bigint, integer, text[]",
+    ),
     ("set_concept_embedding", "bigint, text, real[]"),
     (
         "set_concept_embedding_cas",
