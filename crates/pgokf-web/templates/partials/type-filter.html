@@ -1,0 +1,15 @@
+<label for="f-type-group">Type group</label>
+<select id="f-type-group" name="type_group">
+  <option value="">Any group</option>
+  {% for o in type_selects.groups %}<option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.label }}</option>{% endfor %}
+</select>
+<label for="f-type">Type</label>
+<select id="f-type" name="type">
+  <option value="">Any type</option>
+  {% for g in type_selects.types %}
+  <optgroup label="{{ g.label }}">
+    {% for o in g.types %}<option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.label }}</option>{% endfor %}
+  </optgroup>
+  {% endfor %}
+</select>
+<p class="hint">Pick a group or one exact type, not both.</p>

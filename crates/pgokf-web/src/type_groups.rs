@@ -7,14 +7,13 @@
 //! closed list: a known type is shown under its group's label, and every
 //! type no known group claims lands under "Other", so a new producer's types
 //! are always visible and filterable instead of silently disappearing.
+//!
+//! Group selection travels in its own `type_group` parameter, never encoded
+//! inside the legacy `type` parameter, so every exact type string keeps
+//! working verbatim - no prefix is reserved and no producer type can be
+//! reinterpreted as a group.
 
 use crate::db::Facet;
-
-/// Prefix marking a `type` parameter value as a group slug rather than an
-/// exact type string (`group:code`). The prefix keeps the two namespaces
-/// collision-free: a producer type literally named `code` still parses as an
-/// exact type.
-pub(crate) const GROUP_PREFIX: &str = "group:";
 
 /// The group every unclaimed observed type falls into.
 pub(crate) const OTHER_SLUG: &str = "other";
@@ -41,29 +40,6 @@ const KNOWN_GROUPS: &[(&str, &str, &[&str])] = &[
         ],
     ),
 ];
-
-/// One parsed value of a `type` parameter.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum TypeFilter {
-    /// An exact type string, as `concept_search` matches it.
-    Exact(String),
-    /// A group slug to expand into its observed member types.
-    Group(String),
-}
-
-/// Parse one raw `type` value: a `group:` prefix names a group, anything
-/// else is an exact type string (the legacy form of the parameter).
-pub(crate) fn parse_filter(value: &str) -> TypeFilter {
-    let trimmed = value.trim();
-    match trimmed
-        .strip_prefix(GROUP_PREFIX)
-        .map(str::trim)
-        .filter(|slug| !slug.is_empty())
-    {
-        Some(slug) => TypeFilter::Group(slug.to_owned()),
-        None => TypeFilter::Exact(trimmed.to_owned()),
-    }
-}
 
 /// The slug of the group a type string displays under.
 pub(crate) fn slug_of(concept_type: &str) -> &'static str {
@@ -172,26 +148,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_filter_separates_group_slugs_from_exact_types() {
-        // Arrange & Act & Assert
-        assert_eq!(
-            parse_filter("group:code"),
-            TypeFilter::Group("code".to_owned())
-        );
-        assert_eq!(
-            parse_filter(" group:other "),
-            TypeFilter::Group("other".to_owned())
-        );
-        assert_eq!(parse_filter("Guide"), TypeFilter::Exact("Guide".to_owned()));
-        // A producer type literally named like a slug stays an exact type.
-        assert_eq!(parse_filter("code"), TypeFilter::Exact("code".to_owned()));
-        assert_eq!(
-            parse_filter("group:"),
-            TypeFilter::Exact("group:".to_owned())
-        );
-    }
-
-    #[test]
     fn slug_of_buckets_known_types_and_sends_unknowns_to_other() {
         // Arrange & Act & Assert
         assert_eq!(slug_of("Code Entity"), "code");
@@ -289,6 +245,21 @@ mod tests {
     fn expand_group_rejects_an_unknown_slug() {
         // Arrange & Act & Assert
         assert!(expand_group("bogus", &[]).is_none());
+    }
+
+    #[test]
+    fn expand_group_covers_every_observed_type_beyond_the_display_cap() {
+        // Arrange: more distinct types than the display facets' top-100 cap
+        // (membership reads the complete inventory, never the capped facets).
+        let observed: Vec<String> = (1..=101).map(|n| format!("Widget{n:03}")).collect();
+
+        // Act
+        let expanded = expand_group(OTHER_SLUG, &observed).expect("the Other group");
+
+        // Assert: all 101 types expand, including the one a top-100 display
+        // facet list would have dropped.
+        assert_eq!(expanded.len(), 101);
+        assert!(expanded.iter().any(|t| t == "Widget101"));
     }
 
     #[test]

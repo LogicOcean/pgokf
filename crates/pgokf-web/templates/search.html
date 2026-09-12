@@ -21,18 +21,7 @@
           {% for b in bundles %}<option value="{{ b.id }}" {% if form.bundle.as_str() == b.id.to_string().as_str() %}selected{% endif %}>{{ b.name }}</option>{% endfor %}
         </select>
       </div>
-      <div class="field">
-        <label for="f-type">Type</label>
-        <select id="f-type" name="type">
-          <option value="">Any type</option>
-          {% for g in type_groups %}
-          <optgroup label="{{ g.label }}">
-            {% if !g.all_value.is_empty() %}<option value="{{ g.all_value }}"{% if g.all_selected %} selected{% endif %}>{{ g.all_label }}</option>{% endif %}
-            {% for o in g.types %}<option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.label }}</option>{% endfor %}
-          </optgroup>
-          {% endfor %}
-        </select>
-      </div>
+      <div class="field" id="pgokf-type-filter">{% include "partials/type-filter.html" %}</div>
       <div class="field">
         <label for="f-tags">Tags <span class="muted">(all of, comma-separated)</span></label>
         <input id="f-tags" name="tags" value="{{ form.tags }}" placeholder="e.g. postgresql, failover">

@@ -679,7 +679,7 @@
   if (!clear) return;
   clear.addEventListener('click', function () {
     document
-      .querySelectorAll('#g-type-list input[type=checkbox][name=type]')
+      .querySelectorAll('#g-type-list input[type=checkbox]')
       .forEach(function (box) { box.checked = false; });
   });
 })();

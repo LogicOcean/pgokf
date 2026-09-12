@@ -22,7 +22,7 @@
       <div class="field">
         <span class="field-label" id="g-type-label">Type groups</span>
         <ul class="facet-list bundle-list" id="g-type-list" aria-labelledby="g-type-label" aria-describedby="g-type-hint">
-          {% for t in type_filters %}<li><label><input type="checkbox" name="type" value="{{ t.value }}"{% if t.selected %} checked{% endif %}> {{ t.label }}</label></li>{% endfor %}
+          {% for t in type_filters %}<li><label><input type="checkbox" name="{% if t.group %}type_group{% else %}type{% endif %}" value="{{ t.value }}"{% if t.selected %} checked{% endif %}> {{ t.label }}</label></li>{% endfor %}
         </ul>
         <p class="hint" id="g-type-hint">No selection = all types. Check the groups to include.</p>
         <p class="bundle-actions js-only"><button type="button" class="btn small ghost" data-type-clear>Clear selection</button></p>
