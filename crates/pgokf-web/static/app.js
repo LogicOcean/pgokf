@@ -523,12 +523,17 @@
   // The strip scrolls horizontally on narrow screens, and every navigation
   // is a full page load that restarts it at its left edge - so the tab the
   // user just tapped seemed to "jump to the front" (it sat off-screen right
-  // and had to be scrolled to again). Reveal the active tab inside the
-  // strip only: 'nearest' in both axes never scrolls the page itself.
+  // and had to be scrolled to again). Reveal the active tab by adjusting
+  // only the strip's own scrollLeft; scrollIntoView would also scroll
+  // ancestor viewports, moving the page itself.
   var topnav = document.querySelector('.topnav');
   if (topnav) {
     var currentSection = topnav.querySelector('a[aria-current=page]');
-    if (currentSection) currentSection.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    if (currentSection) {
+      var stripBox = topnav.getBoundingClientRect();
+      var tabBox = currentSection.getBoundingClientRect();
+      topnav.scrollLeft += tabBox.left - stripBox.left - (stripBox.width - tabBox.width) / 2;
+    }
   }
 
   // ---- tabs (ARIA tabs pattern; the hash names the tab as #tab-<name>) ----

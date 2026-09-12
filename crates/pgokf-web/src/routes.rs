@@ -7225,6 +7225,38 @@ mod tests {
         assert!(refreshed.contains("<option value=\"code\" selected>Code (12006)</option>"));
     }
 
+    #[test]
+    fn results_partial_refreshes_the_filter_toggle_out_of_band() {
+        // Arrange: partial responses, one with a non-default filter, one
+        // without.
+        let partial_with = |form: SearchForm| ResultsPartial {
+            form,
+            facets: FacetsView::empty(),
+            type_selects: TypeSelects::empty(),
+            results: ResultsView::empty("Search", "No matches."),
+            oob: true,
+        };
+
+        // Act
+        let filtered = partial_with(form("failover", "postgresql", ""))
+            .render()
+            .expect("the filtered partial renders");
+        let plain = partial_with(form("failover", "", ""))
+            .render()
+            .expect("the plain partial renders");
+
+        // Assert: the toggle and its label swap out of band, so the count
+        // chip tracks the filters applied through the htmx flow.
+        assert!(filtered.contains(
+            "id=\"pgokf-filters-toggle\" class=\"filters-state\" aria-controls=\"pgokf-filters-panel\" checked hx-swap-oob=\"true\""
+        ));
+        assert!(filtered.contains("id=\"pgokf-filters-toggle-label\""));
+        assert!(filtered.contains("<span class=\"chip active\">1 active</span>"));
+        assert!(plain.contains("aria-controls=\"pgokf-filters-panel\" hx-swap-oob=\"true\""));
+        assert!(!plain.contains("checked"));
+        assert!(!plain.contains("active</span>"));
+    }
+
     fn hit_view(title: Option<&str>, ranked: bool) -> HitView {
         HitView {
             bundle_id: 2,
@@ -7288,7 +7320,7 @@ mod tests {
         }
         assert!(rendered.matches("<tr class=\"hit\">").count() == 2);
         assert!(rendered.contains(
-            "<a class=\"hit-title\" href=\"/concepts/2/runbooks%2Ffailover\">Failover runbook</a>"
+            "<a class=\"hit-title\" href=\"/concepts/2/runbooks%2Ffailover\" title=\"Failover runbook\">Failover runbook</a>"
         ));
         // The untitled hit falls back to its id, the unranked row shows no number.
         assert!(rendered.contains(">runbooks/failover</a>"));
@@ -7301,8 +7333,9 @@ mod tests {
         assert!(rendered.contains("title=\"runbooks/failover.md\">runbooks/failover.md</span>"));
         assert!(rendered.contains("<span class=\"tag\">postgresql</span>"));
         assert!(rendered.contains("a <b>failover</b> runbook"));
-        // Each row carries the collapsed Details disclosure a phone shows
-        // in place of the hidden columns.
+        // Each row carries the Details disclosure that expands the clamped
+        // snippet on a wide screen and stands in for the hidden columns on
+        // a phone.
         assert!(rendered.matches("<details class=\"hit-detail\">").count() == 2);
 
         // Assert: the pager is keyset-honest - a First-page link (no

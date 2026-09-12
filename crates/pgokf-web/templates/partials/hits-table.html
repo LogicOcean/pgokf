@@ -15,7 +15,7 @@
     {% for h in hits %}
     <tr class="hit">
       <td class="col-title">
-        <a class="hit-title" href="{{ h.href }}">{{ h.title.as_deref().unwrap_or(h.concept_id.as_str()) }}</a>
+        <a class="hit-title" href="{{ h.href }}" title="{{ h.title.as_deref().unwrap_or(h.concept_id.as_str()) }}">{{ h.title.as_deref().unwrap_or(h.concept_id.as_str()) }}</a>
         <details class="hit-detail">
           <summary>Details</summary>
           <p class="hit-meta"><a href="/bundles/{{ h.bundle_id }}">{{ h.bundle_name }}</a> <span class="muted">/ {{ h.path }}</span>{% if let Some(r) = h.rank_display %} <span class="rank" title="rank">{{ r }}</span>{% endif %}</p>

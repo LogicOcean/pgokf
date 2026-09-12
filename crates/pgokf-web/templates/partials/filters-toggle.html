@@ -1,0 +1,3 @@
+{% let active_filters = form.filter_pairs().len() %}
+<input type="checkbox" id="pgokf-filters-toggle" class="filters-state" aria-controls="pgokf-filters-panel"{% if active_filters > 0 %} checked{% endif %}{% if oob %} hx-swap-oob="true"{% endif %}>
+<label for="pgokf-filters-toggle" id="pgokf-filters-toggle-label" class="filters-toggle"{% if oob %} hx-swap-oob="true"{% endif %}>Filters{% if active_filters > 0 %} <span class="chip active">{{ active_filters }} active</span>{% endif %}</label>

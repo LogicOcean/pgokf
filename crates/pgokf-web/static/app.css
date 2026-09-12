@@ -242,12 +242,20 @@ input[type=radio], input[type=checkbox] { accent-color: var(--accent); }
 .hits-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
 .hits-table td { vertical-align: middle; }
 .hits-table .col-title { min-width: 12rem; }
-.hits-table .hit-title { font-size: 1em; }
+/* Unbroken long identifiers ellipsize rather than stretch the table past
+   the viewport; the link's title attribute keeps the full value. */
+.hits-table .hit-title { display: inline-block; max-width: 26rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; font-size: 1em; }
 .hits-table .hit .rank { margin-left: 0; }
 .hits-table .col-path .path { display: inline-block; max-width: 26rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
 .hits-table .col-snippet { max-width: 34rem; }
 .hits-table .col-snippet .hit-snippet { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.hits-table .hit-detail { display: none; }
+/* The Details disclosure works at every width: on a wide screen it is how
+   the clamped snippet expands, on a phone it also carries the columns the
+   narrow table hides. */
+.hits-table .hit-detail { margin-top: .25rem; font-size: .85em; }
+.hits-table .hit-detail > summary { cursor: pointer; font-weight: 600; color: var(--muted); }
+.hits-table .hit-detail .hit-meta { margin: .3rem 0 .2rem; overflow-wrap: anywhere; }
+.hits-table .hit-detail .tags { margin: 0 0 .2rem; }
 .pager-status { margin-right: auto; }
 
 /* On a phone the filters collapse behind a toggle bar above the results;
@@ -292,13 +300,11 @@ svg.graph a:hover circle { stroke-width: 3; }
   .filters-state:checked ~ .filters { display: block; }
   .results-col { order: 3; min-width: 0; }
   /* The results stay a table on a phone; the lower-priority columns hide
-     (the per-row Details disclosure in Title keeps their values). */
+     (the per-row Details disclosure in Title keeps their values). The
+     title caps narrower so Title and Type both fit a small screen. */
   .table.hits-table { min-width: 0; }
   .hits-table .col-bundle, .hits-table .col-rank, .hits-table .col-tags, .hits-table .col-snippet { display: none; }
-  .hits-table .hit-detail { display: block; margin-top: .25rem; font-size: .85em; }
-  .hits-table .hit-detail > summary { cursor: pointer; font-weight: 600; color: var(--muted); }
-  .hits-table .hit-detail .hit-meta { margin: .3rem 0 .2rem; }
-  .hits-table .hit-detail .tags { margin: 0 0 .2rem; }
+  .hits-table .hit-title { max-width: 11rem; }
   .card.span2 { grid-column: auto; }
   .hero { flex-direction: column; }
   .concept-hero .hero-status { flex-direction: row; align-items: center; min-width: 0; }
