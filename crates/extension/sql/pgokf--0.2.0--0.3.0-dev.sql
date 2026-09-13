@@ -32,6 +32,13 @@
 --     pg_cron jobs pgokf.schedule_refresh registers under the extension
 --     owner's identity, invisible to an ordinary login reading cron.job
 --     directly.
+--   * the external repository-registry surface (section 15): the guarded
+--     column-level SELECT grant that lets pgokf_reader list the producer
+--     service's ast_graph.repository_registry where that schema shares the
+--     database, and the admin-tier SECURITY DEFINER writers
+--     pgokf.registry_set_status / pgokf.registry_set_poll_interval (pause /
+--     resume and the poll interval), both runtime-only couplings that raise
+--     a curated 22023 where the producer schema is absent.
 --
 -- Every statement is additive in the sense that matters: no row is dropped,
 -- truncated, deleted, or rewritten. The DROPs are of objects that carry no
@@ -1664,6 +1671,123 @@ REVOKE ALL ON FUNCTION pgokf.list_scheduled_refreshes() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pgokf.list_scheduled_refreshes() TO pgokf_reader;
 COMMENT ON FUNCTION pgokf.list_scheduled_refreshes() IS
     'Every scheduled bundle refresh the extension manages, as (bundle_id, schedule) rows ordered by bundle id: the read counterpart of pgokf.schedule_refresh / unschedule_refresh. SECURITY DEFINER because pg_cron restricts cron.job rows to username = current_user (grants do not change that) while schedule_refresh registers jobs under the extension owner''s identity - this read runs as that owner, so the app''s login sees the schedules it would otherwise read as zero rows. Tenant-confined like the RLS-backed readers (an unscoped session sees nothing when require_tenant is on; a scoped session sees only its tenant''s jobs), joining each pgokf_refresh_<id> job back to its bundle. Requires pg_cron: raises 22023 naming the missing dependency when it is not installed, exactly like schedule_refresh. Reader-tier (granted to pgokf_reader, inherited by writer and admin).';
+
+-- ===========================================================================
+-- 15. The external repository-registry surface (the registry_surface block
+-- of src/catalog/registry.rs, verbatim). A registered repository's row is
+-- owned by the repository-registry producer service, a separate codebase
+-- whose migrations create the ast_graph schema; the coupling is
+-- runtime-only, exactly like the pg_cron adapter. Reads follow the narrow
+-- grant pattern: pgokf_reader gets USAGE on the ast_graph schema and SELECT
+-- on exactly the columns the admin UI lists (never checkout_path or the
+-- producer's internal graph_id, and no secret exists here at all - fetch
+-- credentials live behind the producer's admin API, which never returns
+-- them; tenant_id is granted so callers can confine their read to the
+-- session tenant), applied only where the table is present. Writes go
+-- through the SECURITY DEFINER functions below, granted to pgokf_admin; each
+-- resolves the table at call time, raises a curated 22023 where it is
+-- absent, and confines its update to the session tenant (pgokf.tenant), so a
+-- cross-tenant id earns the same 22023 as an unknown one.
+-- ===========================================================================
+DO $registry_reader_grant$
+BEGIN
+    IF pg_catalog.to_regclass('ast_graph.repository_registry') IS NOT NULL THEN
+        GRANT USAGE ON SCHEMA ast_graph TO pgokf_reader;
+        GRANT SELECT (repository_id, repository_key, project_name, default_branch,
+                      remote_url, status, poll_interval_seconds,
+                      last_indexed_commit, last_published_commit,
+                      last_published_generation, tenant_id)
+            ON ast_graph.repository_registry TO pgokf_reader;
+    ELSE
+        RAISE NOTICE 'pgokf: ast_graph.repository_registry is not present in this database; skipping the registry reader grant (the producer service installs that schema)';
+    END IF;
+END
+$registry_reader_grant$;
+
+CREATE FUNCTION pgokf.registry_set_status(repository_id uuid, status text)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $registry_set_status$
+BEGIN
+    -- Late binding is the point: the table reference below is planned on
+    -- first execution, so this curated 22023 answers instead of a bare
+    -- 42P01 in a database the producer does not share.
+    IF pg_catalog.to_regclass('ast_graph.repository_registry') IS NULL THEN
+        RAISE EXCEPTION
+            'registry writes require the producer service schema (ast_graph.repository_registry), which is not present in this database'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    -- The producer's poll loop enumerates status 'active' rows only, so
+    -- 'paused' stops a repository's reconciliation without deleting
+    -- anything; any other value is refused rather than inventing a state
+    -- the producer does not define.
+    IF status NOT IN ('active', 'paused') THEN
+        RAISE EXCEPTION
+            'registry status must be active or paused, not %', status
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    UPDATE ast_graph.repository_registry AS r
+       SET status = registry_set_status.status,
+           updated_at = pg_catalog.now()
+     WHERE r.repository_id = registry_set_status.repository_id
+       -- The session tenant confines the write: a cross-tenant id finds no
+       -- row and earns the same 22023 an unknown id does, so the answer
+       -- never reveals that another tenant's repository exists. An unset,
+       -- empty (the GUC's registered default), or all-whitespace
+       -- pgokf.tenant all normalize to the producer's 'default' tenant.
+       AND r.tenant_id = COALESCE(NULLIF(pg_catalog.btrim(pg_catalog.current_setting('pgokf.tenant', true)), ''), 'default');
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'no registered repository with id %', repository_id
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+END
+$registry_set_status$;
+REVOKE ALL ON FUNCTION pgokf.registry_set_status(uuid, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pgokf.registry_set_status(uuid, text) TO pgokf_admin;
+COMMENT ON FUNCTION pgokf.registry_set_status(uuid, text) IS
+    'Pause or resume one registered repository of the external repository-registry producer service by setting its ast_graph.repository_registry status (active or paused; the producer polls active rows only, so pausing stops reconciliation without deleting the registration). Admin-only (pgokf_admin), SECURITY DEFINER over a table no API role may write directly; tenant-confined: the update matches only rows whose tenant_id equals the session''s pgokf.tenant setting, with an unset, empty (the GUC''s registered default), or all-whitespace value normalizing to the producer''s ''default'' tenant, so a cross-tenant id earns the same 22023 as an unknown one without revealing that the row exists. The producer schema coupling is runtime-only - the curated 22023 names the missing dependency when ast_graph.repository_registry is absent, and 22023 also covers an unknown repository id or a status outside (active, paused).';
+
+CREATE FUNCTION pgokf.registry_set_poll_interval(repository_id uuid, poll_interval_seconds integer)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $registry_set_poll_interval$
+BEGIN
+    IF pg_catalog.to_regclass('ast_graph.repository_registry') IS NULL THEN
+        RAISE EXCEPTION
+            'registry writes require the producer service schema (ast_graph.repository_registry), which is not present in this database'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    -- The producer polls a repository at most this often (its own floor is
+    -- 5 seconds); the day-long ceiling keeps a typo from silencing a
+    -- repository for weeks.
+    IF poll_interval_seconds < 5 OR poll_interval_seconds > 86400 THEN
+        RAISE EXCEPTION
+            'poll interval must be between 5 and 86400 seconds, not %', poll_interval_seconds
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    UPDATE ast_graph.repository_registry AS r
+       SET poll_interval_seconds = registry_set_poll_interval.poll_interval_seconds,
+           updated_at = pg_catalog.now()
+     WHERE r.repository_id = registry_set_poll_interval.repository_id
+       AND r.tenant_id = COALESCE(NULLIF(pg_catalog.btrim(pg_catalog.current_setting('pgokf.tenant', true)), ''), 'default');
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'no registered repository with id %', repository_id
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+END
+$registry_set_poll_interval$;
+REVOKE ALL ON FUNCTION pgokf.registry_set_poll_interval(uuid, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pgokf.registry_set_poll_interval(uuid, integer) TO pgokf_admin;
+COMMENT ON FUNCTION pgokf.registry_set_poll_interval(uuid, integer) IS
+    'Set one registered repository''s poll interval in seconds (5 to 86400) on the external repository-registry producer service''s ast_graph.repository_registry row: the producer reconciles an active repository at most this often. Admin-only (pgokf_admin), SECURITY DEFINER over a table no API role may write directly; tenant-confined: the update matches only rows whose tenant_id equals the session''s pgokf.tenant setting, with an unset, empty (the GUC''s registered default), or all-whitespace value normalizing to the producer''s ''default'' tenant, so a cross-tenant id earns the same 22023 as an unknown one without revealing that the row exists. The producer schema coupling is runtime-only - the curated 22023 names the missing dependency when ast_graph.repository_registry is absent, and 22023 also covers an unknown repository id or an out-of-range interval.';
 
 -- Last, so the new relations are registered for pg_dump (the rule for every
 -- upgrade script since 0.1.14). Later phases insert their sections BEFORE

@@ -17,6 +17,7 @@ mod links;
 mod markdown;
 mod mcp_tokens;
 mod oidc;
+mod producer;
 mod provider;
 mod provider_settings;
 mod routes;
@@ -92,6 +93,11 @@ async fn main() -> Result<()> {
             .unwrap_or_else(|| "pgokf".to_owned())
     });
 
+    // The registry producer's admin API, for the Registry tab's credential
+    // controls; an unreachable endpoint is not a startup error (the tab says
+    // "unavailable" when it matters), exactly like the embeddings endpoint.
+    let producer = producer_client(&cli)?;
+
     let trusted_proxies = auth::TrustedProxies::parse(&cli.auth_trusted_proxy)
         .context("parsing --auth-trusted-proxy")?;
 
@@ -110,9 +116,14 @@ async fn main() -> Result<()> {
         builds: tokio::sync::Semaphore::new(routes::MAX_PLUGIN_BUILDS),
         stores,
         embedder,
+        producer,
         catalog_name,
         tenant: cli.tenant.clone(),
         version: version.clone(),
+        #[cfg(test)]
+        registry_visible: None,
+        #[cfg(test)]
+        registry_rows: None,
     });
     let router = routes::router(app.clone());
 
@@ -150,6 +161,20 @@ async fn main() -> Result<()> {
     .context("serving HTTP")?;
     eprintln!("pgokf-web: stopped");
     Ok(())
+}
+
+/// The registry producer's admin API client, for the Registry tab's
+/// credential controls. The token lives in this process only; it is
+/// environment-only by design (a CLI flag would leak it through the process
+/// listing).
+fn producer_client(cli: &Cli) -> Result<Option<producer::ProducerAdmin>> {
+    match (&cli.producer_admin_url, &cli.producer_admin_token) {
+        (Some(url), Some(token)) => Ok(Some(
+            producer::ProducerAdmin::new(url, token)
+                .context("configuring the producer admin API client")?,
+        )),
+        _ => Ok(None),
+    }
 }
 
 /// The writer pool: small, and used only by the human workflow.

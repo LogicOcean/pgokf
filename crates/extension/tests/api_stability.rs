@@ -38,7 +38,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The 67 stable public functions, as `(name, argument-type list)`. The pair
+/// The 69 stable public functions, as `(name, argument-type list)`. The pair
 /// renders to the exact `COMMENT ON FUNCTION pgokf.<name>(<args>)` prefix that
 /// the hardening blocks emit.
 const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
@@ -142,6 +142,8 @@ const PUBLIC_FUNCTIONS: &[(&str, &str)] = &[
         "concept_relationship_neighbors",
         "bigint, text, integer, text, text[], integer",
     ),
+    ("registry_set_status", "uuid, text"),
+    ("registry_set_poll_interval", "uuid, integer"),
 ];
 
 /// The 24 stable public composite types.
@@ -219,7 +221,7 @@ const API_ROLES: &[&str] = &[
     "pgokf_dispatcher",
 ];
 
-/// The number of `#[pg_extern]` functions defined under `src/catalog/`. Five
+/// The number of `#[pg_extern]` functions defined under `src/catalog/`. Seven
 /// public functions are not `#[pg_extern]`s there: `pgokf.version()` is
 /// declared in `src/lib.rs`, `pgokf.tenant_required()` is plain SQL in
 /// `sql/bootstrap.sql` (every row-level-security policy references it, so it
@@ -227,12 +229,16 @@ const API_ROLES: &[&str] = &[
 /// SQL beside the table it reads (`src/catalog/web_identity.rs`),
 /// `pgokf.capabilities()` is plain SQL in the `effective_freshness_view` block
 /// of `src/catalog/freshness.rs` (an immutable constant, so no Rust wrapper is
-/// needed), and `pgokf.list_scheduled_refreshes()` is plain SQL in the
+/// needed), `pgokf.list_scheduled_refreshes()` is plain SQL in the
 /// `scheduled_refreshes_reader` block of `src/catalog/schedule.rs` (a
 /// SECURITY DEFINER read over the runtime-only `cron.job`, so no Rust
-/// wrapper is needed either), so the catalog count is five less than
-/// [`PUBLIC_FUNCTIONS`].
-const CATALOG_PG_EXTERN_COUNT: usize = PUBLIC_FUNCTIONS.len() - 5;
+/// wrapper is needed either), and `pgokf.registry_set_status(uuid, text)` /
+/// `pgokf.registry_set_poll_interval(uuid, integer)` are plain SQL in the
+/// `registry_surface` block of `src/catalog/registry.rs` (SECURITY DEFINER
+/// writes over the runtime-only `ast_graph.repository_registry`, so no Rust
+/// wrapper is needed for them either), so the catalog count is seven less
+/// than [`PUBLIC_FUNCTIONS`].
+const CATALOG_PG_EXTERN_COUNT: usize = PUBLIC_FUNCTIONS.len() - 7;
 
 /// SQL keywords that must never appear in an executable upgrade statement,
 /// because they would break the no-data-loss guarantee.

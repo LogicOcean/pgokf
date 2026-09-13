@@ -501,6 +501,15 @@ Procedure:
    means the SQL was updated but the old library is still loaded (reconnect), or
    the library was replaced but `ALTER EXTENSION UPDATE` was not run.
 
+**Ordering with the producer service.** When the external repository-registry
+producer service shares the database, run the producer's migration 012
+**before** installing or upgrading the pgokf extension: the extension's
+registry surfaces (the reader grant and the `registry_set_status` /
+`registry_set_poll_interval` writers) reference
+`ast_graph.repository_registry.tenant_id`, and applying the extension SQL
+against a pre-012 registry table fails with `42703` (missing column
+`tenant_id`) at the reader grant.
+
 **Upgrading to 0.2.0** adds the package tables (`pgokf.skills`, `pgokf.scripts`,
 `pgokf.reference_documents`) empty. A bundle that already carried a `SKILL.md`
 projects into them on its next `SELECT * FROM pgokf.refresh_bundle(<id>)` (or a

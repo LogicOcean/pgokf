@@ -183,6 +183,25 @@ semantically until the embedder rewrites them.
   and last-day-of-month `$` are a deliberate exclusion and cannot
   round-trip through Custom. Scheduling a refresh re-reads content; it
   does not attest freshness, and the page says so.
+- **Repository-registry configuration on the web UI's Admin page.** A new
+  Registry tab lists every registered repository of the external
+  repository-registry producer service where that service shares the
+  catalog's database: the extension now grants `pgokf_reader` `USAGE` on
+  the `ast_graph` schema and a column-narrowed `SELECT` on
+  `ast_graph.repository_registry` (applied only where the table exists -
+  the coupling is runtime-only, like the `pg_cron` adapter), and adds the
+  admin-tier `SECURITY DEFINER` writers **`pgokf.registry_set_status(uuid,
+  text)`** (pause/resume; the producer polls `active` rows only) and
+  **`pgokf.registry_set_poll_interval(uuid, integer)`** (5-86400 seconds),
+  each raising a curated `22023` where the producer schema is absent. The
+  tab edits the poll interval and pauses/resumes through those functions
+  via the writer connection, and manages per-repository git fetch
+  credentials by proxying the producer's admin API
+  (`OKF_PRODUCER_ADMIN_URL` / `OKF_PRODUCER_ADMIN_TOKEN`, held server-side
+  only): a credential's label, type, and last four characters are shown,
+  the secret itself is never persisted, logged, or rendered, and a
+  producer that does not answer surfaces an honest "unavailable" rather
+  than a silent success.
 
 ## [0.2.0] - 2026-09-09
 

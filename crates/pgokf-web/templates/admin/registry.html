@@ -1,0 +1,85 @@
+{% extends "admin/layout.html" %}
+{% block admin %}
+<section class="panel">
+  <div class="panel-head"><h2>Registered repositories <span class="muted">({{ rows.len() }})</span></h2></div>
+  <p class="muted">One row per repository the registry producer service reconciles. Pause stops a repository's reconciliation without deleting its registration (the producer polls active repositories only); the poll interval bounds how often an active repository is reconciled. A credential is set or removed through the producer's admin API: the label, type, and last four characters are all it ever reports, and the secret itself is never stored here or shown.</p>
+  {% if let Some(note) = registry_note %}<p class="notice bad">{{ note }}</p>{% endif %}
+  {% if !writable %}<p class="notice bad">Pause, resume, and poll-interval changes need the writer connection (OKF_PG_WRITER_URL), and its role must hold the pgokf_admin tier; this server is read-only.</p>{% endif %}
+  {% if let Some(note) = credential_note %}<p class="notice bad">{{ note }}</p>{% endif %}
+  {% if registry_known %}
+  <div class="table-wrap">
+  <table class="table admin" id="pgokf-admin-registry">
+    <thead><tr><th>Project</th><th>Key</th><th>Branch</th><th>Remote</th><th>Status</th><th class="num">Poll interval</th><th>Credential</th><th>Last indexed</th><th>Last published</th><th class="num">Generation</th><th>Actions</th></tr></thead>
+    <tbody>
+    {% for row in rows %}
+      <tr>
+        <td><strong>{{ row.project }}</strong></td>
+        <td><span class="desc path" title="{{ row.key }}">{{ row.key }}</span></td>
+        <td>{{ row.branch }}</td>
+        <td><span class="desc path" title="{{ row.remote }}">{{ row.remote }}</span></td>
+        <td>{% if row.paused %}<span class="pill warn">paused</span>{% else if row.status == "active" %}<span class="pill ok">active</span>{% else %}<span class="pill muted">{{ row.status }}</span>{% endif %}</td>
+        <td class="num">
+          {% if writable %}
+          <form method="post" action="/admin/registry" class="cell-form">
+            <input type="hidden" name="id" value="{{ row.id }}">
+            <input type="hidden" name="action" value="poll">
+            <input type="number" name="poll_interval" value="{{ row.poll_interval_seconds }}" min="5" max="86400" step="1" aria-label="Poll interval in seconds for {{ row.project }}">
+            <button type="submit" class="btn">Save</button>
+            <span class="desc">seconds</span>
+          </form>
+          {% else %}
+          {{ row.poll_interval_seconds }}s
+          {% endif %}
+        </td>
+        <td>
+          {% if credentials_known && row.credential.known %}
+            {% if row.credential.set %}
+            <div>{{ row.credential.summary }}{% if row.credential.unusable %} <span class="pill warn">unusable</span>{% endif %}</div>
+            <div class="desc">updated {{ row.credential.updated_at|datetime }}</div>
+            {% else %}
+            <span class="muted">anonymous</span>
+            {% endif %}
+          {% else %}
+          <span class="muted">&mdash;</span>
+          {% endif %}
+          {% if producer_configured %}
+          <form method="post" action="/admin/registry" class="cell-form" data-once>
+            <input type="hidden" name="id" value="{{ row.id }}">
+            <input type="hidden" name="action" value="set-credential">
+            <input type="text" name="label" placeholder="Label" required maxlength="200" spellcheck="false" aria-label="Credential label for {{ row.project }}">
+            <select name="kind" aria-label="Credential type for {{ row.project }}">
+              <option value="github_pat">GitHub token</option>
+              <option value="http_basic">HTTP basic</option>
+            </select>
+            <input type="password" name="secret" placeholder="Secret" required autocomplete="new-password" aria-label="Credential secret for {{ row.project }}">
+            <button type="submit" class="btn">Set</button>
+          </form>
+          {% if row.credential.known && row.credential.set %}
+          <form method="post" action="/admin/registry" class="cell-form">
+            <input type="hidden" name="id" value="{{ row.id }}">
+            <input type="hidden" name="action" value="remove-credential">
+            <button type="submit" class="btn danger" data-confirm="Remove the credential for {{ row.project }}? The repository fetches anonymously afterwards.">Remove</button>
+          </form>
+          {% endif %}
+          {% endif %}
+        </td>
+        <td class="when">{{ row.last_indexed }}</td>
+        <td class="when">{{ row.last_published }}</td>
+        <td class="num">{{ row.generation }}</td>
+        <td class="row-actions">
+          {% if writable %}
+          {% if row.paused %}
+          <form method="post" action="/admin/registry"><input type="hidden" name="id" value="{{ row.id }}"><input type="hidden" name="action" value="resume"><button type="submit" class="btn">Resume</button></form>
+          {% else %}
+          <form method="post" action="/admin/registry"><input type="hidden" name="id" value="{{ row.id }}"><input type="hidden" name="action" value="pause"><button type="submit" class="btn" data-confirm="Pause {{ row.project }}? The producer stops reconciling it until it is resumed.">Pause</button></form>
+          {% endif %}
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

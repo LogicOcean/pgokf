@@ -193,6 +193,23 @@ pub(crate) struct Cli {
     #[arg(long, env = "OKF_EMBED_API_KEY", hide_env_values = true)]
     pub embed_api_key: Option<String>,
 
+    /// Base URL of the repository-registry producer service's admin API
+    /// (without `/admin/...`). Together with the `OKF_PRODUCER_ADMIN_TOKEN`
+    /// environment variable it enables the Admin page's Registry tab
+    /// credential controls; the tab's registry table itself is read from
+    /// the catalog database either way.
+    #[arg(long, env = "OKF_PRODUCER_ADMIN_URL")]
+    pub producer_admin_url: Option<String>,
+
+    /// The static admin bearer token the producer's admin API requires.
+    /// Settable only through the `OKF_PRODUCER_ADMIN_TOKEN` environment
+    /// variable (read after parsing) - never a CLI flag, whose value would
+    /// show in the process listing. Held in this process's memory only:
+    /// never written to the database, never logged, never rendered into a
+    /// page.
+    #[arg(skip)]
+    pub producer_admin_token: Option<String>,
+
     /// Display name for this catalog in the page header (defaults to the
     /// database name from the connection string).
     #[arg(long, env = "OKF_WEB_TITLE")]
@@ -268,7 +285,18 @@ pub(crate) enum UserCommand {
 impl Cli {
     /// Treat empty optional values as unset (the shape a compose stack
     /// produces for an unset variable), mirroring the other companions.
-    pub(crate) fn normalized(mut self) -> Self {
+    pub(crate) fn normalized(self) -> Self {
+        self.normalized_with_token_env(std::env::var("OKF_PRODUCER_ADMIN_TOKEN").ok())
+    }
+
+    /// The env read separated from the normalization, so tests exercise it
+    /// without touching the process environment. The producer admin token
+    /// is environment-only by design (a CLI flag would leak the secret
+    /// through the process listing), so clap never fills it.
+    fn normalized_with_token_env(mut self, token_env: Option<String>) -> Self {
+        if self.producer_admin_token.is_none() {
+            self.producer_admin_token = token_env;
+        }
         self.writer_url = pgokf_companion::cli::non_empty(self.writer_url);
         self.auth_name_header = pgokf_companion::cli::non_empty(self.auth_name_header);
         self.auth_groups_header = pgokf_companion::cli::non_empty(self.auth_groups_header);
@@ -283,6 +311,8 @@ impl Cli {
         self.embed_endpoint = pgokf_companion::cli::non_empty(self.embed_endpoint);
         self.embed_model = pgokf_companion::cli::non_empty(self.embed_model);
         self.embed_api_key = pgokf_companion::cli::non_empty(self.embed_api_key);
+        self.producer_admin_url = pgokf_companion::cli::non_empty(self.producer_admin_url);
+        self.producer_admin_token = pgokf_companion::cli::non_empty(self.producer_admin_token);
         self.title = pgokf_companion::cli::non_empty(self.title);
         self
     }
@@ -297,6 +327,12 @@ impl Cli {
         }
         if self.embed_endpoint.is_some() != self.embed_model.is_some() {
             bail!("--embed-endpoint and --embed-model must be given together");
+        }
+        if self.producer_admin_url.is_some() != self.producer_admin_token.is_some() {
+            bail!(
+                "--producer-admin-url and the OKF_PRODUCER_ADMIN_TOKEN environment variable must \
+                 be given together"
+            );
         }
         match self.auth.trim() {
             "none" => {}
@@ -450,5 +486,45 @@ mod tests {
         // Act & Assert
         assert!(cli.validate().is_ok());
         assert_eq!(cli.bind.port(), 8080);
+    }
+
+    #[test]
+    fn the_producer_admin_settings_come_in_a_pair() {
+        // Arrange: the token is environment-only - a CLI flag would leak it
+        // through the process listing - so there is no flag to parse.
+
+        // Act & Assert: the flag does not exist...
+        let unknown = Cli::try_parse_from([
+            "pgokf-web",
+            "--database-url",
+            "postgresql://okf_reader@localhost/okf",
+            "--producer-admin-token",
+            "token",
+        ])
+        .expect_err("no --producer-admin-token flag exists");
+        assert_eq!(unknown.kind(), clap::error::ErrorKind::UnknownArgument);
+        // ...the URL alone is half a pair...
+        assert!(
+            parse(&["--producer-admin-url", "http://producer:8081"])
+                .normalized_with_token_env(None)
+                .validate()
+                .is_err()
+        );
+        // ...and the token alone (through the environment) is the other
+        // half.
+        let cli = parse(&[]).normalized_with_token_env(Some("token".to_owned()));
+        assert_eq!(cli.producer_admin_token.as_deref(), Some("token"));
+        assert!(cli.validate().is_err(), "the token alone is half a pair");
+        let cli = parse(&["--producer-admin-url", "http://producer:8081"])
+            .normalized_with_token_env(Some("token".to_owned()));
+        assert!(cli.validate().is_ok(), "the pair validates together");
+
+        // An empty value is the compose shape of "unset", so half a pair
+        // that way is simply no producer configuration at all.
+        let cli =
+            parse(&["--producer-admin-url", ""]).normalized_with_token_env(Some(String::new()));
+        assert_eq!(cli.producer_admin_url, None);
+        assert_eq!(cli.producer_admin_token, None);
+        assert!(cli.validate().is_ok());
     }
 }
