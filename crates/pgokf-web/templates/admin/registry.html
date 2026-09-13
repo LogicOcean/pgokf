@@ -34,7 +34,7 @@
         <td>
           {% if credentials_known && row.credential.known %}
             {% if row.credential.set %}
-            <div>{{ row.credential.summary }}</div>
+            <div>{{ row.credential.summary }}{% if row.credential.unusable %} <span class="pill warn">unusable</span>{% endif %}</div>
             <div class="desc">updated {{ row.credential.updated_at|datetime }}</div>
             {% else %}
             <span class="muted">anonymous</span>
@@ -46,11 +46,10 @@
           <form method="post" action="/admin/registry" class="cell-form" data-once>
             <input type="hidden" name="id" value="{{ row.id }}">
             <input type="hidden" name="action" value="set-credential">
-            <input type="text" name="label" placeholder="Label" required maxlength="255" spellcheck="false" aria-label="Credential label for {{ row.project }}">
+            <input type="text" name="label" placeholder="Label" required maxlength="200" spellcheck="false" aria-label="Credential label for {{ row.project }}">
             <select name="kind" aria-label="Credential type for {{ row.project }}">
               <option value="github_pat">GitHub token</option>
               <option value="http_basic">HTTP basic</option>
-              <option value="ssh_key">SSH key</option>
             </select>
             <input type="password" name="secret" placeholder="Secret" required autocomplete="new-password" aria-label="Credential secret for {{ row.project }}">
             <button type="submit" class="btn">Set</button>

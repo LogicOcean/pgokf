@@ -10,7 +10,9 @@
 //! - `DELETE /admin/repositories/{id}/credential` removes it (`204`), returning
 //!   the repository to anonymous fetches;
 //! - `GET /admin/repositories/{id}/credential` reports `label`, `type`,
-//!   `secret_last4`, and `updated_at` - never the secret itself.
+//!   `secret_last4` (null while the stored secret cannot be unsealed),
+//!   `state` (`configured` or `unusable`), and `updated_at` - never the
+//!   secret itself. A successful PUT's `201` body is the same document.
 //!
 //! Every call carries the static admin bearer token this server is configured
 //! with. The token and any secret a form submits live only in this process's
@@ -44,9 +46,15 @@ pub(crate) struct ProducerAdmin {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CredentialInfo {
     pub label: String,
-    /// The credential type (`github_pat`, `http_basic`, `ssh_key`).
+    /// The credential type (`github_pat`, `http_basic`).
     pub kind: String,
-    pub secret_last4: String,
+    /// The secret's last four characters, or `None` while the credential is
+    /// `unusable` (the producer could not unseal it - it renders the label
+    /// and type with no last-four marker rather than nothing at all).
+    pub secret_last4: Option<String>,
+    /// `configured` or `unusable` (the stored secret no longer unseals, for
+    /// example after a key rotation; the label and type still report).
+    pub state: String,
     pub updated_at: String,
 }
 
@@ -90,14 +98,17 @@ impl ProducerError {
     }
 }
 
-/// The credential document the producer's GET returns. The secret is never
-/// part of it by contract; the field set here makes that structural.
+/// The credential document the producer's GET returns - and a successful
+/// PUT's `201` body carries the same shape. The secret is never part of it
+/// by contract; the field set here makes that structural. `secret_last4` is
+/// null while the stored secret cannot be unsealed (`state: "unusable"`).
 #[derive(Debug, Deserialize)]
 struct CredentialDocument {
     label: String,
     #[serde(rename = "type")]
     kind: String,
-    secret_last4: String,
+    secret_last4: Option<String>,
+    state: String,
     updated_at: String,
 }
 
@@ -159,6 +170,7 @@ impl ProducerAdmin {
                     label: document.label,
                     kind: document.kind,
                     secret_last4: document.secret_last4,
+                    state: document.state,
                     updated_at: document.updated_at,
                 }))
             }
@@ -347,11 +359,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn credential_reports_the_metadata_and_never_the_secret() {
         // Arrange
-        let (base, served) = mock_producer(&[(
-            "200 OK",
-            "{\"label\":\"deploy key\",\"type\":\"ssh_key\",\"secret_last4\":\"a1b2\",\"updated_at\":\"2026-09-13T10:00:00Z\"}",
-        )])
-        .await;
+        let (base, served) = mock_producer(&[("200 OK", CONFIGURED_FIXTURE)]).await;
         let producer = ProducerAdmin::new(&base, "admin-token").expect("a client");
 
         // Act
@@ -367,8 +375,9 @@ pub(crate) mod tests {
             info,
             CredentialInfo {
                 label: "deploy key".to_owned(),
-                kind: "ssh_key".to_owned(),
-                secret_last4: "a1b2".to_owned(),
+                kind: "github_pat".to_owned(),
+                secret_last4: Some("a1b2".to_owned()),
+                state: "configured".to_owned(),
                 updated_at: "2026-09-13T10:00:00Z".to_owned(),
             }
         );
@@ -485,5 +494,82 @@ pub(crate) mod tests {
             error.message(),
             "The producer refused the request (HTTP 400)."
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Cross-repo contract
+    // ------------------------------------------------------------------
+
+    /// The two fixtures below are verbatim in shape from the producer's
+    /// `CredentialInfoResponse`
+    /// (`/tmp/registry-ui/src/ast_graph/producer/admin.py`): keys `label`,
+    /// `type`, `secret_last4` (nullable), `state` (`configured` |
+    /// `unusable`), `updated_at`. The producer repo mirrors this test on its
+    /// side; a drift in the document shape must fail a test here or there.
+    const CONFIGURED_FIXTURE: &str = "{\"label\":\"deploy key\",\"type\":\"github_pat\",\"secret_last4\":\"a1b2\",\"state\":\"configured\",\"updated_at\":\"2026-09-13T10:00:00Z\"}";
+    const UNUSABLE_FIXTURE: &str = "{\"label\":\"legacy key\",\"type\":\"http_basic\",\"secret_last4\":null,\"state\":\"unusable\",\"updated_at\":\"2026-09-01T09:00:00Z\"}";
+
+    /// The web half of the credential-document contract: both documented
+    /// shapes parse, and every status the producer's admin API defines lands
+    /// where the Admin page expects it (`201` PUT body parses as the same
+    /// document; `404` GET is `None`; `204` DELETE is `Ok`; `400` is a
+    /// typed rejection). The render half lives in routes.rs
+    /// (`the_producer_contract_renders_both_credential_states`).
+    #[tokio::test]
+    async fn the_producer_credential_contract_deserializes_and_maps_statuses() {
+        // Both fixtures deserialize, including the null last-four of an
+        // unusable credential.
+        let configured: CredentialDocument =
+            serde_json::from_str(CONFIGURED_FIXTURE).expect("the configured fixture parses");
+        assert_eq!(configured.state, "configured");
+        assert_eq!(configured.secret_last4.as_deref(), Some("a1b2"));
+        let unusable: CredentialDocument =
+            serde_json::from_str(UNUSABLE_FIXTURE).expect("the unusable fixture parses");
+        assert_eq!(unusable.state, "unusable");
+        assert_eq!(unusable.secret_last4, None);
+
+        // Arrange: a mock answering, in order, a GET (200, unusable), a PUT
+        // (201, body in the same document shape), a DELETE (204), a GET of
+        // nothing (404), and a refused PUT (400).
+        let (base, served) = mock_producer(&[
+            ("200 OK", UNUSABLE_FIXTURE),
+            ("201 Created", CONFIGURED_FIXTURE),
+            ("204 No Content", ""),
+            (
+                "404 Not Found",
+                "{\"detail\":\"no credential for repository\"}",
+            ),
+            (
+                "400 Bad Request",
+                "{\"detail\":\"ssh_key credentials are not supported yet\"}",
+            ),
+        ])
+        .await;
+        let producer = ProducerAdmin::new(&base, "admin-token").expect("a client");
+        let id = "8d2e1c4a-0000-4000-8000-0000000000aa";
+
+        // Act & Assert: each status maps the way the contract fixes it.
+        let info = producer
+            .credential(id)
+            .await
+            .expect("the read succeeds")
+            .expect("a credential is set");
+        assert_eq!(info.state, "unusable");
+        assert_eq!(info.secret_last4, None);
+        producer
+            .set_credential(id, "deploy key", "github_pat", "a-secret")
+            .await
+            .expect("201 accepts");
+        producer.remove_credential(id).await.expect("204 removes");
+        assert_eq!(producer.credential(id).await, Ok(None), "404 is None");
+        assert_eq!(
+            producer
+                .set_credential(id, "key", "ssh_key", "a-secret")
+                .await,
+            Err(ProducerError::Rejected(StatusCode::BAD_REQUEST)),
+            "400 is a typed rejection"
+        );
+        let captured = served.await.expect("the mock captured the requests");
+        assert_eq!(captured.len(), 5);
     }
 }

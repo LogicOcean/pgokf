@@ -58,5 +58,9 @@ tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "net", "sig
 tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
 tower = { version = "0.5", features = ["limit"] }
 
+[dev-dependencies]
+# `ServiceExt::oneshot` drives the real router in the route tests.
+tower = { version = "0.5", features = ["util"] }
+
 [lints]
 workspace = true

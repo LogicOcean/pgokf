@@ -4148,6 +4148,138 @@ An added concept for the resync diff.\n";
         }
     }
 
+    /// A minimal stand-in for the producer's registry table, with the two
+    /// tenants the confinement tests move between.
+    fn registry_fixture() {
+        Spi::run(
+            "CREATE SCHEMA ast_graph;
+             CREATE TABLE ast_graph.repository_registry (
+                 repository_id uuid PRIMARY KEY,
+                 status text NOT NULL DEFAULT 'active',
+                 poll_interval_seconds integer NOT NULL DEFAULT 300,
+                 tenant_id text NOT NULL DEFAULT 'default',
+                 updated_at timestamptz NOT NULL DEFAULT now()
+             );
+             INSERT INTO ast_graph.repository_registry (repository_id, tenant_id) VALUES
+                 ('8d2e1c4a-0000-4000-8000-0000000000aa', 'tenant-a'),
+                 ('8d2e1c4a-0000-4000-8000-0000000000bb', 'tenant-b'),
+                 ('8d2e1c4a-0000-4000-8000-0000000000cc', 'default');
+             CREATE FUNCTION pg_temp.registry_call(poll boolean, id uuid) RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             BEGIN
+                 IF poll THEN
+                     PERFORM pgokf.registry_set_poll_interval(id, 300);
+                 ELSE
+                     PERFORM pgokf.registry_set_status(id, 'paused');
+                 END IF;
+                 RETURN 'no-error';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("the registry fixture is creatable");
+    }
+
+    #[pg_test]
+    fn registry_writers_refuse_cross_tenant_and_allow_same_tenant() {
+        // Arrange: the fixture and, for the session, tenant A's GUC. The
+        // writers read current_setting under SECURITY DEFINER, so this is
+        // the tenant the calling session set - the same value the pooled
+        // connections apply from OKF_TENANT.
+        registry_fixture();
+        Spi::run("SELECT set_config('pgokf.tenant', 'tenant-a', true)")
+            .expect("the tenant GUC is settable");
+
+        // Act & Assert: tenant A's own row takes both writes; tenant B's id
+        // earns the same 22023 an unknown id does, in both directions.
+        for poll in ["true", "false"] {
+            assert_eq!(
+                Spi::get_one::<String>(&format!(
+                    "SELECT pg_temp.registry_call({poll}, '8d2e1c4a-0000-4000-8000-0000000000aa')"
+                ))
+                .expect("the probe executes")
+                .as_deref(),
+                Some("no-error"),
+                "same-tenant write must succeed (poll={poll})",
+            );
+            assert_eq!(
+                Spi::get_one::<String>(&format!(
+                    "SELECT pg_temp.registry_call({poll}, '8d2e1c4a-0000-4000-8000-0000000000bb')"
+                ))
+                .expect("the probe executes")
+                .as_deref(),
+                Some("22023"),
+                "cross-tenant write must be refused like an unknown id (poll={poll})",
+            );
+        }
+        // The cross-tenant row is untouched: still active, still 300.
+        let status = Spi::get_one::<String>(
+            "SELECT status FROM ast_graph.repository_registry
+             WHERE repository_id = '8d2e1c4a-0000-4000-8000-0000000000bb'",
+        )
+        .expect("the row reads back")
+        .expect("tenant B's row exists");
+        let interval = Spi::get_one::<i32>(
+            "SELECT poll_interval_seconds FROM ast_graph.repository_registry
+             WHERE repository_id = '8d2e1c4a-0000-4000-8000-0000000000bb'",
+        )
+        .expect("the row reads back")
+        .expect("tenant B's row exists");
+        assert_eq!((status.as_str(), interval), ("active", 300));
+
+        // And from tenant B's side the picture mirrors.
+        Spi::run("SELECT set_config('pgokf.tenant', 'tenant-b', true)")
+            .expect("the tenant GUC flips");
+        assert_eq!(
+            Spi::get_one::<String>(
+                "SELECT pg_temp.registry_call(false, '8d2e1c4a-0000-4000-8000-0000000000bb')"
+            )
+            .expect("the probe executes")
+            .as_deref(),
+            Some("no-error"),
+            "tenant B writes its own row",
+        );
+        assert_eq!(
+            Spi::get_one::<String>(
+                "SELECT pg_temp.registry_call(false, '8d2e1c4a-0000-4000-8000-0000000000aa')"
+            )
+            .expect("the probe executes")
+            .as_deref(),
+            Some("22023"),
+            "tenant B is refused tenant A's row",
+        );
+    }
+
+    #[pg_test]
+    fn registry_writers_default_to_the_default_tenant() {
+        // Arrange: the fixture, with the GUC unset (each pg_test runs in its
+        // own transaction, so nothing leaks in): COALESCE makes that the
+        // producer's 'default' tenant.
+        registry_fixture();
+
+        // Act & Assert
+        assert_eq!(
+            Spi::get_one::<String>(
+                "SELECT pg_temp.registry_call(false, '8d2e1c4a-0000-4000-8000-0000000000cc')"
+            )
+            .expect("the probe executes")
+            .as_deref(),
+            Some("no-error"),
+            "an unset tenant GUC writes the default tenant's row",
+        );
+        assert_eq!(
+            Spi::get_one::<String>(
+                "SELECT pg_temp.registry_call(false, '8d2e1c4a-0000-4000-8000-0000000000aa')"
+            )
+            .expect("the probe executes")
+            .as_deref(),
+            Some("22023"),
+            "an unset tenant GUC is refused another tenant's row",
+        );
+    }
+
     #[pg_test]
     fn list_scheduled_refreshes_applies_the_require_tenant_rule_before_the_pg_cron_check() {
         // Arrange: the require_tenant policy on, and the probe from the

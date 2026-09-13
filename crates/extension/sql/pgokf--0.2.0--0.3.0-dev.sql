@@ -1682,9 +1682,12 @@ COMMENT ON FUNCTION pgokf.list_scheduled_refreshes() IS
 -- on exactly the columns the admin UI lists (never checkout_path or the
 -- producer's internal graph_id, and no secret exists here at all - fetch
 -- credentials live behind the producer's admin API, which never returns
--- them), applied only where the table is present. Writes go through the
--- SECURITY DEFINER functions below, granted to pgokf_admin; each resolves
--- the table at call time and raises a curated 22023 where it is absent.
+-- them; tenant_id is granted so callers can confine their read to the
+-- session tenant), applied only where the table is present. Writes go
+-- through the SECURITY DEFINER functions below, granted to pgokf_admin; each
+-- resolves the table at call time, raises a curated 22023 where it is
+-- absent, and confines its update to the session tenant (pgokf.tenant), so a
+-- cross-tenant id earns the same 22023 as an unknown one.
 -- ===========================================================================
 DO $registry_reader_grant$
 BEGIN
@@ -1693,7 +1696,7 @@ BEGIN
         GRANT SELECT (repository_id, repository_key, project_name, default_branch,
                       remote_url, status, poll_interval_seconds,
                       last_indexed_commit, last_published_commit,
-                      last_published_generation)
+                      last_published_generation, tenant_id)
             ON ast_graph.repository_registry TO pgokf_reader;
     ELSE
         RAISE NOTICE 'pgokf: ast_graph.repository_registry is not present in this database; skipping the registry reader grant (the producer service installs that schema)';
@@ -1729,7 +1732,11 @@ BEGIN
     UPDATE ast_graph.repository_registry AS r
        SET status = registry_set_status.status,
            updated_at = pg_catalog.now()
-     WHERE r.repository_id = registry_set_status.repository_id;
+     WHERE r.repository_id = registry_set_status.repository_id
+       -- The session tenant confines the write: a cross-tenant id finds no
+       -- row and earns the same 22023 an unknown id does, so the answer
+       -- never reveals that another tenant's repository exists.
+       AND r.tenant_id = COALESCE(pg_catalog.current_setting('pgokf.tenant', true), 'default');
     IF NOT FOUND THEN
         RAISE EXCEPTION
             'no registered repository with id %', repository_id
@@ -1740,7 +1747,7 @@ $registry_set_status$;
 REVOKE ALL ON FUNCTION pgokf.registry_set_status(uuid, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pgokf.registry_set_status(uuid, text) TO pgokf_admin;
 COMMENT ON FUNCTION pgokf.registry_set_status(uuid, text) IS
-    'Pause or resume one registered repository of the external repository-registry producer service by setting its ast_graph.repository_registry status (active or paused; the producer polls active rows only, so pausing stops reconciliation without deleting the registration). Admin-only (pgokf_admin), SECURITY DEFINER over a table no API role may write directly; the producer schema coupling is runtime-only - the curated 22023 names the missing dependency when ast_graph.repository_registry is absent, and 22023 also covers an unknown repository id or a status outside (active, paused).';
+    'Pause or resume one registered repository of the external repository-registry producer service by setting its ast_graph.repository_registry status (active or paused; the producer polls active rows only, so pausing stops reconciliation without deleting the registration). Admin-only (pgokf_admin), SECURITY DEFINER over a table no API role may write directly; tenant-confined: the update matches only rows whose tenant_id equals the session''s pgokf.tenant setting (default ''default''), so a cross-tenant id earns the same 22023 as an unknown one without revealing that the row exists. The producer schema coupling is runtime-only - the curated 22023 names the missing dependency when ast_graph.repository_registry is absent, and 22023 also covers an unknown repository id or a status outside (active, paused).';
 
 CREATE FUNCTION pgokf.registry_set_poll_interval(repository_id uuid, poll_interval_seconds integer)
 RETURNS void
@@ -1766,7 +1773,8 @@ BEGIN
     UPDATE ast_graph.repository_registry AS r
        SET poll_interval_seconds = registry_set_poll_interval.poll_interval_seconds,
            updated_at = pg_catalog.now()
-     WHERE r.repository_id = registry_set_poll_interval.repository_id;
+     WHERE r.repository_id = registry_set_poll_interval.repository_id
+       AND r.tenant_id = COALESCE(pg_catalog.current_setting('pgokf.tenant', true), 'default');
     IF NOT FOUND THEN
         RAISE EXCEPTION
             'no registered repository with id %', repository_id
@@ -1777,7 +1785,7 @@ $registry_set_poll_interval$;
 REVOKE ALL ON FUNCTION pgokf.registry_set_poll_interval(uuid, integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pgokf.registry_set_poll_interval(uuid, integer) TO pgokf_admin;
 COMMENT ON FUNCTION pgokf.registry_set_poll_interval(uuid, integer) IS
-    'Set one registered repository''s poll interval in seconds (5 to 86400) on the external repository-registry producer service''s ast_graph.repository_registry row: the producer reconciles an active repository at most this often. Admin-only (pgokf_admin), SECURITY DEFINER over a table no API role may write directly; the producer schema coupling is runtime-only - the curated 22023 names the missing dependency when ast_graph.repository_registry is absent, and 22023 also covers an unknown repository id or an out-of-range interval.';
+    'Set one registered repository''s poll interval in seconds (5 to 86400) on the external repository-registry producer service''s ast_graph.repository_registry row: the producer reconciles an active repository at most this often. Admin-only (pgokf_admin), SECURITY DEFINER over a table no API role may write directly; tenant-confined: the update matches only rows whose tenant_id equals the session''s pgokf.tenant setting (default ''default''), so a cross-tenant id earns the same 22023 as an unknown one without revealing that the row exists. The producer schema coupling is runtime-only - the curated 22023 names the missing dependency when ast_graph.repository_registry is absent, and 22023 also covers an unknown repository id or an out-of-range interval.';
 
 -- Last, so the new relations are registered for pg_dump (the rule for every
 -- upgrade script since 0.1.14). Later phases insert their sections BEFORE
