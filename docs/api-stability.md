@@ -21,7 +21,7 @@ the database. Complete comment coverage is a release gate (see
 
 ## The stable surface
 
-### Functions (67)
+### Functions (69)
 
 The installed extension defines one function more than this table: the
 internal `pgokf.bm25_hits` helper the optional BM25 backend calls. It is not
@@ -97,6 +97,8 @@ or disappear in any release.
 | `pgokf.concept_relationship_neighbors(bigint, text, integer, text, text[], integer)` | `pgokf_reader` | Walk the current typed-relationship set cycle-safely (direction, optional type filter, hop and result ceilings) |
 | `pgokf.set_concept_embedding_cas(bigint, text, real[], text, text, text, text)` | `pgokf_writer` | Compare-and-set embedding write: stores only when the expected file hash still matches, so a superseded attempt cannot overwrite newer content |
 | `pgokf.list_scheduled_refreshes()` | `pgokf_reader` | List the scheduled bundle refreshes the extension manages, as `(bundle_id, schedule)` rows (`SECURITY DEFINER` over `cron.job`, which row-restricts an ordinary login to its own jobs while `schedule_refresh` registers them under the extension owner; tenant-confined) |
+| `pgokf.registry_set_status(uuid, text)` | `pgokf_admin` | Pause/resume one registered repository of the external repository-registry producer service (`ast_graph.repository_registry.status`, `active`/`paused`; runtime-only coupling, curated `22023` when the producer schema is absent) |
+| `pgokf.registry_set_poll_interval(uuid, integer)` | `pgokf_admin` | Set one registered repository's poll interval in seconds (5-86400) on the same external registry (same runtime-only coupling and `22023` behavior) |
 
 Every row from `pgokf.register_bundle_content_with_context` down became stable
 in **0.3.0-dev**; the rows above it predate that release.

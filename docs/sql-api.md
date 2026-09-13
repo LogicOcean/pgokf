@@ -71,6 +71,8 @@ exercised against a live PostgreSQL 18 cluster.
 | `schedule_refresh(bundle_id, schedule)` | `text` | VOLATILE | DEFINER | `pgokf_admin` |
 | `unschedule_refresh(bundle_id)` | `boolean` | VOLATILE | DEFINER | `pgokf_admin` |
 | `list_scheduled_refreshes()` | `TABLE (bundle_id bigint, schedule text)` | STABLE | DEFINER | `pgokf_reader` |
+| `registry_set_status(repository_id, status)` | `void` | VOLATILE | DEFINER | `pgokf_admin` |
+| `registry_set_poll_interval(repository_id, poll_interval_seconds)` | `void` | VOLATILE | DEFINER | `pgokf_admin` |
 | `export_parquet(bundle_id, dest_dir)` | `export_result` | VOLATILE | DEFINER | `pgokf_admin` |
 | `get_concept_source(bundle_id, concept_id)` | `bytea` | STABLE | DEFINER | `pgokf_reader` |
 | `export_sources(bundle_id, dest_dir)` | `export_result` | VOLATILE | DEFINER | `pgokf_admin` |
@@ -721,6 +723,37 @@ function runs as that owner. Tenant confinement matches the RLS-backed
 readers: an unscoped session sees nothing when `require_tenant` is on, and a
 scoped session sees only its tenant's jobs. Raises `22023` naming the missing
 dependency when `pg_cron` is not installed, exactly like `schedule_refresh`.
+
+### `pgokf.registry_set_status(repository_id uuid, status text) → void`
+
+Pause or resume one registered repository of the external repository-registry
+producer service by setting its `ast_graph.repository_registry` row's `status`
+(`active` or `paused`; the producer polls `active` rows only, so pausing stops
+reconciliation without deleting the registration). `VOLATILE`, **SECURITY
+DEFINER** over a table no API role may write directly, **requires
+`pgokf_admin`**. The coupling to the producer's schema is runtime-only: the
+function resolves `ast_graph.repository_registry` at call time and raises
+`22023` naming the missing dependency where it is absent (never a raw `42P01`,
+never a silent success), and raises `22023` for an unknown repository id or a
+`status` outside (`active`, `paused`).
+
+### `pgokf.registry_set_poll_interval(repository_id uuid, poll_interval_seconds integer) → void`
+
+Set one registered repository's poll interval in seconds (5 to 86400) on the
+same external registry row: the producer reconciles an `active` repository at
+most this often. Same volatility, security, role requirement, and `22023`
+behavior as `registry_set_status`.
+
+The read side of this surface is a grant, not a function: where the producer
+service shares the database, the extension grants `pgokf_reader` `USAGE` on
+the `ast_graph` schema and `SELECT` on exactly the registry's listable columns
+(`repository_id`, `repository_key`, `project_name`, `default_branch`,
+`remote_url`, `status`, `poll_interval_seconds`, `last_indexed_commit`,
+`last_published_commit`, `last_published_generation`) - never `checkout_path`
+or the producer's internal `graph_id`. Fetch credentials are not part of this
+surface at all: they live behind the producer's admin API, which never returns
+them.
+
 
 ---
 

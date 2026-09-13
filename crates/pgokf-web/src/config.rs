@@ -193,6 +193,19 @@ pub(crate) struct Cli {
     #[arg(long, env = "OKF_EMBED_API_KEY", hide_env_values = true)]
     pub embed_api_key: Option<String>,
 
+    /// Base URL of the repository-registry producer service's admin API
+    /// (without `/admin/...`). Together with `--producer-admin-token` it
+    /// enables the Admin page's Registry tab credential controls; the tab's
+    /// registry table itself is read from the catalog database either way.
+    #[arg(long, env = "OKF_PRODUCER_ADMIN_URL")]
+    pub producer_admin_url: Option<String>,
+
+    /// The static admin bearer token the producer's admin API requires.
+    /// Held in this process's memory only: never written to the database,
+    /// never logged, never rendered into a page.
+    #[arg(long, env = "OKF_PRODUCER_ADMIN_TOKEN", hide_env_values = true)]
+    pub producer_admin_token: Option<String>,
+
     /// Display name for this catalog in the page header (defaults to the
     /// database name from the connection string).
     #[arg(long, env = "OKF_WEB_TITLE")]
@@ -283,6 +296,8 @@ impl Cli {
         self.embed_endpoint = pgokf_companion::cli::non_empty(self.embed_endpoint);
         self.embed_model = pgokf_companion::cli::non_empty(self.embed_model);
         self.embed_api_key = pgokf_companion::cli::non_empty(self.embed_api_key);
+        self.producer_admin_url = pgokf_companion::cli::non_empty(self.producer_admin_url);
+        self.producer_admin_token = pgokf_companion::cli::non_empty(self.producer_admin_token);
         self.title = pgokf_companion::cli::non_empty(self.title);
         self
     }
@@ -297,6 +312,9 @@ impl Cli {
         }
         if self.embed_endpoint.is_some() != self.embed_model.is_some() {
             bail!("--embed-endpoint and --embed-model must be given together");
+        }
+        if self.producer_admin_url.is_some() != self.producer_admin_token.is_some() {
+            bail!("--producer-admin-url and --producer-admin-token must be given together");
         }
         match self.auth.trim() {
             "none" => {}
@@ -450,5 +468,45 @@ mod tests {
         // Act & Assert
         assert!(cli.validate().is_ok());
         assert_eq!(cli.bind.port(), 8080);
+    }
+
+    #[test]
+    fn the_producer_admin_settings_come_in_a_pair() {
+        // Arrange / Act / Assert
+        assert!(
+            parse(&["--producer-admin-url", "http://producer:8081"])
+                .validate()
+                .is_err()
+        );
+        assert!(
+            parse(&["--producer-admin-token", "token"])
+                .validate()
+                .is_err()
+        );
+        assert!(
+            parse(&[
+                "--producer-admin-url",
+                "http://producer:8081",
+                "--producer-admin-token",
+                "token",
+            ])
+            .validate()
+            .is_ok()
+        );
+        // An empty value is the compose shape of "unset", so half a pair
+        // that way is simply no producer configuration at all.
+        let cli = Cli::parse_from([
+            "pgokf-web",
+            "--database-url",
+            "postgresql://okf_reader@localhost/okf",
+            "--producer-admin-url",
+            "",
+            "--producer-admin-token",
+            "",
+        ])
+        .normalized();
+        assert_eq!(cli.producer_admin_url, None);
+        assert_eq!(cli.producer_admin_token, None);
+        assert!(cli.validate().is_ok());
     }
 }

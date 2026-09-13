@@ -4108,6 +4108,47 @@ An added concept for the resync diff.\n";
     }
 
     #[pg_test]
+    fn registry_writers_raise_22023_when_the_producer_schema_is_absent() {
+        // Arrange: a probe per registry writer, reporting the SQLSTATE of a
+        // call. The test cluster has no ast_graph schema (the
+        // repository-registry producer service installs it), so both writers
+        // must answer with the curated 22023 naming the missing dependency -
+        // never a raw 42P01 from the absent relation, and never a silent
+        // success.
+        Spi::run(
+            "CREATE FUNCTION pg_temp.registry_sqlstate(poll boolean) RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             BEGIN
+                 IF poll THEN
+                     PERFORM pgokf.registry_set_poll_interval(
+                         '00000000-0000-0000-0000-000000000000'::uuid, 300);
+                 ELSE
+                     PERFORM pgokf.registry_set_status(
+                         '00000000-0000-0000-0000-000000000000'::uuid, 'paused');
+                 END IF;
+                 RETURN 'no-error';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("registry probes are creatable");
+
+        // Act & Assert
+        for poll in ["true", "false"] {
+            let sqlstate =
+                Spi::get_one::<String>(&format!("SELECT pg_temp.registry_sqlstate({poll})"))
+                    .expect("registry probe executes")
+                    .expect("probe reports a SQLSTATE");
+            assert_eq!(
+                sqlstate, "22023",
+                "registry writers must raise 22023 when ast_graph is absent (poll={poll})",
+            );
+        }
+    }
+
+    #[pg_test]
     fn list_scheduled_refreshes_applies_the_require_tenant_rule_before_the_pg_cron_check() {
         // Arrange: the require_tenant policy on, and the probe from the
         // companion test re-created (each pg_test runs in its own

@@ -40,6 +40,12 @@
 //!   (`pgokf.schedule_refresh`, `unschedule_refresh`), reached only through
 //!   runtime SPI and mirroring the `pgvector` / `pg_search` optional-dependency
 //!   seam.
+//! - [`registry`] - the external repository-registry surface: the narrow
+//!   `pgokf_reader` column grant on the producer service's
+//!   `ast_graph.repository_registry` (applied only where that schema shares
+//!   the database) and the admin-tier `SECURITY DEFINER` writers
+//!   (`pgokf.registry_set_status`, `registry_set_poll_interval`), another
+//!   runtime-only optional dependency.
 //!
 //! Feature-extension stubs, each to be filled by a later wave without
 //! touching [`sync`]:
@@ -117,6 +123,7 @@ pub mod links;
 pub mod neighbors;
 pub mod packages;
 pub mod provenance;
+pub mod registry;
 pub mod relationships;
 pub mod schedule;
 pub mod schema;

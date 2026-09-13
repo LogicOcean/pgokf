@@ -17,6 +17,7 @@ mod links;
 mod markdown;
 mod mcp_tokens;
 mod oidc;
+mod producer;
 mod provider;
 mod provider_settings;
 mod routes;
@@ -92,6 +93,18 @@ async fn main() -> Result<()> {
             .unwrap_or_else(|| "pgokf".to_owned())
     });
 
+    // The registry producer's admin API, for the Registry tab's credential
+    // controls. The token lives in this process only; an unreachable
+    // endpoint is not a startup error (the tab says "unavailable" when it
+    // matters), exactly like the embeddings endpoint.
+    let producer = match (&cli.producer_admin_url, &cli.producer_admin_token) {
+        (Some(url), Some(token)) => Some(
+            producer::ProducerAdmin::new(url, token)
+                .context("configuring the producer admin API client")?,
+        ),
+        _ => None,
+    };
+
     let trusted_proxies = auth::TrustedProxies::parse(&cli.auth_trusted_proxy)
         .context("parsing --auth-trusted-proxy")?;
 
@@ -110,6 +123,7 @@ async fn main() -> Result<()> {
         builds: tokio::sync::Semaphore::new(routes::MAX_PLUGIN_BUILDS),
         stores,
         embedder,
+        producer,
         catalog_name,
         tenant: cli.tenant.clone(),
         version: version.clone(),

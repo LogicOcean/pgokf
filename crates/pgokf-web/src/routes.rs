@@ -36,13 +36,14 @@ use crate::auth::{Admission, Authenticator, Mode, Principal, Role, Session, cook
 use crate::db::{
     AdminBundle, BundleFile, BundleInfo, BundleLogEntry, BundleStat, ConceptDetail, ConceptSummary,
     Cursor, Db, DuplicateGroup, EdgeSource, Facet, Failure, Graph, Hit, Link, Neighbor,
-    PackageInfo, PersonalItem, ResourceInfo, ReviewItem, SearchQuery, StaleConcept, SyncLogEntry,
-    SyncOutcome, Version,
+    PackageInfo, PersonalItem, RegistryRepository, ResourceInfo, ReviewItem, SearchQuery,
+    StaleConcept, SyncLogEntry, SyncOutcome, Version,
 };
 use crate::graph::{GraphEdge, GraphNode};
 use crate::links::Resolver;
 use crate::mcp_tokens::{McpToken, McpTokens, Minted};
 use crate::oidc::OidcAuth;
+use crate::producer::{CredentialInfo, ProducerError};
 use crate::provider::{ProviderDraft, SecretChange};
 use crate::provider_settings::{ProviderKind, ProviderSettings};
 use crate::store::DocumentStore;
@@ -76,6 +77,11 @@ pub(crate) struct App {
     /// Where directory bundles are reachable from this process, if at all.
     pub stores: crate::store::Stores,
     pub embedder: Option<EmbeddingsClient>,
+    /// The repository-registry producer's admin API client, for the
+    /// Registry tab's credential controls; `None` when no producer admin
+    /// URL/token pair is configured. Holds the static admin bearer token -
+    /// server-side only, never rendered.
+    pub producer: Option<crate::producer::ProducerAdmin>,
     pub catalog_name: String,
     pub tenant: Option<String>,
     /// The library version seen at startup, for the footer.
@@ -153,6 +159,10 @@ pub(crate) fn router(app: Shared) -> Router {
         .route(
             "/admin/bundles",
             get(admin_bundles_page).post(admin_bundles),
+        )
+        .route(
+            "/admin/registry",
+            get(admin_registry_page).post(admin_registry),
         )
         .route("/admin/settings", get(admin_settings_page))
         .route("/review", get(review_page))
@@ -1475,15 +1485,17 @@ enum AdminTab {
     Providers,
     Tokens,
     Bundles,
+    Registry,
     Settings,
 }
 
 impl AdminTab {
-    const ALL: [AdminTab; 5] = [
+    const ALL: [AdminTab; 6] = [
         AdminTab::People,
         AdminTab::Providers,
         AdminTab::Tokens,
         AdminTab::Bundles,
+        AdminTab::Registry,
         AdminTab::Settings,
     ];
 
@@ -1493,6 +1505,7 @@ impl AdminTab {
             AdminTab::Providers => "/admin/providers",
             AdminTab::Tokens => "/admin/tokens",
             AdminTab::Bundles => "/admin/bundles",
+            AdminTab::Registry => "/admin/registry",
             AdminTab::Settings => "/admin/settings",
         }
     }
@@ -1503,6 +1516,7 @@ impl AdminTab {
             AdminTab::Providers => "Identity providers",
             AdminTab::Tokens => "MCP tokens",
             AdminTab::Bundles => "Bundles",
+            AdminTab::Registry => "Registry",
             AdminTab::Settings => "Catalog settings",
         }
     }
@@ -1522,6 +1536,12 @@ impl AdminTab {
                 "The bearer tokens that let agents reach the MCP endpoint over HTTP."
             }
             AdminTab::Bundles => "The bundles the catalog holds, and what to do with them.",
+            AdminTab::Registry => {
+                "The repositories the registry producer service reconciles, read from the \
+                 catalog's database. Credentials are set and removed through the producer's \
+                 admin API: it reports a credential's label, type, and last four characters, \
+                 and the secret itself is never stored here or shown."
+            }
             AdminTab::Settings => {
                 "The catalog's own settings, read from pgokf.get_config(); a database admin \
                  changes them."
@@ -1739,6 +1759,117 @@ struct AdminBundlesPage {
     /// unknown marker instead of a form.
     cadence_known: bool,
     cadence_note: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "admin/registry.html")]
+// The flags mirror the page's three degradation/permission states one to
+// one (the cadence column's `cadence_known` precedent on the bundles tab).
+#[allow(clippy::struct_excessive_bools)]
+struct AdminRegistryPage {
+    shell: Shell,
+    admin: AdminShell,
+    rows: Vec<RegistryRow>,
+    /// Whether the registry table could be read at all; when not,
+    /// `registry_note` says why and the page shows no rows.
+    registry_known: bool,
+    registry_note: Option<String>,
+    /// Whether pause/resume and poll-interval writes are possible (a
+    /// writer connection is on).
+    writable: bool,
+    /// Whether the credential controls are offered (a producer admin API
+    /// is configured).
+    producer_configured: bool,
+    /// Whether the credential column reflects the producer's answers; when
+    /// not, `credential_note` says why and the cells show an unknown
+    /// marker instead of state or forms.
+    credentials_known: bool,
+    credential_note: Option<String>,
+}
+
+/// One row of the Registry tab's table: a registered repository with its
+/// credential state as the producer reports it.
+pub(crate) struct RegistryRow {
+    /// The repository id (a UUID, as text) the forms post back.
+    pub id: String,
+    pub project: String,
+    pub key: String,
+    pub branch: String,
+    /// The canonical remote URL, or the local-checkout marker.
+    pub remote: String,
+    pub status: String,
+    pub paused: bool,
+    pub poll_interval_seconds: i32,
+    pub last_indexed: String,
+    pub last_published: String,
+    pub generation: String,
+    pub credential: CredentialCell,
+}
+
+/// A repository's credential as the cell shows it: set (label, type, last
+/// four characters - never the secret), anonymous, or unknown.
+pub(crate) struct CredentialCell {
+    /// `false` when the producer's answer for this row could not be read.
+    pub known: bool,
+    pub set: bool,
+    /// The set credential: `label · type · …last4`.
+    pub summary: String,
+    pub updated_at: String,
+}
+
+impl CredentialCell {
+    fn unknown() -> Self {
+        Self {
+            known: false,
+            set: false,
+            summary: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    fn anonymous() -> Self {
+        Self {
+            known: true,
+            set: false,
+            summary: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    fn set(info: CredentialInfo) -> Self {
+        Self {
+            known: true,
+            set: true,
+            summary: format!("{} · {} · …{}", info.label, info.kind, info.secret_last4),
+            updated_at: info.updated_at,
+        }
+    }
+}
+
+impl RegistryRow {
+    fn new(repo: RegistryRepository, credential: CredentialCell) -> Self {
+        /// A commit hash for display: its short form, as git prints it.
+        fn short(commit: Option<&str>) -> String {
+            commit.map_or_else(|| "never".to_owned(), |c| c.chars().take(7).collect())
+        }
+        let key = repo.key;
+        Self {
+            id: repo.id,
+            project: repo.project,
+            key,
+            branch: repo.branch,
+            remote: repo.remote.unwrap_or_else(|| "local checkout".to_owned()),
+            paused: repo.status == "paused",
+            status: repo.status,
+            poll_interval_seconds: repo.poll_interval_seconds,
+            last_indexed: short(repo.last_indexed_commit.as_deref()),
+            last_published: short(repo.last_published_commit.as_deref()),
+            generation: repo
+                .last_published_generation
+                .map_or_else(|| "\u{2014}".to_owned(), |g| g.to_string()),
+            credential,
+        }
+    }
 }
 
 /// One row of the admin bundles table: the bundle and its refresh cadence.
@@ -5604,6 +5735,396 @@ async fn admin_bundles(
     Ok(AdminTab::Bundles.redirect_with(&notice))
 }
 
+// ---- Registry -------------------------------------------------------------
+
+/// The Registry tab, read from the catalog. The registry itself comes from
+/// the external producer service's table through the extension's narrow
+/// reader grant; the credential column comes from the producer's admin API
+/// (which never returns a secret). Either side degrades to an explained
+/// "unknown" rather than failing the page: a database without the producer
+/// schema, a missing grant, a busy pool, or a producer that does not answer.
+async fn render_admin_registry(
+    app: &App,
+    session: &Session,
+    outcome: AdminOutcome,
+) -> Result<AdminRegistryPage, AppError> {
+    let (repos, registry_note) = match app.db.registry_repositories().await {
+        Ok(repos) => (repos, None),
+        // The producer service does not share this database (or a partial
+        // install lost the table): an explained empty page, not a fault.
+        Err(error) if is_sql_state(&error, "42P01") => (
+            Vec::new(),
+            Some(
+                "This database holds no repository registry (the producer service's \
+                 ast_graph.repository_registry is not present), so there is nothing to \
+                 configure here."
+                    .to_owned(),
+            ),
+        ),
+        // The narrow grant is missing: the extension grants the listable
+        // columns to pgokf_reader where the producer's table exists, and a
+        // database admin can re-grant after a partial restore.
+        Err(error) if is_sql_state(&error, "42501") => (
+            Vec::new(),
+            Some(
+                "The reader connection cannot see the registry: the extension grants its \
+                 listable columns to pgokf_reader (with USAGE on the ast_graph schema) where \
+                 the producer's table exists; a database admin can re-grant SELECT after a \
+                 partial restore."
+                    .to_owned(),
+            ),
+        ),
+        // A busy pool or a timed-out read must not take the page down with
+        // it: reload answers later.
+        Err(error)
+            if matches!(
+                crate::db::classify(&error),
+                Failure::Busy | Failure::Timeout
+            ) =>
+        {
+            (
+                Vec::new(),
+                Some(
+                    "The registry read did not answer (the catalog is busy); reload to try again."
+                        .to_owned(),
+                ),
+            )
+        }
+        Err(error) => return Err(AppError::from(error)),
+    };
+    let registry_known = registry_note.is_none();
+    let producer_configured = app.producer.is_some();
+    let mut credentials_known = true;
+    let mut credential_note = None;
+    let mut rows = Vec::with_capacity(repos.len());
+    for repo in repos {
+        let cell = match app.producer.as_ref() {
+            // Once one read finds the producer down, the rest would too:
+            // stop asking and mark every remaining cell unknown.
+            _ if !credentials_known => CredentialCell::unknown(),
+            Some(producer) => match producer.credential(&repo.id).await {
+                Ok(Some(info)) => CredentialCell::set(info),
+                Ok(None) => CredentialCell::anonymous(),
+                Err(ProducerError::Unavailable) => {
+                    credentials_known = false;
+                    credential_note = Some(
+                        "The producer admin API did not answer, so the credential column is \
+                         unknown - reload to try again. The registry itself (read from the \
+                         database) is unaffected."
+                            .to_owned(),
+                    );
+                    CredentialCell::unknown()
+                }
+                // A refusal on one repository's read marks that one cell.
+                Err(_) => CredentialCell::unknown(),
+            },
+            None => CredentialCell::unknown(),
+        };
+        rows.push(RegistryRow::new(repo, cell));
+    }
+    if !producer_configured && registry_known {
+        credential_note = Some(
+            "Credential controls need the producer admin API (OKF_PRODUCER_ADMIN_URL and \
+             OKF_PRODUCER_ADMIN_TOKEN together); without them a repository's credential state \
+             reads as unknown here."
+                .to_owned(),
+        );
+    }
+    Ok(AdminRegistryPage {
+        shell: Shell::new(app, session, &AdminTab::Registry.title(), "admin"),
+        admin: AdminTab::Registry.shell(outcome),
+        rows,
+        registry_known,
+        registry_note,
+        writable: app.writer.is_some(),
+        producer_configured,
+        credentials_known: credentials_known && producer_configured,
+        credential_note,
+    })
+}
+
+async fn admin_registry_page(
+    State(app): State<Shared>,
+    session: Session,
+    Query(params): Query<NoticeParams>,
+) -> PageResult {
+    admin(&session)?;
+    let outcome = AdminOutcome {
+        notice: non_empty(&params.notice),
+        error: None,
+    };
+    html(&render_admin_registry(&app, &session, outcome).await?)
+}
+
+/// The Registry tab again, saying what was wrong with the last action: a
+/// 400 for a refusal of what was asked, a 503 when the producer admin API
+/// did not answer - on the page the action came from, never a bare error.
+async fn registry_refused(
+    app: &App,
+    session: &Session,
+    error: String,
+    unavailable: bool,
+) -> PageResult {
+    let outcome = AdminOutcome {
+        notice: None,
+        error: Some(error),
+    };
+    let mut response = html(&render_admin_registry(app, session, outcome).await?)?;
+    *response.status_mut() = if unavailable {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    Ok(response)
+}
+
+/// The page-side answer to a failed registry write: the database's own
+/// verdict (an unknown repository id, an out-of-range value, the missing
+/// producer schema) is a form error; a missing admin tier says so; anything
+/// else is a page fault.
+async fn registry_write_failed(
+    app: &App,
+    session: &Session,
+    error: anyhow::Error,
+    function: &str,
+) -> PageResult {
+    if crate::db::classify(&error) == Failure::InvalidInput {
+        return registry_refused(
+            app,
+            session,
+            crate::db::db_message(&error)
+                .unwrap_or_else(|| "The catalog rejected a request value.".to_owned()),
+            false,
+        )
+        .await;
+    }
+    if is_sql_state(&error, "42501") {
+        return registry_refused(
+            app,
+            session,
+            format!(
+                "Registry changes need the writer connection to hold the pgokf_admin tier: \
+                 {function} is admin-only."
+            ),
+            false,
+        )
+        .await;
+    }
+    Err(AppError::from(error))
+}
+
+/// The page-side answer to a failed producer call: an outage renders the
+/// tab with a 503, a refusal with a 400, each saying what happened.
+async fn registry_producer_failed(
+    app: &App,
+    session: &Session,
+    error: ProducerError,
+) -> PageResult {
+    let unavailable = error.is_unavailable();
+    registry_refused(app, session, error.message(), unavailable).await
+}
+
+/// The credential types the producer's admin API accepts.
+const CREDENTIAL_KINDS: [&str; 3] = ["github_pat", "http_basic", "ssh_key"];
+
+/// The poll-interval bounds `pgokf.registry_set_poll_interval` enforces;
+/// checked here first so a bad value never reaches the database.
+const MIN_POLL_SECONDS: i32 = 5;
+const MAX_POLL_SECONDS: i32 = 86400;
+
+#[derive(Debug, Deserialize)]
+struct AdminRegistryForm {
+    #[serde(default)]
+    action: String,
+    /// The repository id (a UUID) the action is on.
+    #[serde(default)]
+    id: String,
+    /// `set-credential`: the label.
+    #[serde(default)]
+    label: String,
+    /// `set-credential`: the credential type (one of `CREDENTIAL_KINDS`).
+    #[serde(default)]
+    kind: String,
+    /// `set-credential`: the secret. It transits this request once, into
+    /// the producer call; it is never stored, logged, or rendered here.
+    #[serde(default)]
+    secret: String,
+    /// `poll`: the new interval, in seconds.
+    #[serde(default)]
+    poll_interval: String,
+}
+
+/// The producer admin API, or the honest 503 a credential action answers
+/// with when this server was not configured with one.
+fn producer_for(app: &App) -> Result<&crate::producer::ProducerAdmin, AppError> {
+    app.producer.as_ref().ok_or_else(|| {
+        AppError::unavailable(
+            "Credential management needs the producer admin API; this server has neither \
+             OKF_PRODUCER_ADMIN_URL nor OKF_PRODUCER_ADMIN_TOKEN.",
+        )
+    })
+}
+
+/// Pause or resume one repository (`pgokf.registry_set_status` through the
+/// writer connection, whose role must hold the `pgokf_admin` tier).
+async fn registry_pause_resume(
+    app: &App,
+    session: &Session,
+    person: &Principal,
+    id: &str,
+    paused: bool,
+) -> Result<String, PageResult> {
+    let access = require(app, session, Role::Admin, "/admin/registry").map_err(Err)?;
+    let status = if paused { "paused" } else { "active" };
+    match access.writer.registry_set_status(id, status).await {
+        Ok(()) => {
+            eprintln!(
+                "pgokf-web: {} {status} registry repository {id}",
+                person.actor()
+            );
+            Ok(format!(
+                "Repository {id} {}.",
+                if paused { "paused" } else { "resumed" }
+            ))
+        }
+        Err(error) => {
+            Err(registry_write_failed(app, session, error, "pgokf.registry_set_status").await)
+        }
+    }
+}
+
+/// Set one repository's poll interval, validated here first so a bad value
+/// never reaches the database.
+async fn registry_poll_interval(
+    app: &App,
+    session: &Session,
+    person: &Principal,
+    id: &str,
+    raw: &str,
+) -> Result<String, PageResult> {
+    let access = require(app, session, Role::Admin, "/admin/registry").map_err(Err)?;
+    let Some(seconds) = raw
+        .trim()
+        .parse::<i32>()
+        .ok()
+        .filter(|n| (MIN_POLL_SECONDS..=MAX_POLL_SECONDS).contains(n))
+    else {
+        return Err(registry_refused(
+            app,
+            session,
+            format!(
+                "The poll interval must be a number of seconds between {MIN_POLL_SECONDS} and \
+                 {MAX_POLL_SECONDS}."
+            ),
+            false,
+        )
+        .await);
+    };
+    match access.writer.registry_set_poll_interval(id, seconds).await {
+        Ok(()) => {
+            eprintln!(
+                "pgokf-web: {} set the poll interval of registry repository {id} to {seconds}s",
+                person.actor()
+            );
+            Ok(format!(
+                "Repository {id} now polls every {seconds} seconds."
+            ))
+        }
+        Err(error) => {
+            Err(
+                registry_write_failed(app, session, error, "pgokf.registry_set_poll_interval")
+                    .await,
+            )
+        }
+    }
+}
+
+/// Create or replace a repository's fetch credential through the producer's
+/// admin API. The secret transits this request once; the audit line names
+/// the label and type, never the secret.
+async fn registry_set_credential(
+    app: &App,
+    session: &Session,
+    person: &Principal,
+    id: &str,
+    form: &AdminRegistryForm,
+) -> Result<String, PageResult> {
+    let producer = producer_for(app).map_err(Err)?;
+    let label = form.label.trim();
+    let kind = form.kind.trim();
+    let refused = |why: &str| registry_refused(app, session, why.to_owned(), false);
+    if label.is_empty() || label.chars().count() > 255 {
+        return Err(refused("Give the credential a label (at most 255 characters).").await);
+    }
+    if !CREDENTIAL_KINDS.contains(&kind) {
+        return Err(refused("Choose a credential type from the list.").await);
+    }
+    let secret = form.secret.trim();
+    if secret.is_empty() {
+        return Err(refused("Give the credential's secret.").await);
+    }
+    match producer.set_credential(id, label, kind, secret).await {
+        Ok(()) => {
+            eprintln!(
+                "pgokf-web: {} set a {kind} credential ({label}) on registry repository {id}",
+                person.actor()
+            );
+            Ok(format!(
+                "Credential {label} ({kind}) is set for repository {id}; only its last four \
+                 characters are ever shown."
+            ))
+        }
+        Err(error) => Err(registry_producer_failed(app, session, error).await),
+    }
+}
+
+/// Remove a repository's credential through the producer's admin API,
+/// returning it to anonymous fetches.
+async fn registry_remove_credential(
+    app: &App,
+    session: &Session,
+    person: &Principal,
+    id: &str,
+) -> Result<String, PageResult> {
+    let producer = producer_for(app).map_err(Err)?;
+    match producer.remove_credential(id).await {
+        Ok(()) => {
+            eprintln!(
+                "pgokf-web: {} removed the credential of registry repository {id}",
+                person.actor()
+            );
+            Ok(format!(
+                "Repository {id} has no credential now; it fetches anonymously."
+            ))
+        }
+        Err(error) => Err(registry_producer_failed(app, session, error).await),
+    }
+}
+
+async fn admin_registry(
+    State(app): State<Shared>,
+    session: Session,
+    Form(form): Form<AdminRegistryForm>,
+) -> PageResult {
+    let person = admin(&session)?;
+    let id = form.id.trim().to_owned();
+    if id.is_empty() {
+        return Err(AppError::bad_request("Choose a repository."));
+    }
+    let notice = match form.action.as_str() {
+        "pause" => registry_pause_resume(&app, &session, &person, &id, true).await,
+        "resume" => registry_pause_resume(&app, &session, &person, &id, false).await,
+        "poll" => registry_poll_interval(&app, &session, &person, &id, &form.poll_interval).await,
+        "set-credential" => registry_set_credential(&app, &session, &person, &id, &form).await,
+        "remove-credential" => registry_remove_credential(&app, &session, &person, &id).await,
+        other => return Err(AppError::bad_request(format!("Unknown action {other:?}."))),
+    };
+    match notice {
+        Ok(notice) => Ok(AdminTab::Registry.redirect_with(&notice)),
+        Err(result) => result,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // JSON API
 // ---------------------------------------------------------------------------
@@ -9287,6 +9808,7 @@ mod tests {
             builds: tokio::sync::Semaphore::new(MAX_PLUGIN_BUILDS),
             stores: crate::store::Stores::default(),
             embedder: None,
+            producer: None,
             catalog_name: "test".to_owned(),
             tenant: None,
             version: "0".to_owned(),
@@ -9418,5 +9940,281 @@ mod tests {
         assert!(rendered.contains("&mdash;"));
         assert!(!rendered.contains("name=\"cadence\""));
         assert!(rendered.contains("<th>Refresh cadence</th>"));
+    }
+
+    // ---- Registry ---------------------------------------------------------
+
+    fn registry_repo(id: &str, project: &str, status: &str) -> RegistryRepository {
+        RegistryRepository {
+            id: id.to_owned(),
+            key: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
+            project: project.to_owned(),
+            branch: "main".to_owned(),
+            remote: Some(format!("https://github.com/example/{project}.git")),
+            status: status.to_owned(),
+            poll_interval_seconds: 300,
+            last_indexed_commit: Some("a94a8fe5ccb19ba61c4c0873d391e987982fbbd3".to_owned()),
+            last_published_commit: Some("a94a8fe5ccb19ba61c4c0873d391e987982fbbd3".to_owned()),
+            last_published_generation: Some(41),
+        }
+    }
+
+    fn admin_registry_page(rows: Vec<RegistryRow>) -> AdminRegistryPage {
+        AdminRegistryPage {
+            shell: Shell::bare("Administration · Registry"),
+            admin: AdminTab::Registry.shell(AdminOutcome::default()),
+            rows,
+            registry_known: true,
+            registry_note: None,
+            writable: true,
+            producer_configured: true,
+            credentials_known: true,
+            credential_note: None,
+        }
+    }
+
+    #[test]
+    fn admin_registry_page_renders_the_table_and_the_credential_controls() {
+        // Arrange: one repository per credential shape - set, anonymous,
+        // and one whose read was refused - plus a paused one.
+        let page = admin_registry_page(vec![
+            RegistryRow::new(
+                registry_repo("8d2e1c4a-0000-4000-8000-0000000000aa", "atlas", "active"),
+                CredentialCell::set(CredentialInfo {
+                    label: "deploy key".to_owned(),
+                    kind: "github_pat".to_owned(),
+                    secret_last4: "a1b2".to_owned(),
+                    updated_at: "2026-09-13T10:00:00Z".to_owned(),
+                }),
+            ),
+            RegistryRow::new(
+                registry_repo("8d2e1c4a-0000-4000-8000-0000000000bb", "beacon", "paused"),
+                CredentialCell::anonymous(),
+            ),
+            RegistryRow::new(
+                registry_repo("8d2e1c4a-0000-4000-8000-0000000000cc", "cirrus", "active"),
+                CredentialCell::unknown(),
+            ),
+        ]);
+
+        // Act
+        let rendered = page.render().expect("the admin registry page renders");
+
+        // Assert: the standing-rule table, one row per repository, with the
+        // registry columns wired.
+        assert!(rendered.contains("<table class=\"table admin\" id=\"pgokf-admin-registry\">"));
+        for column in [
+            "<th>Project</th>",
+            "<th>Key</th>",
+            "<th>Branch</th>",
+            "<th>Remote</th>",
+            "<th>Status</th>",
+            "<th>Credential</th>",
+            "<th>Last indexed</th>",
+            "<th>Last published</th>",
+        ] {
+            assert!(rendered.contains(column), "the table heads {column}");
+        }
+        assert!(rendered.contains("<strong>atlas</strong>"));
+        assert!(rendered.contains("https://github.com/example/atlas.git"));
+        assert!(rendered.contains("<span class=\"pill ok\">active</span>"));
+        assert!(rendered.contains("<span class=\"pill warn\">paused</span>"));
+        // The credential cell shows label, type, and last four - never a
+        // secret - and "anonymous" where none is set.
+        assert!(rendered.contains("deploy key · github_pat · …a1b2"));
+        assert!(rendered.contains("<span class=\"muted\">anonymous</span>"));
+        assert!(rendered.contains("<span class=\"muted\">&mdash;</span>"));
+        // Per-row controls: pause/resume, the poll-interval form, the
+        // credential set form with a password input that is never
+        // prefilled, and the confirmed remove (only where one is set).
+        assert!(rendered.contains("name=\"action\" value=\"pause\""));
+        assert!(rendered.contains("name=\"action\" value=\"resume\""));
+        assert!(rendered.contains("name=\"action\" value=\"poll\""));
+        assert!(rendered.contains("name=\"poll_interval\" value=\"300\""));
+        assert!(rendered.contains("name=\"action\" value=\"set-credential\""));
+        assert!(rendered.contains("type=\"password\" name=\"secret\""));
+        assert!(!rendered.contains("name=\"secret\" value="));
+        assert!(rendered.contains("name=\"action\" value=\"remove-credential\""));
+        assert!(rendered.contains("data-confirm=\"Remove the credential for atlas?"));
+        // The remove control shows only for the row whose credential is set.
+        assert!(!rendered.contains("data-confirm=\"Remove the credential for beacon?"));
+    }
+
+    #[test]
+    fn admin_registry_page_degrades_to_an_explained_unknown() {
+        // Arrange: the registry itself unreadable (no producer schema in
+        // this database), and a second page whose credential column the
+        // producer did not answer for, on a read-only server.
+        let mut no_registry = admin_registry_page(Vec::new());
+        no_registry.registry_known = false;
+        no_registry.registry_note = Some(
+            "This database holds no repository registry (the producer service's \
+             ast_graph.repository_registry is not present), so there is nothing to configure \
+             here."
+                .to_owned(),
+        );
+        let mut producer_down = admin_registry_page(vec![RegistryRow::new(
+            registry_repo("8d2e1c4a-0000-4000-8000-0000000000aa", "atlas", "active"),
+            CredentialCell::unknown(),
+        )]);
+        producer_down.writable = false;
+        producer_down.credentials_known = false;
+        producer_down.credential_note = Some(
+            "The producer admin API did not answer, so the credential column is unknown - \
+             reload to try again."
+                .to_owned(),
+        );
+
+        // Act
+        let no_registry = no_registry.render().expect("the empty page renders");
+        let producer_down = producer_down.render().expect("the degraded page renders");
+
+        // Assert: each note explains, the unknown cells carry the marker,
+        // and no write control is offered on a read-only server.
+        assert!(no_registry.contains("This database holds no repository registry"));
+        assert!(!no_registry.contains("pgokf-admin-registry\""));
+        assert!(producer_down.contains("The producer admin API did not answer"));
+        assert!(producer_down.contains("OKF_PG_WRITER_URL"));
+        assert!(producer_down.contains("<span class=\"muted\">&mdash;</span>"));
+        assert!(!producer_down.contains("name=\"action\" value=\"pause\""));
+        assert!(!producer_down.contains("name=\"poll_interval\" value="));
+        // The credential set form stays: the producer is configured, and a
+        // set retries the read's failure honestly on submit.
+        assert!(producer_down.contains("name=\"action\" value=\"set-credential\""));
+    }
+
+    /// A signed-in admin, for the handler tests.
+    fn admin_session() -> Session {
+        Session {
+            principal: Some(Principal {
+                subject: "operator".to_owned(),
+                display: "Operator".to_owned(),
+                role: Role::Admin,
+            }),
+            mode: Mode::Users,
+            peer: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn registry_credential_actions_need_a_configured_producer() {
+        // Arrange
+        let app = test_app(None);
+        let form = AdminRegistryForm {
+            action: "set-credential".to_owned(),
+            id: "8d2e1c4a-0000-4000-8000-0000000000aa".to_owned(),
+            label: "deploy key".to_owned(),
+            kind: "github_pat".to_owned(),
+            secret: "canary-secret-7f3a9c-never-rendered".to_owned(),
+            poll_interval: String::new(),
+        };
+
+        // Act
+        let result = admin_registry(State(Arc::new(app)), admin_session(), Form(form)).await;
+
+        // Assert: an honest unavailable, not a silent success.
+        let error = result.expect_err("no producer admin API is configured");
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(error.message().contains("OKF_PRODUCER_ADMIN_URL"));
+        assert!(
+            !error
+                .message()
+                .contains("canary-secret-7f3a9c-never-rendered")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_credential_secret_is_never_rendered_through_the_stack() {
+        // Arrange: a mock producer answering the set (201) and then the
+        // follow-up read with the metadata document (200), and an App whose
+        // producer client points at it.
+        let canary = "canary-secret-7f3a9c-never-rendered";
+        let repository_id = "8d2e1c4a-0000-4000-8000-0000000000aa";
+        let (base, served) = crate::producer::tests::mock_producer(&[
+            ("201 Created", ""),
+            (
+                "200 OK",
+                "{\"label\":\"deploy key\",\"type\":\"github_pat\",\"secret_last4\":\"a1b2\",\"updated_at\":\"2026-09-13T10:00:00Z\"}",
+            ),
+        ])
+        .await;
+        let mut app = test_app(None);
+        app.producer = Some(crate::producer::ProducerAdmin::new(&base, "admin-token").unwrap());
+        let app = Arc::new(app);
+
+        // Act: set the credential through the real POST handler, with the
+        // canary as the secret.
+        let form = AdminRegistryForm {
+            action: "set-credential".to_owned(),
+            id: repository_id.to_owned(),
+            label: "deploy key".to_owned(),
+            kind: "github_pat".to_owned(),
+            secret: canary.to_owned(),
+            poll_interval: String::new(),
+        };
+        let response = admin_registry(State(app.clone()), admin_session(), Form(form))
+            .await
+            .unwrap_or_else(|error| panic!("the set succeeds: {}", error.message()));
+
+        // Assert: the answer is the redirect with a notice - and the canary
+        // is in neither the body nor the Location it points at.
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        let body = axum::body::to_bytes(response.into_body(), 65_536)
+            .await
+            .expect("the redirect body reads");
+        let body = String::from_utf8_lossy(&body);
+        assert!(!location.contains(canary), "the Location carries no secret");
+        assert!(
+            !body.contains(canary),
+            "the response body carries no secret"
+        );
+        assert!(location.starts_with("/admin/registry?notice="));
+
+        // The follow-up page - the GET response rendered the way the
+        // redirected browser would - shows the label, type, and last four
+        // the producer reports, and the canary nowhere. (The mock is
+        // awaited only after this second request: it serves one answer per
+        // request.)
+        let info = app
+            .producer
+            .as_ref()
+            .expect("a producer client")
+            .credential(repository_id)
+            .await
+            .expect("the read succeeds")
+            .expect("a credential is set");
+
+        // The secret did cross to the producer, once, in the PUT body -
+        // proving the flow exercised the real call.
+        let captured = served.await.expect("the mock captured the requests");
+        assert_eq!(
+            captured.len(),
+            2,
+            "the set call and the follow-up read, no more"
+        );
+        assert!(
+            captured[0].body.contains(canary),
+            "the PUT carried the secret"
+        );
+
+        let page = admin_registry_page(vec![RegistryRow::new(
+            registry_repo(repository_id, "atlas", "active"),
+            CredentialCell::set(info),
+        )]);
+        let rendered = page.render().expect("the page renders");
+        assert!(rendered.contains("deploy key · github_pat · …a1b2"));
+        assert!(
+            !rendered.contains(canary),
+            "no GET response body ever renders the secret"
+        );
+        // The full secret's last four characters appear only behind the
+        // ellipsis marker, never as a prefix or in full.
+        assert!(!rendered.contains(&canary[..canary.len() - 4]));
     }
 }
