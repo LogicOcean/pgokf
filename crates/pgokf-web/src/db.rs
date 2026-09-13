@@ -68,6 +68,16 @@ pub(crate) fn content_bundle_name(path: &str, name: Option<&str>) -> String {
         .to_owned()
 }
 
+/// The schedule read behind [`Db::refresh_schedules`], kept as a constant
+/// so the scratch-database test executes exactly what ships. It goes
+/// through the extension's reader surface, never `cron.job` directly:
+/// `pg_cron` grants `SELECT` on `cron.job` to `PUBLIC` but restricts row
+/// visibility to `username = current_user`, and `pgokf.schedule_refresh` -
+/// `SECURITY DEFINER` - registers every job under the extension owner's
+/// identity, so this app's login would read zero rows whatever its grants.
+const REFRESH_SCHEDULES_SQL: &str =
+    "SELECT r.bundle_id, r.schedule FROM pgokf.list_scheduled_refreshes() r";
+
 /// One row of `pgokf.list_bundles()`.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct BundleInfo {
@@ -137,6 +147,17 @@ pub(crate) struct AdminBundle {
     pub retired: bool,
     pub file_count: i32,
     pub last_synced_at: Option<String>,
+    /// The producer-attested freshness state (`pgokf.effective_freshness`,
+    /// bundle scope); `None` when no freshness row exists.
+    pub freshness: Option<String>,
+}
+
+/// A bundle's scheduled content refresh as `pg_cron` holds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RefreshSchedule {
+    pub bundle_id: i64,
+    /// The cron expression or interval phrase the job runs on.
+    pub schedule: String,
 }
 
 /// A concept a person produced or verified, for their profile.
@@ -1149,12 +1170,16 @@ impl Db {
         .await
     }
 
-    /// Every bundle for the admin page, retired ones included.
+    /// Every bundle for the admin page, retired ones included, each with its
+    /// producer-attested freshness state (the bundle-scope row of the
+    /// reader-granted `pgokf.effective_freshness` projection).
     pub(crate) async fn admin_bundles(&self) -> Result<Vec<AdminBundle>> {
         let sql = format!(
             "SELECT b.id, b.path, {}, b.source_type, b.enabled, (b.retired_at IS NOT NULL),
-                    b.file_count, {}
+                    b.file_count, {}, f.state
              FROM pgokf.bundles b
+             LEFT JOIN pgokf.effective_freshness f
+                    ON f.bundle_id = b.id AND f.scope_kind = 'bundle'
              ORDER BY (b.retired_at IS NOT NULL), b.id",
             display_name("b"),
             iso("b.last_synced_at")
@@ -1169,6 +1194,7 @@ impl Db {
                 retired: col(r, 5)?,
                 file_count: col(r, 6)?,
                 last_synced_at: col(r, 7)?,
+                freshness: col(r, 8)?,
             })
         })
         .await
@@ -1231,6 +1257,55 @@ impl Db {
     pub(crate) async fn unregister_bundle(&self, id: i64) -> Result<()> {
         self.bundle_op("SELECT * FROM pgokf.unregister_bundle($1)", &[&id])
             .await
+    }
+
+    /// Register (or re-schedule, idempotently) a recurring content refresh
+    /// for a bundle (`pgokf.schedule_refresh`; the `pg_cron` adapter).
+    /// Returns the deterministic job name. The function is admin-tier
+    /// (`pgokf_admin`) and raises `22023` when `pg_cron` is absent or the
+    /// schedule is malformed.
+    pub(crate) async fn schedule_refresh(&self, id: i64, schedule: &str) -> Result<String> {
+        let row = self
+            .query_opt("SELECT pgokf.schedule_refresh($1, $2)", &[&id, &schedule])
+            .await?
+            .ok_or_else(|| anyhow!("schedule_refresh returned no row"))?;
+        col(&row, 0)
+    }
+
+    /// Remove a bundle's scheduled refresh (`pgokf.unschedule_refresh`):
+    /// `true` when a job was removed, `false` for a clean no-op (no
+    /// `pg_cron`, or no such job).
+    pub(crate) async fn unschedule_refresh(&self, id: i64) -> Result<bool> {
+        let row = self
+            .query_opt("SELECT pgokf.unschedule_refresh($1)", &[&id])
+            .await?
+            .ok_or_else(|| anyhow!("unschedule_refresh returned no row"))?;
+        col(&row, 0)
+    }
+
+    /// Every scheduled content refresh, keyed by bundle.
+    ///
+    /// The read goes through `pgokf.list_scheduled_refreshes`, the
+    /// extension's reader-tier surface (`SECURITY DEFINER`,
+    /// tenant-confined, granted to `pgokf_reader`), never `cron.job`
+    /// directly: `pg_cron` grants `SELECT` on `cron.job` to `PUBLIC` but
+    /// restricts row visibility to `username = current_user`, and
+    /// `pgokf.schedule_refresh` - `SECURITY DEFINER` - registers every job
+    /// under the extension owner's identity. The app's login would read
+    /// zero rows no matter the grants; the extension's read runs as that
+    /// owner and returns exactly the session tenant's
+    /// `pgokf_refresh_<id>` jobs. Callers treat `22023` (no `pg_cron` in
+    /// this database), `42P01`/`42883` (a skewed or partial install), and
+    /// `42501` (the `EXECUTE` grant is missing) as "schedules not
+    /// visible", not as page failures.
+    pub(crate) async fn refresh_schedules(&self) -> Result<Vec<RefreshSchedule>> {
+        self.query_map(REFRESH_SCHEDULES_SQL, &[], |r| {
+            Ok(RefreshSchedule {
+                bundle_id: col(r, 0)?,
+                schedule: col(r, 1)?,
+            })
+        })
+        .await
     }
 
     /// Register a directory bundle at a path the database server can read.
@@ -2620,6 +2695,263 @@ mod tests {
         assert_eq!(classify(&busy), Failure::Busy);
         assert_eq!(classify(&other), Failure::Other);
         assert_eq!(db_message(&other), None);
+    }
+
+    #[test]
+    fn the_schedule_read_goes_through_the_extensions_reader_surface() {
+        // Assert: the read asks the extension's tenant-confined SECURITY
+        // DEFINER surface - never cron.job, which pg_cron row-restricts to
+        // username = current_user (grants do not change that), so this
+        // app's login would read zero rows from it.
+        assert!(REFRESH_SCHEDULES_SQL.contains("pgokf.list_scheduled_refreshes()"));
+        assert!(!REFRESH_SCHEDULES_SQL.contains("cron.job"));
+    }
+
+    #[tokio::test]
+    async fn schedule_writes_and_the_schedule_read_issue_statements() {
+        // Arrange / Act / Assert: against a dead pool every call errors,
+        // proving each issues exactly the statement it wraps.
+        let db = dead_db();
+        assert!(db.schedule_refresh(7, "0 * * * *").await.is_err());
+        assert!(db.unschedule_refresh(7).await.is_err());
+        assert!(db.refresh_schedules().await.is_err());
+    }
+
+    /// The scratch database the schedule-visibility regression creates and
+    /// drops, and its two scratch roles (cluster-wide, so dropped too): the
+    /// stand-in extension owner that jobs are registered under, and the
+    /// stand-in app writer login that must not read them off `cron.job`
+    /// directly.
+    const SCHEDULE_SCRATCH_DB: &str = "pgokf_web_schedule_sql_test";
+    const SCHEDULE_SCRATCH_OWNER: &str = "pgokf_web_sched_owner";
+    const SCHEDULE_SCRATCH_WRITER: &str = "pgokf_web_sched_writer";
+
+    /// The cron-side fixture DDL, run by the connecting admin (standing in
+    /// for `pg_cron`'s own owner, so the row policy genuinely applies to
+    /// the reader function's owner instead of being bypassed for the
+    /// table's owner). Mirrors upstream `pg_cron.sql` verbatim: `USAGE` on
+    /// the schema and `SELECT` on `cron.job` granted to `PUBLIC`, row
+    /// security enabled, and a policy restricting rows to `username =
+    /// current_user`. `INSERT` goes to the two stand-in roles for the
+    /// fixture rows (the real path inserts through `cron.schedule`'s
+    /// internals; what matters is that each row records the identity that
+    /// made it, exactly as `pg_cron` records it).
+    fn schedule_scratch_cron_ddl() -> String {
+        format!(
+            "CREATE SCHEMA cron;
+             CREATE TABLE cron.job (
+                 jobid bigint PRIMARY KEY,
+                 schedule text NOT NULL,
+                 command text NOT NULL,
+                 jobname text NOT NULL UNIQUE,
+                 username text NOT NULL DEFAULT current_user
+             );
+             GRANT USAGE ON SCHEMA cron TO PUBLIC;
+             GRANT SELECT ON cron.job TO PUBLIC;
+             GRANT INSERT ON cron.job TO {SCHEDULE_SCRATCH_OWNER}, {SCHEDULE_SCRATCH_WRITER};
+             ALTER TABLE cron.job ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY cron_job_policy ON cron.job
+                 USING (username = current_user);"
+        )
+    }
+
+    /// The pgokf-side fixture DDL, run under the extension-owner stand-in:
+    /// the bundles table, a fixed `tenant_required`, and a plain-SQL
+    /// stand-in for `pgokf.list_scheduled_refreshes` mirroring the
+    /// extension function's body
+    /// (`crates/extension/src/catalog/schedule.rs`, the
+    /// `scheduled_refreshes_reader` block) minus its pg_cron-presence
+    /// guard, which the in-database extension tests cover instead. The
+    /// owner stand-in's jobs record that identity - the SECURITY DEFINER
+    /// arrangement the shipped extension has - and the writer stand-in
+    /// owns one job under the convention's name that must not leak through.
+    fn schedule_scratch_pgokf_ddl() -> String {
+        format!(
+            "SET ROLE {SCHEDULE_SCRATCH_OWNER};
+             CREATE SCHEMA pgokf;
+             CREATE TABLE pgokf.bundles (
+                 id bigint PRIMARY KEY,
+                 tenant_id text NOT NULL DEFAULT 'default'
+             );
+             INSERT INTO pgokf.bundles VALUES
+                 (3, 'acme'), (5, 'default'), (7, 'default');
+             CREATE FUNCTION pgokf.tenant_required() RETURNS boolean
+                 LANGUAGE sql STABLE AS $$ SELECT false $$;
+             CREATE FUNCTION pgokf.list_scheduled_refreshes()
+             RETURNS TABLE (bundle_id bigint, schedule text)
+             LANGUAGE plpgsql STABLE
+             SECURITY DEFINER SET search_path = pg_catalog, pg_temp
+             AS $list_scheduled_refreshes$
+             DECLARE
+                 v_tenant text := NULLIF(pg_catalog.current_setting('pgokf.tenant', true), '');
+             BEGIN
+                 IF v_tenant IS NULL AND pgokf.tenant_required() THEN
+                     RETURN;
+                 END IF;
+                 RETURN QUERY
+                 SELECT b.id, j.schedule
+                 FROM cron.job AS j
+                 JOIN pgokf.bundles AS b
+                   ON b.id = pg_catalog.substring(j.jobname, 'pgokf_refresh_([0-9]{{1,18}})')::bigint
+                 WHERE j.jobname ~ '^pgokf_refresh_[0-9]{{1,18}}$'
+                   AND (v_tenant IS NULL OR b.tenant_id = v_tenant)
+                 ORDER BY b.id;
+             END
+             $list_scheduled_refreshes$;
+             REVOKE ALL ON FUNCTION pgokf.list_scheduled_refreshes() FROM PUBLIC;
+             GRANT USAGE ON SCHEMA pgokf TO {SCHEDULE_SCRATCH_WRITER};
+             GRANT EXECUTE ON FUNCTION pgokf.list_scheduled_refreshes()
+                 TO {SCHEDULE_SCRATCH_WRITER};
+             INSERT INTO cron.job (jobid, schedule, command, jobname) VALUES
+                 (1, '0 * * * *', 'SELECT pgokf.refresh_bundle(7)', 'pgokf_refresh_7'),
+                 (2, '45 seconds', 'SELECT pgokf.refresh_bundle(3)', 'pgokf_refresh_3'),
+                 (3, '0 0 * * *', 'SELECT 1', 'pgokfXrefreshX9'),
+                 (4, '0 1 * * *', 'SELECT 1', 'pgokf_refresh_1_extra');
+             RESET ROLE;
+             SET ROLE {SCHEDULE_SCRATCH_WRITER};
+             INSERT INTO cron.job (jobid, schedule, command, jobname) VALUES
+                 (5, '*/5 * * * *', 'SELECT 1', 'pgokf_refresh_5');
+             RESET ROLE;"
+        )
+    }
+
+    /// The schedule-visibility assertions, run as the writer stand-in:
+    /// its direct `cron.job` read sees only its own job (the reproduced
+    /// defect), while the shipped read through the SECURITY DEFINER
+    /// surface returns the owner's jobs, tenant-confined.
+    async fn verify_schedule_visibility(
+        client: &tokio_postgres::Client,
+    ) -> Result<(), anyhow::Error> {
+        client
+            .batch_execute(&format!("SET ROLE {SCHEDULE_SCRATCH_WRITER}"))
+            .await?;
+        let direct: Vec<String> = client
+            .query("SELECT jobname FROM cron.job ORDER BY jobname", &[])
+            .await
+            .context("the writer's direct cron.job read")?
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        assert_eq!(
+            direct,
+            vec!["pgokf_refresh_5".to_owned()],
+            "pg_cron's policy shows the writer only its own job, even though \
+             SELECT is granted to PUBLIC"
+        );
+
+        let rows = client
+            .query(REFRESH_SCHEDULES_SQL, &[])
+            .await
+            .context("the schedule-read SQL executes")?;
+        let schedules: Vec<RefreshSchedule> = rows
+            .iter()
+            .map(|row| RefreshSchedule {
+                bundle_id: row.get(0),
+                schedule: row.get(1),
+            })
+            .collect();
+        assert_eq!(
+            schedules,
+            vec![
+                RefreshSchedule {
+                    bundle_id: 3,
+                    schedule: "45 seconds".to_owned(),
+                },
+                RefreshSchedule {
+                    bundle_id: 7,
+                    schedule: "0 * * * *".to_owned(),
+                },
+            ],
+            "the owner-registered jobs, keyed by bundle, in bundle order; lookalike \
+             names and the writer's own job stay out"
+        );
+
+        // Tenant confinement: a scoped session sees only its tenant's jobs.
+        client.batch_execute("SET pgokf.tenant = 'acme'").await?;
+        let scoped: Vec<i64> = client
+            .query(REFRESH_SCHEDULES_SQL, &[])
+            .await
+            .context("the scoped schedule-read SQL executes")?
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        assert_eq!(scoped, vec![3], "a scoped session sees only acme's job");
+        client.batch_execute("RESET pgokf.tenant").await?;
+        client.batch_execute("RESET ROLE").await?;
+        Ok(())
+    }
+
+    /// The schedule read, executed for real under a faithful reproduction
+    /// of `pg_cron`'s row-visibility model (real `pg_cron` is not
+    /// installable in this test setup): the writer's direct `cron.job`
+    /// read sees none of the owner's jobs, while the shipped read through
+    /// the SECURITY DEFINER surface returns them, tenant-confined.
+    #[tokio::test]
+    async fn refresh_schedules_read_survives_pg_crons_row_visibility_policy() {
+        let Some((admin, mut config)) = scratch_admin().await else {
+            return;
+        };
+        let who: String = admin
+            .query_one("SELECT current_user", &[])
+            .await
+            .expect("current_user reads")
+            .get(0);
+        for statement in [
+            format!("DROP DATABASE IF EXISTS {SCHEDULE_SCRATCH_DB}"),
+            format!("DROP ROLE IF EXISTS {SCHEDULE_SCRATCH_WRITER}"),
+            format!("DROP ROLE IF EXISTS {SCHEDULE_SCRATCH_OWNER}"),
+            format!("CREATE ROLE {SCHEDULE_SCRATCH_OWNER} NOLOGIN"),
+            format!("CREATE ROLE {SCHEDULE_SCRATCH_WRITER} NOLOGIN"),
+            // Membership lets the connecting user SET ROLE into each
+            // stand-in even when it is not a superuser.
+            format!("GRANT {SCHEDULE_SCRATCH_OWNER} TO \"{who}\""),
+            format!("GRANT {SCHEDULE_SCRATCH_WRITER} TO \"{who}\""),
+            // The owner stand-in owns the database, so its SET ROLE self
+            // may create the pgokf schema in it; the connecting user keeps
+            // CREATE for the cron schema when it is not a superuser.
+            format!("CREATE DATABASE {SCHEDULE_SCRATCH_DB} OWNER {SCHEDULE_SCRATCH_OWNER}"),
+            format!("GRANT CREATE ON DATABASE {SCHEDULE_SCRATCH_DB} TO \"{who}\""),
+        ] {
+            admin
+                .batch_execute(&statement)
+                .await
+                .unwrap_or_else(|error| panic!("{statement}: {error}"));
+        }
+        let result = async {
+            config.dbname(SCHEDULE_SCRATCH_DB);
+            let (client, connection) = config
+                .connect(NoTls)
+                .await
+                .context("connect to the scratch database")?;
+            tokio::spawn(async move {
+                if let Err(error) = connection.await {
+                    eprintln!("scratch connection error: {error}");
+                }
+            });
+            client
+                .batch_execute(&schedule_scratch_cron_ddl())
+                .await
+                .context("the cron.job fixture")?;
+            client
+                .batch_execute(&schedule_scratch_pgokf_ddl())
+                .await
+                .context("the pgokf fixture")?;
+
+            verify_schedule_visibility(&client).await?;
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        for statement in [
+            format!("DROP DATABASE IF EXISTS {SCHEDULE_SCRATCH_DB}"),
+            format!("DROP ROLE IF EXISTS {SCHEDULE_SCRATCH_WRITER}"),
+            format!("DROP ROLE IF EXISTS {SCHEDULE_SCRATCH_OWNER}"),
+        ] {
+            admin
+                .batch_execute(&statement)
+                .await
+                .unwrap_or_else(|error| panic!("{statement}: {error}"));
+        }
+        result.expect("schedule-visibility fixtures");
     }
 
     #[test]

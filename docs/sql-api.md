@@ -70,6 +70,7 @@ exercised against a live PostgreSQL 18 cluster.
 | `rebuild_search_index()` | `boolean` | VOLATILE | DEFINER | `pgokf_admin` |
 | `schedule_refresh(bundle_id, schedule)` | `text` | VOLATILE | DEFINER | `pgokf_admin` |
 | `unschedule_refresh(bundle_id)` | `boolean` | VOLATILE | DEFINER | `pgokf_admin` |
+| `list_scheduled_refreshes()` | `TABLE (bundle_id bigint, schedule text)` | STABLE | DEFINER | `pgokf_reader` |
 | `export_parquet(bundle_id, dest_dir)` | `export_result` | VOLATILE | DEFINER | `pgokf_admin` |
 | `get_concept_source(bundle_id, concept_id)` | `bytea` | STABLE | DEFINER | `pgokf_reader` |
 | `export_sources(bundle_id, dest_dir)` | `export_result` | VOLATILE | DEFINER | `pgokf_admin` |
@@ -686,8 +687,9 @@ Full scheduling requires `pg_cron` in `shared_preload_libraries`.
 Schedule (or re-schedule, idempotently) a `SELECT pgokf.refresh_bundle(<bundle_id>)`
 under the deterministic `pg_cron` job name `pgokf_refresh_<bundle_id>`, returning
 the job name. `VOLATILE`, **SECURITY DEFINER**, tenant-confined, **requires
-`pgokf_admin`**. The `schedule` is a 5-field cron expression or a `pg_cron`
-interval phrase (`'30 minutes'`); it and the job name bind as parameters, and the
+`pgokf_admin`**. The `schedule` is a 5-field cron expression or `pg_cron`'s
+`'<N> seconds'` interval syntax (`N` from 1 to 59 - the only interval phrase
+its parser accepts); it and the job name bind as parameters, and the
 scheduled command's bundle id is a trusted integer literal.
 
 - **Requires `pg_cron`**: raises `22023` naming the missing dependency when it is
@@ -705,6 +707,20 @@ Remove the `pgokf_refresh_<bundle_id>` job when present (returns `true`); a clea
 no-op returning `false` (with a `NOTICE`) when `pg_cron` is not installed or no such
 job exists. `VOLATILE`, **SECURITY DEFINER**, tenant-confined, **requires
 `pgokf_admin`**; raises `22023` for an unknown or cross-tenant `bundle_id`.
+
+### `pgokf.list_scheduled_refreshes() → TABLE (bundle_id bigint, schedule text)`
+
+The read counterpart of the two mutators: every scheduled refresh the
+extension manages, ordered by bundle id. `STABLE`, **SECURITY DEFINER**,
+tenant-confined, **requires `pgokf_reader`**. `SECURITY DEFINER` is what makes
+the read work: `pg_cron` grants `SELECT` on `cron.job` to `PUBLIC` but
+restricts row visibility to `username = current_user`, and
+`schedule_refresh` registers every job under the extension owner's identity -
+so an ordinary login reading `cron.job` itself sees none of them, while this
+function runs as that owner. Tenant confinement matches the RLS-backed
+readers: an unscoped session sees nothing when `require_tenant` is on, and a
+scoped session sees only its tenant's jobs. Raises `22023` naming the missing
+dependency when `pg_cron` is not installed, exactly like `schedule_refresh`.
 
 ---
 

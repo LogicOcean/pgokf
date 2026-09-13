@@ -27,6 +27,11 @@
 --     pgokf.replace_relationships writer API, the
 --     pgokf.concept_relationship_neighbors typed traversal, and the
 --     relationship_coverage_missing participation in pgokf.mark_fresh.
+--   * the scheduled-refresh read surface pgokf.list_scheduled_refreshes
+--     (section 14): the tenant-confined, SECURITY DEFINER listing of the
+--     pg_cron jobs pgokf.schedule_refresh registers under the extension
+--     owner's identity, invisible to an ordinary login reading cron.job
+--     directly.
 --
 -- Every statement is additive in the sense that matters: no row is dropped,
 -- truncated, deleted, or rewritten. The DROPs are of objects that carry no
@@ -1600,6 +1605,65 @@ REVOKE ALL ON FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[],
 GRANT EXECUTE ON FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[]) TO pgokf_reader;
 COMMENT ON FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[]) IS
     'Internal helper behind concept_search when search_backend = bm25 resolves to the ParadeDB pg_search provider (the pg_textsearch provider runs inline with invoker rights and does not use it); not part of the stable API. Runs the ParadeDB pg_search BM25 hit query with the owner''s privileges (row-level security wraps the catalog tables in a shape pg_search cannot plan for non-owners) while applying the same pgokf.tenant scoping the policies enforce, over active bundles only, with concept_search''s filters (p_concept_types is the type-membership form concept_search_hybrid uses to constrain the lexical candidate list before truncation), keyset cursor, and limit. Reader-level; returns exactly the rows concept_search would.';
+
+-- ===========================================================================
+-- 14. The scheduled-refresh read surface (the scheduled_refreshes_reader
+-- block of src/catalog/schedule.rs, verbatim). pg_cron grants SELECT on
+-- cron.job to PUBLIC but restricts rows to username = current_user, and
+-- pgokf.schedule_refresh - SECURITY DEFINER since 0.1.9 - registers every
+-- job under the extension owner's identity, so an ordinary login reading
+-- cron.job directly sees none of them. pgokf.list_scheduled_refreshes runs
+-- as that owner (SECURITY DEFINER), confines itself to the session tenant
+-- like the RLS-backed readers, and raises the same 22023 schedule_refresh
+-- raises when pg_cron is not installed. Reader-tier.
+-- ===========================================================================
+CREATE FUNCTION pgokf.list_scheduled_refreshes()
+RETURNS TABLE (bundle_id bigint, schedule text)
+LANGUAGE plpgsql STABLE
+SECURITY DEFINER SET search_path = pg_catalog, pg_temp
+AS $list_scheduled_refreshes$
+DECLARE
+    v_tenant text := NULLIF(pg_catalog.current_setting('pgokf.tenant', true), '');
+BEGIN
+    -- The read-side tenant rule, applied explicitly because this body runs
+    -- as the extension owner and so bypasses row-level security: an
+    -- unscoped session sees nothing when the catalog requires a tenant,
+    -- exactly like the RLS-backed readers.
+    IF v_tenant IS NULL AND pgokf.tenant_required() THEN
+        RETURN;
+    END IF;
+    -- Reading the jobs needs pg_cron exactly like scheduling them: refuse
+    -- with the same 22023 naming the missing dependency rather than
+    -- failing on the absent cron.job relation.
+    IF NOT (SELECT pg_catalog.count(*) > 0
+            FROM pg_catalog.pg_extension
+            WHERE extname = 'pg_cron') THEN
+        RAISE EXCEPTION
+            'listing scheduled refreshes requires the pg_cron extension, which is not installed; add pg_cron to shared_preload_libraries and run CREATE EXTENSION pg_cron'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    -- SECURITY DEFINER is the point of this surface: pg_cron grants SELECT
+    -- on cron.job to PUBLIC but its row-security policy restricts rows to
+    -- username = current_user, and pgokf.schedule_refresh - itself
+    -- SECURITY DEFINER - registers every job under the extension owner's
+    -- identity. An ordinary login therefore reads zero rows whatever its
+    -- grants; running as that owner, this read sees exactly the jobs the
+    -- extension manages. (A job another role created directly under the
+    -- convention's name is pg_cron-invisible to it, by the same policy.)
+    RETURN QUERY
+    SELECT b.id, j.schedule
+    FROM cron.job AS j
+    JOIN pgokf.bundles AS b
+      ON b.id = pg_catalog.substring(j.jobname, 'pgokf_refresh_([0-9]{1,18})')::bigint
+    WHERE j.jobname ~ '^pgokf_refresh_[0-9]{1,18}$'
+      AND (v_tenant IS NULL OR b.tenant_id = v_tenant)
+    ORDER BY b.id;
+END
+$list_scheduled_refreshes$;
+REVOKE ALL ON FUNCTION pgokf.list_scheduled_refreshes() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pgokf.list_scheduled_refreshes() TO pgokf_reader;
+COMMENT ON FUNCTION pgokf.list_scheduled_refreshes() IS
+    'Every scheduled bundle refresh the extension manages, as (bundle_id, schedule) rows ordered by bundle id: the read counterpart of pgokf.schedule_refresh / unschedule_refresh. SECURITY DEFINER because pg_cron restricts cron.job rows to username = current_user (grants do not change that) while schedule_refresh registers jobs under the extension owner''s identity - this read runs as that owner, so the app''s login sees the schedules it would otherwise read as zero rows. Tenant-confined like the RLS-backed readers (an unscoped session sees nothing when require_tenant is on; a scoped session sees only its tenant''s jobs), joining each pgokf_refresh_<id> job back to its bundle. Requires pg_cron: raises 22023 naming the missing dependency when it is not installed, exactly like schedule_refresh. Reader-tier (granted to pgokf_reader, inherited by writer and admin).';
 
 -- Last, so the new relations are registered for pg_dump (the rule for every
 -- upgrade script since 0.1.14). Later phases insert their sections BEFORE

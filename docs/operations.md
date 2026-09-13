@@ -327,6 +327,38 @@ clear `22023` naming the missing dependency (never a silent success) and
 `SELECT pgokf.refresh_bundle(<id>)` with the id bound as a trusted integer
 literal and the schedule bound as a parameter.
 
+The web UI's Admin page (bundles tab) drives the same two functions per
+bundle: a cadence select (off, presets, or a validated custom schedule)
+plus a column showing the current schedule, read through
+`pgokf.list_scheduled_refreshes()` - the extension's reader-tier surface
+(`SECURITY DEFINER`, tenant-confined, granted to `pgokf_reader`) - never
+from `cron.job` directly. It has to be: `pg_cron` grants `SELECT` on
+`cron.job` to `PUBLIC`, but its row-security policy restricts visibility
+to `username = current_user`, and `pgokf.schedule_refresh` - itself
+`SECURITY DEFINER` - registers every job under the extension owner's
+identity. The app's login would therefore read zero rows whatever its
+grants, while the extension's own read runs as that owner and returns
+exactly the session tenant's `pgokf_refresh_<id>` jobs. No `cron`-schema
+grants are needed; when the read is impossible (`pg_cron` absent, the
+`EXECUTE` grant missing, an extension version predating the surface) the
+column reads as unknown and says why - never as Off. The writes need the
+writer login to hold `pgokf_admin`, since `schedule_refresh` is
+admin-tier. Schedules run in `pg_cron`'s timezone (the `cron.timezone`
+setting, GMT by default), which may differ from the database server's
+`timezone` setting.
+
+Custom accepts a 5-field cron expression or a `<count> <unit>` interval:
+`1`-`59` seconds (passed through as `pg_cron`'s own interval syntax - the
+only interval its parser accepts), `1`-`59` minutes, or a number of hours
+that divides the day; minute and hour intervals are translated to the
+equivalent cron expression before they reach the scheduler (`30 minutes`
+becomes `*/30 * * * *`). The deliberate subset ends there: `pg_cron`'s
+`@daily`-style nicknames and its last-day-of-month `$` are not accepted
+through Custom, so a schedule set externally with one of them cannot
+round-trip through the form (the column still displays it verbatim).
+Scheduling a refresh re-reads content on a cadence; it does not attest
+freshness - that stays the producer's call.
+
 #### External scheduling
 
 Prefer an external scheduler when `pg_cron` is not available, or when you want one

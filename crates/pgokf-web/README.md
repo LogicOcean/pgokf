@@ -239,7 +239,21 @@ Roles are a ladder; each holds the ones below it:
 | `uploader` | **Upload** Markdown documents into a content bundle (new or existing); a document without `generated`/`author` is stamped with the person's OKF actor, `human:<name>` |
 | `editor` | **Edit** a document (frontmatter and body, with a validating preview) or delete it; any earlier verification is set aside, `generated` names the editor, and the document returns to the review queue |
 | `approver` | **Review**: the queue of unverified documents; approving records a `verified` event under the person's name (the document becomes *human-reviewed*, a draft becomes active), sending back makes it a draft and keeps the note under `reviews` |
-| `admin` | everything above, plus **Admin**: people (in `users` mode: add, change role, reset password, remove, sign out everywhere), the identity provider (in `users` mode: set up, change, switch off, remove), the MCP tokens (mint, revoke), and bundles (register a directory bundle, refresh, enable or disable, retire or bring back, unregister) |
+| `admin` | everything above, plus **Admin**: people (in `users` mode: add, change role, reset password, remove, sign out everywhere), the identity provider (in `users` mode: set up, change, switch off, remove), the MCP tokens (mint, revoke), and bundles (register a directory bundle, refresh, enable or disable, retire or bring back, unregister, set the refresh cadence) |
+
+The bundles tab also shows each bundle's producer-attested **freshness**
+state and its **refresh cadence** - the recurring content refresh
+`pgokf.schedule_refresh` registers through `pg_cron` (docs/operations.md).
+Scheduling a refresh re-reads the bundle's source on a cadence; it does
+not attest freshness, which stays the producer's to make. Two database-side
+requirements apply beyond the usual `pgokf_writer` writer role: setting a
+cadence calls the admin-tier `pgokf.schedule_refresh` / `unschedule_refresh`
+(so the writer login must hold `pgokf_admin`), and reading the current
+cadences queries `pg_cron`'s job table by the `pgokf_refresh_<id>` job-name
+convention (so the writer login needs `USAGE` on schema `cron` and `SELECT`
+on `cron.job`, which `pg_cron` grants to nobody by default). Without the
+grant the cadence column reads as unknown and says why; without `pg_cron`
+the page says scheduling is unavailable.
 
 The **MCP tokens** an admin mints there are the bearer tokens `pgokf-mcp`
 accepts over HTTP (see [its README](../pgokf-mcp/README.md#serving-it-over-http)).

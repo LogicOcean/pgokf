@@ -57,6 +57,25 @@
     });
   });
 
+  // ---- refresh cadence forms (admin bundles page) ---------------------------
+  // The custom cron field matters only when the select is on "Custom…":
+  // hide and disable it otherwise (a disabled field is not submitted; the
+  // server validates again either way, and without this script the field
+  // simply stays visible and enabled).
+  document.querySelectorAll('select[data-cadence]').forEach(function (select) {
+    var wrap = select.form && select.form.querySelector('[data-cadence-custom]');
+    if (!wrap) return;
+    var input = wrap.querySelector('input');
+    var sync = function () {
+      var custom = select.value === 'custom';
+      wrap.hidden = !custom;
+      input.disabled = !custom;
+      input.required = custom;
+    };
+    select.addEventListener('change', sync);
+    sync();
+  });
+
   // ---- agent plugin builder ------------------------------------------------
   var builder = document.getElementById('pgokf-plugin-form');
   if (builder) {

@@ -1,9 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Optional `pg_cron` scheduled bundle re-sync: `pgokf.schedule_refresh` /
-//! `pgokf.unschedule_refresh`.
+//! `pgokf.unschedule_refresh`, read back through `pgokf.list_scheduled_refreshes`.
 //!
 //! These register (and remove) a recurring `pgokf.refresh_bundle` job on the
-//! external `pg_cron` scheduler. Exactly like the `pg_search` BM25 adapter in
+//! external `pg_cron` scheduler. The mutators are `SECURITY DEFINER`, so the
+//! jobs belong to the extension owner; because `pg_cron` restricts `cron.job`
+//! row visibility to `username = current_user` (grants do not change that),
+//! an ordinary login reading `cron.job` directly sees none of them.
+//! `pgokf.list_scheduled_refreshes` - plain SQL, `SECURITY DEFINER`,
+//! tenant-confined, granted to `pgokf_reader` - is the read surface that runs
+//! as that owner and returns exactly the session tenant's jobs.
+//! Exactly like the `pg_search` BM25 adapter in
 //! [`crate::catalog::search_backend`] and the `pgvector` semantic surface in
 //! [`crate::catalog::embedding`], the coupling to `pg_cron` is **runtime-only**:
 //! the extension is compiled and installed with no build-time reference to it, so
@@ -37,9 +44,9 @@ use crate::errors::CatalogError;
 use crate::security;
 
 /// Longest accepted cron schedule string. `pg_cron` accepts a 5-field cron
-/// expression or a short interval phrase (`'30 seconds'`, `'1 hour'`); both are
-/// comfortably under this bound, which is defense in depth on top of the
-/// parameter binding.
+/// expression or its `'<N> seconds'` interval syntax (`N` from 1 to 59 - the
+/// only interval phrase its parser accepts); both are comfortably under this
+/// bound, which is defense in depth on top of the parameter binding.
 const MAX_SCHEDULE_LEN: usize = 128;
 
 fn spi_error(context: &'static str) -> impl Fn(pgrx::spi::Error) -> CatalogError {
@@ -95,7 +102,7 @@ fn missing_pg_cron_error() -> CatalogError {
 fn validate_schedule(schedule: &str) -> Result<(), CatalogError> {
     if schedule.trim().is_empty() {
         return Err(CatalogError::invalid_parameter(
-            "schedule must not be empty (e.g. '0 * * * *' or '30 minutes')",
+            "schedule must not be empty (e.g. '0 * * * *' or '30 seconds')",
             Path::new(""),
         ));
     }
@@ -205,8 +212,9 @@ mod pgokf {
     /// registers (or re-schedules, idempotently) a cron job named
     /// `pgokf_refresh_<bundle_id>` that pins the bundle's tenant and runs
     /// `SELECT pgokf.refresh_bundle(<id>)`
-    /// on the given cron `schedule` (a 5-field cron expression or a `pg_cron`
-    /// interval phrase such as `'30 minutes'`), returning the job name. **Requires
+    /// on the given cron `schedule` (a 5-field cron expression or `pg_cron`'s
+    /// `'<N> seconds'` interval syntax, `N` from 1 to 59), returning the job
+    /// name. **Requires
     /// pg_cron**: raises SQLSTATE `22023` naming the missing dependency when it is
     /// not installed (no silent success). Raises `22023` for an unknown or
     /// cross-tenant `bundle_id`, or an empty/oversized `schedule`.
@@ -244,6 +252,60 @@ COMMENT ON FUNCTION pgokf.unschedule_refresh(bigint) IS
         name = "schedule_refresh_hardening",
         requires = [schedule_refresh, unschedule_refresh]
     );
+
+    extension_sql!(
+        r"
+CREATE FUNCTION pgokf.list_scheduled_refreshes()
+RETURNS TABLE (bundle_id bigint, schedule text)
+LANGUAGE plpgsql STABLE
+SECURITY DEFINER SET search_path = pg_catalog, pg_temp
+AS $list_scheduled_refreshes$
+DECLARE
+    v_tenant text := NULLIF(pg_catalog.current_setting('pgokf.tenant', true), '');
+BEGIN
+    -- The read-side tenant rule, applied explicitly because this body runs
+    -- as the extension owner and so bypasses row-level security: an
+    -- unscoped session sees nothing when the catalog requires a tenant,
+    -- exactly like the RLS-backed readers.
+    IF v_tenant IS NULL AND pgokf.tenant_required() THEN
+        RETURN;
+    END IF;
+    -- Reading the jobs needs pg_cron exactly like scheduling them: refuse
+    -- with the same 22023 naming the missing dependency rather than
+    -- failing on the absent cron.job relation.
+    IF NOT (SELECT pg_catalog.count(*) > 0
+            FROM pg_catalog.pg_extension
+            WHERE extname = 'pg_cron') THEN
+        RAISE EXCEPTION
+            'listing scheduled refreshes requires the pg_cron extension, which is not installed; add pg_cron to shared_preload_libraries and run CREATE EXTENSION pg_cron'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    -- SECURITY DEFINER is the point of this surface: pg_cron grants SELECT
+    -- on cron.job to PUBLIC but its row-security policy restricts rows to
+    -- username = current_user, and pgokf.schedule_refresh - itself
+    -- SECURITY DEFINER - registers every job under the extension owner's
+    -- identity. An ordinary login therefore reads zero rows whatever its
+    -- grants; running as that owner, this read sees exactly the jobs the
+    -- extension manages. (A job another role created directly under the
+    -- convention's name is pg_cron-invisible to it, by the same policy.)
+    RETURN QUERY
+    SELECT b.id, j.schedule
+    FROM cron.job AS j
+    JOIN pgokf.bundles AS b
+      ON b.id = pg_catalog.substring(j.jobname, 'pgokf_refresh_([0-9]{1,18})')::bigint
+    WHERE j.jobname ~ '^pgokf_refresh_[0-9]{1,18}$'
+      AND (v_tenant IS NULL OR b.tenant_id = v_tenant)
+    ORDER BY b.id;
+END
+$list_scheduled_refreshes$;
+REVOKE ALL ON FUNCTION pgokf.list_scheduled_refreshes() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pgokf.list_scheduled_refreshes() TO pgokf_reader;
+COMMENT ON FUNCTION pgokf.list_scheduled_refreshes() IS
+    'Every scheduled bundle refresh the extension manages, as (bundle_id, schedule) rows ordered by bundle id: the read counterpart of pgokf.schedule_refresh / unschedule_refresh. SECURITY DEFINER because pg_cron restricts cron.job rows to username = current_user (grants do not change that) while schedule_refresh registers jobs under the extension owner''s identity - this read runs as that owner, so the app''s login sees the schedules it would otherwise read as zero rows. Tenant-confined like the RLS-backed readers (an unscoped session sees nothing when require_tenant is on; a scoped session sees only its tenant''s jobs), joining each pgokf_refresh_<id> job back to its bundle. Requires pg_cron: raises 22023 naming the missing dependency when it is not installed, exactly like schedule_refresh. Reader-tier (granted to pgokf_reader, inherited by writer and admin).';
+",
+        name = "scheduled_refreshes_reader",
+        requires = ["catalog_tables"]
+    );
 }
 
 #[cfg(test)]
@@ -270,7 +332,7 @@ mod tests {
     fn validate_schedule_accepts_a_cron_expression_and_an_interval_phrase() {
         // Arrange / Act / Assert
         assert!(validate_schedule("0 * * * *").is_ok());
-        assert!(validate_schedule("30 minutes").is_ok());
+        assert!(validate_schedule("30 seconds").is_ok());
     }
 
     #[test]

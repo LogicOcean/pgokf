@@ -1733,7 +1733,30 @@ struct AdminTokensPage {
 struct AdminBundlesPage {
     shell: Shell,
     admin: AdminShell,
-    bundles: Vec<AdminBundle>,
+    bundles: Vec<AdminBundleRow>,
+    /// Whether the cadence column reflects `pg_cron`'s job table (it could
+    /// be read); when not, `cadence_note` says why and the cells show an
+    /// unknown marker instead of a form.
+    cadence_known: bool,
+    cadence_note: Option<String>,
+}
+
+/// One row of the admin bundles table: the bundle and its refresh cadence.
+pub(crate) struct AdminBundleRow {
+    pub bundle: AdminBundle,
+    pub cadence: CadenceView,
+}
+
+/// A bundle's refresh cadence as the admin table shows and edits it.
+pub(crate) struct CadenceView {
+    /// The current cadence, humanized for a preset ("every 15 minutes"),
+    /// the raw schedule text for anything else, "Off" when no job exists.
+    pub label: String,
+    /// The select option matching the current state
+    /// (`off`/`15min`/`hourly`/`6h`/`daily`/`custom`).
+    pub preset: String,
+    /// The current raw schedule, prefilling the custom field.
+    pub custom: String,
 }
 
 #[derive(Template)]
@@ -5003,20 +5026,385 @@ async fn admin_tokens_page(
 
 // ---- Bundles and settings -------------------------------------------------
 
+/// The refresh cadence select's scheduled choices: `(value, label, cron)`.
+/// `off` and `custom` are handled by the form logic and carry no schedule.
+const CADENCE_PRESETS: &[(&str, &str, &str)] = &[
+    ("15min", "every 15 minutes", "*/15 * * * *"),
+    ("hourly", "hourly", "0 * * * *"),
+    ("6h", "every 6 hours", "0 */6 * * *"),
+    ("daily", "daily", "0 3 * * *"),
+];
+
+/// The longest accepted schedule text, mirroring the extension's bound
+/// (`crates/extension/src/catalog/schedule.rs`), so a value that would be
+/// refused there never reaches the database.
+const MAX_SCHEDULE_LEN: usize = 128;
+
+/// How one scheduled refresh reads on the admin page. A preset's own cron
+/// expression humanizes to the preset's label; anything else (set by hand
+/// or by another client) shows its raw schedule text, and no job is "Off".
+fn cadence_view(schedule: Option<&str>) -> CadenceView {
+    let Some(schedule) = schedule else {
+        return CadenceView {
+            label: "Off".to_owned(),
+            preset: "off".to_owned(),
+            custom: String::new(),
+        };
+    };
+    let trimmed = schedule.trim();
+    match CADENCE_PRESETS.iter().find(|(_, _, cron)| cron == &trimmed) {
+        Some((value, label, _)) => CadenceView {
+            label: (*label).to_owned(),
+            preset: (*value).to_owned(),
+            custom: trimmed.to_owned(),
+        },
+        None => CadenceView {
+            label: trimmed.to_owned(),
+            preset: "custom".to_owned(),
+            custom: trimmed.to_owned(),
+        },
+    }
+}
+
+/// The schedule a cadence form submission asks for: `None` for `off` (the
+/// job goes away), the preset's cron expression, or the validated custom
+/// text. An unknown select value or a malformed custom schedule is refused
+/// here, before any statement runs.
+fn resolve_cadence(cadence: &str, custom: &str) -> Result<Option<String>, AppError> {
+    match cadence.trim() {
+        "" | "off" => Ok(None),
+        "custom" => validate_cron_schedule(custom).map(Some),
+        value => CADENCE_PRESETS
+            .iter()
+            .find(|(v, _, _)| *v == value)
+            .map(|(_, _, cron)| Some((*cron).to_owned()))
+            .ok_or_else(|| AppError::bad_request("Choose a refresh cadence from the list.")),
+    }
+}
+
+/// Validate the custom schedule of the cadence form and normalize it to
+/// what is sent to `pg_cron`: non-empty, within the extension's length
+/// bound, NUL-free, and either a 5-field cron expression or an explicitly
+/// supported interval phrase. Supported phrases translate BEFORE they
+/// reach the scheduler: `1-59 seconds` passes through as `pg_cron`'s own
+/// interval syntax (the only interval its parser accepts), while minute
+/// and hour phrases become the equivalent 5-field cron expression
+/// (`30 minutes` -> `*/30 * * * *`, `1 hour` -> `0 * * * *`). Anything
+/// `pg_cron` could not schedule as entered (`60 seconds`, `90 minutes`) is
+/// refused here; this is the pre-flight screen, and a schedule that passes
+/// here but not `pg_cron`'s parser comes back from the database as a form
+/// error the same way.
+fn validate_cron_schedule(raw: &str) -> Result<String, AppError> {
+    let schedule = raw.trim();
+    let bad = |why: String| {
+        AppError::bad_request(format!(
+            "The custom schedule is not one pg_cron accepts: {why}. Give five cron fields \
+             (e.g. */30 * * * *) or an interval: 1-59 seconds, 1-59 minutes, or a number of \
+             hours that divides the day."
+        ))
+    };
+    if schedule.is_empty() {
+        return Err(bad("it is empty".to_owned()));
+    }
+    if schedule.len() > MAX_SCHEDULE_LEN {
+        return Err(bad(format!("it is longer than {MAX_SCHEDULE_LEN} bytes")));
+    }
+    if schedule.contains('\0') {
+        return Err(bad("it contains a NUL byte".to_owned()));
+    }
+    match interval_phrase(schedule) {
+        Some(Ok(translated)) => Ok(translated),
+        Some(Err(why)) => Err(bad(why)),
+        None if valid_cron_expression(schedule) => Ok(schedule.to_owned()),
+        None => Err(bad(
+            "give five fields (minute hour day-of-month month day-of-week)".to_owned(),
+        )),
+    }
+}
+
+/// A `<count> <unit>` interval phrase, when the input has that shape.
+/// `Some(Ok(_))` is the schedule to hand to `pg_cron`: a 1-59 second
+/// phrase passes through as `pg_cron`'s own interval syntax; a minute
+/// phrase (1-59) becomes `*/n * * * *`; an hour phrase that divides the
+/// day (1, 2, 3, 4, 6, 8, 12, 24) becomes `0 */n * * *` (with `1 hour` ->
+/// `0 * * * *` and `24 hours` -> `0 0 * * *`). `Some(Err(_))` refuses a
+/// phrase-shaped input the scheduler could not honor as entered - above
+/// all `60 seconds`, which `pg_cron`'s interval parser (1-59 seconds only)
+/// rejects. `None` means the input is not phrase-shaped at all and the
+/// cron parser decides.
+fn interval_phrase(schedule: &str) -> Option<Result<String, String>> {
+    let words: Vec<&str> = schedule.split_whitespace().collect();
+    let [count, unit] = words.as_slice() else {
+        return None;
+    };
+    let unit = unit.to_ascii_lowercase();
+    let kind = match unit.as_str() {
+        "second" | "seconds" => "second",
+        "minute" | "minutes" => "minute",
+        "hour" | "hours" => "hour",
+        _ => return None,
+    };
+    let Ok(n) = count.parse::<u64>() else {
+        return Some(Err(format!("{count:?} is not a count")));
+    };
+    if n == 0 {
+        return Some(Err("the count must be positive".to_owned()));
+    }
+    Some(match kind {
+        "second" if n <= 59 => Ok(format!("{n} seconds")),
+        "second" => Err(format!(
+            "pg_cron's interval syntax accepts only 1-59 seconds, not {n}"
+        )),
+        "minute" if n <= 59 => Ok(format!("*/{n} * * * *")),
+        "minute" => Err(format!(
+            "{n} minutes does not map onto a minute field; give five cron fields"
+        )),
+        "hour" if n == 1 => Ok("0 * * * *".to_owned()),
+        "hour" if n == 24 => Ok("0 0 * * *".to_owned()),
+        "hour" if 24 % n == 0 => Ok(format!("0 */{n} * * *")),
+        "hour" => Err(format!(
+            "{n} hours does not divide the day (1, 2, 3, 4, 6, 8, 12, or 24 do); \
+             give five cron fields"
+        )),
+        _ => unreachable!("unit is one of second, minute, hour"),
+    })
+}
+
+/// A 5-field cron expression; every field is a list of atoms or ranges with
+/// optional steps, the atoms numeric within their field's range or a month
+/// or weekday name.
+fn valid_cron_expression(schedule: &str) -> bool {
+    const MONTHS: [&str; 12] = [
+        "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+    ];
+    const WEEKDAYS: [&str; 7] = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+    let fields: Vec<&str> = schedule.split_whitespace().collect();
+    let [minute, hour, day, month, weekday] = fields.as_slice() else {
+        return false;
+    };
+    valid_cron_field(minute, 0, 59, &[])
+        && valid_cron_field(hour, 0, 23, &[])
+        && valid_cron_field(day, 1, 31, &[])
+        && valid_cron_field(month, 1, 12, &MONTHS)
+        && valid_cron_field(weekday, 0, 7, &WEEKDAYS)
+}
+
+/// One cron field: a comma list of `atom`, `atom-atom`, or either with a
+/// `/step` (a positive integer); `*` stands for the whole range.
+fn valid_cron_field(field: &str, min: u32, max: u32, names: &[&str]) -> bool {
+    let atom = |token: &str| {
+        if let Ok(value) = token.parse::<u32>() {
+            return (min..=max).contains(&value);
+        }
+        names.iter().any(|name| token.eq_ignore_ascii_case(name))
+    };
+    field.split(',').all(|item| {
+        let (base, step) = item
+            .split_once('/')
+            .map_or((item, None), |(b, s)| (b, Some(s)));
+        let step_ok = step.is_none_or(|s| s.parse::<u32>().is_ok_and(|n| n > 0));
+        let base_ok = match base.split_once('-') {
+            Some((from, to)) => atom(from) && atom(to),
+            None => base == "*" || atom(base),
+        };
+        step_ok && base_ok
+    })
+}
+
+/// Whether a catalog failure carries this `SQLSTATE` (used to tell "no
+/// `pg_cron` here", "the grant or the extension predates the read surface",
+/// and a skewed install apart from a real fault on the schedule read).
+fn is_sql_state(error: &anyhow::Error, code: &str) -> bool {
+    crate::db::sql_state(error)
+        .as_ref()
+        .is_some_and(|state| state.code() == code)
+}
+
+/// The Bundles tab, read from the catalog. The cadence column reads
+/// schedules through the extension's `pgokf.list_scheduled_refreshes`
+/// surface (over the writer connection), never `cron.job` directly:
+/// `pg_cron` grants `SELECT` on `cron.job` to `PUBLIC` but restricts rows
+/// to `username = current_user`, and `pgokf.schedule_refresh` registers
+/// every job under the extension owner's identity, so this app's login
+/// would read zero rows whatever its grants. When the read is impossible -
+/// no writer connection, no `pg_cron` in this database, a skewed extension
+/// version, or the grant missing - the column degrades to an unknown
+/// marker with a note rather than failing the page.
+async fn render_admin_bundles(
+    app: &App,
+    session: &Session,
+    outcome: AdminOutcome,
+) -> Result<AdminBundlesPage, AppError> {
+    let bundles = app.db.admin_bundles().await?;
+    let (schedules, cadence_note) = match &app.writer {
+        Some(writer) => match writer.refresh_schedules().await {
+            Ok(schedules) => (Some(schedules), None),
+            // The extension's read surface raises its curated 22023 when
+            // pg_cron is absent (exactly like schedule_refresh); 42P01
+            // covers the skewed case where the cron.job relation itself is
+            // gone. Either way: not a page failure, an explained unknown.
+            Err(error) if is_sql_state(&error, "22023") || is_sql_state(&error, "42P01") => (
+                None,
+                Some(
+                    "pg_cron is not installed in this database, so no refresh cadence can be \
+                     read or set here (scheduled refresh needs pg_cron; see docs/operations.md)."
+                        .to_owned(),
+                ),
+            ),
+            Err(error) if is_sql_state(&error, "42501") => (
+                None,
+                Some(
+                    "The writer connection cannot execute pgokf.list_scheduled_refreshes, so \
+                     the cadence column is unknown: the extension grants it to pgokf_reader \
+                     (which the app's roles inherit), and a database admin can re-grant \
+                     EXECUTE after a partial restore. Setting a cadence additionally needs \
+                     the writer role to hold the pgokf_admin tier (pgokf.schedule_refresh is \
+                     admin-only)."
+                        .to_owned(),
+                ),
+            ),
+            // The read surface was added after the extension this database
+            // has installed: an explained unknown, never an Off.
+            Err(error) if is_sql_state(&error, "42883") => (
+                None,
+                Some(
+                    "The installed pgokf extension predates the schedule read surface \
+                     (pgokf.list_scheduled_refreshes), so the cadence column is unknown; \
+                     upgrade the extension to read and set refresh cadences here."
+                        .to_owned(),
+                ),
+            ),
+            // A busy pool or a timed-out read must not take the page down
+            // with it: the column reads as unknown until a reload answers.
+            Err(error)
+                if matches!(
+                    crate::db::classify(&error),
+                    Failure::Busy | Failure::Timeout
+                ) =>
+            {
+                (
+                    None,
+                    Some(
+                        "The schedule read did not answer (the catalog is busy); the cadence \
+                         column is unknown for now - reload to try again."
+                            .to_owned(),
+                    ),
+                )
+            }
+            Err(error) => return Err(AppError::from(error)),
+        },
+        None => (
+            None,
+            Some(
+                "Refresh cadences need the writer connection (OKF_PG_WRITER_URL); this server \
+                 is read-only."
+                    .to_owned(),
+            ),
+        ),
+    };
+    let by_bundle: HashMap<i64, String> = schedules
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| (s.bundle_id, s.schedule))
+        .collect();
+    let known = cadence_note.is_none();
+    Ok(AdminBundlesPage {
+        shell: Shell::new(app, session, &AdminTab::Bundles.title(), "admin"),
+        admin: AdminTab::Bundles.shell(outcome),
+        bundles: bundles
+            .into_iter()
+            .map(|bundle| {
+                let cadence = cadence_view(by_bundle.get(&bundle.id).map(String::as_str));
+                AdminBundleRow { bundle, cadence }
+            })
+            .collect(),
+        cadence_known: known,
+        cadence_note,
+    })
+}
+
 async fn admin_bundles_page(
     State(app): State<Shared>,
     session: Session,
     Query(params): Query<NoticeParams>,
 ) -> PageResult {
     admin(&session)?;
-    html(&AdminBundlesPage {
-        shell: Shell::new(&app, &session, &AdminTab::Bundles.title(), "admin"),
-        admin: AdminTab::Bundles.shell(AdminOutcome {
-            notice: non_empty(&params.notice),
-            error: None,
+    let outcome = AdminOutcome {
+        notice: non_empty(&params.notice),
+        error: None,
+    };
+    html(&render_admin_bundles(&app, &session, outcome).await?)
+}
+
+/// The Bundles tab again, saying what was wrong with the last action, as a
+/// 400 - on the page the action came from.
+async fn bundles_refused(app: &App, session: &Session, error: String) -> PageResult {
+    let outcome = AdminOutcome {
+        notice: None,
+        error: Some(error),
+    };
+    as_refusal(&render_admin_bundles(app, session, outcome).await?)
+}
+
+/// What a cadence change produced: a notice, or a refusal the page shows
+/// the operator (a form error, not a page fault).
+enum CadenceOutcome {
+    Done(String),
+    Refused(String),
+}
+
+/// Schedule (or, for `off`, remove) a bundle's recurring content refresh.
+/// This schedules a content refresh only - the job re-reads the bundle's
+/// source on a cadence; the freshness state stays the producer's to attest,
+/// and nothing here certifies it.
+async fn change_cadence(
+    writer: &Db,
+    bundle_id: i64,
+    cadence: &str,
+    custom: &str,
+) -> Result<CadenceOutcome, AppError> {
+    let schedule = match resolve_cadence(cadence, custom) {
+        Ok(schedule) => schedule,
+        Err(error) => return Ok(CadenceOutcome::Refused(error.message().to_owned())),
+    };
+    let result = match &schedule {
+        Some(schedule) => writer
+            .schedule_refresh(bundle_id, schedule)
+            .await
+            .map(|job| {
+                format!(
+                    "Bundle {bundle_id} now refreshes {} (job {job}). A refresh re-reads the \
+                     source; it does not attest freshness.",
+                    cadence_view(Some(schedule)).label
+                )
+            }),
+        None => writer.unschedule_refresh(bundle_id).await.map(|removed| {
+            if removed {
+                format!(
+                    "Bundle {bundle_id} no longer refreshes on a schedule; the job was removed."
+                )
+            } else {
+                format!("Bundle {bundle_id} had no scheduled refresh.")
+            }
         }),
-        bundles: app.db.admin_bundles().await?,
-    })
+    };
+    match result {
+        Ok(notice) => Ok(CadenceOutcome::Done(notice)),
+        // The database's own verdict on the schedule (pg_cron's parser) or
+        // the bundle id is a form error, not a page fault.
+        Err(error) if crate::db::classify(&error) == Failure::InvalidInput => {
+            Ok(CadenceOutcome::Refused(
+                crate::db::db_message(&error)
+                    .unwrap_or_else(|| "The catalog rejected the cadence.".to_owned()),
+            ))
+        }
+        Err(error) if is_sql_state(&error, "42501") => Ok(CadenceOutcome::Refused(
+            "Scheduling a refresh needs the writer connection to hold the pgokf_admin tier: \
+             pgokf.schedule_refresh is admin-only."
+                .to_owned(),
+        )),
+        Err(error) => Err(AppError::from(error)),
+    }
 }
 
 async fn admin_settings_page(State(app): State<Shared>, session: Session) -> PageResult {
@@ -5123,6 +5511,12 @@ struct AdminBundleForm {
     path: String,
     #[serde(default)]
     name: String,
+    /// The refresh cadence select (`off`, a preset, or `custom`).
+    #[serde(default)]
+    cadence: String,
+    /// The custom cron schedule, used when `cadence` is `custom`.
+    #[serde(default)]
+    custom_cron: String,
 }
 
 async fn admin_bundles(
@@ -5168,6 +5562,14 @@ async fn admin_bundles(
         "unregister" => {
             access.writer.unregister_bundle(id()?).await?;
             format!("Bundle {} unregistered.", form.id.trim())
+        }
+        "cadence" => {
+            match change_cadence(access.writer, id()?, &form.cadence, &form.custom_cron).await? {
+                CadenceOutcome::Done(notice) => notice,
+                CadenceOutcome::Refused(why) => {
+                    return bundles_refused(&app, &session, why).await;
+                }
+            }
         }
         "register" => {
             let path = form.path.trim();
@@ -8674,5 +9076,347 @@ mod tests {
         assert_eq!(path, "a%20b/c%26d");
         assert!(link.contains("<a href=\"https://x.example/?a=1&amp;b=2\""));
         assert!(link.contains("&lt;now&gt;"));
+    }
+
+    #[test]
+    fn resolve_cadence_maps_the_presets_to_fixed_cron_expressions() {
+        // Arrange & Act & Assert
+        assert_eq!(resolve_cadence("off", "").ok().flatten(), None);
+        assert_eq!(resolve_cadence("", "").ok().flatten(), None);
+        assert_eq!(
+            resolve_cadence("15min", "").ok().flatten().as_deref(),
+            Some("*/15 * * * *")
+        );
+        assert_eq!(
+            resolve_cadence("hourly", "").ok().flatten().as_deref(),
+            Some("0 * * * *")
+        );
+        assert_eq!(
+            resolve_cadence("6h", "").ok().flatten().as_deref(),
+            Some("0 */6 * * *")
+        );
+        assert_eq!(
+            resolve_cadence("daily", "").ok().flatten().as_deref(),
+            Some("0 3 * * *")
+        );
+        // A custom value goes through validation; the field is ignored for
+        // presets and off.
+        assert_eq!(
+            resolve_cadence("custom", "*/30 * * * *")
+                .ok()
+                .flatten()
+                .as_deref(),
+            Some("*/30 * * * *")
+        );
+        assert_eq!(
+            resolve_cadence("hourly", "not a cron")
+                .ok()
+                .flatten()
+                .as_deref(),
+            Some("0 * * * *")
+        );
+        assert!(resolve_cadence("weekly", "").is_err(), "an unknown preset");
+    }
+
+    #[test]
+    fn cadence_round_trips_through_set_and_read_back() {
+        // Arrange & Act & Assert: every preset the form can set humanizes
+        // back to that same preset when the schedule is read again, and off
+        // reads back as Off.
+        for (value, label, cron) in CADENCE_PRESETS {
+            let schedule = resolve_cadence(value, "").ok().flatten();
+            assert_eq!(schedule.as_deref(), Some(*cron));
+            let view = cadence_view(schedule.as_deref());
+            assert_eq!(view.preset, *value);
+            assert_eq!(view.label, *label);
+        }
+        let off = resolve_cadence("off", "").ok().flatten();
+        assert_eq!(off, None);
+        let view = cadence_view(off.as_deref());
+        assert_eq!(view.preset, "off");
+        assert_eq!(view.label, "Off");
+        // A schedule no preset owns reads back as custom, verbatim.
+        let custom = cadence_view(Some("17 4 * * 1-5"));
+        assert_eq!(custom.preset, "custom");
+        assert_eq!(custom.label, "17 4 * * 1-5");
+        assert_eq!(custom.custom, "17 4 * * 1-5");
+    }
+
+    #[test]
+    fn validate_cron_schedule_accepts_cron_expressions_and_interval_phrases() {
+        // Arrange & Act & Assert
+        for good in [
+            "* * * * *",
+            "*/15 * * * *",
+            "0 */6 * * *",
+            "0 9 * * MON-FRI",
+            "30 2 1 jan *",
+            "0,30 * * * *",
+            "0 9-17/2 * * *",
+            "  0 * * * *  ",
+            "30 minutes",
+            "1 hour",
+            "45 seconds",
+        ] {
+            assert!(
+                validate_cron_schedule(good).is_ok(),
+                "{good:?} should validate"
+            );
+        }
+        // Trimming is part of the contract.
+        assert_eq!(
+            validate_cron_schedule("  0 * * * *  ").ok().as_deref(),
+            Some("0 * * * *")
+        );
+    }
+
+    #[test]
+    fn interval_phrases_translate_to_cron_expressions_before_they_reach_pg_cron() {
+        // Arrange & Act & Assert: minute and hour phrases never reach the
+        // scheduler as phrases (its interval parser accepts only 1-59
+        // seconds); they become the equivalent 5-field cron expression,
+        // while a seconds phrase passes through as pg_cron's own syntax.
+        assert_eq!(
+            validate_cron_schedule("45 seconds").ok().as_deref(),
+            Some("45 seconds")
+        );
+        assert_eq!(
+            validate_cron_schedule("1 second").ok().as_deref(),
+            Some("1 seconds")
+        );
+        assert_eq!(
+            validate_cron_schedule("30 minutes").ok().as_deref(),
+            Some("*/30 * * * *")
+        );
+        assert_eq!(
+            validate_cron_schedule("1 minute").ok().as_deref(),
+            Some("*/1 * * * *")
+        );
+        assert_eq!(
+            validate_cron_schedule("1 hour").ok().as_deref(),
+            Some("0 * * * *")
+        );
+        assert_eq!(
+            validate_cron_schedule("6 hours").ok().as_deref(),
+            Some("0 */6 * * *")
+        );
+        assert_eq!(
+            validate_cron_schedule("24 hours").ok().as_deref(),
+            Some("0 0 * * *")
+        );
+    }
+
+    #[test]
+    fn validate_cron_schedule_rejects_malformed_input() {
+        // Arrange
+        let oversized = "1 ".repeat(100);
+
+        // Act & Assert: everything here is refused before any database call.
+        for bad_input in [
+            "",
+            "   ",
+            "* * * *",
+            "* * * * * *",
+            "61 * * * *",
+            "* 25 * * *",
+            "* * 0 * *",
+            "* * * 13 *",
+            "* * * * 8",
+            "* * * FOO *",
+            "*/0 * * * *",
+            "*/x * * * *",
+            "0 * * * *; DROP TABLE cron.job",
+            "0 minutes later",
+            "0 weeks",
+            // Phrase-shaped input the scheduler could not honor as entered:
+            // pg_cron's interval parser takes 1-59 seconds only, and a
+            // minute/hour count that no 5-field expression expresses is
+            // refused rather than sent.
+            "0 seconds",
+            "60 seconds",
+            "90 minutes",
+            "5 hours",
+            "25 hours",
+        ] {
+            assert!(
+                validate_cron_schedule(bad_input).is_err(),
+                "{bad_input:?} must be refused"
+            );
+        }
+        assert!(
+            validate_cron_schedule(&oversized).is_err(),
+            "over 128 bytes"
+        );
+        assert!(validate_cron_schedule("0 * * *\0*").is_err(), "a NUL byte");
+    }
+
+    #[test]
+    fn the_admin_gate_rejects_everything_but_the_admin_role() {
+        // Arrange
+        let session_with = |role: Role| Session {
+            principal: Some(Principal {
+                subject: "person".to_owned(),
+                display: "Person".to_owned(),
+                role,
+            }),
+            mode: Mode::Users,
+            peer: None,
+        };
+
+        // Act & Assert
+        assert!(admin(&session_with(Role::Admin)).is_ok());
+        for role in [Role::Viewer, Role::Uploader, Role::Editor, Role::Approver] {
+            let error = admin(&session_with(role)).expect_err("a non-admin is refused");
+            assert_eq!(error.status(), StatusCode::FORBIDDEN);
+        }
+        // Nobody signed in is sent to sign-in, never to the page.
+        let anon = admin(&Session::anonymous(Mode::Users)).expect_err("anonymous is refused");
+        assert_eq!(anon.status(), StatusCode::SEE_OTHER);
+    }
+
+    /// An App with dead pools, for tests of gates that run before any
+    /// statement is issued.
+    fn test_app(writer: Option<Db>) -> App {
+        App {
+            db: crate::db::dead_db(),
+            writer,
+            mcp_tokens: None,
+            auth: Authenticator::Anonymous,
+            trusted_proxies: crate::auth::TrustedProxies::default(),
+            rebuilds: tokio::sync::Mutex::new(()),
+            builds: tokio::sync::Semaphore::new(MAX_PLUGIN_BUILDS),
+            stores: crate::store::Stores::default(),
+            embedder: None,
+            catalog_name: "test".to_owned(),
+            tenant: None,
+            version: "0".to_owned(),
+        }
+    }
+
+    #[test]
+    fn cadence_actions_need_the_admin_role_and_a_writer_connection() {
+        // Arrange
+        let admin_session = Session {
+            principal: Some(Principal {
+                subject: "operator".to_owned(),
+                display: "Operator".to_owned(),
+                role: Role::Admin,
+            }),
+            mode: Mode::Users,
+            peer: None,
+        };
+
+        // Act & Assert: without a writer connection the action is
+        // unavailable; with one, an admin passes and an editor is refused.
+        let no_writer = test_app(None);
+        let error = require(&no_writer, &admin_session, Role::Admin, "/admin")
+            .err()
+            .expect("no writer connection");
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let with_writer = test_app(Some(crate::db::dead_db()));
+        assert!(require(&with_writer, &admin_session, Role::Admin, "/admin").is_ok());
+        let editor = Session {
+            principal: Some(Principal {
+                subject: "editor".to_owned(),
+                display: "Editor".to_owned(),
+                role: Role::Editor,
+            }),
+            ..admin_session.clone()
+        };
+        let error = require(&with_writer, &editor, Role::Admin, "/admin")
+            .err()
+            .expect("a non-admin is refused");
+        assert_eq!(error.status(), StatusCode::FORBIDDEN);
+    }
+
+    fn admin_bundle(id: i64, name: &str, freshness: Option<&str>) -> AdminBundle {
+        AdminBundle {
+            id,
+            path: format!("/bundles/{name}"),
+            name: name.to_owned(),
+            source_type: "filesystem".to_owned(),
+            enabled: true,
+            retired: false,
+            file_count: 3,
+            last_synced_at: None,
+            freshness: freshness.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn admin_bundles_page_renders_freshness_and_the_cadence_form() {
+        // Arrange: one bundle per cadence shape - a preset, off, and a
+        // schedule no preset owns - plus one freshness state each.
+        let page = AdminBundlesPage {
+            shell: Shell::bare("Administration · Bundles"),
+            admin: AdminTab::Bundles.shell(AdminOutcome::default()),
+            bundles: vec![
+                AdminBundleRow {
+                    bundle: admin_bundle(7, "docs", Some("fresh")),
+                    cadence: cadence_view(Some("0 * * * *")),
+                },
+                AdminBundleRow {
+                    bundle: admin_bundle(8, "wiki", Some("stale")),
+                    cadence: cadence_view(None),
+                },
+                AdminBundleRow {
+                    bundle: admin_bundle(9, "notes", None),
+                    cadence: cadence_view(Some("17 4 * * 1-5")),
+                },
+            ],
+            cadence_known: true,
+            cadence_note: None,
+        };
+
+        // Act
+        let rendered = page.render().expect("the admin bundles page renders");
+
+        // Assert: the new columns, the per-row cadence form with the current
+        // state preselected, and the honest framing (a refresh schedule is
+        // not a freshness attestation).
+        assert!(rendered.contains("<th>Freshness</th>"));
+        assert!(rendered.contains("<th>Refresh cadence</th>"));
+        assert!(rendered.contains("<span class=\"pill ok\">fresh</span>"));
+        assert!(rendered.contains("<span class=\"pill warn\">stale</span>"));
+        assert!(rendered.contains("refreshing content does not attest freshness"));
+        assert!(rendered.contains("<option value=\"hourly\" selected>Hourly</option>"));
+        assert!(rendered.contains("<option value=\"off\" selected>Off</option>"));
+        assert!(rendered.contains("<option value=\"custom\" selected>Custom"));
+        assert!(rendered.contains("value=\"17 4 * * 1-5\""));
+        assert!(rendered.contains("Now: hourly"));
+        assert!(rendered.contains("Now: Off"));
+        assert!(rendered.contains("Now: 17 4 * * 1-5"));
+        assert!(rendered.contains("name=\"cadence\" data-cadence"));
+        assert!(rendered.contains("name=\"action\" value=\"cadence\""));
+        // Scheduling surfaces here only: no freshness-attesting action.
+        assert!(!rendered.contains("certify"));
+    }
+
+    #[test]
+    fn admin_bundles_page_degrades_when_the_schedule_read_is_impossible() {
+        // Arrange
+        let page = AdminBundlesPage {
+            shell: Shell::bare("Administration · Bundles"),
+            admin: AdminTab::Bundles.shell(AdminOutcome::default()),
+            bundles: vec![AdminBundleRow {
+                bundle: admin_bundle(7, "docs", Some("fresh")),
+                cadence: cadence_view(None),
+            }],
+            cadence_known: false,
+            cadence_note: Some(
+                "pg_cron is not installed in this database, so no refresh cadence can be read or set here."
+                    .to_owned(),
+            ),
+        };
+
+        // Act
+        let rendered = page.render().expect("the admin bundles page renders");
+
+        // Assert: the note explains, the cells show the unknown marker, and
+        // no cadence form is offered.
+        assert!(rendered.contains("pg_cron is not installed in this database"));
+        assert!(rendered.contains("&mdash;"));
+        assert!(!rendered.contains("name=\"cadence\""));
+        assert!(rendered.contains("<th>Refresh cadence</th>"));
     }
 }

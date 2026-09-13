@@ -4070,6 +4070,89 @@ An added concept for the resync diff.\n";
         );
     }
 
+    #[pg_test]
+    fn list_scheduled_refreshes_raises_22023_when_pg_cron_is_absent() {
+        // Arrange: a probe that reports the SQLSTATE of a schedule-listing
+        // attempt. pg_cron is not installed in the test cluster. (The
+        // ownership/visibility split the read surface exists for - the
+        // extension owner seeing jobs pg_cron's row policy hides from the
+        // app's login - needs a real cron.job and is reproduced with a
+        // faithful stand-in in pgokf-web's scratch-database test; this test
+        // pins the absent-scheduler contract of the real function.)
+        Spi::run(
+            "CREATE FUNCTION pg_temp.list_sqlstate() RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             BEGIN
+                 PERFORM * FROM pgokf.list_scheduled_refreshes();
+                 RETURN 'no-error';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("list probe is creatable");
+
+        // Act
+        let sqlstate = Spi::get_one::<String>("SELECT pg_temp.list_sqlstate()")
+            .expect("list probe executes")
+            .expect("probe reports a SQLSTATE");
+
+        // Assert: listing names the missing dependency with 22023, exactly
+        // like schedule_refresh - never a silent empty result and never a
+        // raw 42P01 from the absent cron.job relation.
+        assert_eq!(
+            sqlstate, "22023",
+            "list_scheduled_refreshes must raise 22023 when pg_cron is absent",
+        );
+    }
+
+    #[pg_test]
+    fn list_scheduled_refreshes_applies_the_require_tenant_rule_before_the_pg_cron_check() {
+        // Arrange: the require_tenant policy on, and the probe from the
+        // companion test re-created (each pg_test runs in its own
+        // transaction).
+        Spi::run("SELECT pgokf.set_config('require_tenant', 'true'::jsonb)")
+            .expect("policy is settable");
+        Spi::run(
+            "CREATE FUNCTION pg_temp.list_sqlstate() RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             BEGIN
+                 PERFORM * FROM pgokf.list_scheduled_refreshes();
+                 RETURN 'no-error';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE;
+             END
+             $probe$;",
+        )
+        .expect("list probe is creatable");
+
+        // Act / Assert: an unscoped session is confined like every other
+        // reader surface - an empty result, not an error - even though
+        // pg_cron is absent (the tenant rule is applied first, exactly like
+        // schedule_refresh confines before it schedules).
+        let count =
+            Spi::get_one::<i64>("SELECT pg_catalog.count(*) FROM pgokf.list_scheduled_refreshes()")
+                .expect("an unscoped, tenant-required listing returns no rows")
+                .expect("count returns a row");
+        assert_eq!(
+            count, 0,
+            "an unscoped session sees nothing when require_tenant is on"
+        );
+
+        // A scoped session passes the tenant gate and then hits the
+        // curated missing-dependency error.
+        Spi::run("SET pgokf.tenant = 'acme'").expect("pgokf.tenant is settable");
+        let sqlstate = Spi::get_one::<String>("SELECT pg_temp.list_sqlstate()")
+            .expect("list probe executes")
+            .expect("probe reports a SQLSTATE");
+        assert_eq!(
+            sqlstate, "22023",
+            "a scoped session reaches the pg_cron check and gets its 22023"
+        );
+    }
+
     // ---------------------------------------------------------------------
     // 0.1.10 F1: Attested Computation type-specific fields as graph edges.
     // ---------------------------------------------------------------------
