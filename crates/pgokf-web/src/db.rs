@@ -167,25 +167,31 @@ pub(crate) struct RefreshSchedule {
 /// and nothing else - `checkout_path` and the producer's internal
 /// `graph_id` stay ungranted, and no secret ever lives in this table.
 /// The WHERE confines the listing to the session tenant (`pgokf.tenant`,
-/// applied per pooled connection; unset means the producer's `default`),
-/// matching the tenant model the catalog's row-level security enforces.
+/// applied per pooled connection), normalizing an unset, empty (the GUC's
+/// registered default), or all-whitespace value to the producer's
+/// `default` tenant - the same normalization the extension's registry
+/// writers apply (`crates/extension/src/catalog/registry.rs`), and the
+/// tests pin the predicate's text so the two never drift.
 const REGISTRY_REPOSITORIES_SQL: &str =
     "SELECT r.repository_id::text, r.repository_key, r.project_name, r.default_branch,
             r.remote_url, r.status, r.poll_interval_seconds,
             r.last_indexed_commit, r.last_published_commit, r.last_published_generation
      FROM ast_graph.repository_registry r
-     WHERE r.tenant_id = COALESCE(pg_catalog.current_setting('pgokf.tenant', true), 'default')
+     WHERE r.tenant_id = COALESCE(NULLIF(pg_catalog.btrim(pg_catalog.current_setting('pgokf.tenant', true)), ''), 'default')
      ORDER BY r.project_name, r.default_branch, r.repository_key";
 
 /// The tenant-visibility probe behind [`Db::registry_repository_visible`]:
 /// the credential actions run it before forwarding anything to the
 /// producer, so an id outside the session tenant is refused exactly as an
-/// unknown one is.
+/// unknown one is. The id is bound as text and cast in SQL
+/// (`$1::text::uuid`): tokio-postgres binds no Rust string to a `uuid`
+/// parameter, and the in-SQL cast turns a malformed id into the `22P02`
+/// input error the caller maps to "not visible".
 const REGISTRY_VISIBLE_SQL: &str =
     "SELECT EXISTS(
          SELECT 1 FROM ast_graph.repository_registry r
-         WHERE r.repository_id = $1::uuid
-           AND r.tenant_id = COALESCE(pg_catalog.current_setting('pgokf.tenant', true), 'default'))";
+         WHERE r.repository_id = $1::text::uuid
+           AND r.tenant_id = COALESCE(NULLIF(pg_catalog.btrim(pg_catalog.current_setting('pgokf.tenant', true)), ''), 'default'))";
 
 /// One registered repository of the external repository-registry producer
 /// service, as the Admin page's Registry tab lists it. The credential
@@ -1408,7 +1414,7 @@ impl Db {
     /// malformed one is the catalog's `22P02` input error, not a panic.
     pub(crate) async fn registry_set_status(&self, id: &str, status: &str) -> Result<()> {
         self.execute(
-            "SELECT pgokf.registry_set_status($1::uuid, $2)",
+            "SELECT pgokf.registry_set_status($1::text::uuid, $2)",
             &[&id, &status],
         )
         .await?;
@@ -1416,10 +1422,11 @@ impl Db {
     }
 
     /// Set one registered repository's poll interval in seconds
-    /// (`pgokf.registry_set_poll_interval`, admin-tier).
+    /// (`pgokf.registry_set_poll_interval`, admin-tier). The id is bound as
+    /// text and cast in SQL, exactly like [`Db::registry_set_status`].
     pub(crate) async fn registry_set_poll_interval(&self, id: &str, seconds: i32) -> Result<()> {
         self.execute(
-            "SELECT pgokf.registry_set_poll_interval($1::uuid, $2)",
+            "SELECT pgokf.registry_set_poll_interval($1::text::uuid, $2)",
             &[&id, &seconds],
         )
         .await?;
@@ -2780,6 +2787,15 @@ pub(crate) fn dead_db() -> Db {
 mod tests {
     use super::*;
 
+    /// The registry tenant predicate, pinned once here and asserted into
+    /// the read, the visibility probe, and the inlined writer DDL below:
+    /// `pgokf.tenant` unset, empty (its registered default), or
+    /// all-whitespace all normalize to the producer's `default` tenant.
+    /// The extension's registry writers
+    /// (`crates/extension/src/catalog/registry.rs`) carry the same
+    /// expression; a drift on either side must fail a test.
+    const REGISTRY_TENANT_PREDICATE: &str = "r.tenant_id = COALESCE(NULLIF(pg_catalog.btrim(pg_catalog.current_setting('pgokf.tenant', true)), ''), 'default')";
+
     #[test]
     fn iso_substitutes_the_column_into_the_utc_rendering() {
         // Arrange & Act
@@ -2839,16 +2855,15 @@ mod tests {
     fn the_registry_read_is_narrow_tenant_confined_and_secret_free() {
         // Assert: the read names the producer's registry table and the
         // listable columns the extension grants to pgokf_reader, confines
-        // the listing to the session tenant (the pgokf.tenant GUC, unset
-        // meaning the producer's 'default'), and never reaches for the
-        // ungranted ones - the server-local checkout path, the producer's
-        // internal graph id, or any secret (no secret column exists, and
-        // this read must never grow one).
+        // the listing to the session tenant (the pgokf.tenant GUC, with
+        // unset, empty, and all-whitespace all meaning the producer's
+        // 'default'), and never reaches for the ungranted ones - the
+        // server-local checkout path, the producer's internal graph id, or
+        // any secret (no secret column exists, and this read must never
+        // grow one).
         assert!(REGISTRY_REPOSITORIES_SQL.contains("FROM ast_graph.repository_registry"));
         assert!(
-            REGISTRY_REPOSITORIES_SQL.contains(
-                "WHERE r.tenant_id = COALESCE(pg_catalog.current_setting('pgokf.tenant', true), 'default')"
-            ),
+            REGISTRY_REPOSITORIES_SQL.contains(&format!("WHERE {REGISTRY_TENANT_PREDICATE}")),
             "the registry read is confined to the session tenant"
         );
         for column in [
@@ -2875,12 +2890,15 @@ mod tests {
             );
         }
         // The visibility probe the credential actions gate on carries the
-        // same tenant predicate.
+        // same tenant predicate, and binds the id as text cast in SQL (a
+        // Rust string does not bind to a uuid parameter).
         assert!(
-            REGISTRY_VISIBLE_SQL.contains(
-                "r.tenant_id = COALESCE(pg_catalog.current_setting('pgokf.tenant', true), 'default')"
-            ),
+            REGISTRY_VISIBLE_SQL.contains(REGISTRY_TENANT_PREDICATE),
             "the visibility probe is confined to the session tenant"
+        );
+        assert!(
+            REGISTRY_VISIBLE_SQL.contains("$1::text::uuid"),
+            "the visibility probe binds the id as text and casts it in SQL"
         );
     }
 
@@ -2996,7 +3014,7 @@ mod tests {
                     SET status = registry_set_status.status,
                         updated_at = pg_catalog.now()
                   WHERE r.repository_id = registry_set_status.repository_id
-                    AND r.tenant_id = COALESCE(pg_catalog.current_setting('pgokf.tenant', true), 'default');
+                    AND {REGISTRY_TENANT_PREDICATE};
                  IF NOT FOUND THEN
                      RAISE EXCEPTION
                          'no registered repository with id %', repository_id
@@ -3026,7 +3044,7 @@ mod tests {
                     SET poll_interval_seconds = registry_set_poll_interval.poll_interval_seconds,
                         updated_at = pg_catalog.now()
                   WHERE r.repository_id = registry_set_poll_interval.repository_id
-                    AND r.tenant_id = COALESCE(pg_catalog.current_setting('pgokf.tenant', true), 'default');
+                    AND {REGISTRY_TENANT_PREDICATE};
                  IF NOT FOUND THEN
                      RAISE EXCEPTION
                          'no registered repository with id %', repository_id
@@ -3155,6 +3173,27 @@ mod tests {
             assert_eq!(rows.len(), 1, "only the session tenant's rows list");
             let project: String = rows[0].get(2);
             assert_eq!(project, "beacon");
+            // An empty (the GUC's registered default) or all-whitespace
+            // GUC normalizes to the producer's 'default' tenant: the
+            // 'default' row lists, the named tenant's does not.
+            for blank in ["", "   "] {
+                client
+                    .batch_execute(&format!(
+                        "SELECT set_config('pgokf.tenant', '{blank}', false)"
+                    ))
+                    .await?;
+                let rows = client
+                    .query(REGISTRY_REPOSITORIES_SQL, &[])
+                    .await
+                    .context("the blank-tenant read executes")?;
+                assert_eq!(
+                    rows.len(),
+                    1,
+                    "a blank pgokf.tenant ({blank:?}) lists the default tenant's rows"
+                );
+                let project: String = rows[0].get(2);
+                assert_eq!(project, "atlas");
+            }
             client
                 .batch_execute("SELECT set_config('pgokf.tenant', 'default', false)")
                 .await?;
@@ -3245,10 +3284,86 @@ mod tests {
                 )
                 .await
                 .context("the session tenant's own row updates")?;
+            // An empty (the registered default) or all-whitespace GUC is
+            // the producer's 'default' tenant: the 'default' row's writes
+            // succeed, the named tenant's earn 22023.
+            for blank in ["", "   "] {
+                client
+                    .batch_execute(&format!(
+                        "SELECT set_config('pgokf.tenant', '{blank}', false)"
+                    ))
+                    .await?;
+                client
+                    .batch_execute(
+                        "SELECT pgokf.registry_set_status(
+                             '8d2e1c4a-0000-4000-8000-0000000000aa'::uuid, 'active')",
+                    )
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("a blank pgokf.tenant ({blank:?}) writes the default row: {error}")
+                    });
+                assert_eq!(
+                    sqlstate_of(
+                        &client,
+                        "SELECT pgokf.registry_set_status(
+                             '8d2e1c4a-0000-4000-8000-0000000000bb'::uuid, 'active')",
+                    )
+                    .await
+                    .as_deref(),
+                    Some("22023"),
+                    "a blank pgokf.tenant ({blank:?}) is refused the named tenant's row"
+                );
+            }
             client
                 .batch_execute("SELECT set_config('pgokf.tenant', 'default', false)")
                 .await?;
             client.batch_execute("RESET ROLE").await?;
+
+            // The web crate's own registry statements through a real pooled
+            // `Db` scoped to the 'default' tenant: the id is bound as text
+            // and cast in SQL (`$1::text::uuid`), so the writers and the
+            // visibility probe accept a string id at all - a bare `$1::uuid`
+            // bind fails before any statement runs - and a malformed id is
+            // the catalog's 22P02 input error, which the visibility probe
+            // maps to `false`.
+            let db_url = format!("{} dbname={REGISTRY_SCRATCH_DB}", scratch_db_url());
+            let db = Db::connect(&DbConfig {
+                database_url: &db_url,
+                force_tls: false,
+                pool_size: 1,
+                tenant: Some("default"),
+                statement_timeout_ms: 1000,
+            })
+            .context("the pooled Db connects to the scratch registry")?;
+            assert!(
+                db.registry_repository_visible("8d2e1c4a-0000-4000-8000-0000000000aa")
+                    .await?,
+                "the session tenant's own id is visible"
+            );
+            assert!(
+                !db.registry_repository_visible("8d2e1c4a-0000-4000-8000-0000000000bb")
+                    .await?,
+                "another tenant's id is not visible"
+            );
+            assert!(
+                !db.registry_repository_visible("not-a-uuid").await?,
+                "a malformed id reads as not visible, not an error"
+            );
+            db.registry_set_status("8d2e1c4a-0000-4000-8000-0000000000aa", "active")
+                .await
+                .context("the status writer accepts a string id")?;
+            db.registry_set_poll_interval("8d2e1c4a-0000-4000-8000-0000000000aa", 300)
+                .await
+                .context("the poll-interval writer accepts a string id")?;
+            let error = db
+                .registry_set_status("not-a-uuid", "paused")
+                .await
+                .expect_err("a malformed id is refused by the in-SQL cast");
+            assert_eq!(
+                sql_state(&error),
+                Some(tokio_postgres::error::SqlState::INVALID_TEXT_REPRESENTATION),
+                "a malformed id is the catalog's 22P02 input error, not a bind failure"
+            );
             Ok::<_, anyhow::Error>(())
         }
         .await;
@@ -3788,12 +3903,17 @@ mod tests {
     /// overrides the default `host=localhost dbname=postgres` string. The
     /// parsed config comes back so the fixture connection can reuse
     /// everything but the database name.
+    /// The libpq string the scratch tests connect through:
+    /// `PGOKF_WEB_TEST_DB` when set, else the local default.
+    fn scratch_db_url() -> String {
+        std::env::var("PGOKF_WEB_TEST_DB").unwrap_or_else(|_| {
+            let user = std::env::var("USER").unwrap_or_else(|_| "postgres".to_owned());
+            format!("host=localhost dbname=postgres user={user}")
+        })
+    }
+
     async fn scratch_admin() -> Option<(tokio_postgres::Client, tokio_postgres::Config)> {
-        let config: tokio_postgres::Config = std::env::var("PGOKF_WEB_TEST_DB")
-            .unwrap_or_else(|_| {
-                let user = std::env::var("USER").unwrap_or_else(|_| "postgres".to_owned());
-                format!("host=localhost dbname=postgres user={user}")
-            })
+        let config: tokio_postgres::Config = scratch_db_url()
             .parse()
             .expect("PGOKF_WEB_TEST_DB parses as a libpq connection string");
         let (client, connection) = match config.connect(NoTls).await {

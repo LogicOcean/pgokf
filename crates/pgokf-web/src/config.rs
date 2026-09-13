@@ -329,7 +329,10 @@ impl Cli {
             bail!("--embed-endpoint and --embed-model must be given together");
         }
         if self.producer_admin_url.is_some() != self.producer_admin_token.is_some() {
-            bail!("--producer-admin-url and --producer-admin-token must be given together");
+            bail!(
+                "--producer-admin-url and the OKF_PRODUCER_ADMIN_TOKEN environment variable must \
+                 be given together"
+            );
         }
         match self.auth.trim() {
             "none" => {}

@@ -469,6 +469,13 @@ installed SQL version ([operations.md](operations.md#upgrades)).
    `SKILL.md` so its package projects into them; a bundle with no packages
    needs nothing.
 
+When the external repository-registry producer service shares the database,
+run the producer's migration 012 **before** step 4 (and before any fresh
+`CREATE EXTENSION pgokf`): the extension's registry surfaces reference
+`ast_graph.repository_registry.tenant_id`, which 012 adds, and the extension
+SQL fails with `42703` against a pre-012 registry table
+([operations.md](operations.md#upgrades)).
+
 Between steps 3 and 4 the new library is loaded while the SQL objects are
 still the old version, so a companion that calls the catalog in that window
 (the `embed` daemon's first watch pass, typically) logs one failed pass such

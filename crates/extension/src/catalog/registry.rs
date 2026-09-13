@@ -85,8 +85,10 @@ BEGIN
      WHERE r.repository_id = registry_set_status.repository_id
        -- The session tenant confines the write: a cross-tenant id finds no
        -- row and earns the same 22023 an unknown id does, so the answer
-       -- never reveals that another tenant's repository exists.
-       AND r.tenant_id = COALESCE(pg_catalog.current_setting('pgokf.tenant', true), 'default');
+       -- never reveals that another tenant's repository exists. An unset,
+       -- empty (the GUC's registered default), or all-whitespace
+       -- pgokf.tenant all normalize to the producer's 'default' tenant.
+       AND r.tenant_id = COALESCE(NULLIF(pg_catalog.btrim(pg_catalog.current_setting('pgokf.tenant', true)), ''), 'default');
     IF NOT FOUND THEN
         RAISE EXCEPTION
             'no registered repository with id %', repository_id
@@ -97,7 +99,7 @@ $registry_set_status$;
 REVOKE ALL ON FUNCTION pgokf.registry_set_status(uuid, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pgokf.registry_set_status(uuid, text) TO pgokf_admin;
 COMMENT ON FUNCTION pgokf.registry_set_status(uuid, text) IS
-    'Pause or resume one registered repository of the external repository-registry producer service by setting its ast_graph.repository_registry status (active or paused; the producer polls active rows only, so pausing stops reconciliation without deleting the registration). Admin-only (pgokf_admin), SECURITY DEFINER over a table no API role may write directly; tenant-confined: the update matches only rows whose tenant_id equals the session''s pgokf.tenant setting (default ''default''), so a cross-tenant id earns the same 22023 as an unknown one without revealing that the row exists. The producer schema coupling is runtime-only - the curated 22023 names the missing dependency when ast_graph.repository_registry is absent, and 22023 also covers an unknown repository id or a status outside (active, paused).';
+    'Pause or resume one registered repository of the external repository-registry producer service by setting its ast_graph.repository_registry status (active or paused; the producer polls active rows only, so pausing stops reconciliation without deleting the registration). Admin-only (pgokf_admin), SECURITY DEFINER over a table no API role may write directly; tenant-confined: the update matches only rows whose tenant_id equals the session''s pgokf.tenant setting, with an unset, empty (the GUC''s registered default), or all-whitespace value normalizing to the producer''s ''default'' tenant, so a cross-tenant id earns the same 22023 as an unknown one without revealing that the row exists. The producer schema coupling is runtime-only - the curated 22023 names the missing dependency when ast_graph.repository_registry is absent, and 22023 also covers an unknown repository id or a status outside (active, paused).';
 
 CREATE FUNCTION pgokf.registry_set_poll_interval(repository_id uuid, poll_interval_seconds integer)
 RETURNS void
@@ -124,7 +126,7 @@ BEGIN
        SET poll_interval_seconds = registry_set_poll_interval.poll_interval_seconds,
            updated_at = pg_catalog.now()
      WHERE r.repository_id = registry_set_poll_interval.repository_id
-       AND r.tenant_id = COALESCE(pg_catalog.current_setting('pgokf.tenant', true), 'default');
+       AND r.tenant_id = COALESCE(NULLIF(pg_catalog.btrim(pg_catalog.current_setting('pgokf.tenant', true)), ''), 'default');
     IF NOT FOUND THEN
         RAISE EXCEPTION
             'no registered repository with id %', repository_id
@@ -135,7 +137,7 @@ $registry_set_poll_interval$;
 REVOKE ALL ON FUNCTION pgokf.registry_set_poll_interval(uuid, integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pgokf.registry_set_poll_interval(uuid, integer) TO pgokf_admin;
 COMMENT ON FUNCTION pgokf.registry_set_poll_interval(uuid, integer) IS
-    'Set one registered repository''s poll interval in seconds (5 to 86400) on the external repository-registry producer service''s ast_graph.repository_registry row: the producer reconciles an active repository at most this often. Admin-only (pgokf_admin), SECURITY DEFINER over a table no API role may write directly; tenant-confined: the update matches only rows whose tenant_id equals the session''s pgokf.tenant setting (default ''default''), so a cross-tenant id earns the same 22023 as an unknown one without revealing that the row exists. The producer schema coupling is runtime-only - the curated 22023 names the missing dependency when ast_graph.repository_registry is absent, and 22023 also covers an unknown repository id or an out-of-range interval.';
+    'Set one registered repository''s poll interval in seconds (5 to 86400) on the external repository-registry producer service''s ast_graph.repository_registry row: the producer reconciles an active repository at most this often. Admin-only (pgokf_admin), SECURITY DEFINER over a table no API role may write directly; tenant-confined: the update matches only rows whose tenant_id equals the session''s pgokf.tenant setting, with an unset, empty (the GUC''s registered default), or all-whitespace value normalizing to the producer''s ''default'' tenant, so a cross-tenant id earns the same 22023 as an unknown one without revealing that the row exists. The producer schema coupling is runtime-only - the curated 22023 names the missing dependency when ast_graph.repository_registry is absent, and 22023 also covers an unknown repository id or an out-of-range interval.';
 ",
     name = "registry_surface",
     requires = ["catalog_tables"]

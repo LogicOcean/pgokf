@@ -4254,30 +4254,50 @@ An added concept for the resync diff.\n";
 
     #[pg_test]
     fn registry_writers_default_to_the_default_tenant() {
-        // Arrange: the fixture, with the GUC unset (each pg_test runs in its
-        // own transaction, so nothing leaks in): COALESCE makes that the
-        // producer's 'default' tenant.
+        // Arrange: the fixture, then the GUC in each shape that must mean
+        // the producer's 'default' tenant. `pgokf.tenant` is registered
+        // with an empty-string default (crates/extension/src/guc.rs), so an
+        // unset GUC already reads as '' here - `current_setting(..., true)`
+        // never returns NULL - and a blank or all-whitespace value must
+        // normalize the same way (each pg_test runs in its own transaction,
+        // so nothing leaks in or out).
         registry_fixture();
+        for (set, why) in [
+            (
+                "SELECT set_config('pgokf.tenant', '', true)",
+                "empty (the registered default)",
+            ),
+            (
+                "SELECT set_config('pgokf.tenant', '   ', true)",
+                "all-whitespace",
+            ),
+        ] {
+            Spi::run(set).expect("the tenant GUC is settable");
 
-        // Act & Assert
-        assert_eq!(
-            Spi::get_one::<String>(
-                "SELECT pg_temp.registry_call(false, '8d2e1c4a-0000-4000-8000-0000000000cc')"
-            )
-            .expect("the probe executes")
-            .as_deref(),
-            Some("no-error"),
-            "an unset tenant GUC writes the default tenant's row",
-        );
-        assert_eq!(
-            Spi::get_one::<String>(
-                "SELECT pg_temp.registry_call(false, '8d2e1c4a-0000-4000-8000-0000000000aa')"
-            )
-            .expect("the probe executes")
-            .as_deref(),
-            Some("22023"),
-            "an unset tenant GUC is refused another tenant's row",
-        );
+            // Act & Assert: the default tenant's row takes both writes...
+            for poll in ["true", "false"] {
+                assert_eq!(
+                    Spi::get_one::<String>(&format!(
+                        "SELECT pg_temp.registry_call({poll}, '8d2e1c4a-0000-4000-8000-0000000000cc')"
+                    ))
+                    .expect("the probe executes")
+                    .as_deref(),
+                    Some("no-error"),
+                    "a {why} tenant GUC writes the default tenant's row (poll={poll})",
+                );
+            }
+            // ...and a foreign tenant's id still earns the same 22023 an
+            // unknown id does.
+            assert_eq!(
+                Spi::get_one::<String>(
+                    "SELECT pg_temp.registry_call(false, '8d2e1c4a-0000-4000-8000-0000000000aa')"
+                )
+                .expect("the probe executes")
+                .as_deref(),
+                Some("22023"),
+                "a {why} tenant GUC is refused another tenant's row",
+            );
+        }
     }
 
     #[pg_test]

@@ -10636,4 +10636,232 @@ mod tests {
             "an unusable credential says so instead of showing a bare gap"
         );
     }
+
+    /// The scratch database the live router regression creates and drops:
+    /// the credential actions run through the real router and a real pooled
+    /// `Db` per tenant against a stand-in of the producer's registry table.
+    const ROUTER_SCRATCH_DB: &str = "pgokf_web_registry_router_test";
+
+    /// One tenant's app for the live router regression: a real pooled `Db`
+    /// scoped to the tenant against the scratch registry, the mock
+    /// producer, and header auth signing every request in as an admin.
+    fn per_tenant_router(url: &str, base: &str, tenant: &str) -> Router {
+        let mut app = test_app(None);
+        app.db = Db::connect(&crate::db::DbConfig {
+            database_url: url,
+            force_tls: false,
+            pool_size: 1,
+            tenant: Some(tenant),
+            statement_timeout_ms: 1000,
+        })
+        .expect("the pooled Db connects to the scratch registry");
+        app.tenant = Some(tenant.to_owned());
+        app.auth = header_auth();
+        app.producer = Some(crate::producer::ProducerAdmin::new(base, "admin-token").unwrap());
+        router(Arc::new(app))
+    }
+
+    /// The credential actions through the real router and a real database,
+    /// for both tenants: a valid set and remove answer with the success
+    /// redirect and reach the listening mock producer exactly once each,
+    /// while a malformed id, another tenant's id, and an unknown id are
+    /// all refused identically before anything is forwarded. This guards
+    /// the binding the `App` seams above stub out: the id reaches
+    /// `PostgreSQL` as text and is cast in SQL (`$1::text::uuid`), so a
+    /// real credential action is not a 500 at the pool. Skips with a notice
+    /// when no scratch `PostgreSQL` answers, exactly like the db.rs
+    /// execution regressions (`PGOKF_WEB_TEST_DB` overrides the local
+    /// default).
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn credential_actions_run_through_the_real_database_tenant_confined() {
+        // Arrange: the scratch database with one registered repository per
+        // tenant (tenant-c intentionally has none, so its refusal pages
+        // render without a producer read).
+        let url = std::env::var("PGOKF_WEB_TEST_DB").unwrap_or_else(|_| {
+            let user = std::env::var("USER").unwrap_or_else(|_| "postgres".to_owned());
+            format!("host=localhost dbname=postgres user={user}")
+        });
+        let (admin, connection) = match tokio_postgres::connect(&url, tokio_postgres::NoTls).await {
+            Ok(pair) => pair,
+            Err(error) => {
+                eprintln!("skipping the live router test: no scratch PostgreSQL answers ({error})");
+                return;
+            }
+        };
+        tokio::spawn(async move {
+            if let Err(error) = connection.await {
+                eprintln!("scratch admin connection error: {error}");
+            }
+        });
+        for statement in [
+            format!("DROP DATABASE IF EXISTS {ROUTER_SCRATCH_DB} WITH (FORCE)"),
+            format!("CREATE DATABASE {ROUTER_SCRATCH_DB}"),
+        ] {
+            admin
+                .batch_execute(&statement)
+                .await
+                .unwrap_or_else(|error| panic!("{statement}: {error}"));
+        }
+        let result = async {
+            let url = format!("{url} dbname={ROUTER_SCRATCH_DB}");
+            let (setup, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls).await?;
+            tokio::spawn(async move {
+                if let Err(error) = connection.await {
+                    eprintln!("scratch fixture connection error: {error}");
+                }
+            });
+            setup
+                .batch_execute(
+                    "CREATE SCHEMA ast_graph;
+                     CREATE TABLE ast_graph.repository_registry (
+                         repository_id uuid PRIMARY KEY,
+                         repository_key varchar(64) NOT NULL,
+                         project_name varchar(255) NOT NULL,
+                         default_branch varchar(255) NOT NULL DEFAULT 'main',
+                         remote_url text,
+                         status varchar(32) NOT NULL DEFAULT 'active',
+                         poll_interval_seconds integer NOT NULL DEFAULT 300,
+                         last_indexed_commit varchar(64),
+                         last_published_commit varchar(64),
+                         last_published_generation bigint,
+                         tenant_id text NOT NULL DEFAULT 'default'
+                     );
+                     INSERT INTO ast_graph.repository_registry
+                         (repository_id, repository_key, project_name, tenant_id)
+                     VALUES
+                         ('00000000-0000-4000-8000-000000000001', 'aaa', 'atlas', 'tenant-a'),
+                         ('00000000-0000-4000-8000-000000000002', 'bbb', 'beacon', 'tenant-b');",
+                )
+                .await?;
+            // The mock producer answers, in order: tenant A's set and
+            // remove, then tenant B's. Any forwarded request beyond those
+            // four lands on a closed listener and fails the test.
+            let (base, served) = crate::producer::tests::mock_producer(&[
+                ("201 Created", ""),
+                ("204 No Content", ""),
+                ("201 Created", ""),
+                ("204 No Content", ""),
+            ])
+            .await;
+
+            // Act & Assert: both tenants set and remove their own
+            // repository's credential through the real router; each action
+            // answers with the success redirect, never a 500.
+            for (tenant, own) in [
+                ("tenant-a", "00000000-0000-4000-8000-000000000001"),
+                ("tenant-b", "00000000-0000-4000-8000-000000000002"),
+            ] {
+                let router = per_tenant_router(&url, &base, tenant);
+                let set = router
+                    .clone()
+                    .oneshot(admin_request(
+                        "POST",
+                        "/admin/registry",
+                        Some(format!(
+                            "action=set-credential&id={own}&label=deploy+key&kind=github_pat&secret=canary-secret"
+                        )),
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    set.status(),
+                    StatusCode::SEE_OTHER,
+                    "{tenant} set-credential answers the success redirect"
+                );
+                let remove = router
+                    .oneshot(admin_request(
+                        "POST",
+                        "/admin/registry",
+                        Some(format!("action=remove-credential&id={own}")),
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    remove.status(),
+                    StatusCode::SEE_OTHER,
+                    "{tenant} remove-credential answers the success redirect"
+                );
+            }
+
+            // Act & Assert: from a tenant with no row of its own, a
+            // malformed id, another tenant's id, and an unknown id are all
+            // the same refusal on the page - never a 500, never forwarded.
+            let router = per_tenant_router(&url, &base, "tenant-c");
+            for id in [
+                "not-a-uuid",
+                "00000000-0000-4000-8000-000000000001",
+                "00000000-0000-4000-8000-000000000009",
+            ] {
+                let response = router
+                    .clone()
+                    .oneshot(admin_request(
+                        "POST",
+                        "/admin/registry",
+                        Some(format!(
+                            "action=set-credential&id={id}&label=deploy+key&kind=github_pat&secret=canary-secret"
+                        )),
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    StatusCode::BAD_REQUEST,
+                    "{id} is refused on the page, not a 500"
+                );
+                let body = body_text(response).await;
+                assert!(
+                    body.contains("no repository with that id"),
+                    "{id} earns the same refusal as an unknown id"
+                );
+            }
+
+            // Assert: exactly the four valid mutations reached the
+            // producer, each under the bearer token, the secret in the two
+            // set bodies alone.
+            let captured = served.await.expect("the mock producer served its answers");
+            assert_eq!(
+                captured.len(),
+                4,
+                "only the four valid credential actions reached the producer"
+            );
+            let (put_a, delete_a, put_b, delete_b) =
+                (&captured[0], &captured[1], &captured[2], &captured[3]);
+            assert!(
+                put_a
+                    .head
+                    .starts_with("PUT /admin/repositories/00000000-0000-4000-8000-000000000001/credential"),
+                "tenant A's set went to its own repository: {}",
+                put_a.head.lines().next().unwrap_or_default()
+            );
+            assert!(put_a.body.contains("canary-secret"));
+            assert!(
+                delete_a
+                    .head
+                    .starts_with("DELETE /admin/repositories/00000000-0000-4000-8000-000000000001/credential"),
+                "tenant A's remove went to its own repository"
+            );
+            assert!(
+                put_b
+                    .head
+                    .starts_with("PUT /admin/repositories/00000000-0000-4000-8000-000000000002/credential"),
+                "tenant B's set went to its own repository"
+            );
+            assert!(
+                delete_b
+                    .head
+                    .starts_with("DELETE /admin/repositories/00000000-0000-4000-8000-000000000002/credential"),
+                "tenant B's remove went to its own repository"
+            );
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        admin
+            .batch_execute(&format!(
+                "DROP DATABASE IF EXISTS {ROUTER_SCRATCH_DB} WITH (FORCE)"
+            ))
+            .await
+            .expect("drop the scratch database");
+        result.expect("the live router regression");
+    }
 }
