@@ -11,7 +11,7 @@
     <div><button type="submit" class="btn primary">Register</button></div>
   </form>
   </div>
-  <p class="muted">Freshness is the bundle producer's attestation, shown as reported. Refresh cadence schedules a recurring content refresh (a pg_cron job that re-reads the bundle's source); refreshing content does not attest freshness. Presets run on the database server's timezone.</p>
+  <p class="muted">Freshness is the bundle producer's attestation, shown as reported. Refresh cadence schedules a recurring content refresh (a pg_cron job that re-reads the bundle's source); refreshing content does not attest freshness. Schedules run in the scheduler's timezone (pg_cron's <code>cron.timezone</code> setting, GMT by default).</p>
   {% if let Some(note) = cadence_note %}<p class="notice bad">{{ note }}</p>{% endif %}
   <div class="table-wrap">
   <table class="table admin" id="pgokf-admin-bundles">
@@ -38,7 +38,7 @@
               <option value="daily"{% if b.cadence.preset == "daily" %} selected{% endif %}>Daily</option>
               <option value="custom"{% if b.cadence.preset == "custom" %} selected{% endif %}>Custom&hellip;</option>
             </select>
-            <span data-cadence-custom><input type="text" name="custom_cron" value="{{ b.cadence.custom }}" placeholder="*/30 * * * *" pattern="[0-9A-Za-z*,/ -]{1,128}" maxlength="128" spellcheck="false" title="A 5-field cron expression (e.g. */30 * * * *) or an interval such as 30 minutes" aria-label="Custom cron schedule for {{ b.bundle.name }}"></span>
+            <span data-cadence-custom><input type="text" name="custom_cron" value="{{ b.cadence.custom }}" placeholder="*/30 * * * *" pattern="[0-9A-Za-z*,/ -]{1,128}" maxlength="128" spellcheck="false" title="A 5-field cron expression (e.g. */30 * * * *), or an interval: 1-59 seconds (45 seconds), 1-59 minutes (30 minutes), or hours dividing the day (6 hours) - minute and hour intervals are saved as the equivalent cron expression. @daily and last-day-of-month ($) forms are not accepted here." aria-label="Custom cron schedule for {{ b.bundle.name }}"></span>
             <button type="submit" class="btn">Save</button>
             <span class="desc">Now: {{ b.cadence.label }}</span>
           </form>

@@ -5085,18 +5085,25 @@ fn resolve_cadence(cadence: &str, custom: &str) -> Result<Option<String>, AppErr
     }
 }
 
-/// Validate the custom schedule of the cadence form: non-empty, within the
-/// extension's length bound, NUL-free, and recognizably a 5-field cron
-/// expression or a `pg_cron` interval phrase ("30 minutes"). This is the
-/// pre-flight screen - `pg_cron` remains the authority, and a schedule that
-/// passes here but not its parser comes back from the database as a form
+/// Validate the custom schedule of the cadence form and normalize it to
+/// what is sent to `pg_cron`: non-empty, within the extension's length
+/// bound, NUL-free, and either a 5-field cron expression or an explicitly
+/// supported interval phrase. Supported phrases translate BEFORE they
+/// reach the scheduler: `1-59 seconds` passes through as `pg_cron`'s own
+/// interval syntax (the only interval its parser accepts), while minute
+/// and hour phrases become the equivalent 5-field cron expression
+/// (`30 minutes` -> `*/30 * * * *`, `1 hour` -> `0 * * * *`). Anything
+/// `pg_cron` could not schedule as entered (`60 seconds`, `90 minutes`) is
+/// refused here; this is the pre-flight screen, and a schedule that passes
+/// here but not `pg_cron`'s parser comes back from the database as a form
 /// error the same way.
 fn validate_cron_schedule(raw: &str) -> Result<String, AppError> {
     let schedule = raw.trim();
     let bad = |why: String| {
         AppError::bad_request(format!(
             "The custom schedule is not one pg_cron accepts: {why}. Give five cron fields \
-             (e.g. */30 * * * *) or an interval such as 30 minutes."
+             (e.g. */30 * * * *) or an interval: 1-59 seconds, 1-59 minutes, or a number of \
+             hours that divides the day."
         ))
     };
     if schedule.is_empty() {
@@ -5108,26 +5115,62 @@ fn validate_cron_schedule(raw: &str) -> Result<String, AppError> {
     if schedule.contains('\0') {
         return Err(bad("it contains a NUL byte".to_owned()));
     }
-    if valid_interval_phrase(schedule) || valid_cron_expression(schedule) {
-        Ok(schedule.to_owned())
-    } else {
-        Err(bad(
+    match interval_phrase(schedule) {
+        Some(Ok(translated)) => Ok(translated),
+        Some(Err(why)) => Err(bad(why)),
+        None if valid_cron_expression(schedule) => Ok(schedule.to_owned()),
+        None => Err(bad(
             "give five fields (minute hour day-of-month month day-of-week)".to_owned(),
-        ))
+        )),
     }
 }
 
-/// A `pg_cron` interval phrase: a positive count and a unit ("30 minutes").
-fn valid_interval_phrase(schedule: &str) -> bool {
+/// A `<count> <unit>` interval phrase, when the input has that shape.
+/// `Some(Ok(_))` is the schedule to hand to `pg_cron`: a 1-59 second
+/// phrase passes through as `pg_cron`'s own interval syntax; a minute
+/// phrase (1-59) becomes `*/n * * * *`; an hour phrase that divides the
+/// day (1, 2, 3, 4, 6, 8, 12, 24) becomes `0 */n * * *` (with `1 hour` ->
+/// `0 * * * *` and `24 hours` -> `0 0 * * *`). `Some(Err(_))` refuses a
+/// phrase-shaped input the scheduler could not honor as entered - above
+/// all `60 seconds`, which `pg_cron`'s interval parser (1-59 seconds only)
+/// rejects. `None` means the input is not phrase-shaped at all and the
+/// cron parser decides.
+fn interval_phrase(schedule: &str) -> Option<Result<String, String>> {
     let words: Vec<&str> = schedule.split_whitespace().collect();
     let [count, unit] = words.as_slice() else {
-        return false;
+        return None;
     };
-    count.parse::<u64>().is_ok_and(|n| n > 0)
-        && matches!(
-            unit.to_ascii_lowercase().as_str(),
-            "second" | "seconds" | "minute" | "minutes" | "hour" | "hours"
-        )
+    let unit = unit.to_ascii_lowercase();
+    let kind = match unit.as_str() {
+        "second" | "seconds" => "second",
+        "minute" | "minutes" => "minute",
+        "hour" | "hours" => "hour",
+        _ => return None,
+    };
+    let Ok(n) = count.parse::<u64>() else {
+        return Some(Err(format!("{count:?} is not a count")));
+    };
+    if n == 0 {
+        return Some(Err("the count must be positive".to_owned()));
+    }
+    Some(match kind {
+        "second" if n <= 59 => Ok(format!("{n} seconds")),
+        "second" => Err(format!(
+            "pg_cron's interval syntax accepts only 1-59 seconds, not {n}"
+        )),
+        "minute" if n <= 59 => Ok(format!("*/{n} * * * *")),
+        "minute" => Err(format!(
+            "{n} minutes does not map onto a minute field; give five cron fields"
+        )),
+        "hour" if n == 1 => Ok("0 * * * *".to_owned()),
+        "hour" if n == 24 => Ok("0 0 * * *".to_owned()),
+        "hour" if 24 % n == 0 => Ok(format!("0 */{n} * * *")),
+        "hour" => Err(format!(
+            "{n} hours does not divide the day (1, 2, 3, 4, 6, 8, 12, or 24 do); \
+             give five cron fields"
+        )),
+        _ => unreachable!("unit is one of second, minute, hour"),
+    })
 }
 
 /// A 5-field cron expression; every field is a list of atoms or ranges with
@@ -5171,9 +5214,9 @@ fn valid_cron_field(field: &str, min: u32, max: u32, names: &[&str]) -> bool {
     })
 }
 
-/// Whether a catalog failure carries this `SQLSTATE` (used to tell "the
-/// role cannot see `cron.job`" or "no `pg_cron` here" apart from a real
-/// fault on the schedule read).
+/// Whether a catalog failure carries this `SQLSTATE` (used to tell "no
+/// `pg_cron` here", "the grant or the extension predates the read surface",
+/// and a skewed install apart from a real fault on the schedule read).
 fn is_sql_state(error: &anyhow::Error, code: &str) -> bool {
     crate::db::sql_state(error)
         .as_ref()
@@ -5181,10 +5224,14 @@ fn is_sql_state(error: &anyhow::Error, code: &str) -> bool {
 }
 
 /// The Bundles tab, read from the catalog. The cadence column reads
-/// `pg_cron`'s job table over the writer connection (never the reader pool:
-/// `pg_cron` grants `SELECT` on `cron.job` to no `pgokf` role by default);
-/// when that read is impossible - no writer connection, no `pg_cron` in
-/// this database, or the grant missing - the column degrades to an unknown
+/// schedules through the extension's `pgokf.list_scheduled_refreshes`
+/// surface (over the writer connection), never `cron.job` directly:
+/// `pg_cron` grants `SELECT` on `cron.job` to `PUBLIC` but restricts rows
+/// to `username = current_user`, and `pgokf.schedule_refresh` registers
+/// every job under the extension owner's identity, so this app's login
+/// would read zero rows whatever its grants. When the read is impossible -
+/// no writer connection, no `pg_cron` in this database, a skewed extension
+/// version, or the grant missing - the column degrades to an unknown
 /// marker with a note rather than failing the page.
 async fn render_admin_bundles(
     app: &App,
@@ -5195,7 +5242,11 @@ async fn render_admin_bundles(
     let (schedules, cadence_note) = match &app.writer {
         Some(writer) => match writer.refresh_schedules().await {
             Ok(schedules) => (Some(schedules), None),
-            Err(error) if is_sql_state(&error, "42P01") => (
+            // The extension's read surface raises its curated 22023 when
+            // pg_cron is absent (exactly like schedule_refresh); 42P01
+            // covers the skewed case where the cron.job relation itself is
+            // gone. Either way: not a page failure, an explained unknown.
+            Err(error) if is_sql_state(&error, "22023") || is_sql_state(&error, "42P01") => (
                 None,
                 Some(
                     "pg_cron is not installed in this database, so no refresh cadence can be \
@@ -5206,10 +5257,23 @@ async fn render_admin_bundles(
             Err(error) if is_sql_state(&error, "42501") => (
                 None,
                 Some(
-                    "The writer connection cannot read pg_cron's job table, so the cadence \
-                     column is unknown: a database admin grants it USAGE on schema cron and \
-                     SELECT on cron.job. Setting a cadence additionally needs the writer role \
-                     to hold the pgokf_admin tier (pgokf.schedule_refresh is admin-only)."
+                    "The writer connection cannot execute pgokf.list_scheduled_refreshes, so \
+                     the cadence column is unknown: the extension grants it to pgokf_reader \
+                     (which the app's roles inherit), and a database admin can re-grant \
+                     EXECUTE after a partial restore. Setting a cadence additionally needs \
+                     the writer role to hold the pgokf_admin tier (pgokf.schedule_refresh is \
+                     admin-only)."
+                        .to_owned(),
+                ),
+            ),
+            // The read surface was added after the extension this database
+            // has installed: an explained unknown, never an Off.
+            Err(error) if is_sql_state(&error, "42883") => (
+                None,
+                Some(
+                    "The installed pgokf extension predates the schedule read surface \
+                     (pgokf.list_scheduled_refreshes), so the cadence column is unknown; \
+                     upgrade the extension to read and set refresh cadences here."
                         .to_owned(),
                 ),
             ),
@@ -8813,6 +8877,19 @@ mod tests {
     }
 
     #[test]
+    fn filters_encode_paths_per_segment_and_linkify_escapes() {
+        // Arrange & Act
+        let path = filters::encode_path("a b/c&d");
+        let link =
+            filters::linkify("see https://x.example/?a=1&b=2 <now>").expect("linkify renders");
+
+        // Assert
+        assert_eq!(path, "a%20b/c%26d");
+        assert!(link.contains("<a href=\"https://x.example/?a=1&amp;b=2\""));
+        assert!(link.contains("&lt;now&gt;"));
+    }
+
+    #[test]
     fn resolve_cadence_maps_the_presets_to_fixed_cron_expressions() {
         // Arrange & Act & Assert
         assert_eq!(resolve_cadence("off", "").ok().flatten(), None);
@@ -8905,6 +8982,42 @@ mod tests {
     }
 
     #[test]
+    fn interval_phrases_translate_to_cron_expressions_before_they_reach_pg_cron() {
+        // Arrange & Act & Assert: minute and hour phrases never reach the
+        // scheduler as phrases (its interval parser accepts only 1-59
+        // seconds); they become the equivalent 5-field cron expression,
+        // while a seconds phrase passes through as pg_cron's own syntax.
+        assert_eq!(
+            validate_cron_schedule("45 seconds").ok().as_deref(),
+            Some("45 seconds")
+        );
+        assert_eq!(
+            validate_cron_schedule("1 second").ok().as_deref(),
+            Some("1 seconds")
+        );
+        assert_eq!(
+            validate_cron_schedule("30 minutes").ok().as_deref(),
+            Some("*/30 * * * *")
+        );
+        assert_eq!(
+            validate_cron_schedule("1 minute").ok().as_deref(),
+            Some("*/1 * * * *")
+        );
+        assert_eq!(
+            validate_cron_schedule("1 hour").ok().as_deref(),
+            Some("0 * * * *")
+        );
+        assert_eq!(
+            validate_cron_schedule("6 hours").ok().as_deref(),
+            Some("0 */6 * * *")
+        );
+        assert_eq!(
+            validate_cron_schedule("24 hours").ok().as_deref(),
+            Some("0 0 * * *")
+        );
+    }
+
+    #[test]
     fn validate_cron_schedule_rejects_malformed_input() {
         // Arrange
         let oversized = "1 ".repeat(100);
@@ -8926,6 +9039,15 @@ mod tests {
             "0 * * * *; DROP TABLE cron.job",
             "0 minutes later",
             "0 weeks",
+            // Phrase-shaped input the scheduler could not honor as entered:
+            // pg_cron's interval parser takes 1-59 seconds only, and a
+            // minute/hour count that no 5-field expression expresses is
+            // refused rather than sent.
+            "0 seconds",
+            "60 seconds",
+            "90 minutes",
+            "5 hours",
+            "25 hours",
         ] {
             assert!(
                 validate_cron_schedule(bad_input).is_err(),

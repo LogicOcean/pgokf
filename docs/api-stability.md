@@ -21,7 +21,7 @@ the database. Complete comment coverage is a release gate (see
 
 ## The stable surface
 
-### Functions (66)
+### Functions (67)
 
 The installed extension defines one function more than this table: the
 internal `pgokf.bm25_hits` helper the optional BM25 backend calls. It is not
@@ -96,6 +96,7 @@ or disappear in any release.
 | `pgokf.replace_relationships(text, bigint, bigint, bigint, bigint, jsonb)` | `pgokf_writer` | Publish a source bundle's complete typed-relationship set, bound to the producer's live publication fence |
 | `pgokf.concept_relationship_neighbors(bigint, text, integer, text, text[], integer)` | `pgokf_reader` | Walk the current typed-relationship set cycle-safely (direction, optional type filter, hop and result ceilings) |
 | `pgokf.set_concept_embedding_cas(bigint, text, real[], text, text, text, text)` | `pgokf_writer` | Compare-and-set embedding write: stores only when the expected file hash still matches, so a superseded attempt cannot overwrite newer content |
+| `pgokf.list_scheduled_refreshes()` | `pgokf_reader` | List the scheduled bundle refreshes the extension manages, as `(bundle_id, schedule)` rows (`SECURITY DEFINER` over `cron.job`, which row-restricts an ordinary login to its own jobs while `schedule_refresh` registers them under the extension owner; tenant-confined) |
 
 Every row from `pgokf.register_bundle_content_with_context` down became stable
 in **0.3.0-dev**; the rows above it predate that release.

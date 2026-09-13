@@ -97,7 +97,8 @@ SQL API under schema pgokf (44 functions; exact signatures in sql-api.md):
   read/ops    list_bundles / bundle_info / get_config / list_sync_log /
               list_sync_changes / list_bundle_log / catalog_stats / health /
               stale_concepts / duplicate_concepts / get_concept_source /
-              get_skill / get_script / get_reference / version (reader tier)
+              get_skill / get_script / get_reference / list_scheduled_refreshes /
+              version (reader tier)
   admin       set_config / reset_config / purge_retired /
               schedule_refresh / unschedule_refresh /
               rebuild_search_index / rebuild_embedding_index / list_access_log /
@@ -445,7 +446,11 @@ reports per-bundle counts and sync recency, `health` returns a jsonb
 liveness/readiness document, `stale_concepts` lists concepts past their OKF
 `stale_after` instant, and `duplicate_concepts` reports identical content
 hashes across bundles. `schedule_refresh` / `unschedule_refresh` wire periodic
-`refresh_bundle` runs through `pg_cron` when that extension is installed. See
+`refresh_bundle` runs through `pg_cron` when that extension is installed, and
+`list_scheduled_refreshes` reads the registered schedules back (SECURITY
+DEFINER: `pg_cron` row-restricts `cron.job` to `username = current_user`, so
+only the extension owner - the identity `schedule_refresh` registers under -
+sees them). See
 [operations.md](operations.md).
 
 ## Data and API invariants

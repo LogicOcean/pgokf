@@ -164,14 +164,25 @@ semantically until the embedder rewrites them.
   now shows each bundle's producer-attested freshness state (the
   bundle-scope row of `pgokf.effective_freshness`) and offers a per-bundle
   refresh cadence - Off, a preset (every 15 minutes, hourly, every 6 hours,
-  daily), or a validated custom cron expression - backed by
+  daily), or a validated custom schedule - backed by
   `pgokf.schedule_refresh` / `unschedule_refresh` through the writer
-  connection. The current cadences are read from `pg_cron`'s job table by
-  the `pgokf_refresh_<id>` job-name convention (never over the reader pool:
-  `pg_cron` grants `SELECT` on `cron.job` to no `pgokf` role by default),
-  and the column degrades to an explained "unknown" when the read is
-  impossible. Scheduling a refresh re-reads content; it does not attest
-  freshness, and the page says so.
+  connection. The current cadences are read through the new
+  **`pgokf.list_scheduled_refreshes()`** (reader-tier, `SECURITY DEFINER`,
+  tenant-confined) rather than from `pg_cron`'s job table directly:
+  `pg_cron` grants `SELECT` on `cron.job` to `PUBLIC` but restricts row
+  visibility to `username = current_user`, and `schedule_refresh` -
+  `SECURITY DEFINER` - registers every job under the extension owner's
+  identity, so an app login reading `cron.job` itself would see none of
+  them and render running schedules as Off. The column degrades to an
+  explained "unknown" when the read is impossible. Custom accepts a
+  5-field cron expression or an interval: `1`-`59` seconds (passed through
+  as `pg_cron`'s own interval syntax, the only interval its parser
+  accepts), `1`-`59` minutes, or hours dividing the day - minute and hour
+  phrases are translated to the equivalent cron expression first (`30
+  minutes` becomes `*/30 * * * *`). `pg_cron`'s `@daily`-style nicknames
+  and last-day-of-month `$` are a deliberate exclusion and cannot
+  round-trip through Custom. Scheduling a refresh re-reads content; it
+  does not attest freshness, and the page says so.
 
 ## [0.2.0] - 2026-09-09
 

@@ -67,7 +67,7 @@ Everything works with stock PostgreSQL; these unlock more when installed, and de
 | `pgvector` | `concept_search_semantic`, `concept_search_hybrid`, embeddings | semantic errors clearly; hybrid falls back to lexical |
 | `pg_textsearch` (Tiger Data, PostgreSQL license, PG 17-18) | BM25 ranking (`search_backend = bm25`, the `auto` provider) | falls back to native FTS with a warning |
 | `pg_search` (ParadeDB, AGPL-3.0) | BM25 ranking (`bm25_provider = pg_search`) | falls back to native FTS with a warning |
-| `pg_cron` | `schedule_refresh` / `unschedule_refresh` | scheduling raises a clear "install pg_cron" error |
+| `pg_cron` | `schedule_refresh` / `unschedule_refresh` / `list_scheduled_refreshes` | scheduling and listing raise a clear "install pg_cron" error |
 
 ## Companion tools
 
