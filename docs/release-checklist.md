@@ -120,7 +120,9 @@ The extension ships forward-compatible upgrade scripts named
 script as `pgokf--<crate-version>.sql` and copies every upgrade script
 alongside it, so the update path is available without any manual step. The
 shipped chain runs one script per step from `0.1.0 → 0.1.1` through
-`0.1.16 → 0.2.0` (the current `default_version`).
+`0.1.16 → 0.2.0` and on into the point-versioned development line
+(`0.2.0 → 0.3.0-dev → 0.3.0-dev1 → …`; see "Development point versions" in
+[api-stability.md](api-stability.md)) to the current `default_version`.
 
 > **0.1.3 was a breaking pre-release re-model.** The `pgokf.concept_provenance`
 > shape changed to conform to OKF v0.2 (see [CHANGELOG.md](https://github.com/LogicOcean/pgokf/blob/main/CHANGELOG.md)).
@@ -189,6 +191,15 @@ ${PG_BIN}/pg_ctl -D "$DATA" -w stop -m fast && rm -rf /tmp/pgokf-rel
       the companion crates, the image tags in `deploy/compose/.env.example`
       and the `packaging/docker/*` / `docs/` examples, and `Cargo.lock`
       (`cargo update --workspace`).
+- [ ] **Collapse a point-versioned dev cycle.** Releasing out of a
+      `X.Y.0-devN` line means: the bump above lands the clean `X.Y.0`, and one
+      terminal `sql/pgokf--X.Y.0-devN--X.Y.0.sql` script (a no-op beyond the
+      standing `register_dump_relations()` call) ships so point-versioned
+      deployments reach the release through `ALTER EXTENSION pgokf UPDATE`
+      like any other step. Then prove the released chain converges with a
+      fresh install: upgrade a scratch cluster from the previous tag through
+      every dev step to `X.Y.0` and diff the object catalog against a fresh
+      `CREATE EXTENSION` at `X.Y.0`.
 - [ ] Move the `Unreleased` changelog section under the new version with the
       release date; add fresh compare/tag links.
 - [ ] Re-run gates 1–5 against the bumped version.
