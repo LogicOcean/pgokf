@@ -13,7 +13,9 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 **Generic producer capabilities: catalog generations, freshness, a durable
 change-event outbox, generation-bound typed relationships, and
 freshness-aware workspace plugins** (the schema step toward **0.3.0**;
-development builds ship as `0.3.0-dev`). Everything here is
+development builds ship as point versions `0.3.0-dev1`, `0.3.0-dev2`, ... -
+see "Development point versions" in
+[docs/api-stability.md](docs/api-stability.md)). Everything here is
 producer-neutral: the catalog manages generic bundles, concepts, paths, and
 opaque producer revisions only. `ALTER EXTENSION pgokf UPDATE` is additive
 and preserves all data; bundles that predate the upgrade start `stale`
@@ -23,6 +25,16 @@ semantically until the embedder rewrites them.
 
 ### Added
 
+- **Point-versioned development cycle.** The dev line now moves
+  `0.3.0-dev1`, `0.3.0-dev2`, ... so every mid-cycle SQL change has an
+  `ALTER EXTENSION pgokf UPDATE` target instead of a hand-applied patch. The
+  first step, `0.3.0-dev → 0.3.0-dev1`, receipts the objects that entered
+  the cycle after the first dev deployments - the
+  `pgokf.list_scheduled_refreshes` read surface, the registry reader grant,
+  and the `pgokf.registry_set_status` / `pgokf.registry_set_poll_interval`
+  writers - idempotently, adopting any hand-applied copies into extension
+  membership, so a `0.3.0-dev` installation of any vintage reaches exact
+  `0.3.0-dev1` parity through the normal update machinery.
 - **Catalog generations and publication fences.** Every accepted refresh,
   content resync, and bundle state mutation bumps a monotonic
   `pgokf.bundles.catalog_generation` under the bundle's advisory lock.

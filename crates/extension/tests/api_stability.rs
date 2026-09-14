@@ -418,6 +418,205 @@ fn every_upgrade_script_is_forward_compatible() {
 /// every script since is held to the rule.
 const RESHAPED_DELIBERATELY: &[&str] = &["pgokf--0.1.2--0.1.3.sql"];
 
+/// The `default_version` declared in `pgokf.control`.
+fn control_default_version() -> String {
+    let control = read_to_string(&crate_dir().join("pgokf.control"));
+    for line in control.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if let Some(value) = line.strip_prefix("default_version") {
+            let value = value.trim().strip_prefix('=').unwrap_or(value).trim();
+            return value.trim_matches('\'').trim_matches('"').to_string();
+        }
+    }
+    panic!("pgokf.control must declare a default_version");
+}
+
+/// Every `(from, to)` edge a shipped upgrade script declares, parsed out of
+/// the `pgokf--<from>--<to>.sql` file names.
+fn upgrade_edges() -> Vec<(String, String)> {
+    let sql = crate_dir().join("sql");
+    let mut edges: Vec<(String, String)> = std::fs::read_dir(&sql)
+        .expect("sql directory is readable")
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter_map(|path| {
+            let name = path.file_name()?.to_str()?.to_string();
+            let stem = name.strip_prefix("pgokf--")?.strip_suffix(".sql")?;
+            let (from, to) = stem.split_once("--")?;
+            Some((from.to_string(), to.to_string()))
+        })
+        .collect();
+    edges.sort();
+    edges
+}
+
+/// The control file's `default_version` is the version pgrx names the
+/// generated install script (`pgokf--<default_version>.sql`) after, and
+/// `cargo pgrx package` refuses to build when it disagrees with the crate
+/// version. Failing here, at source level, keeps the two pins from drifting
+/// between packaging runs.
+#[test]
+fn default_version_matches_the_crate_version() {
+    // Arrange
+    let default_version = control_default_version();
+
+    // Act / Assert
+    assert_eq!(
+        default_version,
+        env!("CARGO_PKG_VERSION"),
+        "pgokf.control's default_version ({default_version}) does not match the crate version \
+         ({}); bump them together so the generated install script \
+         pgokf--{default_version}.sql matches the packaged extension",
+        env!("CARGO_PKG_VERSION"),
+    );
+}
+
+/// A development-cycle default version is a point version: `MAJOR.MINOR.PATCH`
+/// optionally followed by `-devN` with N >= 1 (`0.3.0-dev1`, `0.3.0-dev2`,
+/// ...). PostgreSQL treats extension version names as opaque strings and
+/// finds update paths by exact `pgokf--<from>--<to>.sql` file-name matching,
+/// so the suffix needs no ordering semantics - but the convention keeps the
+/// chain readable and collapses into the clean tag at finalization.
+#[test]
+fn default_version_follows_the_point_version_convention() {
+    // Arrange
+    let default_version = control_default_version();
+
+    // Act / Assert
+    let (core, dev) = match default_version.split_once('-') {
+        Some((core, suffix)) => (core, Some(suffix)),
+        None => (default_version.as_str(), None),
+    };
+    let parts: Vec<&str> = core.split('.').collect();
+    assert!(
+        parts.len() == 3 && parts.iter().all(|part| part.parse::<u32>().is_ok()),
+        "default_version {default_version} is not MAJOR.MINOR.PATCH[-devN]",
+    );
+    if let Some(suffix) = dev {
+        let number = suffix
+            .strip_prefix("dev")
+            .unwrap_or_else(|| panic!("default_version {default_version}: pre-release suffix must be devN"));
+        assert!(
+            number.parse::<u32>().is_ok_and(|n| n >= 1),
+            "default_version {default_version}: dev point numbers start at 1",
+        );
+    }
+}
+
+/// The shipped upgrade scripts must form a walkable chain from the first
+/// released version to the current `default_version`, and the newest step's
+/// target must BE the `default_version`: a change that bumps the dev point
+/// version without shipping its `<from>--<to>.sql` script (or ships one
+/// aiming somewhere else) leaves live deployments with no update path. This
+/// is the forward discipline of the dev point-version convention, enforced.
+#[test]
+fn upgrade_chain_reaches_the_default_version() {
+    // Arrange
+    let default_version = control_default_version();
+    let edges = upgrade_edges();
+    assert!(
+        !edges.is_empty(),
+        "expected the shipped upgrade scripts, found none",
+    );
+
+    // Act: breadth-first walk from the chain's root.
+    let root = "0.1.0";
+    let mut visited = std::collections::HashSet::from([root.to_string()]);
+    let mut frontier = std::collections::VecDeque::from([root.to_string()]);
+    while let Some(version) = frontier.pop_front() {
+        for (from, to) in &edges {
+            if *from == version && visited.insert(to.clone()) {
+                frontier.push_back(to.clone());
+            }
+        }
+    }
+
+    // Assert
+    assert!(
+        visited.contains(&default_version),
+        "no upgrade-script path leads from {root} to default_version {default_version}; \
+         every deployment must reach it through ALTER EXTENSION pgokf UPDATE (edges: {edges:?})",
+    );
+    assert!(
+        edges.iter().any(|(_, to)| *to == default_version),
+        "no upgrade script targets default_version {default_version}; the newest step of the \
+         chain must ship as pgokf--<previous>--{default_version}.sql",
+    );
+}
+
+/// The `0.3.0-dev -> 0.3.0-dev1` script receipts the objects that entered the
+/// dev cycle after the first `0.3.0-dev` deployments: the registry reader
+/// grant, the two registry writers, and the scheduled-refresh reader. Because
+/// field installations of `0.3.0-dev` exist both with and without them (the
+/// `0.2.0 -> 0.3.0-dev` script gained them mid-cycle, and some were applied
+/// by hand), every statement must be idempotent, and hand-applied copies must
+/// be adopted into extension membership.
+#[test]
+fn dev1_upgrade_script_replays_the_dev_cycle_delta() {
+    // Arrange
+    let script = read_to_string(
+        &crate_dir()
+            .join("sql")
+            .join("pgokf--0.3.0-dev--0.3.0-dev1.sql"),
+    );
+
+    // Act / Assert
+    let expected = [
+        "CREATE OR REPLACE FUNCTION pgokf.list_scheduled_refreshes()",
+        "CREATE OR REPLACE FUNCTION pgokf.registry_set_status(repository_id uuid, status text)",
+        "CREATE OR REPLACE FUNCTION pgokf.registry_set_poll_interval(repository_id uuid, poll_interval_seconds integer)",
+        "DO $registry_reader_grant$",
+        "REVOKE ALL ON FUNCTION pgokf.list_scheduled_refreshes() FROM PUBLIC;",
+        "GRANT EXECUTE ON FUNCTION pgokf.list_scheduled_refreshes() TO pgokf_reader;",
+        "COMMENT ON FUNCTION pgokf.list_scheduled_refreshes()",
+        "REVOKE ALL ON FUNCTION pgokf.registry_set_status(uuid, text) FROM PUBLIC;",
+        "GRANT EXECUTE ON FUNCTION pgokf.registry_set_status(uuid, text) TO pgokf_admin;",
+        "COMMENT ON FUNCTION pgokf.registry_set_status(uuid, text)",
+        "REVOKE ALL ON FUNCTION pgokf.registry_set_poll_interval(uuid, integer) FROM PUBLIC;",
+        "GRANT EXECUTE ON FUNCTION pgokf.registry_set_poll_interval(uuid, integer) TO pgokf_admin;",
+        "COMMENT ON FUNCTION pgokf.registry_set_poll_interval(uuid, integer)",
+        "ALTER EXTENSION pgokf ADD FUNCTION",
+        "SELECT pgokf_private.register_dump_relations();",
+    ];
+    for needle in expected {
+        assert!(
+            script.contains(needle),
+            "pgokf--0.3.0-dev--0.3.0-dev1.sql is missing `{needle}`; the dev1 step must \
+             receipt the mid-cycle objects idempotently and adopt hand-applied copies \
+             into extension membership",
+        );
+    }
+
+    // Idempotency: no bare CREATE for the replayed functions - a late or
+    // hand-patched 0.3.0-dev already holds them, and a plain CREATE would
+    // fail the update outright.
+    for name in [
+        "pgokf.list_scheduled_refreshes",
+        "pgokf.registry_set_status",
+        "pgokf.registry_set_poll_interval",
+    ] {
+        let bare = format!("CREATE FUNCTION {name}");
+        assert!(
+            !script.contains(&bare),
+            "pgokf--0.3.0-dev--0.3.0-dev1.sql creates {name} non-idempotently; use CREATE OR REPLACE",
+        );
+    }
+
+    // Ordering is load-bearing: PostgreSQL refuses CREATE OR REPLACE on an
+    // object the extension does not own during an update, so the
+    // membership-adoption DO block must precede the first re-creation.
+    let adopt = script
+        .find("DO $dev1_membership$")
+        .expect("membership adoption block present");
+    let recreate = script
+        .find("CREATE OR REPLACE FUNCTION")
+        .expect("idempotent re-creation present");
+    assert!(
+        adopt < recreate,
+        "pgokf--0.3.0-dev--0.3.0-dev1.sql must adopt hand-applied copies into the extension \
+         (DO $dev1_membership$) before any CREATE OR REPLACE, or the update is refused",
+    );
+}
+
 /// Whether one normalized, upper-cased statement would lose data.
 ///
 /// `ON DELETE CASCADE` is a foreign-key clause, and dropping a `CHECK`

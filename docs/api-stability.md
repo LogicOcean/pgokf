@@ -101,7 +101,7 @@ or disappear in any release.
 | `pgokf.registry_set_poll_interval(uuid, integer)` | `pgokf_admin` | Set one registered repository's poll interval in seconds (5-86400) on the same external registry (same runtime-only coupling, `22023` behavior, and tenant confinement) |
 
 Every row from `pgokf.register_bundle_content_with_context` down became stable
-in **0.3.0-dev**; the rows above it predate that release.
+in the **0.3.0 development cycle**; the rows above it predate that cycle.
 
 The function **name, schema, argument types, argument order, and result shape**
 are all part of the contract. Default values that let callers omit trailing
@@ -120,7 +120,7 @@ working.
 `pgokf.freshness_dependency_info`, `pgokf.publication_fence_info`,
 `pgokf.claimed_change_event`, `pgokf.catalog_change_event_info`,
 `pgokf.concept_search_fresh_result`, `pgokf.relationship_publication_info`,
-`pgokf.relationship_neighbor` (the last seven became stable in **0.3.0-dev**).
+`pgokf.relationship_neighbor` (the last seven became stable in the **0.3.0 development cycle**).
 
 The set of columns, their names, and their types are stable. New columns are
 **not** added to an existing composite type in a compatible release, because
@@ -162,7 +162,7 @@ configuration and run the file-writing exports. Each tier inherits the one
 below (`pgokf_admin` → `pgokf_writer` → `pgokf_reader`). These are cluster-wide
 roles and survive `DROP EXTENSION`.
 
-Since **0.3.0-dev** a fourth role, `pgokf_dispatcher`, stands deliberately
+Since the **0.3.0 development cycle** a fourth role, `pgokf_dispatcher`, stands deliberately
 **outside** the ladder: it inherits nothing and is inherited by nothing. It is
 the sole claim/acknowledge role for the catalog-change outbox
 (`pgokf.claim_catalog_change_events`, `pgokf.ack_catalog_change_event`) and
@@ -175,7 +175,7 @@ holds no search or ingestion rights; admins inspect the outbox through
 `pgokf.max_frontmatter_bytes`, `pgokf.max_graph_hops`, `pgokf.log_level`, and
 `pgokf.tenant` (the `USERSET`
 multi-tenant policy selector; empty by default, which preserves the
-pre-multi-tenancy see-all behavior), plus - since **0.3.0-dev** -
+pre-multi-tenancy see-all behavior), plus - since the **0.3.0 development cycle** -
 `pgokf.sync_context` (the `USERSET` change-provenance context a producer
 session sets before a sync; the committed catalog-change event carries it).
 The **names** and their meaning are
@@ -210,6 +210,50 @@ a `Changed` or `Removed` heading. Reaching `1.0.0` is the point at which the
 MAJOR/MINOR/PATCH rules above become binding guarantees, and it is a deliberate
 human release decision - not an automated version bump.
 
+### Development point versions
+
+Between releases the working line is **point-versioned**: the cycle toward
+`0.3.0` ships as `0.3.0-dev1`, `0.3.0-dev2`, and so on, with
+`pgokf.control`'s `default_version` and the workspace crate version moving
+together on every step. The reason is operational: deployments track
+development builds, and a flat `0.3.0-dev` gives SQL objects added mid-cycle
+no `ALTER EXTENSION pgokf UPDATE` target - they would have to be applied by
+hand, outside the extension's receipts. With point versions, every SQL change
+rides its own `pgokf--0.3.0-devN--0.3.0-dev<N+1>.sql` script through the
+normal update machinery.
+
+The naming needs no special dispensation from PostgreSQL: extension version
+names are **opaque strings** to the update machinery. `ALTER EXTENSION ...
+UPDATE` finds its path by exact `pgokf--<from>--<to>.sql` file-name matching
+(a graph walk over the shipped scripts, with the control file's
+`default_version` - itself a string, never a comparison - as the goal of a
+bare `UPDATE`), so `0.3.0-dev` -> `0.3.0-dev1` resolves like any other edge
+once the script file exists. pgrx accepts the suffix in both the control file
+and the Cargo package version (a SemVer pre-release identifier), and the
+`api_stability` suite locks the convention's shape (`MAJOR.MINOR.PATCH-devN`,
+N starting at 1).
+
+**Forward discipline, test-enforced.** Any change that adds or alters a
+shipped SQL object must, in the same change: bump the dev point version
+(control file and workspace `Cargo.toml` together) and ship the
+`devN -> devN+1` upgrade script whose target equals the new
+`default_version`. `tests/api_stability.rs` fails the build otherwise: it
+requires the control version to match the crate version, the script chain to
+walk from `0.1.0` to the `default_version`, and the newest step to name it.
+Where a mid-cycle object may already exist in the field (deployed from an
+earlier or later point of the cycle, or applied by hand), the step's
+statements must be idempotent - `CREATE OR REPLACE`, guarded `DO` blocks -
+and must adopt hand-applied copies into extension membership.
+
+**Collapse at finalization.** When the cycle closes, `default_version`
+becomes the clean `0.3.0`, the install script regenerates under that name,
+and one terminal `pgokf--0.3.0-devN--0.3.0.sql` script (a no-op beyond the
+standing `register_dump_relations()` call) lets point-versioned deployments
+reach the release through the same machinery. The released chain from the
+previous tag then runs `... -> 0.2.0 -> 0.3.0-dev1 -> ... -> 0.3.0`; the
+fresh-install-vs-upgrade parity harness proves the two routes converge
+object-by-object.
+
 ## Deprecation process
 
 Nothing on the stable surface is removed abruptly. The process is:
@@ -237,7 +281,7 @@ disappear in any release, and callers must not depend on them:
   administrator-only state managed exclusively through `pgokf.set_config` /
   `pgokf.reset_config` / `pgokf.get_config`. Read and write it only through
   those functions.
-- **The internal `pgokf.*` state tables behind the 0.3.0-dev producer surface** -
+- **The internal `pgokf.*` state tables behind the 0.3.0-cycle producer surface** -
   `pgokf.bundle_freshness`, `pgokf.concept_freshness`,
   `pgokf.freshness_dependency`, `pgokf.publication_fence`,
   `pgokf.catalog_change_event`, `pgokf.relationship_publication`, and
