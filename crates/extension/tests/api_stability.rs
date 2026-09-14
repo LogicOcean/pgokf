@@ -502,12 +502,27 @@ fn default_version_follows_the_point_version_convention() {
     }
 }
 
+/// The first released version: the root every deployment's update path
+/// starts from.
+const CHAIN_ROOT: &str = "0.1.0";
+
+/// Terminal versions of the upgrade graph tolerated besides
+/// `default_version`: historical branches that were deliberately forked and
+/// frozen. Empty today - the shipped chain is a single line from `0.1.0` to
+/// the default - so any second terminal means a shipped script diverges from
+/// the supported update path and must be justified here explicitly.
+const PERMITTED_BRANCH_TERMINALS: &[&str] = &[];
+
 /// The shipped upgrade scripts must form a walkable chain from the first
-/// released version to the current `default_version`, and the newest step's
-/// target must BE the `default_version`: a change that bumps the dev point
-/// version without shipping its `<from>--<to>.sql` script (or ships one
-/// aiming somewhere else) leaves live deployments with no update path. This
-/// is the forward discipline of the dev point-version convention, enforced.
+/// released version to the current `default_version`, and `default_version`
+/// must be the chain's TERMINAL node: no script may name it as a source. A
+/// change that ships a `<from>--<to>.sql` step without bumping
+/// `default_version` to that step's target leaves bare
+/// `ALTER EXTENSION pgokf UPDATE` aiming at the old terminal, so the new
+/// script never runs. This is the forward discipline of the dev
+/// point-version convention, enforced. Version names are opaque to
+/// PostgreSQL, so nothing here compares strings - the graph edges carry the
+/// ordering.
 #[test]
 fn upgrade_chain_reaches_the_default_version() {
     // Arrange
@@ -518,28 +533,101 @@ fn upgrade_chain_reaches_the_default_version() {
         "expected the shipped upgrade scripts, found none",
     );
 
-    // Act: breadth-first walk from the chain's root.
-    let root = "0.1.0";
+    // Act / Assert
+    if let Err(reason) = check_upgrade_chain_terminates_at(&edges, CHAIN_ROOT, &default_version) {
+        panic!("{reason}");
+    }
+}
+
+/// Validate the upgrade graph structurally: `default_version` must be
+/// reachable from `root` and must be the graph's only terminal (a version
+/// with no outgoing upgrade edges), up to [`PERMITTED_BRANCH_TERMINALS`].
+fn check_upgrade_chain_terminates_at(
+    edges: &[(String, String)],
+    root: &str,
+    default_version: &str,
+) -> Result<(), String> {
+    // Breadth-first walk from the chain's root.
     let mut visited = std::collections::HashSet::from([root.to_string()]);
     let mut frontier = std::collections::VecDeque::from([root.to_string()]);
     while let Some(version) = frontier.pop_front() {
-        for (from, to) in &edges {
+        for (from, to) in edges {
             if *from == version && visited.insert(to.clone()) {
                 frontier.push_back(to.clone());
             }
         }
     }
 
+    if !visited.contains(default_version) {
+        return Err(format!(
+            "no upgrade-script path leads from {root} to default_version {default_version}; \
+             every deployment must reach it through ALTER EXTENSION pgokf UPDATE (edges: {edges:?})"
+        ));
+    }
+
+    // A script whose source IS the default means a new step shipped without
+    // bumping default_version: bare UPDATE still targets the old terminal
+    // and never runs the new script.
+    if let Some((_, to)) = edges.iter().find(|(from, _)| from == default_version) {
+        return Err(format!(
+            "default_version {default_version} is the source of an upgrade script \
+             (pgokf--{default_version}--{to}.sql); the step shipped without bumping \
+             default_version, so bare ALTER EXTENSION pgokf UPDATE never runs it"
+        ));
+    }
+
+    // Every version with no outgoing edge must be the default (or an
+    // explicitly permitted historical branch). A terminal anywhere else
+    // means a shipped step leads somewhere bare UPDATE does not.
+    let sources: std::collections::HashSet<&str> =
+        edges.iter().map(|(from, _)| from.as_str()).collect();
+    let mut terminals: Vec<&str> = edges
+        .iter()
+        .flat_map(|(from, to)| [from.as_str(), to.as_str()])
+        .filter(|version| !sources.contains(version))
+        .collect();
+    terminals.sort_unstable();
+    terminals.dedup();
+    for terminal in terminals {
+        if terminal != default_version && !PERMITTED_BRANCH_TERMINALS.contains(&terminal) {
+            return Err(format!(
+                "upgrade chain terminates at {terminal}, not default_version {default_version}; \
+                 the newest step's target must BE the default (ship \
+                 pgokf--<previous>--{default_version}.sql), or list a deliberate historical \
+                 branch in PERMITTED_BRANCH_TERMINALS",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// The append-without-bump negative case, locked as a fixture: shipping a
+/// valid `dev1 -> dev2` script while `default_version` stays `dev1` must be
+/// rejected, because bare `ALTER EXTENSION pgokf UPDATE` would still target
+/// `dev1` and silently never run the new script.
+#[test]
+fn appended_step_without_default_bump_is_rejected() {
+    // Arrange: a valid chain to dev1, then a hypothetical dev1 -> dev2 step
+    // appended with the default left at dev1.
+    let valid: Vec<(String, String)> = vec![("0.1.0".to_string(), "0.3.0-dev1".to_string())];
+    let mut appended = valid.clone();
+    appended.push(("0.3.0-dev1".to_string(), "0.3.0-dev2".to_string()));
+
+    // Act
+    let control_ok = check_upgrade_chain_terminates_at(&valid, CHAIN_ROOT, "0.3.0-dev1");
+    let result = check_upgrade_chain_terminates_at(&appended, CHAIN_ROOT, "0.3.0-dev1");
+
     // Assert
     assert!(
-        visited.contains(&default_version),
-        "no upgrade-script path leads from {root} to default_version {default_version}; \
-         every deployment must reach it through ALTER EXTENSION pgokf UPDATE (edges: {edges:?})",
+        control_ok.is_ok(),
+        "the un-appended chain must validate, so the rejection below isolates the missing bump: {control_ok:?}",
     );
+    let reason =
+        result.expect_err("an appended step without a default_version bump must be rejected");
     assert!(
-        edges.iter().any(|(_, to)| *to == default_version),
-        "no upgrade script targets default_version {default_version}; the newest step of the \
-         chain must ship as pgokf--<previous>--{default_version}.sql",
+        reason.contains("without bumping default_version"),
+        "the rejection must name the missing bump, got: {reason}",
     );
 }
 

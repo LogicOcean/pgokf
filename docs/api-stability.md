@@ -239,7 +239,14 @@ shipped SQL object must, in the same change: bump the dev point version
 `devN -> devN+1` upgrade script whose target equals the new
 `default_version`. `tests/api_stability.rs` fails the build otherwise: it
 requires the control version to match the crate version, the script chain to
-walk from `0.1.0` to the `default_version`, and the newest step to name it.
+walk from `0.1.0` to the `default_version`, and the `default_version` to be
+the chain's unique terminal node - no script may name it as a source, so a
+step shipped without the default bump (a `dev1 -> dev2` script while the
+default stays `dev1`) fails the suite, because bare `ALTER EXTENSION pgokf
+UPDATE` would still target the old terminal and never run it. The check
+walks the `pgokf--<from>--<to>.sql` edges as a graph and never compares
+version strings; a deliberate historical branch, should one ever ship, must
+be listed explicitly in `PERMITTED_BRANCH_TERMINALS`.
 Where a mid-cycle object may already exist in the field (deployed from an
 earlier or later point of the cycle, or applied by hand), the step's
 statements must be idempotent - `CREATE OR REPLACE`, guarded `DO` blocks -
