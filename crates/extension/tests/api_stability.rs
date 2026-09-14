@@ -492,9 +492,9 @@ fn default_version_follows_the_point_version_convention() {
         "default_version {default_version} is not MAJOR.MINOR.PATCH[-devN]",
     );
     if let Some(suffix) = dev {
-        let number = suffix
-            .strip_prefix("dev")
-            .unwrap_or_else(|| panic!("default_version {default_version}: pre-release suffix must be devN"));
+        let number = suffix.strip_prefix("dev").unwrap_or_else(|| {
+            panic!("default_version {default_version}: pre-release suffix must be devN")
+        });
         assert!(
             number.parse::<u32>().is_ok_and(|n| n >= 1),
             "default_version {default_version}: dev point numbers start at 1",
