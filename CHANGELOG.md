@@ -215,6 +215,20 @@ semantically until the embedder rewrites them.
   producer that does not answer surfaces an honest "unavailable" rather
   than a silent success.
 
+### Changed
+
+- **The `replace_relationships` row ceiling is raised to 50000 and is now
+  configurable.** One call's `rows` argument was bounded by a compile-time
+  hard limit of 10000; the bound is now the `pgokf.max_relationship_rows`
+  GUC (default `50000`, accepted range `1 .. 1000000`, `SIGHUP` context
+  like the extension's other resource ceilings), so an operator can raise
+  it as a producer's relationship set grows without rebuilding the
+  extension. The limit still bounds only a single call's validation and
+  jsonb parse - inserts are batched beneath it - and one row past the
+  effective limit is refused with `22023`, naming the limit. Ships as
+  `0.3.0-dev2`: the `0.3.0-dev1 → 0.3.0-dev2` upgrade script re-applies
+  the function's `COMMENT ON` text, and the GUC registers in `_PG_init`.
+
 ## [0.2.0] - 2026-09-09
 
 **Skill packages are catalog content, and a web UI to work with them.** A

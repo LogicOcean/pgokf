@@ -169,10 +169,11 @@ the sole claim/acknowledge role for the catalog-change outbox
 holds no search or ingestion rights; admins inspect the outbox through
 `pgokf.list_catalog_change_events`.
 
-### GUC names (8)
+### GUC names (9)
 
 `pgokf.max_file_bytes`, `pgokf.max_bundle_files`, `pgokf.max_bundle_bytes`,
-`pgokf.max_frontmatter_bytes`, `pgokf.max_graph_hops`, `pgokf.log_level`, and
+`pgokf.max_frontmatter_bytes`, `pgokf.max_graph_hops`,
+`pgokf.max_relationship_rows`, `pgokf.log_level`, and
 `pgokf.tenant` (the `USERSET`
 multi-tenant policy selector; empty by default, which preserves the
 pre-multi-tenancy see-all behavior), plus - since the **0.3.0 development cycle** -

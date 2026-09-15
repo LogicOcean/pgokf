@@ -43,7 +43,7 @@ use crate::graph::{GraphEdge, GraphNode};
 use crate::links::Resolver;
 use crate::mcp_tokens::{McpToken, McpTokens, Minted};
 use crate::oidc::OidcAuth;
-use crate::producer::{CredentialInfo, ProducerError};
+use crate::producer::{CredentialInfo, ProducerError, RegistrationReceipt};
 use crate::provider::{ProviderDraft, SecretChange};
 use crate::provider_settings::{ProviderKind, ProviderSettings};
 use crate::store::DocumentStore;
@@ -173,6 +173,10 @@ pub(crate) fn router(app: Shared) -> Router {
         .route(
             "/admin/registry",
             get(admin_registry_page).post(admin_registry),
+        )
+        .route(
+            "/admin/registry/{id}",
+            get(admin_repository_page).post(admin_repository),
         )
         .route("/admin/settings", get(admin_settings_page))
         .route("/review", get(review_page))
@@ -1548,9 +1552,10 @@ impl AdminTab {
             AdminTab::Bundles => "The bundles the catalog holds, and what to do with them.",
             AdminTab::Registry => {
                 "The repositories the registry producer service reconciles, read from the \
-                 catalog's database. Credentials are set and removed through the producer's \
-                 admin API: it reports a credential's label, type, and last four characters, \
-                 and the secret itself is never stored here or shown."
+                 catalog's database. Registering a repository and managing its fetch \
+                 credential run through the producer's admin API: it reports a credential's \
+                 label, type, and last four characters, and the secret itself is never \
+                 stored here or shown."
             }
             AdminTab::Settings => {
                 "The catalog's own settings, read from pgokf.get_config(); a database admin \
@@ -1787,8 +1792,9 @@ struct AdminRegistryPage {
     /// Whether pause/resume and poll-interval writes are possible (a
     /// writer connection is on).
     writable: bool,
-    /// Whether the credential controls are offered (a producer admin API
-    /// is configured).
+    /// Whether the registration form is offered and the credential column
+    /// reflects the producer's answers (a producer admin API is
+    /// configured).
     producer_configured: bool,
     /// Whether the credential column reflects the producer's answers; when
     /// not, `credential_note` says why and the cells show an unknown
@@ -1798,7 +1804,9 @@ struct AdminRegistryPage {
 }
 
 /// One row of the Registry tab's table: a registered repository with its
-/// credential state as the producer reports it.
+/// credential state as the producer reports it. The project and remote
+/// cells link to the repository's own page (`/admin/registry/{id}`); the
+/// table itself carries no credential controls, only the status pill.
 pub(crate) struct RegistryRow {
     /// The repository id (a UUID, as text) the forms post back.
     pub id: String,
@@ -1887,6 +1895,71 @@ impl RegistryRow {
             poll_interval_seconds: repo.poll_interval_seconds,
             last_indexed: short(repo.last_indexed_commit.as_deref()),
             last_published: short(repo.last_published_commit.as_deref()),
+            generation: repo
+                .last_published_generation
+                .map_or_else(|| "\u{2014}".to_owned(), |g| g.to_string()),
+            credential,
+        }
+    }
+}
+
+#[derive(Template)]
+#[template(path = "admin/repository.html")]
+struct AdminRepositoryPage {
+    shell: Shell,
+    admin: AdminShell,
+    repo: RepositoryDetailView,
+    /// Whether the credential controls are offered (a producer admin API
+    /// is configured).
+    producer_configured: bool,
+    /// Whether the credential section reflects the producer's answer; when
+    /// not, `credential_note` says why and the section shows an unknown
+    /// marker instead of state.
+    credentials_known: bool,
+    credential_note: Option<String>,
+    /// Where the producer stages the worktree, as its operator API reports
+    /// it (the database reader grant deliberately withholds the column);
+    /// `None` while the producer has not answered.
+    checkout_path: Option<String>,
+}
+
+/// One registered repository as its own page shows it: the full registry
+/// row (commit hashes unshortened, unlike the table) plus its credential
+/// state as the producer reports it.
+pub(crate) struct RepositoryDetailView {
+    /// The repository id (a UUID, as text) the credential forms post to.
+    pub id: String,
+    pub project: String,
+    pub key: String,
+    pub branch: String,
+    /// The canonical remote URL, or the local-checkout marker.
+    pub remote: String,
+    pub status: String,
+    pub paused: bool,
+    pub poll_interval_seconds: i32,
+    pub last_indexed: String,
+    pub last_published: String,
+    pub generation: String,
+    pub credential: CredentialCell,
+}
+
+impl RepositoryDetailView {
+    fn new(repo: RegistryRepository, credential: CredentialCell) -> Self {
+        Self {
+            id: repo.id,
+            project: repo.project,
+            key: repo.key,
+            branch: repo.branch,
+            remote: repo.remote.unwrap_or_else(|| "local checkout".to_owned()),
+            paused: repo.status == "paused",
+            status: repo.status,
+            poll_interval_seconds: repo.poll_interval_seconds,
+            last_indexed: repo
+                .last_indexed_commit
+                .unwrap_or_else(|| "never".to_owned()),
+            last_published: repo
+                .last_published_commit
+                .unwrap_or_else(|| "never".to_owned()),
             generation: repo
                 .last_published_generation
                 .map_or_else(|| "\u{2014}".to_owned(), |g| g.to_string()),
@@ -5957,23 +6030,19 @@ async fn registry_write_failed(
     Err(AppError::from(error))
 }
 
-/// The page-side answer to a failed producer call: an outage renders the
-/// tab with a 503, a refusal with a 400, each saying what happened.
-async fn registry_producer_failed(
-    app: &App,
-    session: &Session,
-    error: ProducerError,
-) -> PageResult {
-    let unavailable = error.is_unavailable();
-    registry_refused(app, session, error.message(), unavailable).await
-}
-
 /// The credential types the producer's admin API accepts (`ssh_key` is
 /// deliberately not offered: the producer refuses it with a typed 400).
 const CREDENTIAL_KINDS: [&str; 2] = ["github_pat", "http_basic"];
 
 /// The producer's label bound (`CredentialPutRequest.label`, max 200).
 const MAX_CREDENTIAL_LABEL: usize = 200;
+
+/// The producer's registration bounds (`normalize_registration`): the
+/// registry columns cap the branch and the project name at 255; the
+/// checkout path is TEXT with a 1024 sanity cap.
+const MAX_BRANCH: usize = 255;
+const MAX_PROJECT_NAME: usize = 255;
+const MAX_CHECKOUT_PATH: usize = 1024;
 
 /// The poll-interval bounds `pgokf.registry_set_poll_interval` enforces;
 /// checked here first so a bad value never reaches the database.
@@ -5987,6 +6056,41 @@ struct AdminRegistryForm {
     /// The repository id (a UUID) the action is on.
     #[serde(default)]
     id: String,
+    /// `register`: the https remote URL (never with embedded credentials).
+    #[serde(default)]
+    remote: String,
+    /// `register`: the default branch (`main` when left blank).
+    #[serde(default)]
+    branch: String,
+    /// `register`: the project name.
+    #[serde(default)]
+    project: String,
+    /// `register`: where the producer stages its worktree.
+    #[serde(default)]
+    checkout_path: String,
+    /// `register`: the optional first credential's label.
+    #[serde(default)]
+    label: String,
+    /// `register`: the optional credential's type (one of
+    /// `CREDENTIAL_KINDS`).
+    #[serde(default)]
+    kind: String,
+    /// `register`: the optional credential's secret. It transits this
+    /// request once, into the producer call; it is never stored, logged,
+    /// or rendered here.
+    #[serde(default)]
+    secret: String,
+    /// `poll`: the new interval, in seconds.
+    #[serde(default)]
+    poll_interval: String,
+}
+
+/// The repository page's form: the credential actions that used to sit
+/// inline in the Registry table live on the repository's own page now.
+#[derive(Debug, Deserialize)]
+struct AdminRepositoryForm {
+    #[serde(default)]
+    action: String,
     /// `set-credential`: the label.
     #[serde(default)]
     label: String,
@@ -5997,9 +6101,6 @@ struct AdminRegistryForm {
     /// the producer call; it is never stored, logged, or rendered here.
     #[serde(default)]
     secret: String,
-    /// `poll`: the new interval, in seconds.
-    #[serde(default)]
-    poll_interval: String,
 }
 
 /// The producer admin API, or the honest 503 a credential action answers
@@ -6104,10 +6205,31 @@ async fn require_visible_repository(
     match registry_repository_visible(app, id).await {
         Ok(true) => Ok(()),
         Ok(false) => {
-            Err(registry_refused(app, session, REPOSITORY_NOT_VISIBLE.to_owned(), false).await)
+            Err(
+                repository_refused(app, session, id, REPOSITORY_NOT_VISIBLE.to_owned(), false)
+                    .await,
+            )
         }
         Err(error) => Err(Err(error)),
     }
+}
+
+/// Validate one credential form (label, type, secret) against the
+/// producer's bounds, so an invalid one stops before anything crosses to
+/// the producer. The secret passes byte-for-byte as submitted (leading
+/// and trailing whitespace may be significant); only an all-whitespace
+/// one is refused, since the producer requires a non-empty secret.
+fn check_credential(label: &str, kind: &str, secret: &str) -> Result<(), &'static str> {
+    if label.is_empty() || label.chars().count() > MAX_CREDENTIAL_LABEL {
+        return Err("Give the credential a label (at most 200 characters).");
+    }
+    if !CREDENTIAL_KINDS.contains(&kind) {
+        return Err("Choose a credential type from the list.");
+    }
+    if secret.trim().is_empty() {
+        return Err("Give the credential's secret.");
+    }
+    Ok(())
 }
 
 /// Create or replace a repository's fetch credential through the producer's
@@ -6118,26 +6240,16 @@ async fn registry_set_credential(
     session: &Session,
     person: &Principal,
     id: &str,
-    form: &AdminRegistryForm,
+    label: &str,
+    kind: &str,
+    secret: &str,
 ) -> Result<String, PageResult> {
     let producer = producer_for(app).map_err(Err)?;
     require_visible_repository(app, session, id).await?;
-    let label = form.label.trim();
-    let kind = form.kind.trim();
-    let refused = |why: &str| registry_refused(app, session, why.to_owned(), false);
-    if label.is_empty() || label.chars().count() > MAX_CREDENTIAL_LABEL {
-        return Err(refused("Give the credential a label (at most 200 characters).").await);
+    if let Err(why) = check_credential(label, kind, secret) {
+        return Err(repository_refused(app, session, id, why.to_owned(), false).await);
     }
-    if !CREDENTIAL_KINDS.contains(&kind) {
-        return Err(refused("Choose a credential type from the list.").await);
-    }
-    // The secret goes to the producer byte-for-byte as submitted (leading
-    // and trailing whitespace may be significant); only an all-whitespace
-    // one is refused, since the producer requires a non-empty secret.
-    if form.secret.trim().is_empty() {
-        return Err(refused("Give the credential's secret.").await);
-    }
-    match producer.set_credential(id, label, kind, &form.secret).await {
+    match producer.set_credential(id, label, kind, secret).await {
         Ok(()) => {
             eprintln!(
                 "pgokf-web: {} set a {kind} credential ({label}) on registry repository {id}",
@@ -6148,7 +6260,7 @@ async fn registry_set_credential(
                  characters are ever shown."
             ))
         }
-        Err(error) => Err(registry_producer_failed(app, session, error).await),
+        Err(error) => Err(repository_producer_failed(app, session, id, error).await),
     }
 }
 
@@ -6172,8 +6284,258 @@ async fn registry_remove_credential(
                 "Repository {id} has no credential now; it fetches anonymously."
             ))
         }
-        Err(error) => Err(registry_producer_failed(app, session, error).await),
+        Err(error) => Err(repository_producer_failed(app, session, id, error).await),
     }
+}
+
+/// The remote-URL rules the producer's `validate_remote_url` enforces,
+/// checked here first so a bad value earns a form error instead of a
+/// producer round-trip: an explicit `https://` URL, and never one with
+/// credentials embedded in it (a credential is set separately, in the
+/// credential fields - never in the URL).
+fn registration_remote_error(remote: &str) -> Option<&'static str> {
+    if remote.is_empty() {
+        return Some("Give the repository's remote URL.");
+    }
+    if !remote.to_ascii_lowercase().starts_with("https://") {
+        return Some(
+            "The remote URL must be an explicit https:// URL; ssh, git, and http forms are \
+             not accepted.",
+        );
+    }
+    let authority = remote["https://".len()..]
+        .split('/')
+        .next()
+        .unwrap_or_default();
+    if authority.contains('@') {
+        return Some(
+            "The remote URL must not embed credentials; give the credential in the credential \
+             fields instead.",
+        );
+    }
+    None
+}
+
+/// The registry key derived from the remote URL, mirroring the producer's
+/// own derivation (its `default_repository_key`): the last two path
+/// segments (owner/repository, a trailing `.git` dropped), lowercased,
+/// every non-alphanumeric run collapsed to one `-`, trimmed, capped at 64
+/// characters. The host is the fallback for a URL with no usable path.
+fn derive_repository_key(remote: &str) -> Option<String> {
+    let after_scheme = remote.split_once("://").map(|(_, rest)| rest)?;
+    let without_query = after_scheme.split(['?', '#']).next().unwrap_or_default();
+    let (host, path) = without_query.split_once('/').unwrap_or((without_query, ""));
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let base = match segments.as_slice() {
+        [] => host.to_owned(),
+        [only] => only.strip_suffix(".git").unwrap_or(only).to_owned(),
+        [.., owner, name] => format!("{owner}-{}", name.strip_suffix(".git").unwrap_or(name)),
+    };
+    let mut slug = String::new();
+    let mut pending_dash = false;
+    for c in base.chars().flat_map(char::to_lowercase) {
+        if c.is_ascii_alphanumeric() {
+            if pending_dash && !slug.is_empty() {
+                slug.push('-');
+            }
+            pending_dash = false;
+            slug.push(c);
+        } else {
+            pending_dash = true;
+        }
+    }
+    slug.truncate(64);
+    (!slug.is_empty()).then_some(slug)
+}
+
+/// The registration receipt's graph resolution, phrased for the notice:
+/// every outcome is a success state (an idempotent re-registration is not
+/// an error), and `adopted` says plainly that the graph was not shaped by
+/// this registration.
+fn graph_outcome_notice(receipt: &RegistrationReceipt, project: &str) -> String {
+    if receipt.already_registered {
+        return format!(
+            "Repository {project} is already registered; nothing changed (the existing \
+             registration stands)."
+        );
+    }
+    match receipt.graph_outcome.as_str() {
+        "created" => format!("Repository {project} registered; a new graph was created for it."),
+        "reused" => {
+            format!("Repository {project} registered against the project name's existing graph.")
+        }
+        "adopted" => format!(
+            "Repository {project} registered; it adopted a pre-existing graph whose roots \
+             differ from this checkout path - confirm that is intended."
+        ),
+        "provided" => format!("Repository {project} registered against the provided graph."),
+        other => format!("Repository {project} registered (graph outcome: {other})."),
+    }
+}
+
+/// The page-side answer to a refused or failed registration: the 409
+/// guards (cross-tenant re-registration, graph-adoption branch mismatch)
+/// and the 429 rate limit are phrased for what they mean, an outage is an
+/// honest 503 - never a raw dump of the producer's answer.
+async fn registration_failed(app: &App, session: &Session, error: ProducerError) -> PageResult {
+    let (message, unavailable) = match &error {
+        ProducerError::Rejected(status) if *status == StatusCode::CONFLICT => (
+            "The producer refused the registration (HTTP 409): this key and branch are already \
+             registered under another tenant, or the project name collides with an existing \
+             graph on a different branch. Re-registering the same repository is not an error; \
+             a different branch or project name resolves the collision."
+                .to_owned(),
+            false,
+        ),
+        ProducerError::Rejected(status) if *status == StatusCode::TOO_MANY_REQUESTS => (
+            "The producer's admin API rate limit was reached (HTTP 429); wait a minute and \
+             try again."
+                .to_owned(),
+            true,
+        ),
+        _ => (error.message(), error.is_unavailable()),
+    };
+    registry_refused(app, session, message, unavailable).await
+}
+
+/// The register form, validated against the producer's bounds and ready
+/// for the producer call.
+struct RegistrationDraft<'a> {
+    remote: &'a str,
+    /// The registry key derived from the remote URL's slug.
+    key: String,
+    branch: String,
+    project: &'a str,
+    checkout_path: &'a str,
+    /// The optional first credential: `(label, kind, secret)`, present only
+    /// when all three credential fields are filled.
+    credential: Option<(&'a str, &'a str, &'a str)>,
+}
+
+/// Validate the register form, so a bad value earns a form error before
+/// anything crosses to the producer.
+fn registration_draft(form: &AdminRegistryForm) -> Result<RegistrationDraft<'_>, &'static str> {
+    let remote = form.remote.trim();
+    if let Some(why) = registration_remote_error(remote) {
+        return Err(why);
+    }
+    let branch = non_empty(&form.branch).unwrap_or_else(|| "main".to_owned());
+    if branch.chars().count() > MAX_BRANCH {
+        return Err("The branch name must be at most 255 characters.");
+    }
+    let project = form.project.trim();
+    if project.is_empty() || project.chars().count() > MAX_PROJECT_NAME {
+        return Err("Give the project name (at most 255 characters).");
+    }
+    let checkout_path = form.checkout_path.trim();
+    if checkout_path.is_empty() || checkout_path.chars().count() > MAX_CHECKOUT_PATH {
+        return Err(
+            "Give the checkout path - where the producer stages its worktree (at most 1024 \
+             characters).",
+        );
+    }
+    let Some(key) = derive_repository_key(remote) else {
+        return Err("Could not derive a registry key from that remote URL.");
+    };
+    // The credential is optional: all three fields, or none of them.
+    let label = form.label.trim();
+    let kind = form.kind.trim();
+    let credential = if label.is_empty() && kind.is_empty() && form.secret.is_empty() {
+        None
+    } else {
+        check_credential(label, kind, &form.secret)?;
+        Some((label, kind, form.secret.as_str()))
+    };
+    Ok(RegistrationDraft {
+        remote,
+        key,
+        branch,
+        project,
+        checkout_path,
+        credential,
+    })
+}
+
+/// Register a repository through the producer's admin API: the
+/// registration itself, then - when the form's credential fields are
+/// filled - the credential, so the repository's first reconcile is
+/// already authenticated. Registration is idempotent at the producer: a
+/// repeat is reported as the existing row, not an error. The answer lands
+/// on the new repository's own page.
+async fn registry_register(
+    app: &App,
+    session: &Session,
+    person: &Principal,
+    form: &AdminRegistryForm,
+) -> PageResult {
+    let producer = producer_for(app)?;
+    let draft = match registration_draft(form) {
+        Ok(draft) => draft,
+        Err(why) => return registry_refused(app, session, why.to_owned(), false).await,
+    };
+    let receipt = match producer
+        .register(
+            draft.remote,
+            &draft.key,
+            &draft.branch,
+            draft.checkout_path,
+            draft.project,
+            app.tenant.as_deref(),
+        )
+        .await
+    {
+        Ok(receipt) => receipt,
+        Err(error) => return registration_failed(app, session, error).await,
+    };
+    eprintln!(
+        "pgokf-web: {} registered registry repository {} ({}, {}, graph {})",
+        person.actor(),
+        receipt.repository_id,
+        draft.key,
+        draft.branch,
+        receipt.graph_outcome
+    );
+    let mut notice = graph_outcome_notice(&receipt, draft.project);
+    if let Some((label, kind, secret)) = draft.credential {
+        match producer
+            .set_credential(&receipt.repository_id, label, kind, secret)
+            .await
+        {
+            Ok(()) => {
+                eprintln!(
+                    "pgokf-web: {} set a {kind} credential ({label}) on registry repository {}",
+                    person.actor(),
+                    receipt.repository_id
+                );
+                notice = format!(
+                    "{notice} The credential {label} ({kind}) is set, so the first reconcile \
+                     is already authenticated."
+                );
+            }
+            // The repository IS registered; only the credential did not
+            // land. Say exactly that, and where to finish the job.
+            Err(error) => {
+                return registry_refused(
+                    app,
+                    session,
+                    format!(
+                        "Repository {} registered (id {}), but setting its credential \
+                         failed: {} Set it from the repository's page.",
+                        draft.project,
+                        receipt.repository_id,
+                        error.message()
+                    ),
+                    error.is_unavailable(),
+                )
+                .await;
+            }
+        }
+    }
+    Ok(redirect(&format!(
+        "/admin/registry/{}?notice={}",
+        filters::percent_encode(&receipt.repository_id),
+        filters::percent_encode(&notice)
+    )))
 }
 
 async fn admin_registry(
@@ -6182,6 +6544,11 @@ async fn admin_registry(
     Form(form): Form<AdminRegistryForm>,
 ) -> PageResult {
     let person = admin(&session)?;
+    // Registration is the one action that addresses no existing
+    // repository; its answer lands on the new repository's own page.
+    if form.action == "register" {
+        return registry_register(&app, &session, &person, &form).await;
+    }
     let id = form.id.trim().to_owned();
     if id.is_empty() {
         return Err(AppError::bad_request("Choose a repository."));
@@ -6190,12 +6557,169 @@ async fn admin_registry(
         "pause" => registry_pause_resume(&app, &session, &person, &id, true).await,
         "resume" => registry_pause_resume(&app, &session, &person, &id, false).await,
         "poll" => registry_poll_interval(&app, &session, &person, &id, &form.poll_interval).await,
-        "set-credential" => registry_set_credential(&app, &session, &person, &id, &form).await,
-        "remove-credential" => registry_remove_credential(&app, &session, &person, &id).await,
         other => return Err(AppError::bad_request(format!("Unknown action {other:?}."))),
     };
     match notice {
         Ok(notice) => Ok(AdminTab::Registry.redirect_with(&notice)),
+        Err(result) => result,
+    }
+}
+
+/// One repository's page: the registry row (tenant-scoped, from the same
+/// read the Registry tab lists), the credential as the producer reports
+/// it, and the checkout path from the producer's operator API (the column
+/// the database reader grant deliberately withholds). An id outside the
+/// session tenant is the same 404 as an unknown one - the page never
+/// reveals that another tenant's row exists.
+async fn render_admin_repository(
+    app: &App,
+    session: &Session,
+    id: &str,
+    outcome: AdminOutcome,
+) -> Result<AdminRepositoryPage, AppError> {
+    let repos = registry_repositories(app).await?;
+    let Some(repo) = repos.into_iter().find(|repo| repo.id == id) else {
+        return Err(AppError::not_found("This repository"));
+    };
+    let producer_configured = app.producer.is_some();
+    let mut credentials_known = true;
+    let mut credential_note = None;
+    let cell = match app.producer.as_ref() {
+        Some(producer) => match producer.credential(id).await {
+            Ok(Some(info)) => CredentialCell::set(info),
+            Ok(None) => CredentialCell::anonymous(),
+            Err(ProducerError::Unavailable) => {
+                credentials_known = false;
+                credential_note = Some(
+                    "The producer admin API did not answer, so the credential state and the \
+                     checkout path are unknown - reload to try again. The registry row itself \
+                     (read from the database) is unaffected."
+                        .to_owned(),
+                );
+                CredentialCell::unknown()
+            }
+            // A refusal on the credential read marks the one cell.
+            Err(_) => CredentialCell::unknown(),
+        },
+        None => CredentialCell::unknown(),
+    };
+    let checkout_path = match app.producer.as_ref() {
+        Some(producer) if credentials_known => match producer.repository(id).await {
+            Ok(Some(detail)) => Some(detail.checkout_path),
+            Ok(None) | Err(_) => None,
+        },
+        _ => None,
+    };
+    if !producer_configured {
+        credential_note = Some(
+            "Credential management needs the producer admin API (OKF_PRODUCER_ADMIN_URL and \
+             OKF_PRODUCER_ADMIN_TOKEN together); without them the credential state and the \
+             checkout path read as unknown here."
+                .to_owned(),
+        );
+    }
+    let title = format!("Administration · {}", repo.project);
+    Ok(AdminRepositoryPage {
+        shell: Shell::new(app, session, &title, "admin"),
+        admin: AdminTab::Registry.shell(outcome),
+        repo: RepositoryDetailView::new(repo, cell),
+        producer_configured,
+        credentials_known: credentials_known && producer_configured,
+        credential_note,
+        checkout_path,
+    })
+}
+
+async fn admin_repository_page(
+    State(app): State<Shared>,
+    session: Session,
+    Path(id): Path<String>,
+    Query(params): Query<NoticeParams>,
+) -> PageResult {
+    admin(&session)?;
+    let outcome = AdminOutcome {
+        notice: non_empty(&params.notice),
+        error: None,
+    };
+    html(&render_admin_repository(&app, &session, &id, outcome).await?)
+}
+
+/// The repository page again, saying what was wrong with the last action:
+/// a 400 for a refusal of what was asked, a 503 when the producer admin
+/// API did not answer - on the page the action came from, never a bare
+/// error. (When the id names nothing this tenant can see, the refusal
+/// falls back to the Registry tab: the page itself is a 404 then.)
+async fn repository_refused(
+    app: &App,
+    session: &Session,
+    id: &str,
+    error: String,
+    unavailable: bool,
+) -> PageResult {
+    let outcome = AdminOutcome {
+        notice: None,
+        error: Some(error.clone()),
+    };
+    match render_admin_repository(app, session, id, outcome).await {
+        Ok(page) => {
+            let mut response = html(&page)?;
+            *response.status_mut() = if unavailable {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            Ok(response)
+        }
+        Err(_) => registry_refused(app, session, error, unavailable).await,
+    }
+}
+
+/// The page-side answer to a failed producer call from a repository page:
+/// an outage renders the page with a 503, a refusal with a 400, each
+/// saying what happened.
+async fn repository_producer_failed(
+    app: &App,
+    session: &Session,
+    id: &str,
+    error: ProducerError,
+) -> PageResult {
+    let unavailable = error.is_unavailable();
+    repository_refused(app, session, id, error.message(), unavailable).await
+}
+
+async fn admin_repository(
+    State(app): State<Shared>,
+    session: Session,
+    Path(id): Path<String>,
+    Form(form): Form<AdminRepositoryForm>,
+) -> PageResult {
+    let person = admin(&session)?;
+    let id = id.trim().to_owned();
+    if id.is_empty() {
+        return Err(AppError::bad_request("Choose a repository."));
+    }
+    let notice = match form.action.as_str() {
+        "set-credential" => {
+            registry_set_credential(
+                &app,
+                &session,
+                &person,
+                &id,
+                form.label.trim(),
+                form.kind.trim(),
+                &form.secret,
+            )
+            .await
+        }
+        "remove-credential" => registry_remove_credential(&app, &session, &person, &id).await,
+        other => return Err(AppError::bad_request(format!("Unknown action {other:?}."))),
+    };
+    match notice {
+        Ok(notice) => Ok(redirect(&format!(
+            "/admin/registry/{}?notice={}",
+            filters::percent_encode(&id),
+            filters::percent_encode(&notice)
+        ))),
         Err(result) => result,
     }
 }
@@ -10053,7 +10577,7 @@ mod tests {
     }
 
     #[test]
-    fn admin_registry_page_renders_the_table_and_the_credential_controls() {
+    fn admin_registry_page_renders_the_table_the_links_and_the_status_pills() {
         // Arrange: one repository per credential shape - set, anonymous,
         // one whose read was refused, and one the producer reports unusable
         // (no last four; the state renders explicitly) - plus a paused one.
@@ -10106,44 +10630,62 @@ mod tests {
         ] {
             assert!(rendered.contains(column), "the table heads {column}");
         }
-        assert!(rendered.contains("<strong>atlas</strong>"));
-        assert!(rendered.contains("https://github.com/example/atlas.git"));
+        // Each row's project and remote link to the repository's own page.
+        assert!(rendered.contains(
+            "<a href=\"/admin/registry/8d2e1c4a-0000-4000-8000-0000000000aa\"><strong>atlas</strong></a>"
+        ));
+        assert!(rendered.contains(
+            "<a href=\"/admin/registry/8d2e1c4a-0000-4000-8000-0000000000aa\" class=\"path\" title=\"https://github.com/example/atlas.git\">https://github.com/example/atlas.git</a>"
+        ));
         assert!(rendered.contains("<span class=\"pill ok\">active</span>"));
         assert!(rendered.contains("<span class=\"pill warn\">paused</span>"));
-        // The credential cell shows label, type, and last four - never a
-        // secret - and "anonymous" where none is set. An unusable credential
-        // says so: label and type without a last-four marker, never an
-        // unexplained em dash.
-        assert!(rendered.contains("deploy key · github_pat · …a1b2"));
-        assert!(rendered.contains("<span class=\"muted\">anonymous</span>"));
+        // The credential column is a status pill and nothing more: label,
+        // type, and last four - never a secret - "anonymous" where none is
+        // set, and an unusable credential says so.
+        assert!(rendered.contains(
+            "<span class=\"pill ok\" title=\"updated 2026-09-13 10:00 UTC\">deploy key · github_pat · …a1b2</span>"
+        ));
+        assert!(rendered.contains("<span class=\"pill muted\">anonymous</span>"));
         assert!(rendered.contains("<span class=\"muted\">&mdash;</span>"));
-        assert!(
-            rendered.contains("legacy key · http_basic <span class=\"pill warn\">unusable</span>")
-        );
-        // Per-row controls: pause/resume, the poll-interval form, the
-        // credential set form with a password input that is never
-        // prefilled, and the confirmed remove (only where one is set).
+        assert!(rendered.contains(
+            "<span class=\"pill warn\" title=\"updated 2026-09-01 09:00 UTC\">legacy key · http_basic · unusable</span>"
+        ));
+        // Per-row controls: pause/resume and the poll-interval form. The
+        // inline credential forms are GONE - no password input, no
+        // set/remove action anywhere on the list page.
         assert!(rendered.contains("name=\"action\" value=\"pause\""));
         assert!(rendered.contains("name=\"action\" value=\"resume\""));
         assert!(rendered.contains("name=\"action\" value=\"poll\""));
         assert!(rendered.contains("name=\"poll_interval\" value=\"300\""));
-        assert!(rendered.contains("name=\"action\" value=\"set-credential\""));
-        assert!(rendered.contains("type=\"password\" name=\"secret\""));
+        assert!(!rendered.contains("value=\"set-credential\""));
+        assert!(!rendered.contains("value=\"remove-credential\""));
+        assert!(!rendered.contains("type=\"password\" name=\"secret\" required"));
+        // The add-repository form tops the page (the producer admin API is
+        // configured): remote, branch, project, checkout path, and the
+        // optional credential triple with a never-prefilled secret.
+        assert!(rendered.contains("<details class=\"adder\" id=\"pgokf-add-repository\">"));
+        assert!(rendered.contains("name=\"action\" value=\"register\""));
+        assert!(rendered.contains("name=\"remote\""));
+        assert!(rendered.contains("name=\"branch\" value=\"main\""));
+        assert!(rendered.contains("name=\"project\""));
+        assert!(rendered.contains("name=\"checkout_path\""));
+        assert!(rendered.contains("where the producer stages its worktree"));
+        assert!(
+            rendered.contains("type=\"password\" name=\"secret\" autocomplete=\"new-password\"")
+        );
         assert!(!rendered.contains("name=\"secret\" value="));
-        assert!(rendered.contains("name=\"action\" value=\"remove-credential\""));
-        assert!(rendered.contains("data-confirm=\"Remove the credential for atlas?"));
-        // The remove control shows only for the rows whose credential is set.
-        assert!(!rendered.contains("data-confirm=\"Remove the credential for beacon?"));
-        // The form honors the producer's bounds: the label caps at 200 and
-        // only the credential types the producer accepts are offered.
+        // The form honors the producer's bounds and offers only the
+        // credential types it accepts.
         assert!(rendered.contains("maxlength=\"200\""));
-        assert!(!rendered.contains("maxlength=\"255\""));
         assert!(rendered.contains("<option value=\"github_pat\">GitHub token</option>"));
         assert!(rendered.contains("<option value=\"http_basic\">HTTP basic</option>"));
         assert!(
             !rendered.contains("ssh_key"),
             "the producer refuses ssh_key, so the form never offers it"
         );
+        // The header copy points at the details page and names the CLI as
+        // the scripted alternative.
+        assert!(rendered.contains("register CLI remains the scripted alternative"));
     }
 
     #[test]
@@ -10184,9 +10726,12 @@ mod tests {
         assert!(producer_down.contains("<span class=\"muted\">&mdash;</span>"));
         assert!(!producer_down.contains("name=\"action\" value=\"pause\""));
         assert!(!producer_down.contains("name=\"poll_interval\" value="));
-        // The credential set form stays: the producer is configured, and a
-        // set retries the read's failure honestly on submit.
-        assert!(producer_down.contains("name=\"action\" value=\"set-credential\""));
+        // No inline credential form ever - degraded or not.
+        assert!(!producer_down.contains("value=\"set-credential\""));
+        assert!(!producer_down.contains("value=\"remove-credential\""));
+        // The add form stays: the producer is configured, and a
+        // registration retries the read's failure honestly on submit.
+        assert!(producer_down.contains("name=\"action\" value=\"register\""));
     }
 
     /// A signed-in admin, for the handler tests.
@@ -10242,10 +10787,11 @@ mod tests {
     #[tokio::test]
     async fn a_credential_secret_is_never_rendered_through_the_stack() {
         // Arrange: a mock producer answering the set (201, body in the
-        // contract's document shape) and then the follow-up read (200), and
-        // an App whose producer client points at it, whose registry seam
-        // serves the one repository the page lists, and whose visibility
-        // probe answers "visible".
+        // contract's document shape) and then the details page's follow-up
+        // reads (the credential, then the operator detail), and an App
+        // whose producer client points at it, whose registry seam serves
+        // the one repository the page shows, and whose visibility probe
+        // answers "visible".
         let canary = "canary-secret-7f3a9c-never-rendered";
         let repository_id = "8d2e1c4a-0000-4000-8000-0000000000aa";
         let (base, served) = crate::producer::tests::mock_producer(&[
@@ -10256,6 +10802,10 @@ mod tests {
             (
                 "200 OK",
                 "{\"label\":\"deploy key\",\"type\":\"github_pat\",\"secret_last4\":\"a1b2\",\"state\":\"configured\",\"updated_at\":\"2026-09-13T10:00:00Z\"}",
+            ),
+            (
+                "200 OK",
+                "{\"repository_id\":\"8d2e1c4a-0000-4000-8000-0000000000aa\",\"checkout_path\":\"/srv/checkouts/atlas\"}",
             ),
         ])
         .await;
@@ -10268,21 +10818,22 @@ mod tests {
 
         // Act: set the credential through the real router - identity
         // middleware, cross-site guard, form parsing, handler - with the
-        // canary as the secret.
+        // canary as the secret, on the repository's own page.
         let response = router
             .clone()
             .oneshot(admin_request(
                 "POST",
-                "/admin/registry",
+                &format!("/admin/registry/{repository_id}"),
                 Some(format!(
-                    "action=set-credential&id={repository_id}&label=deploy+key&kind=github_pat&secret={canary}"
+                    "action=set-credential&label=deploy+key&kind=github_pat&secret={canary}"
                 )),
             ))
             .await
             .expect("the router answers");
 
-        // Assert: the answer is the redirect with a notice - and the canary
-        // is in neither the body nor the Location it points at.
+        // Assert: the answer is the redirect back to the repository page
+        // with a notice - and the canary is in neither the body nor the
+        // Location it points at.
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         let location = response
             .headers()
@@ -10290,14 +10841,14 @@ mod tests {
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default()
             .to_owned();
-        assert!(location.starts_with("/admin/registry?notice="));
+        assert!(location.starts_with(&format!("/admin/registry/{repository_id}?notice=")));
         assert!(!location.contains(canary), "the Location carries no secret");
         let body = body_text(response).await;
         assert!(!body.contains(canary), "the POST body carries no secret");
 
         // Act: follow the redirect the way the browser would, through the
-        // same router; the page read comes from the seam, the credential
-        // cell from the mock producer.
+        // same router; the registry row comes from the seam, the credential
+        // and the checkout path from the mock producer.
         let response = router
             .oneshot(admin_request("GET", &location, None))
             .await
@@ -10308,6 +10859,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = body_text(response).await;
         assert!(body.contains("deploy key · github_pat · …a1b2"));
+        assert!(body.contains("/srv/checkouts/atlas"));
         assert!(
             !body.contains(canary),
             "no GET response body ever renders the secret"
@@ -10321,55 +10873,73 @@ mod tests {
         let captured = served.await.expect("the mock captured the requests");
         assert_eq!(
             captured.len(),
-            2,
-            "the set call and the follow-up read, no more"
+            3,
+            "the set call and the details page's two reads, no more"
         );
         assert!(
             captured[0].body.contains(canary),
             "the PUT carried the secret"
         );
-        assert!(captured[0].head.starts_with("PUT /admin/repositories/"));
-        assert!(captured[1].head.starts_with("GET /admin/repositories/"));
+        assert!(captured[0].head.starts_with(
+            "PUT /admin/repositories/8d2e1c4a-0000-4000-8000-0000000000aa/credential"
+        ));
+        assert!(captured[1].head.starts_with(
+            "GET /admin/repositories/8d2e1c4a-0000-4000-8000-0000000000aa/credential"
+        ));
+        assert!(
+            captured[2]
+                .head
+                .starts_with("GET /admin/repositories/8d2e1c4a-0000-4000-8000-0000000000aa ")
+        );
     }
 
     #[tokio::test]
     async fn a_refused_credential_set_renders_no_secret_and_no_echoed_body() {
         // Arrange: a misbehaving producer that answers 400 with the whole
-        // request body echoed back, secret included.
+        // request body echoed back, secret included; then the details
+        // page's follow-up reads (anonymous credential, then the operator
+        // detail).
         let canary = "canary-secret-7f3a9c-never-rendered";
         let repository_id = "8d2e1c4a-0000-4000-8000-0000000000aa";
         let echoed =
             format!("{{\"detail\":\"rejected\",\"you_sent\":{{\"secret\":\"{canary}\"}}}}");
-        let (base, served) =
-            crate::producer::tests::mock_producer(&[("400 Bad Request", &echoed)]).await;
+        let (base, served) = crate::producer::tests::mock_producer(&[
+            ("400 Bad Request", &echoed),
+            ("404 Not Found", "{\"detail\":\"no credential\"}"),
+            (
+                "200 OK",
+                "{\"repository_id\":\"8d2e1c4a-0000-4000-8000-0000000000aa\",\"checkout_path\":\"/srv/checkouts/atlas\"}",
+            ),
+        ])
+        .await;
         let mut app = test_app(None);
         app.producer = Some(crate::producer::ProducerAdmin::new(&base, "admin-token").unwrap());
         app.auth = header_auth();
         app.registry_visible = Some(true);
-        app.registry_rows = Some(Vec::new());
+        app.registry_rows = Some(vec![registry_repo(repository_id, "atlas", "active")]);
         let router = router(Arc::new(app));
 
         // Act
         let response = router
             .oneshot(admin_request(
                 "POST",
-                "/admin/registry",
+                &format!("/admin/registry/{repository_id}"),
                 Some(format!(
-                    "action=set-credential&id={repository_id}&label=deploy+key&kind=github_pat&secret={canary}"
+                    "action=set-credential&label=deploy+key&kind=github_pat&secret={canary}"
                 )),
             ))
             .await
             .expect("the router answers");
 
-        // Assert: the refusal renders on the page with the status quoted
-        // and the echoed body - canary included - nowhere.
+        // Assert: the refusal renders on the repository page with the
+        // status quoted and the echoed body - canary included - nowhere.
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = body_text(response).await;
         assert!(body.contains("The producer refused the request (HTTP 400)"));
         assert!(!body.contains(canary), "the error page carries no secret");
         assert!(!body.contains(&canary[..canary.len() - 4]));
-        let captured = served.await.expect("the mock captured the request");
-        assert_eq!(captured.len(), 1);
+        let captured = served.await.expect("the mock captured the requests");
+        assert_eq!(captured.len(), 3);
     }
 
     #[tokio::test]
@@ -10384,22 +10954,26 @@ mod tests {
         app.registry_visible = Some(false);
         app.registry_rows = Some(Vec::new());
         let app = Arc::new(app);
+        let id = "8d2e1c4a-0000-4000-8000-0000000000aa".to_owned();
 
         // Act: both credential actions on the invisible id.
         let mut results = Vec::new();
         for action in ["set-credential", "remove-credential"] {
-            let form = AdminRegistryForm {
+            let form = AdminRepositoryForm {
                 action: action.to_owned(),
-                id: "8d2e1c4a-0000-4000-8000-0000000000aa".to_owned(),
                 label: "deploy key".to_owned(),
                 kind: "github_pat".to_owned(),
                 secret: "canary-secret-7f3a9c-never-rendered".to_owned(),
-                poll_interval: String::new(),
             };
             results.push(
-                admin_registry(State(app.clone()), admin_session(), Form(form))
-                    .await
-                    .unwrap_or_else(|e| panic!("the refusal renders as a page: {}", e.message())),
+                admin_repository(
+                    State(app.clone()),
+                    admin_session(),
+                    Path(id.clone()),
+                    Form(form),
+                )
+                .await
+                .unwrap_or_else(|e| panic!("the refusal renders as a page: {}", e.message())),
             );
         }
 
@@ -10429,43 +11003,41 @@ mod tests {
         app.producer = Some(crate::producer::ProducerAdmin::new(&base, "admin-token").unwrap());
         app.registry_visible = Some(true);
         let app = Arc::new(app);
-        let id = "8d2e1c4a-0000-4000-8000-0000000000aa";
+        let id = "8d2e1c4a-0000-4000-8000-0000000000aa".to_owned();
 
         // Act
-        let set = admin_registry(
+        let set = admin_repository(
             State(app.clone()),
             admin_session(),
-            Form(AdminRegistryForm {
+            Path(id.clone()),
+            Form(AdminRepositoryForm {
                 action: "set-credential".to_owned(),
-                id: id.to_owned(),
                 label: "deploy key".to_owned(),
                 kind: "github_pat".to_owned(),
                 secret: "a-secret".to_owned(),
-                poll_interval: String::new(),
             }),
         )
         .await
         .unwrap_or_else(|e| panic!("the set succeeds: {}", e.message()));
-        let remove = admin_registry(
+        let remove = admin_repository(
             State(app.clone()),
             admin_session(),
-            Form(AdminRegistryForm {
+            Path(id.clone()),
+            Form(AdminRepositoryForm {
                 action: "remove-credential".to_owned(),
-                id: id.to_owned(),
-                ..AdminRegistryForm {
+                ..AdminRepositoryForm {
                     action: String::new(),
-                    id: String::new(),
                     label: String::new(),
                     kind: String::new(),
                     secret: String::new(),
-                    poll_interval: String::new(),
                 }
             }),
         )
         .await
         .unwrap_or_else(|e| panic!("the removal succeeds: {}", e.message()));
 
-        // Assert: both forward and redirect, and the producer saw both.
+        // Assert: both forward and redirect back to the repository page,
+        // and the producer saw both.
         assert_eq!(set.status(), StatusCode::SEE_OTHER);
         assert_eq!(remove.status(), StatusCode::SEE_OTHER);
         let captured = served.await.expect("the mock captured the requests");
@@ -10479,27 +11051,26 @@ mod tests {
         // Arrange: a mock producer expecting exactly one call (the label at
         // the producer's bound, with the whitespace-padded secret, forwards;
         // every invalid form must stop before the producer).
-        let id = "8d2e1c4a-0000-4000-8000-0000000000aa";
+        let id = "8d2e1c4a-0000-4000-8000-0000000000aa".to_owned();
         let (base, served) = crate::producer::tests::mock_producer(&[("201 Created", "")]).await;
         let mut app = test_app(None);
         app.producer = Some(crate::producer::ProducerAdmin::new(&base, "admin-token").unwrap());
         app.registry_visible = Some(true);
         app.registry_rows = Some(Vec::new());
         let app = Arc::new(app);
-        let form = |label: String, kind: &str, secret: &str| AdminRegistryForm {
+        let form = |label: String, kind: &str, secret: &str| AdminRepositoryForm {
             action: "set-credential".to_owned(),
-            id: id.to_owned(),
             label,
             kind: kind.to_owned(),
             secret: secret.to_owned(),
-            poll_interval: String::new(),
         };
 
         // Act & Assert: a 201-character label is refused...
         let too_long = "l".repeat(201);
-        let response = admin_registry(
+        let response = admin_repository(
             State(app.clone()),
             admin_session(),
+            Path(id.clone()),
             Form(form(too_long, "github_pat", "a-secret")),
         )
         .await
@@ -10507,18 +11078,20 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert!(body_text(response).await.contains("at most 200 characters"));
         // ...a type the producer refuses is never offered (ssh_key)...
-        let response = admin_registry(
+        let response = admin_repository(
             State(app.clone()),
             admin_session(),
+            Path(id.clone()),
             Form(form("deploy key".to_owned(), "ssh_key", "a-secret")),
         )
         .await
         .unwrap_or_else(|e| panic!("the refusal renders as a page: {}", e.message()));
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         // ...and an all-whitespace secret is refused.
-        let response = admin_registry(
+        let response = admin_repository(
             State(app.clone()),
             admin_session(),
+            Path(id.clone()),
             Form(form("deploy key".to_owned(), "github_pat", "   ")),
         )
         .await
@@ -10527,9 +11100,10 @@ mod tests {
 
         // Act: a 200-character label with a whitespace-padded secret - both
         // within the producer's bounds - forwards.
-        let response = admin_registry(
+        let response = admin_repository(
             State(app.clone()),
             admin_session(),
+            Path(id.clone()),
             Form(form("l".repeat(200), "http_basic", " user:password ")),
         )
         .await
@@ -10556,17 +11130,21 @@ mod tests {
     async fn registry_credential_actions_need_a_configured_producer() {
         // Arrange
         let app = test_app(None);
-        let form = AdminRegistryForm {
+        let form = AdminRepositoryForm {
             action: "set-credential".to_owned(),
-            id: "8d2e1c4a-0000-4000-8000-0000000000aa".to_owned(),
             label: "deploy key".to_owned(),
             kind: "github_pat".to_owned(),
             secret: "canary-secret-7f3a9c-never-rendered".to_owned(),
-            poll_interval: String::new(),
         };
 
         // Act
-        let result = admin_registry(State(Arc::new(app)), admin_session(), Form(form)).await;
+        let result = admin_repository(
+            State(Arc::new(app)),
+            admin_session(),
+            Path("8d2e1c4a-0000-4000-8000-0000000000aa".to_owned()),
+            Form(form),
+        )
+        .await;
 
         // Assert: an honest unavailable, not a silent success.
         let error = result.expect_err("no producer admin API is configured");
@@ -10577,6 +11155,457 @@ mod tests {
                 .message()
                 .contains("canary-secret-7f3a9c-never-rendered")
         );
+    }
+
+    /// A details-page fixture: one repository with a configured credential,
+    /// the checkout path the producer's operator API reported.
+    fn admin_repository_page(
+        repo: RegistryRepository,
+        credential: CredentialCell,
+        checkout_path: Option<String>,
+    ) -> AdminRepositoryPage {
+        AdminRepositoryPage {
+            shell: Shell::bare("Administration · atlas"),
+            admin: AdminTab::Registry.shell(AdminOutcome::default()),
+            repo: RepositoryDetailView::new(repo, credential),
+            producer_configured: true,
+            credentials_known: true,
+            credential_note: None,
+            checkout_path,
+        }
+    }
+
+    #[test]
+    fn admin_repository_page_renders_the_row_and_the_credential_controls() {
+        // Arrange: a credentialed repository.
+        let page = admin_repository_page(
+            registry_repo("8d2e1c4a-0000-4000-8000-0000000000aa", "atlas", "active"),
+            CredentialCell::set(CredentialInfo {
+                label: "deploy key".to_owned(),
+                kind: "github_pat".to_owned(),
+                secret_last4: Some("a1b2".to_owned()),
+                state: "configured".to_owned(),
+                updated_at: "2026-09-13T10:00:00Z".to_owned(),
+            }),
+            Some("/srv/checkouts/atlas".to_owned()),
+        );
+
+        // Act
+        let rendered = page.render().expect("the repository page renders");
+
+        // Assert: the identity block carries the row's fields - the remote,
+        // branch, project, key, checkout path, status, poll interval, and
+        // the FULL last-indexed commit (the table shows the short form).
+        assert!(rendered.contains("https://github.com/example/atlas.git"));
+        assert!(rendered.contains("<th>Branch</th><td>main</td>"));
+        assert!(rendered.contains("/srv/checkouts/atlas"));
+        assert!(rendered.contains("<span class=\"pill ok\">active</span>"));
+        assert!(rendered.contains("300s"));
+        assert!(rendered.contains("a94a8fe5ccb19ba61c4c0873d391e987982fbbd3"));
+        // The credential section: the current credential (label, type, last
+        // four, updated - never the secret), the set/replace form with a
+        // never-prefilled secret, and the confirmed remove.
+        assert!(rendered.contains("deploy key · github_pat · …a1b2"));
+        assert!(rendered.contains("updated 2026-09-13 10:00 UTC"));
+        assert!(rendered.contains(
+            "<form method=\"post\" action=\"/admin/registry/8d2e1c4a-0000-4000-8000-0000000000aa\" data-once>"
+        ));
+        assert!(rendered.contains("name=\"action\" value=\"set-credential\""));
+        assert!(
+            rendered.contains(
+                "type=\"password\" name=\"secret\" required autocomplete=\"new-password\""
+            )
+        );
+        assert!(!rendered.contains("name=\"secret\" value="));
+        assert!(rendered.contains(">Replace credential</button>"));
+        assert!(rendered.contains("name=\"action\" value=\"remove-credential\""));
+        assert!(rendered.contains("data-confirm=\"Remove the credential for atlas?"));
+        assert!(rendered.contains("maxlength=\"200\""));
+        assert!(
+            !rendered.contains("ssh_key"),
+            "the producer refuses ssh_key, so the form never offers it"
+        );
+        // A way back to the Registry tab.
+        assert!(rendered.contains("href=\"/admin/registry\">All repositories</a>"));
+    }
+
+    #[test]
+    fn admin_repository_page_renders_anonymous_unusable_and_unknown_states() {
+        // Arrange: an anonymous repository, one whose credential is
+        // unusable, and one the producer did not answer for (no checkout
+        // path either).
+        let anonymous = admin_repository_page(
+            registry_repo("8d2e1c4a-0000-4000-8000-0000000000bb", "beacon", "active"),
+            CredentialCell::anonymous(),
+            None,
+        );
+        let unusable = admin_repository_page(
+            registry_repo("8d2e1c4a-0000-4000-8000-0000000000dd", "drizzle", "active"),
+            CredentialCell::set(CredentialInfo {
+                label: "legacy key".to_owned(),
+                kind: "http_basic".to_owned(),
+                secret_last4: None,
+                state: "unusable".to_owned(),
+                updated_at: "2026-09-01T09:00:00Z".to_owned(),
+            }),
+            Some("/srv/checkouts/drizzle".to_owned()),
+        );
+        let mut unknown = admin_repository_page(
+            registry_repo("8d2e1c4a-0000-4000-8000-0000000000cc", "cirrus", "active"),
+            CredentialCell::unknown(),
+            None,
+        );
+        unknown.credentials_known = false;
+        unknown.credential_note = Some(
+            "The producer admin API did not answer, so the credential state and the checkout \
+             path are unknown - reload to try again."
+                .to_owned(),
+        );
+
+        // Act
+        let anonymous = anonymous.render().expect("the anonymous page renders");
+        let unusable = unusable.render().expect("the unusable page renders");
+        let unknown = unknown.render().expect("the degraded page renders");
+
+        // Assert: anonymous says so and offers Set (not Replace, no
+        // remove); unusable warns and says to set a new one; the degraded
+        // page explains and shows the unknown markers.
+        assert!(anonymous.contains("No credential is set; the repository fetches anonymously."));
+        assert!(anonymous.contains(">Set credential</button>"));
+        assert!(!anonymous.contains("value=\"remove-credential\""));
+        assert!(anonymous.contains("unknown right now"));
+        assert!(unusable.contains("The stored credential is unusable"));
+        assert!(unusable.contains("legacy key · http_basic"));
+        assert!(unknown.contains("The producer admin API did not answer"));
+        assert!(unknown.contains("The credential state is unknown"));
+        // The set form stays on every variant: the producer is configured.
+        for rendered in [&anonymous, &unusable, &unknown] {
+            assert!(rendered.contains("name=\"action\" value=\"set-credential\""));
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unknown_repository_id_is_a_404() {
+        // Arrange: the seam serving one repository; the asked-for id is
+        // not it (another tenant's id looks exactly the same here).
+        let mut app = test_app(None);
+        app.auth = header_auth();
+        app.registry_rows = Some(vec![registry_repo(
+            "8d2e1c4a-0000-4000-8000-0000000000aa",
+            "atlas",
+            "active",
+        )]);
+        let router = router(Arc::new(app));
+
+        // Act
+        let response = router
+            .oneshot(admin_request(
+                "GET",
+                "/admin/registry/8d2e1c4a-0000-4000-8000-0000000000ff",
+                None,
+            ))
+            .await
+            .expect("the router answers");
+
+        // Assert
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn the_old_inline_credential_actions_are_gone() {
+        // Arrange
+        let mut app = test_app(None);
+        app.auth = header_auth();
+        app.registry_rows = Some(Vec::new());
+        let router = router(Arc::new(app));
+
+        // Act: the actions the inline table forms used to post.
+        for action in ["set-credential", "remove-credential"] {
+            let response = router
+                .clone()
+                .oneshot(admin_request(
+                    "POST",
+                    "/admin/registry",
+                    Some(format!(
+                        "action={action}&id=8d2e1c4a-0000-4000-8000-0000000000aa&label=deploy+key&kind=github_pat&secret=canary"
+                    )),
+                ))
+                .await
+                .expect("the router answers");
+
+            // Assert: an unknown action now - the credential actions live
+            // on the repository page only.
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{action} is no longer a list-page action"
+            );
+            let body = body_text(response).await;
+            assert!(body.contains("Unknown action"));
+            assert!(!body.contains("canary"));
+        }
+    }
+
+    /// A register form body, urlencoded; the credential fields are appended
+    /// by the caller when the flow under test sets one.
+    fn register_body(extra: &str) -> String {
+        format!(
+            "action=register&remote=https%3A%2F%2Fgithub.com%2Fexample%2Fatlas.git&branch=main&project=atlas&checkout_path=%2Fsrv%2Fcheckouts%2Fatlas{extra}"
+        )
+    }
+
+    /// The registration receipt the mock producer answers with (the
+    /// contract's document shape).
+    const REGISTER_RECEIPT: &str = "{\"repository_id\":\"8d2e1c4a-0000-4000-8000-0000000000aa\",\"remote_url\":\"https://github.com/example/atlas\",\"repository_key\":\"example-atlas\",\"default_branch\":\"main\",\"checkout_path\":\"/srv/checkouts/atlas\",\"project_name\":\"atlas\",\"graph_id\":\"11111111-2222-3333-4444-555555555555\",\"poll_interval_seconds\":300,\"status\":\"active\",\"tenant_id\":\"default\",\"last_indexed_commit\":null,\"last_published_commit\":null,\"last_published_generation\":null,\"created_at\":\"2026-09-15T10:00:00Z\",\"updated_at\":\"2026-09-15T10:00:00Z\",\"graph_outcome\":\"created\"}";
+
+    #[tokio::test]
+    async fn add_repository_registers_then_sets_the_credential_in_order() {
+        // Arrange: a mock producer answering the registration (201) and
+        // then the credential set (201), and an App with header auth and
+        // the registry seams (the redirect target does not render here).
+        let canary = "canary-secret-7f3a9c-never-rendered";
+        let (base, served) = crate::producer::tests::mock_producer(&[
+            ("201 Created", REGISTER_RECEIPT),
+            ("201 Created", ""),
+        ])
+        .await;
+        let mut app = test_app(None);
+        app.producer = Some(crate::producer::ProducerAdmin::new(&base, "admin-token").unwrap());
+        app.auth = header_auth();
+        let router = router(Arc::new(app));
+
+        // Act: register with the credential triple filled.
+        let response = router
+            .oneshot(admin_request(
+                "POST",
+                "/admin/registry",
+                Some(register_body(&format!(
+                    "&label=deploy+key&kind=github_pat&secret={canary}"
+                ))),
+            ))
+            .await
+            .expect("the router answers");
+
+        // Assert: the answer lands on the new repository's own page, the
+        // notice honestly reporting the graph outcome and the credential.
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        assert!(
+            location.starts_with("/admin/registry/8d2e1c4a-0000-4000-8000-0000000000aa?notice=")
+        );
+        assert!(!location.contains(canary), "the Location carries no secret");
+        // The producer saw, in order: the registration (with the derived
+        // key and the checkout path), then the credential PUT against the
+        // returned repository id - the first reconcile is authenticated.
+        let captured = served.await.expect("the mock captured the requests");
+        assert_eq!(captured.len(), 2, "register, then set-credential");
+        assert!(captured[0].head.starts_with("POST /admin/repositories "));
+        assert!(
+            captured[0]
+                .body
+                .contains("\"repository_key\":\"example-atlas\"")
+        );
+        assert!(
+            captured[0]
+                .body
+                .contains("\"checkout_path\":\"/srv/checkouts/atlas\"")
+        );
+        assert!(captured[0].body.contains("\"default_branch\":\"main\""));
+        assert!(captured[1].head.starts_with(
+            "PUT /admin/repositories/8d2e1c4a-0000-4000-8000-0000000000aa/credential"
+        ));
+        assert!(
+            captured[1].body.contains(canary),
+            "the PUT carried the secret"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_repository_without_a_credential_registers_only() {
+        // Arrange: a mock producer answering the registration alone; any
+        // second request lands on a closed listener and fails the test.
+        let (base, served) =
+            crate::producer::tests::mock_producer(&[("201 Created", REGISTER_RECEIPT)]).await;
+        let mut app = test_app(None);
+        app.producer = Some(crate::producer::ProducerAdmin::new(&base, "admin-token").unwrap());
+        app.auth = header_auth();
+        let router = router(Arc::new(app));
+
+        // Act: register with the credential fields empty.
+        let response = router
+            .oneshot(admin_request(
+                "POST",
+                "/admin/registry",
+                Some(register_body("")),
+            ))
+            .await
+            .expect("the router answers");
+
+        // Assert
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let captured = served.await.expect("the mock captured the request");
+        let [request] = captured.try_into().expect("exactly one request");
+        assert!(request.head.starts_with("POST /admin/repositories "));
+    }
+
+    #[tokio::test]
+    async fn add_repository_surfaces_the_409_adoption_guard_readably() {
+        // Arrange: the producer refusing with the branch-mismatch adoption
+        // guard (its raw JSON detail must NOT leak into the page).
+        let (base, served) = crate::producer::tests::mock_producer(&[(
+            "409 Conflict",
+            "{\"detail\":\"graph for project_name 'atlas' already exists with default_branch 'develop' (graph_id=1111); refusing to adopt\"}",
+        )])
+        .await;
+        let mut app = test_app(None);
+        app.producer = Some(crate::producer::ProducerAdmin::new(&base, "admin-token").unwrap());
+        app.auth = header_auth();
+        app.registry_rows = Some(Vec::new());
+        let router = router(Arc::new(app));
+
+        // Act
+        let response = router
+            .oneshot(admin_request(
+                "POST",
+                "/admin/registry",
+                Some(register_body("")),
+            ))
+            .await
+            .expect("the router answers");
+
+        // Assert: a readable notice on the Registry tab, quoting the status
+        // and what it means - never the producer's raw body.
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = body_text(response).await;
+        assert!(body.contains("The producer refused the registration (HTTP 409)"));
+        assert!(body.contains("already registered under another tenant"));
+        assert!(body.contains("different branch"));
+        assert!(!body.contains("{\"detail\""), "no raw dump: {body}");
+        assert!(!body.contains("graph_id=1111"), "no echoed detail: {body}");
+        let captured = served.await.expect("the mock captured the request");
+        assert_eq!(captured.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn add_repository_surfaces_the_429_rate_limit_readably() {
+        // Arrange
+        let (base, served) = crate::producer::tests::mock_producer(&[(
+            "429 Too Many Requests",
+            "{\"detail\":\"admin mutation rate limit exceeded\"}",
+        )])
+        .await;
+        let mut app = test_app(None);
+        app.producer = Some(crate::producer::ProducerAdmin::new(&base, "admin-token").unwrap());
+        app.auth = header_auth();
+        app.registry_rows = Some(Vec::new());
+        let router = router(Arc::new(app));
+
+        // Act
+        let response = router
+            .oneshot(admin_request(
+                "POST",
+                "/admin/registry",
+                Some(register_body("")),
+            ))
+            .await
+            .expect("the router answers");
+
+        // Assert
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_text(response).await;
+        assert!(body.contains("rate limit was reached (HTTP 429)"));
+        assert!(!body.contains("{\"detail\""), "no raw dump: {body}");
+        let captured = served.await.expect("the mock captured the request");
+        assert_eq!(captured.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn add_repository_validates_before_the_producer_is_called() {
+        // Arrange: a mock producer expecting NOTHING.
+        let (base, served) = crate::producer::tests::mock_producer(&[]).await;
+        let mut app = test_app(None);
+        app.producer = Some(crate::producer::ProducerAdmin::new(&base, "admin-token").unwrap());
+        app.auth = header_auth();
+        app.registry_rows = Some(Vec::new());
+        let router = router(Arc::new(app));
+
+        // Act & Assert: a non-https remote, a credential-bearing remote, a
+        // missing project name, and a half-filled credential are each a
+        // readable form error before anything crosses to the producer.
+        for (body, expected) in [
+            (
+                "action=register&remote=git%40github.com%3Aexample%2Fatlas.git&branch=main&project=atlas&checkout_path=%2Fsrv%2Fcheckouts%2Fatlas",
+                "must be an explicit https:// URL",
+            ),
+            (
+                "action=register&remote=https%3A%2F%2Fuser%3Atoken%40github.com%2Fexample%2Fatlas.git&branch=main&project=atlas&checkout_path=%2Fsrv%2Fcheckouts%2Fatlas",
+                "must not embed credentials",
+            ),
+            (
+                "action=register&remote=https%3A%2F%2Fgithub.com%2Fexample%2Fatlas.git&branch=main&project=&checkout_path=%2Fsrv%2Fcheckouts%2Fatlas",
+                "Give the project name",
+            ),
+            (
+                "action=register&remote=https%3A%2F%2Fgithub.com%2Fexample%2Fatlas.git&branch=main&project=atlas&checkout_path=%2Fsrv%2Fcheckouts%2Fatlas&label=deploy+key&kind=github_pat",
+                "Give the credential&#39;s secret",
+            ),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(admin_request(
+                    "POST",
+                    "/admin/registry",
+                    Some(body.to_owned()),
+                ))
+                .await
+                .expect("the router answers");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{expected}");
+            assert!(
+                body_text(response).await.contains(expected),
+                "the refusal says: {expected}"
+            );
+        }
+        let captured = served.await.expect("the mock ran");
+        assert!(captured.is_empty(), "the producer was never called");
+    }
+
+    #[test]
+    fn repository_key_derivation_mirrors_the_producer() {
+        // The producer's `default_repository_key` examples and edges: the
+        // last two path segments (a trailing `.git` dropped), lowercased,
+        // non-alphanumeric runs collapsed to one `-`, capped at 64, the
+        // host as the no-path fallback.
+        assert_eq!(
+            derive_repository_key("https://github.com/LogicOcean/code-graph").as_deref(),
+            Some("logicocean-code-graph")
+        );
+        assert_eq!(
+            derive_repository_key("https://github.com/example/atlas.git").as_deref(),
+            Some("example-atlas")
+        );
+        assert_eq!(
+            derive_repository_key("https://git.example.com/atlas.git").as_deref(),
+            Some("atlas")
+        );
+        assert_eq!(
+            derive_repository_key("https://example.com/My_Repo--Fork/").as_deref(),
+            Some("my-repo-fork")
+        );
+        assert_eq!(
+            derive_repository_key("https://example.com").as_deref(),
+            Some("example-com")
+        );
+        let long = derive_repository_key(&format!(
+            "https://example.com/{}/{}",
+            "o".repeat(40),
+            "r".repeat(40)
+        ));
+        assert_eq!(long.as_ref().map(String::len), Some(64), "capped at 64");
     }
 
     /// The render half of the credential-document contract (the parse and
@@ -10630,9 +11659,9 @@ mod tests {
         let rendered = page.render().expect("the page renders");
 
         // Assert
-        assert!(rendered.contains("deploy key · github_pat · …a1b2"));
+        assert!(rendered.contains("deploy key · github_pat · …a1b2</span>"));
         assert!(
-            rendered.contains("legacy key · http_basic <span class=\"pill warn\">unusable</span>"),
+            rendered.contains("legacy key · http_basic · unusable</span>"),
             "an unusable credential says so instead of showing a bare gap"
         );
     }
@@ -10746,8 +11775,9 @@ mod tests {
             .await;
 
             // Act & Assert: both tenants set and remove their own
-            // repository's credential through the real router; each action
-            // answers with the success redirect, never a 500.
+            // repository's credential through the real router, on the
+            // repository's own page; each action answers with the success
+            // redirect, never a 500.
             for (tenant, own) in [
                 ("tenant-a", "00000000-0000-4000-8000-000000000001"),
                 ("tenant-b", "00000000-0000-4000-8000-000000000002"),
@@ -10757,10 +11787,11 @@ mod tests {
                     .clone()
                     .oneshot(admin_request(
                         "POST",
-                        "/admin/registry",
-                        Some(format!(
-                            "action=set-credential&id={own}&label=deploy+key&kind=github_pat&secret=canary-secret"
-                        )),
+                        &format!("/admin/registry/{own}"),
+                        Some(
+                            "action=set-credential&label=deploy+key&kind=github_pat&secret=canary-secret"
+                                .to_owned(),
+                        ),
                     ))
                     .await
                     .unwrap();
@@ -10772,8 +11803,8 @@ mod tests {
                 let remove = router
                     .oneshot(admin_request(
                         "POST",
-                        "/admin/registry",
-                        Some(format!("action=remove-credential&id={own}")),
+                        &format!("/admin/registry/{own}"),
+                        Some("action=remove-credential".to_owned()),
                     ))
                     .await
                     .unwrap();
@@ -10797,10 +11828,11 @@ mod tests {
                     .clone()
                     .oneshot(admin_request(
                         "POST",
-                        "/admin/registry",
-                        Some(format!(
-                            "action=set-credential&id={id}&label=deploy+key&kind=github_pat&secret=canary-secret"
-                        )),
+                        &format!("/admin/registry/{id}"),
+                        Some(
+                            "action=set-credential&label=deploy+key&kind=github_pat&secret=canary-secret"
+                                .to_owned(),
+                        ),
                     ))
                     .await
                     .unwrap();

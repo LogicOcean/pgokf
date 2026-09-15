@@ -149,9 +149,6 @@ use crate::catalog::sync::advisory_lock_key;
 use crate::errors::CatalogError;
 use crate::security;
 
-/// Maximum rows accepted in one `replace_relationships` call (a hard limit;
-/// inserts are batched at [`BATCH_SIZE`] beneath it).
-const MAX_RELATIONSHIP_ROWS: usize = 10_000;
 /// Maximum length of a producer-defined namespaced relation type.
 const RELATION_TYPE_MAX_LEN: usize = 128;
 /// Maximum length of a concept id endpoint.
@@ -420,16 +417,19 @@ fn parse_row(index: usize, value: &serde_json::Value) -> Result<RelationshipRow,
     })
 }
 
-/// Parse the `rows` wire argument: a JSON array of at most
-/// [`MAX_RELATIONSHIP_ROWS`] validated row objects.
-fn parse_rows(rows: &JsonB) -> Result<Vec<RelationshipRow>, CatalogError> {
+/// Parse the `rows` wire argument: a JSON array of at most `max_rows`
+/// validated row objects. The caller passes the effective
+/// `pgokf.max_relationship_rows` ceiling (a hard limit; inserts are batched
+/// at [`BATCH_SIZE`] beneath it), so this function stays backend-free and
+/// unit-testable.
+fn parse_rows(rows: &JsonB, max_rows: usize) -> Result<Vec<RelationshipRow>, CatalogError> {
     let array = rows.0.as_array().ok_or_else(|| {
         CatalogError::invalid_parameter("rows must be a JSON array of row objects", Path::new(""))
     })?;
-    if array.len() > MAX_RELATIONSHIP_ROWS {
+    if array.len() > max_rows {
         return Err(CatalogError::invalid_parameter(
             format!(
-                "rows holds {} entries but the hard limit is {MAX_RELATIONSHIP_ROWS}",
+                "rows holds {} entries but the hard limit is {max_rows}",
                 array.len()
             ),
             Path::new(""),
@@ -1697,7 +1697,7 @@ fn replace_relationships_impl(
 
     // Parse, validate, deduplicate, and canonicalize BEFORE touching the
     // catalog, so a malformed submission fails without taking the lock.
-    let mut parsed = parse_rows(&rows)?;
+    let mut parsed = parse_rows(&rows, crate::guc::max_relationship_rows())?;
     reject_duplicates(&parsed)?;
 
     let stored_path = crate::catalog::freshness::bundle_path(source_bundle_id)?;
@@ -2540,7 +2540,7 @@ ALTER FUNCTION pgokf.replace_relationships(text, bigint, bigint, bigint, bigint,
 REVOKE ALL ON FUNCTION pgokf.replace_relationships(text, bigint, bigint, bigint, bigint, jsonb) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pgokf.replace_relationships(text, bigint, bigint, bigint, bigint, jsonb) TO pgokf_writer;
 COMMENT ON FUNCTION pgokf.replace_relationships(text, bigint, bigint, bigint, bigint, jsonb) IS
-    'Replace a source bundle''s typed relationship set for one publication generation, atomically, returning pgokf.relationship_publication_info. Writer-tier (pgokf_writer; admin inherits), SECURITY DEFINER, tenant-confined; producer is an opaque label, not authorization. Compare-and-set under the source bundle advisory lock: fencing_token must be the live unexpired token of the (tenant, producer, bundle) publication fence and publication_generation must equal its target (22023 otherwise, so a superseded or expired attempt never publishes). Generation rule, against the bundle''s current catalog generation G: expected = G activates immediately (superseding the producer''s prior active publication); expected = G + 1 stages the set, invisible until a refresh accepts exactly that generation (run_bundle_sync activates it in the sync transaction and supersedes the prior generation''s publications, so new concepts never combine with old-generation relationships); anything else is 22023. rows is a jsonb array of row objects (source_concept_id, namespaced relation_type ''<namespace>:<name>'', optional direction directed|undirected, optional resolved target target_bundle_id + target_concept_id (concept alone targets the source bundle), optional external_target (mutually exclusive with a resolved target), optional source_location/provenance jsonb, optional confidence in [0,1]); at most 10000 rows, duplicate canonical identities are 22023. Endpoint validation never leaks: an absent, inactive, or cross-tenant target bundle resolves to the same unresolved row with the bundle reference dropped. Rows are canonicalized (sorted) and hashed: an identical retried call is a no-op, the same publication key with a different set is 23505. An empty rows array removes the prior set on activation. A bundle whose relationship coverage a refresh supersedes without replacement stays stale (reason relationship_coverage_missing) and pgokf.mark_fresh refuses until a matching replacement activates.';
+    'Replace a source bundle''s typed relationship set for one publication generation, atomically, returning pgokf.relationship_publication_info. Writer-tier (pgokf_writer; admin inherits), SECURITY DEFINER, tenant-confined; producer is an opaque label, not authorization. Compare-and-set under the source bundle advisory lock: fencing_token must be the live unexpired token of the (tenant, producer, bundle) publication fence and publication_generation must equal its target (22023 otherwise, so a superseded or expired attempt never publishes). Generation rule, against the bundle''s current catalog generation G: expected = G activates immediately (superseding the producer''s prior active publication); expected = G + 1 stages the set, invisible until a refresh accepts exactly that generation (run_bundle_sync activates it in the sync transaction and supersedes the prior generation''s publications, so new concepts never combine with old-generation relationships); anything else is 22023. rows is a jsonb array of row objects (source_concept_id, namespaced relation_type ''<namespace>:<name>'', optional direction directed|undirected, optional resolved target target_bundle_id + target_concept_id (concept alone targets the source bundle), optional external_target (mutually exclusive with a resolved target), optional source_location/provenance jsonb, optional confidence in [0,1]); at most pgokf.max_relationship_rows rows (default 50000), duplicate canonical identities are 22023. Endpoint validation never leaks: an absent, inactive, or cross-tenant target bundle resolves to the same unresolved row with the bundle reference dropped. Rows are canonicalized (sorted) and hashed: an identical retried call is a no-op, the same publication key with a different set is 23505. An empty rows array removes the prior set on activation. A bundle whose relationship coverage a refresh supersedes without replacement stays stale (reason relationship_coverage_missing) and pgokf.mark_fresh refuses until a matching replacement activates.';
 
 REVOKE ALL ON FUNCTION pgokf.concept_relationship_neighbors(bigint, text, integer, text, text[], integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pgokf.concept_relationship_neighbors(bigint, text, integer, text, text[], integer) TO pgokf_reader;
@@ -2651,12 +2651,80 @@ mod tests {
     #[test]
     fn parse_rows_requires_an_array_within_the_hard_limit() {
         // Arrange & Act & Assert
-        assert!(parse_rows(&JsonB(row_json(r#"{"not": "an array"}"#))).is_err());
+        assert!(parse_rows(&JsonB(row_json(r#"{"not": "an array"}"#)), 50_000).is_err());
         assert!(
-            parse_rows(&JsonB(row_json("[]")))
+            parse_rows(&JsonB(row_json("[]")), 50_000)
                 .expect("empty is valid")
                 .is_empty()
         );
+
+        // The boundary itself: `max_rows` rows pass, `max_rows + 1` is
+        // refused with the 22023 shape the SQL surface reports.
+        let one =
+            r#"{"source_concept_id": "a", "relation_type": "ns:rel", "external_target": "e1"}"#;
+        let two =
+            r#"{"source_concept_id": "a", "relation_type": "ns:rel", "external_target": "e2"}"#;
+        let three =
+            r#"{"source_concept_id": "a", "relation_type": "ns:rel", "external_target": "e3"}"#;
+        assert_eq!(
+            parse_rows(&JsonB(row_json(&format!("[{one},{two}]"))), 2)
+                .expect("exactly the limit is accepted")
+                .len(),
+            2
+        );
+        let error = parse_rows(&JsonB(row_json(&format!("[{one},{two},{three}]"))), 2)
+            .expect_err("one past the limit is refused");
+        assert_eq!(error.kind(), ErrorKind::InvalidParameter);
+        assert_eq!(error.sqlstate(), "22023");
+        assert!(
+            error.to_string().contains("the hard limit is 2"),
+            "the message names the effective limit: {error}"
+        );
+    }
+
+    #[test]
+    fn fifty_thousand_rows_validate_and_canonicalize_in_a_sane_time() {
+        // Arrange: a full submission at the GUC default (50_000 rows, each a
+        // distinct canonical identity) - the shape the tasker-platform
+        // producer hit the old 10K ceiling with.
+        let limit = usize::try_from(crate::guc::DEFAULT_MAX_RELATIONSHIP_ROWS)
+            .expect("the default is positive");
+        let submission = format!(
+            "[{}]",
+            (0..limit)
+                .map(|index| format!(
+                    r#"{{"source_concept_id": "a", "relation_type": "ns:r{index}", "external_target": "e{index}", "confidence": 0.5}}"#
+                ))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let rows = row_json(&submission);
+
+        // Act: the full validation path `replace_relationships` runs before
+        // touching the catalog - parse, duplicate scan, canonical sort,
+        // per-row and set hashing.
+        let started = std::time::Instant::now();
+        let parsed = parse_rows(&JsonB(rows.clone()), limit).expect("50K rows are accepted");
+        reject_duplicates(&parsed).expect("identities are distinct");
+        let (canonical, set_hash) = canonicalize(parsed);
+        let elapsed = started.elapsed();
+
+        // Assert: the count round-trips and the path stays in the same
+        // complexity class it had at the old 10K limit (parse is linear,
+        // dedup is linear, canonicalize is one sort plus one pass). 30
+        // seconds is a generous ceiling only a pathological blow-up trips;
+        // the path takes well under a second on this class of hardware.
+        assert_eq!(canonical.len(), limit);
+        assert!(!set_hash.is_empty());
+        assert!(
+            elapsed < std::time::Duration::from_secs(30),
+            "50K-row validation took {elapsed:?}"
+        );
+
+        // A submission one row past the limit is refused before any of that
+        // work happens.
+        let error = parse_rows(&JsonB(rows), limit - 1).expect_err("past the limit is refused");
+        assert_eq!(error.sqlstate(), "22023");
     }
 
     #[test]
