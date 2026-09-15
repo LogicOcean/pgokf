@@ -32,8 +32,8 @@ pg_test = []
 
 [dependencies]
 arrow.workspace = true
-okf-parser = { version = "=0.3.0-dev1", path = "../okf-parser" }
-okf-sync = { version = "=0.3.0-dev1", path = "../okf-sync" }
+okf-parser = { version = "=0.3.0-dev2", path = "../okf-parser" }
+okf-sync = { version = "=0.3.0-dev2", path = "../okf-sync" }
 parquet.workspace = true
 pgrx.workspace = true
 # Direct dependency since the typed-relationship write API parses its jsonb

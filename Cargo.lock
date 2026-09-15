@@ -2261,7 +2261,7 @@ dependencies = [
 
 [[package]]
 name = "okf-parser"
-version = "0.3.0-dev1"
+version = "0.3.0-dev2"
 dependencies = [
  "pulldown-cmark",
  "serde",
@@ -2273,7 +2273,7 @@ dependencies = [
 
 [[package]]
 name = "okf-sync"
-version = "0.3.0-dev1"
+version = "0.3.0-dev2"
 dependencies = [
  "blake3",
  "globset",
@@ -2400,7 +2400,7 @@ dependencies = [
 
 [[package]]
 name = "pgokf"
-version = "0.3.0-dev1"
+version = "0.3.0-dev2"
 dependencies = [
  "arrow",
  "okf-parser",
@@ -2413,7 +2413,7 @@ dependencies = [
 
 [[package]]
 name = "pgokf-companion"
-version = "0.3.0-dev1"
+version = "0.3.0-dev2"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -2428,7 +2428,7 @@ dependencies = [
 
 [[package]]
 name = "pgokf-embed"
-version = "0.3.0-dev1"
+version = "0.3.0-dev2"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2443,7 +2443,7 @@ dependencies = [
 
 [[package]]
 name = "pgokf-ingest"
-version = "0.3.0-dev1"
+version = "0.3.0-dev2"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2458,7 +2458,7 @@ dependencies = [
 
 [[package]]
 name = "pgokf-mcp"
-version = "0.3.0-dev1"
+version = "0.3.0-dev2"
 dependencies = [
  "anyhow",
  "axum",
@@ -2476,7 +2476,7 @@ dependencies = [
 
 [[package]]
 name = "pgokf-pgconn"
-version = "0.3.0-dev1"
+version = "0.3.0-dev2"
 dependencies = [
  "anyhow",
  "rustls",
@@ -2488,7 +2488,7 @@ dependencies = [
 
 [[package]]
 name = "pgokf-web"
-version = "0.3.0-dev1"
+version = "0.3.0-dev2"
 dependencies = [
  "ammonia",
  "anyhow",
@@ -2519,7 +2519,7 @@ dependencies = [
 
 [[package]]
 name = "pgokf-workspace"
-version = "0.3.0-dev1"
+version = "0.3.0-dev2"
 dependencies = [
  "anyhow",
  "serde",

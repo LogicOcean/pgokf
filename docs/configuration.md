@@ -16,7 +16,7 @@ Everything below is taken from `crates/extension/src/guc.rs` and
 
 ## GUCs (resource ceilings)
 
-Registered in `_PG_init`. The five numeric ceilings use the **`SIGHUP`**
+Registered in `_PG_init`. The six numeric ceilings use the **`SIGHUP`**
 context: they change only via `postgresql.conf` plus a configuration reload
 (`SELECT pg_reload_conf();` or `pg_ctl reload`), and **no session - not even a
 superuser `SET`** - can raise them. That is what makes them dependable hard
@@ -32,6 +32,7 @@ threshold uses **`SUSET`**, so a superuser can adjust it at runtime.
 | `pgokf.max_bundle_bytes` | integer | `1073741824` | `1 .. 2147483647` | `SIGHUP` | Maximum **total** bytes of the files discovered in one bundle. The per-file and file-count ceilings multiply out to far more than one sync can hold in memory, and a package resource is stored whole whatever its type, so this is what decides whether a bundle can be ingested. |
 | `pgokf.max_frontmatter_bytes` | integer | `262144` (256 KiB) | `1 .. 2147483647` | `SIGHUP` | Maximum bytes parsed as YAML frontmatter in one document. |
 | `pgokf.max_graph_hops` | integer | `5` | `1 .. 1000` | `SIGHUP` | Hard ceiling for graph traversal depth; `concept_neighbors(max_hops)` is capped to this. |
+| `pgokf.max_relationship_rows` | integer | `50000` | `1 .. 1000000` | `SIGHUP` | Maximum rows accepted in one `replace_relationships` call; larger submissions are refused with `22023`. Inserts are batched beneath this ceiling, so it bounds a single call's validation and jsonb parse, not memory. |
 | `pgokf.log_level` | string | `warning` | - | `SUSET` | Logging threshold used by `pgokf`. |
 | `pgokf.tenant` | string | `''` (empty = see all, unless `require_tenant` is on) | - | `USERSET` | Active tenant for multi-tenant row-level isolation. A policy selector, not a ceiling: any session may set it. |
 

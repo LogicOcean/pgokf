@@ -374,10 +374,11 @@ and [security.md](security.md#source-retrieval-and-reconstruction).
 Two configuration surfaces, described fully in
 [configuration.md](configuration.md):
 
-- **GUCs** - four `SIGHUP` resource ceilings (`max_file_bytes`,
-  `max_bundle_files`, `max_frontmatter_bytes`, `max_graph_hops`) that can only be
+- **GUCs** - six `SIGHUP` resource ceilings (`max_file_bytes`,
+  `max_bundle_files`, `max_bundle_bytes`, `max_frontmatter_bytes`,
+  `max_graph_hops`, `max_relationship_rows`) that can only be
   set in `postgresql.conf`, plus a `SUSET` `log_level`. They are hard safety
-  limits no SQL session can raise. A sixth GUC, the `USERSET` `pgokf.tenant`,
+  limits no SQL session can raise. A seventh GUC, the `USERSET` `pgokf.tenant`,
   is not a limit at all: it is the per-session tenant selector for the opt-in
   row-level security described below.
 - **Durable policy** - the singleton `pgokf_private.config` row, managed through

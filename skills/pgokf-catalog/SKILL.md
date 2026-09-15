@@ -338,10 +338,10 @@ Unknown keys, wrong-shaped, or out-of-domain values raise `22023`. Changing
 keep the configuration in effect when they were indexed. Set it before the first
 `register_bundle`, or re-register a bundle to rebuild its vectors.
 
-Five `pgokf.*` GUCs are hard safety ceilings (`SHOW` to read). The four resource
+Six `pgokf.*` GUCs are hard safety ceilings (`SHOW` to read). The five resource
 limits use `SIGHUP` context - set only in `postgresql.conf` + reload, never via
 SQL `SET`; `log_level` uses `SUSET` (a superuser can change it at runtime). A
-sixth GUC, `pgokf.tenant`, is different in kind: a `USERSET` per-session tenant
+seventh GUC, `pgokf.tenant`, is different in kind: a `USERSET` per-session tenant
 selector for the opt-in multi-tenant row-level-security policies (empty, the
 default, sees every row unless the `require_tenant` policy key is on). It is a policy selector any session may set, not a
 hard security boundary against arbitrary SQL; see `docs/multi-tenancy.md`.
@@ -352,6 +352,7 @@ hard security boundary against arbitrary SQL; see `docs/multi-tenancy.md`.
 | `pgokf.max_bundle_files` | `100000` | Files discovered per bundle |
 | `pgokf.max_frontmatter_bytes` | `262144` (256 KiB) | Frontmatter block cap |
 | `pgokf.max_graph_hops` | `5` | `concept_neighbors` hop ceiling |
+| `pgokf.max_relationship_rows` | `50000` | Rows per `replace_relationships` call |
 | `pgokf.log_level` | `warning` | Extension log verbosity |
 
 ```sql
