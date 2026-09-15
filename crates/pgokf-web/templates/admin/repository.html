@@ -1,0 +1,52 @@
+{% extends "admin/layout.html" %}
+{% block admin %}
+<section class="panel">
+  <div class="panel-head"><h2>{{ repo.project }} {% if repo.paused %}<span class="pill warn">paused</span>{% else if repo.status == "active" %}<span class="pill ok">active</span>{% else %}<span class="pill muted">{{ repo.status }}</span>{% endif %}</h2><a class="btn ghost" href="/admin/registry">All repositories</a></div>
+  <table class="table">
+    <tbody>
+      <tr><th>Remote</th><td><span class="desc path">{{ repo.remote }}</span></td></tr>
+      <tr><th>Branch</th><td>{{ repo.branch }}</td></tr>
+      <tr><th>Project name</th><td>{{ repo.project }}</td></tr>
+      <tr><th>Key</th><td><span class="desc path">{{ repo.key }}</span></td></tr>
+      <tr><th>Checkout path</th><td>{% if let Some(path) = checkout_path %}<span class="desc path">{{ path }}</span>{% else %}<span class="muted">reported by the producer admin API only; unknown right now</span>{% endif %}</td></tr>
+      <tr><th>Poll interval</th><td>{{ repo.poll_interval_seconds }}s</td></tr>
+      <tr><th>Last indexed commit</th><td><span class="desc path">{{ repo.last_indexed }}</span></td></tr>
+      <tr><th>Last published</th><td><span class="desc path">{{ repo.last_published }}</span> <span class="desc">(generation {{ repo.generation }})</span></td></tr>
+    </tbody>
+  </table>
+</section>
+<section class="panel">
+  <div class="panel-head"><h2>Credential</h2></div>
+  <p class="muted small">The producer's admin API sets and removes the fetch credential; it reports the label, type, and last four characters, and the secret itself is never stored here or shown.</p>
+  {% if let Some(note) = credential_note %}<p class="notice bad">{{ note }}</p>{% endif %}
+  {% if credentials_known && repo.credential.known %}
+    {% if repo.credential.set %}
+    <p>Current credential: <strong>{{ repo.credential.summary }}</strong> <span class="desc">updated {{ repo.credential.updated_at|datetime }}</span></p>
+    {% if repo.credential.unusable %}<p class="notice bad">The stored credential is unusable (its secret no longer unseals at the producer); set a new one below.</p>{% endif %}
+    {% else %}
+    <p class="muted">No credential is set; the repository fetches anonymously.</p>
+    {% endif %}
+  {% else if !credentials_known %}
+  <p class="muted">The credential state is unknown until the producer admin API answers.</p>
+  {% endif %}
+  {% if producer_configured %}
+  <form method="post" action="/admin/registry/{{ repo.id }}" data-once>
+    <input type="hidden" name="action" value="set-credential">
+    <div class="form-row fields-3">
+      <div class="field"><label for="rc-label">Label</label><input id="rc-label" type="text" name="label" required maxlength="200" spellcheck="false" placeholder="deploy key" aria-label="Credential label for {{ repo.project }}"></div>
+      <div class="field"><label for="rc-kind">Type</label><select id="rc-kind" name="kind" aria-label="Credential type for {{ repo.project }}"><option value="github_pat">GitHub token</option><option value="http_basic">HTTP basic</option></select></div>
+      <div class="field"><label for="rc-secret">Secret <span class="muted">(never shown again)</span></label><input id="rc-secret" type="password" name="secret" required autocomplete="new-password" aria-label="Credential secret for {{ repo.project }}"></div>
+      <div><button type="submit" class="btn primary">{% if repo.credential.known && repo.credential.set %}Replace credential{% else %}Set credential{% endif %}</button></div>
+    </div>
+  </form>
+  {% if credentials_known && repo.credential.known && repo.credential.set %}
+  <form method="post" action="/admin/registry/{{ repo.id }}">
+    <input type="hidden" name="action" value="remove-credential">
+    <button type="submit" class="btn danger" data-confirm="Remove the credential for {{ repo.project }}? The repository fetches anonymously afterwards.">Remove the credential</button>
+  </form>
+  {% endif %}
+  {% else %}
+  <p class="muted">Credential management needs the producer admin API (OKF_PRODUCER_ADMIN_URL and OKF_PRODUCER_ADMIN_TOKEN together).</p>
+  {% endif %}
+</section>
+{% endblock %}

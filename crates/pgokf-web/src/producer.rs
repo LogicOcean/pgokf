@@ -3,8 +3,17 @@
 //! the Admin page's Registry tab.
 //!
 //! The producer (a separate service, sharing this catalog's database) exposes
-//! per-repository git fetch credentials over three endpoints:
+//! repository registration and per-repository git fetch credentials:
 //!
+//! - `POST /admin/repositories` with `{remote_url, repository_key,
+//!   default_branch, checkout_path, project_name, tenant_id?}` registers a
+//!   repository (`201`), idempotently: an existing (key, branch) identity
+//!   answers `200` with the durable row. The body is the registry row plus
+//!   `graph_outcome` (`provided` | `created` | `reused` | `adopted`). A `409`
+//!   refuses a cross-tenant re-registration or a graph-adoption branch
+//!   mismatch; a `429` is the admin rate limit;
+//! - `GET /admin/repositories/{id}` reports the operator detail, including
+//!   the `checkout_path` the database reader grant deliberately withholds;
 //! - `PUT /admin/repositories/{id}/credential` with `{label, type, secret}`
 //!   creates or replaces the credential (`201`);
 //! - `DELETE /admin/repositories/{id}/credential` removes it (`204`), returning
@@ -56,6 +65,35 @@ pub(crate) struct CredentialInfo {
     /// example after a key rotation; the label and type still report).
     pub state: String,
     pub updated_at: String,
+}
+
+/// A repository's operator detail as the producer reports it. Only the
+/// checkout path is read here: the registry row itself comes from the
+/// (tenant-scoped) database read, and the credential from the credential
+/// endpoint - this call exists because the database reader grant
+/// deliberately withholds `checkout_path`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RepositoryDetail {
+    /// Where the producer stages the repository's worktree.
+    pub checkout_path: String,
+}
+
+/// The registration receipt `POST /admin/repositories` answers with: the
+/// durable registry row's identity and how its backing graph row was
+/// resolved. Never any credential material.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RegistrationReceipt {
+    /// The registered repository's id (a UUID, as text): the registration's
+    /// answer, and the id a follow-up credential PUT addresses.
+    pub repository_id: String,
+    pub repository_key: String,
+    /// How the graph row was resolved: `provided`, `created`, `reused`, or
+    /// `adopted` (a pre-existing graph whose roots differ from this
+    /// checkout - rendered honestly, never as an error).
+    pub graph_outcome: String,
+    /// `true` on a `200`: the (key, branch) identity was already registered
+    /// and the answer is the durable row, unchanged. `false` on a `201`.
+    pub already_registered: bool,
 }
 
 /// What a failed producer call means to the Admin page.
@@ -122,6 +160,37 @@ struct CredentialChange<'a> {
     secret: &'a str,
 }
 
+/// The operator detail `GET /admin/repositories/{id}` returns; only the
+/// fields this client reads are named, the rest pass through unread.
+#[derive(Debug, Deserialize)]
+struct RepositoryDetailDocument {
+    checkout_path: String,
+}
+
+/// The registration receipt's body (`201`, or `200` for an idempotent
+/// re-registration): the durable registry row plus the graph resolution.
+#[derive(Debug, Deserialize)]
+struct RegistrationDocument {
+    repository_id: String,
+    repository_key: String,
+    graph_outcome: String,
+}
+
+/// The body of `POST /admin/repositories`. `graph_id` stays unset: the
+/// producer auto-creates (or reuses, by project name) the graph row and
+/// reports the resolution in `graph_outcome`. The poll interval keeps the
+/// producer's default; the Registry tab edits it afterwards.
+#[derive(Debug, Serialize)]
+struct RepositoryRegistration<'a> {
+    remote_url: &'a str,
+    repository_key: &'a str,
+    default_branch: &'a str,
+    checkout_path: &'a str,
+    project_name: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tenant_id: Option<&'a str>,
+}
+
 impl ProducerAdmin {
     /// Build a client. `base` is the producer's base URL (for example
     /// `http://producer:8081`); the `/admin/repositories/...` paths are
@@ -145,6 +214,98 @@ impl ProducerAdmin {
             self.base,
             percent_encode(repository_id)
         )
+    }
+
+    /// The registration endpoint (also the collection listing).
+    fn repositories_url(&self) -> String {
+        format!("{}/admin/repositories", self.base)
+    }
+
+    /// The operator-detail endpoint of one repository.
+    fn repository_url(&self, repository_id: &str) -> String {
+        format!(
+            "{}/admin/repositories/{}",
+            self.base,
+            percent_encode(repository_id)
+        )
+    }
+
+    /// Register a repository (idempotently). The answer is the durable
+    /// row's receipt: `201` for a new registration, `200` for one whose
+    /// (key, branch) identity already existed. A `409` (cross-tenant
+    /// re-registration, or a graph-adoption branch mismatch), a `429`
+    /// (the admin rate limit), and a `400` (validation) are typed
+    /// rejections the page phrases for the operator.
+    pub(crate) async fn register(
+        &self,
+        remote_url: &str,
+        repository_key: &str,
+        default_branch: &str,
+        checkout_path: &str,
+        project_name: &str,
+        tenant_id: Option<&str>,
+    ) -> Result<RegistrationReceipt, ProducerError> {
+        let response = self
+            .http
+            .post(self.repositories_url())
+            .bearer_auth(&self.token)
+            .json(&RepositoryRegistration {
+                remote_url,
+                repository_key,
+                default_branch,
+                checkout_path,
+                project_name,
+                tenant_id,
+            })
+            .send()
+            .await
+            .map_err(|_| ProducerError::Unavailable)?;
+        let already_registered = match response.status() {
+            StatusCode::CREATED => false,
+            StatusCode::OK => true,
+            StatusCode::NOT_FOUND => return Err(ProducerError::UnknownRepository),
+            status if status.is_server_error() => return Err(ProducerError::Unavailable),
+            status => return Err(ProducerError::Rejected(status)),
+        };
+        let document = response
+            .json::<RegistrationDocument>()
+            .await
+            .map_err(|error| ProducerError::Unexpected(error.to_string()))?;
+        Ok(RegistrationReceipt {
+            repository_id: document.repository_id,
+            repository_key: document.repository_key,
+            graph_outcome: document.graph_outcome,
+            already_registered,
+        })
+    }
+
+    /// One repository's operator detail, or `None` when the producer knows
+    /// no repository with that id.
+    pub(crate) async fn repository(
+        &self,
+        repository_id: &str,
+    ) -> Result<Option<RepositoryDetail>, ProducerError> {
+        let response = self
+            .http
+            .get(self.repository_url(repository_id))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(|_| ProducerError::Unavailable)?;
+        match response.status() {
+            StatusCode::OK => {
+                let document = response
+                    .json::<RepositoryDetailDocument>()
+                    .await
+                    .map_err(|error| ProducerError::Unexpected(error.to_string()))?;
+                Ok(Some(RepositoryDetail {
+                    checkout_path: document.checkout_path,
+                }))
+            }
+            StatusCode::NOT_FOUND => Ok(None),
+            status if status.is_server_error() => Err(ProducerError::Unavailable),
+            status => Err(ProducerError::Rejected(status)),
+        }
     }
 
     /// The credential of one repository, or `None` when none is set (the
@@ -500,6 +661,147 @@ pub(crate) mod tests {
     // Cross-repo contract
     // ------------------------------------------------------------------
 
+    #[tokio::test]
+    async fn register_posts_the_registration_and_reads_the_receipt() {
+        // Arrange: a 201 (new registration) and a 200 (idempotent
+        // re-registration), each carrying the contract's document shape.
+        let (base, served) = mock_producer(&[
+            ("201 Created", REGISTRATION_FIXTURE),
+            ("200 OK", REREGISTRATION_FIXTURE),
+        ])
+        .await;
+        let producer = ProducerAdmin::new(&base, "admin-token").expect("a client");
+
+        // Act
+        let receipt = producer
+            .register(
+                "https://github.com/example/atlas.git",
+                "example-atlas",
+                "main",
+                "/srv/checkouts/atlas",
+                "atlas",
+                Some("tenant-a"),
+            )
+            .await
+            .expect("the registration succeeds");
+        let again = producer
+            .register(
+                "https://github.com/example/atlas.git",
+                "example-atlas",
+                "main",
+                "/srv/checkouts/atlas",
+                "atlas",
+                None,
+            )
+            .await
+            .expect("the re-registration succeeds");
+        let captured = served.await.expect("the mock captured the requests");
+
+        // Assert
+        assert_eq!(
+            receipt,
+            RegistrationReceipt {
+                repository_id: "8d2e1c4a-0000-4000-8000-0000000000aa".to_owned(),
+                repository_key: "example-atlas".to_owned(),
+                graph_outcome: "created".to_owned(),
+                already_registered: false,
+            }
+        );
+        assert!(
+            again.already_registered,
+            "a 200 is an idempotent re-registration"
+        );
+        assert_eq!(again.graph_outcome, "reused");
+        let (first, second) = (&captured[0], &captured[1]);
+        assert!(first.head.starts_with("POST /admin/repositories "));
+        assert!(
+            first
+                .head
+                .to_lowercase()
+                .contains("authorization: bearer admin-token")
+        );
+        assert_eq!(
+            first.body,
+            "{\"remote_url\":\"https://github.com/example/atlas.git\",\"repository_key\":\"example-atlas\",\"default_branch\":\"main\",\"checkout_path\":\"/srv/checkouts/atlas\",\"project_name\":\"atlas\",\"tenant_id\":\"tenant-a\"}"
+        );
+        assert!(
+            !second.body.contains("tenant_id"),
+            "no tenant field crosses when none is given: {}",
+            second.body
+        );
+    }
+
+    #[tokio::test]
+    async fn register_maps_the_refusals_to_typed_errors() {
+        // Arrange: the adoption guard (409), the rate limit (429), and a
+        // validation refusal (400).
+        let (base, served) = mock_producer(&[
+            ("409 Conflict", "{\"detail\":\"branch mismatch\"}"),
+            ("429 Too Many Requests", "{\"detail\":\"rate limit\"}"),
+            ("400 Bad Request", "{\"detail\":\"non-https remote\"}"),
+        ])
+        .await;
+        let producer = ProducerAdmin::new(&base, "admin-token").expect("a client");
+
+        // Act & Assert
+        for expected in [
+            StatusCode::CONFLICT,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::BAD_REQUEST,
+        ] {
+            assert_eq!(
+                producer
+                    .register("https://h/r", "k", "main", "/c", "p", None)
+                    .await,
+                Err(ProducerError::Rejected(expected)),
+            );
+        }
+        let captured = served.await.expect("the mock captured the requests");
+        assert_eq!(captured.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn repository_reports_the_checkout_path_and_404_is_none() {
+        // Arrange
+        let (base, served) = mock_producer(&[
+            ("200 OK", DETAIL_FIXTURE),
+            ("404 Not Found", "{\"detail\":\"unknown repository\"}"),
+        ])
+        .await;
+        let producer = ProducerAdmin::new(&base, "admin-token").expect("a client");
+
+        // Act & Assert
+        let detail = producer
+            .repository("8d2e1c4a-0000-4000-8000-0000000000aa")
+            .await
+            .expect("the read succeeds")
+            .expect("the producer knows the repository");
+        assert_eq!(
+            detail,
+            RepositoryDetail {
+                checkout_path: "/srv/checkouts/atlas".to_owned(),
+            }
+        );
+        assert_eq!(
+            producer
+                .repository("8d2e1c4a-0000-4000-8000-0000000000ff")
+                .await,
+            Ok(None),
+            "an unknown id is a clean None"
+        );
+        let captured = served.await.expect("the mock captured the requests");
+        assert_eq!(captured.len(), 2);
+        assert!(
+            captured[0]
+                .head
+                .starts_with("GET /admin/repositories/8d2e1c4a-0000-4000-8000-0000000000aa ")
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Cross-repo contract
+    // ------------------------------------------------------------------
+
     /// The two fixtures below are verbatim in shape from the producer's
     /// `CredentialInfoResponse`
     /// (`/tmp/registry-ui/src/ast_graph/producer/admin.py`): keys `label`,
@@ -508,6 +810,20 @@ pub(crate) mod tests {
     /// side; a drift in the document shape must fail a test here or there.
     const CONFIGURED_FIXTURE: &str = "{\"label\":\"deploy key\",\"type\":\"github_pat\",\"secret_last4\":\"a1b2\",\"state\":\"configured\",\"updated_at\":\"2026-09-13T10:00:00Z\"}";
     const UNUSABLE_FIXTURE: &str = "{\"label\":\"legacy key\",\"type\":\"http_basic\",\"secret_last4\":null,\"state\":\"unusable\",\"updated_at\":\"2026-09-01T09:00:00Z\"}";
+
+    /// The registration and detail fixtures below are verbatim in shape
+    /// from the producer's `RepositoryRegistrationResponse` and
+    /// `RepositoryDetailResponse`
+    /// (`/tmp/registry-ui/src/ast_graph/producer/admin.py`): the registry
+    /// row's fields plus `graph_outcome` (`provided` | `created` |
+    /// `reused` | `adopted`) on the receipt, and `checkout_path` on the
+    /// operator detail. The producer repo mirrors this test on its side; a
+    /// drift in the document shape must fail a test here or there. (The
+    /// credential fixtures above carry the same discipline for
+    /// `CredentialInfoResponse`.)
+    const REGISTRATION_FIXTURE: &str = "{\"repository_id\":\"8d2e1c4a-0000-4000-8000-0000000000aa\",\"remote_url\":\"https://github.com/example/atlas\",\"repository_key\":\"example-atlas\",\"default_branch\":\"main\",\"checkout_path\":\"/srv/checkouts/atlas\",\"project_name\":\"atlas\",\"graph_id\":\"11111111-2222-3333-4444-555555555555\",\"poll_interval_seconds\":300,\"status\":\"active\",\"tenant_id\":\"tenant-a\",\"last_indexed_commit\":null,\"last_published_commit\":null,\"last_published_generation\":null,\"created_at\":\"2026-09-15T10:00:00Z\",\"updated_at\":\"2026-09-15T10:00:00Z\",\"graph_outcome\":\"created\"}";
+    const REREGISTRATION_FIXTURE: &str = "{\"repository_id\":\"8d2e1c4a-0000-4000-8000-0000000000aa\",\"remote_url\":\"https://github.com/example/atlas\",\"repository_key\":\"example-atlas\",\"default_branch\":\"main\",\"checkout_path\":\"/srv/checkouts/atlas\",\"project_name\":\"atlas\",\"graph_id\":\"11111111-2222-3333-4444-555555555555\",\"poll_interval_seconds\":300,\"status\":\"active\",\"tenant_id\":\"tenant-a\",\"last_indexed_commit\":null,\"last_published_commit\":null,\"last_published_generation\":null,\"created_at\":\"2026-09-15T10:00:00Z\",\"updated_at\":\"2026-09-15T10:00:00Z\",\"graph_outcome\":\"reused\"}";
+    const DETAIL_FIXTURE: &str = "{\"repository_id\":\"8d2e1c4a-0000-4000-8000-0000000000aa\",\"remote_url\":\"https://github.com/example/atlas\",\"repository_key\":\"example-atlas\",\"default_branch\":\"main\",\"checkout_path\":\"/srv/checkouts/atlas\",\"project_name\":\"atlas\",\"graph_id\":\"11111111-2222-3333-4444-555555555555\",\"poll_interval_seconds\":300,\"status\":\"active\",\"tenant_id\":\"tenant-a\",\"last_indexed_commit\":null,\"last_published_commit\":null,\"last_published_generation\":null,\"created_at\":\"2026-09-15T10:00:00Z\",\"updated_at\":\"2026-09-15T10:00:00Z\",\"credential\":{\"label\":\"deploy key\",\"secret_last4\":\"a1b2\"}}";
 
     /// The web half of the credential-document contract: both documented
     /// shapes parse, and every status the producer's admin API defines lands

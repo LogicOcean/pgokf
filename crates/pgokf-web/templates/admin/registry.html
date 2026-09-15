@@ -2,7 +2,26 @@
 {% block admin %}
 <section class="panel">
   <div class="panel-head"><h2>Registered repositories <span class="muted">({{ rows.len() }})</span></h2></div>
-  <p class="muted">One row per repository the registry producer service reconciles. Pause stops a repository's reconciliation without deleting its registration (the producer polls active repositories only); the poll interval bounds how often an active repository is reconciled. A credential is set or removed through the producer's admin API: the label, type, and last four characters are all it ever reports, and the secret itself is never stored here or shown.</p>
+  {% if producer_configured %}
+  <details class="adder" id="pgokf-add-repository">
+    <summary><h3>+ Add repository</h3></summary>
+    <p class="muted small">Registration rides the producer's admin API and is idempotent: registering an already-registered repository reports its existing row, not an error. This form is the primary path; the producer's register CLI remains the scripted alternative. Give a private repository's credential here and its first reconcile is already authenticated - or set one later from the repository's page. The secret crosses once, to the producer; it is never stored here or shown.</p>
+    <form method="post" action="/admin/registry" data-once>
+      <input type="hidden" name="action" value="register">
+      <div class="step-grid">
+        <div class="field"><label for="ar-remote">Remote URL <span class="muted">(https://, no embedded credentials)</span></label><input id="ar-remote" type="url" name="remote" placeholder="https://github.com/example/project.git" required spellcheck="false"></div>
+        <div class="field"><label for="ar-branch">Branch</label><input id="ar-branch" type="text" name="branch" value="main" required maxlength="255" spellcheck="false"></div>
+        <div class="field"><label for="ar-project">Project name</label><input id="ar-project" type="text" name="project" required maxlength="255" spellcheck="false"></div>
+        <div class="field"><label for="ar-checkout">Checkout path <span class="muted">(where the producer stages its worktree)</span></label><input id="ar-checkout" type="text" name="checkout_path" placeholder="/srv/checkouts/project" required maxlength="1024" spellcheck="false"></div>
+        <div class="field"><label for="ar-label">Credential label <span class="muted">(optional, for a private repository)</span></label><input id="ar-label" type="text" name="label" maxlength="200" spellcheck="false"></div>
+        <div class="field"><label for="ar-kind">Credential type</label><select id="ar-kind" name="kind"><option value="">None - anonymous fetch</option><option value="github_pat">GitHub token</option><option value="http_basic">HTTP basic</option></select></div>
+        <div class="field"><label for="ar-secret">Credential secret <span class="muted">(optional; never shown again)</span></label><input id="ar-secret" type="password" name="secret" autocomplete="new-password"></div>
+      </div>
+      <div class="editor-actions"><button type="submit" class="btn primary">Register</button></div>
+    </form>
+  </details>
+  {% endif %}
+  <p class="muted">One row per repository the registry producer service reconciles; a row's project and remote link to the repository's own page, where its fetch credential is set, replaced, or removed. Pause stops a repository's reconciliation without deleting its registration (the producer polls active repositories only); the poll interval bounds how often an active repository is reconciled. The credential column is a status readout only: the producer's admin API reports the label, type, and last four characters, and the secret itself is never stored here or shown.</p>
   {% if let Some(note) = registry_note %}<p class="notice bad">{{ note }}</p>{% endif %}
   {% if !writable %}<p class="notice bad">Pause, resume, and poll-interval changes need the writer connection (OKF_PG_WRITER_URL), and its role must hold the pgokf_admin tier; this server is read-only.</p>{% endif %}
   {% if let Some(note) = credential_note %}<p class="notice bad">{{ note }}</p>{% endif %}
@@ -13,10 +32,10 @@
     <tbody>
     {% for row in rows %}
       <tr>
-        <td><strong>{{ row.project }}</strong></td>
+        <td><a href="/admin/registry/{{ row.id }}"><strong>{{ row.project }}</strong></a></td>
         <td><span class="desc path" title="{{ row.key }}">{{ row.key }}</span></td>
         <td>{{ row.branch }}</td>
-        <td><span class="desc path" title="{{ row.remote }}">{{ row.remote }}</span></td>
+        <td><a href="/admin/registry/{{ row.id }}" class="path" title="{{ row.remote }}">{{ row.remote }}</a></td>
         <td>{% if row.paused %}<span class="pill warn">paused</span>{% else if row.status == "active" %}<span class="pill ok">active</span>{% else %}<span class="pill muted">{{ row.status }}</span>{% endif %}</td>
         <td class="num">
           {% if writable %}
@@ -34,33 +53,16 @@
         <td>
           {% if credentials_known && row.credential.known %}
             {% if row.credential.set %}
-            <div>{{ row.credential.summary }}{% if row.credential.unusable %} <span class="pill warn">unusable</span>{% endif %}</div>
-            <div class="desc">updated {{ row.credential.updated_at|datetime }}</div>
+              {% if row.credential.unusable %}
+              <span class="pill warn" title="updated {{ row.credential.updated_at|datetime }}">{{ row.credential.summary }} · unusable</span>
+              {% else %}
+              <span class="pill ok" title="updated {{ row.credential.updated_at|datetime }}">{{ row.credential.summary }}</span>
+              {% endif %}
             {% else %}
-            <span class="muted">anonymous</span>
+            <span class="pill muted">anonymous</span>
             {% endif %}
           {% else %}
           <span class="muted">&mdash;</span>
-          {% endif %}
-          {% if producer_configured %}
-          <form method="post" action="/admin/registry" class="cell-form" data-once>
-            <input type="hidden" name="id" value="{{ row.id }}">
-            <input type="hidden" name="action" value="set-credential">
-            <input type="text" name="label" placeholder="Label" required maxlength="200" spellcheck="false" aria-label="Credential label for {{ row.project }}">
-            <select name="kind" aria-label="Credential type for {{ row.project }}">
-              <option value="github_pat">GitHub token</option>
-              <option value="http_basic">HTTP basic</option>
-            </select>
-            <input type="password" name="secret" placeholder="Secret" required autocomplete="new-password" aria-label="Credential secret for {{ row.project }}">
-            <button type="submit" class="btn">Set</button>
-          </form>
-          {% if row.credential.known && row.credential.set %}
-          <form method="post" action="/admin/registry" class="cell-form">
-            <input type="hidden" name="id" value="{{ row.id }}">
-            <input type="hidden" name="action" value="remove-credential">
-            <button type="submit" class="btn danger" data-confirm="Remove the credential for {{ row.project }}? The repository fetches anonymously afterwards.">Remove</button>
-          </form>
-          {% endif %}
           {% endif %}
         </td>
         <td class="when">{{ row.last_indexed }}</td>
