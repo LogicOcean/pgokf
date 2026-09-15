@@ -1054,7 +1054,9 @@ and an optional target: a resolved `target_bundle_id` + `target_concept_id`
 or neither (an unresolved row, returned as metadata but never materialized as
 a traversal edge). Endpoint validation never leaks: an absent, inactive, or
 cross-tenant target bundle produces the same `unresolved` row with the
-endpoint references dropped. Rows are canonicalized (sorted) and hashed, so an
+endpoint references dropped. A call accepts at most
+`pgokf.max_relationship_rows` rows (default 50000; more is a `22023`).
+Rows are canonicalized (sorted) and hashed, so an
 identical retried call is a no-op while the same publication key with a
 different set is a `23505` conflict; an empty `rows` array removes the prior
 set on activation.
@@ -2253,7 +2255,7 @@ See [security.md](security.md) for the authorization model.
 
 ## GUCs
 
-Seven `pgokf.*` server settings. The five resource ceilings use the `SIGHUP`
+Eight `pgokf.*` server settings. The six resource ceilings use the `SIGHUP`
 context, settable only in `postgresql.conf` plus a reload, **never** from a SQL
 `SET`, so they stay trustworthy as hard safety limits. `log_level` uses `SUSET`,
 so a superuser can change it at runtime, and `pgokf.tenant` uses `USERSET` (any
@@ -2267,6 +2269,7 @@ Full detail in [configuration.md](configuration.md).
 | `pgokf.max_bundle_bytes` | integer | `1073741824` (1 GiB) | `1 .. 2147483647` | `SIGHUP` |
 | `pgokf.max_frontmatter_bytes` | integer | `262144` (256 KiB) | `1 .. 2147483647` | `SIGHUP` |
 | `pgokf.max_graph_hops` | integer | `5` | `1 .. 1000` | `SIGHUP` |
+| `pgokf.max_relationship_rows` | integer | `50000` | `1 .. 1000000` | `SIGHUP` |
 | `pgokf.log_level` | string | `warning` | - | `SUSET` |
 | `pgokf.tenant` | string | `''` (empty = see all, unless `require_tenant` is on) | n/a | `USERSET` |
 

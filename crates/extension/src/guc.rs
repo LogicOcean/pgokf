@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Configuration variables (GUCs) exposed by the `pgokf` extension.
 //!
-//! The four resource ceilings are registered with the `Sighup` context: they
+//! The resource ceilings are registered with the `Sighup` context: they
 //! can only be set in `postgresql.conf` (applied at server start or on a
 //! configuration reload), and no session - not even a superuser's `SET` -
 //! can raise them, which keeps them trustworthy as hard safety limits. The
@@ -34,11 +34,19 @@ pub const DEFAULT_MAX_BUNDLE_BYTES: i32 = 1024 * 1024 * 1024;
 pub const DEFAULT_MAX_FRONTMATTER_BYTES: i32 = 256 * 1024;
 /// Default ceiling for graph traversal depth.
 pub const DEFAULT_MAX_GRAPH_HOPS: i32 = 5;
+/// Default ceiling for the rows accepted in one `replace_relationships`
+/// call.
+pub const DEFAULT_MAX_RELATIONSHIP_ROWS: i32 = 50_000;
 /// Default logging threshold used when `pgokf.log_level` is unset.
 pub const DEFAULT_LOG_LEVEL: &str = "warning";
 
 /// Upper bound accepted for `pgokf.max_graph_hops`.
 const MAX_GRAPH_HOPS_CEILING: i32 = 1_000;
+/// Upper bound accepted for `pgokf.max_relationship_rows`. The ceiling keeps
+/// the GUC itself a bounded single-call limit: relationship inserts are
+/// batched beneath it, so the value exists to bound one call's validation
+/// and jsonb parse, not memory, and must not grow without bound.
+const MAX_RELATIONSHIP_ROWS_CEILING: i32 = 1_000_000;
 
 static MAX_FILE_BYTES: GucSetting<i32> = GucSetting::<i32>::new(DEFAULT_MAX_FILE_BYTES);
 static MAX_BUNDLE_FILES: GucSetting<i32> = GucSetting::<i32>::new(DEFAULT_MAX_BUNDLE_FILES);
@@ -46,6 +54,8 @@ static MAX_BUNDLE_BYTES: GucSetting<i32> = GucSetting::<i32>::new(DEFAULT_MAX_BU
 static MAX_FRONTMATTER_BYTES: GucSetting<i32> =
     GucSetting::<i32>::new(DEFAULT_MAX_FRONTMATTER_BYTES);
 static MAX_GRAPH_HOPS: GucSetting<i32> = GucSetting::<i32>::new(DEFAULT_MAX_GRAPH_HOPS);
+static MAX_RELATIONSHIP_ROWS: GucSetting<i32> =
+    GucSetting::<i32>::new(DEFAULT_MAX_RELATIONSHIP_ROWS);
 static LOG_LEVEL: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(Some(c"warning"));
 
@@ -118,6 +128,16 @@ pub fn register_gucs() {
         &MAX_GRAPH_HOPS,
         1,
         MAX_GRAPH_HOPS_CEILING,
+        GucContext::Sighup,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pgokf.max_relationship_rows",
+        c"Maximum rows accepted in one replace_relationships call.",
+        c"Hard safety limit bounding one call's row validation and jsonb parse; inserts are batched beneath it.",
+        &MAX_RELATIONSHIP_ROWS,
+        1,
+        MAX_RELATIONSHIP_ROWS_CEILING,
         GucContext::Sighup,
         GucFlags::default(),
     );
@@ -203,6 +223,13 @@ pub fn max_graph_hops() -> usize {
     to_limit(MAX_GRAPH_HOPS.get())
 }
 
+/// Effective `pgokf.max_relationship_rows`: ceiling for the rows one
+/// `replace_relationships` call accepts.
+#[must_use]
+pub fn max_relationship_rows() -> usize {
+    to_limit(MAX_RELATIONSHIP_ROWS.get())
+}
+
 /// Effective `pgokf.log_level` as UTF-8, falling back to
 /// [`DEFAULT_LOG_LEVEL`] when the setting is unset.
 #[must_use]
@@ -236,6 +263,7 @@ mod tests {
         assert_eq!(DEFAULT_MAX_BUNDLE_FILES, 100_000);
         assert_eq!(DEFAULT_MAX_FRONTMATTER_BYTES, 256 * 1024);
         assert_eq!(DEFAULT_MAX_GRAPH_HOPS, 5);
+        assert_eq!(DEFAULT_MAX_RELATIONSHIP_ROWS, 50_000);
         assert_eq!(DEFAULT_LOG_LEVEL, "warning");
     }
 

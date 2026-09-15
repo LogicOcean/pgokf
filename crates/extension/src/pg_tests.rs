@@ -10490,11 +10490,14 @@ Use the solo skill on its own.\n";
         // Assert: the hard row limit is enforced before any catalog write.
         let oversized = format!(
             "[{}]",
-            vec![r#"{"source_concept_id": "alpha", "relation_type": "ns:r", "external_target": "e"}"#; 10_001]
+            vec![r#"{"source_concept_id": "alpha", "relation_type": "ns:r", "external_target": "e"}"#; 50_001]
                 .join(",")
         );
         let state = replace_sqlstate(bundle_id, "producer-a", 10, 1, token, &oversized);
-        assert_eq!(state, "22023", "more than 10000 rows is rejected");
+        assert_eq!(
+            state, "22023",
+            "more than 50000 rows (the pgokf.max_relationship_rows default) is rejected"
+        );
 
         // Assert: arbitrary producer-defined namespaced types are accepted, and
         // a same-bundle concept-only target resolves.
@@ -10524,6 +10527,97 @@ Use the solo skill on its own.\n";
                 format!("alpha-[:code:links]->ext:registry:other-thing (unresolved)"),
                 format!("alpha-[:code:misses]->{bundle_id}:absent (unresolved)"),
             ]
+        );
+    }
+
+    #[pg_test]
+    fn replace_relationships_publishes_fifty_thousand_rows_in_a_sane_time() {
+        // Arrange: a registered bundle (generation 1) and its live fence, and
+        // a full submission at the pgokf.max_relationship_rows default
+        // (50_000 rows, each a distinct canonical identity against the
+        // fixture's alpha concept).
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_fixture(&bundle);
+        let token = issue_fence(bundle_id, "producer-a", 10);
+        let rows = format!(
+            "[{}]",
+            (0..50_000)
+                .map(|index| format!(
+                    r#"{{"source_concept_id": "alpha", "relation_type": "ns:r{index}", "external_target": "e{index}"}}"#
+                ))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+
+        // Act: one real publication end to end (jsonb parse, validation,
+        // canonicalization, hashing, batched inserts).
+        let started = std::time::Instant::now();
+        let (state, count) = replace_rows(bundle_id, "producer-a", 10, 1, token, &rows);
+        let elapsed = started.elapsed();
+
+        // Assert: every row lands. The wall-clock bound is deliberately
+        // generous - it exists to catch a complexity regression at the raised
+        // limit (the path was acceptable at 10K, so a 5x bound must stay in
+        // the same class), not to benchmark; on this class of hardware the
+        // call completes in seconds.
+        assert_eq!((state.as_str(), count), ("active", 50_000));
+        assert!(
+            elapsed.as_secs() < 60,
+            "a 50K-row publication took {elapsed:?}"
+        );
+
+        // Assert: one row past the limit is refused with the same 22023
+        // shape, and the message names the effective limit.
+        Spi::run(
+            "CREATE OR REPLACE FUNCTION pg_temp.replace_errm(
+                 producer text, bid bigint, pub_gen bigint, expected bigint,
+                 token bigint, rows jsonb) RETURNS text
+             LANGUAGE plpgsql
+             AS $probe$
+             BEGIN
+                 PERFORM pgokf.replace_relationships(producer, bid, pub_gen, expected, token, rows);
+                 RETURN 'ok';
+             EXCEPTION WHEN OTHERS THEN
+                 RETURN SQLSTATE || ':' || SQLERRM;
+             END
+             $probe$;",
+        )
+        .expect("replace message probe is creatable");
+        let oversized = format!(
+            "[{}]",
+            vec![r#"{"source_concept_id": "alpha", "relation_type": "ns:r", "external_target": "e"}"#; 50_001]
+                .join(",")
+        );
+        let outcome = Spi::get_one_with_args::<String>(
+            "SELECT pg_temp.replace_errm($1, $2, $3, $4, $5, $6::jsonb)",
+            &[
+                "producer-a".into(),
+                bundle_id.into(),
+                11_i64.into(),
+                1_i64.into(),
+                token.into(),
+                oversized.into(),
+            ],
+        )
+        .expect("replace message probe executes")
+        .expect("the probe reports an outcome");
+        assert!(
+            outcome.starts_with("22023:"),
+            "one past the limit is 22023: {outcome}"
+        );
+        assert!(
+            outcome.contains("rows holds 50001 entries but the hard limit is 50000"),
+            "the message names the effective limit: {outcome}"
+        );
+
+        // Assert: the empty-rows removal path is unchanged - an empty set
+        // under a new fence supersedes the 50K publication down to zero.
+        let token = issue_fence(bundle_id, "producer-a", 11);
+        let (state, count) = replace_rows(bundle_id, "producer-a", 11, 1, token, "[]");
+        assert_eq!((state.as_str(), count), ("active", 0));
+        assert!(
+            current_relationship_rows(bundle_id).is_empty(),
+            "an empty rows array removes the prior set"
         );
     }
 

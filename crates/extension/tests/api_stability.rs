@@ -472,7 +472,7 @@ fn default_version_matches_the_crate_version() {
 
 /// A development-cycle default version is a point version: `MAJOR.MINOR.PATCH`
 /// optionally followed by `-devN` with N >= 1 (`0.3.0-dev1`, `0.3.0-dev2`,
-/// ...). PostgreSQL treats extension version names as opaque strings and
+/// ...). `PostgreSQL` treats extension version names as opaque strings and
 /// finds update paths by exact `pgokf--<from>--<to>.sql` file-name matching,
 /// so the suffix needs no ordering semantics - but the convention keeps the
 /// chain readable and collapses into the clean tag at finalization.
@@ -521,7 +521,7 @@ const PERMITTED_BRANCH_TERMINALS: &[&str] = &[];
 /// `ALTER EXTENSION pgokf UPDATE` aiming at the old terminal, so the new
 /// script never runs. This is the forward discipline of the dev
 /// point-version convention, enforced. Version names are opaque to
-/// PostgreSQL, so nothing here compares strings - the graph edges carry the
+/// `PostgreSQL`, so nothing here compares strings - the graph edges carry the
 /// ordering.
 #[test]
 fn upgrade_chain_reaches_the_default_version() {
