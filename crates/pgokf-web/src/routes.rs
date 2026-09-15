@@ -11883,7 +11883,7 @@ mod tests {
             .await
             .expect("the router answers");
 
-        // Assert: a readable notice on the Registry tab, quoting the status
+        // Assert: a readable notice on the add-repository page, quoting the status
         // and what it means - never the producer's raw body.
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = body_text(response).await;
