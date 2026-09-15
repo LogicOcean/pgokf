@@ -1,0 +1,24 @@
+{% extends "admin/layout.html" %}
+{% block admin %}
+<section class="panel">
+  <div class="panel-head"><h2>Add a repository</h2><a class="btn ghost" href="/admin/registry">All repositories</a></div>
+  {% if producer_configured %}
+  <p class="muted small">Registration rides the producer's admin API and is idempotent: registering an already-registered repository reports its existing row, not an error. This form is the primary path; the producer's register CLI remains the scripted alternative. Give a private repository's credential here and its first reconcile is already authenticated - or set one later from the repository's page. The secret crosses once, to the producer; it is never stored here or shown.</p>
+  <form method="post" action="/admin/registry" id="pgokf-add-repository" data-once>
+    <input type="hidden" name="action" value="register">
+    <div class="step-grid">
+      <div class="field"><label for="ar-remote">Remote URL <span class="muted">(https://, no embedded credentials)</span></label><input id="ar-remote" type="url" name="remote" placeholder="https://github.com/example/project.git" required spellcheck="false"></div>
+      <div class="field"><label for="ar-branch">Branch</label><input id="ar-branch" type="text" name="branch" value="main" required maxlength="255" spellcheck="false"></div>
+      <div class="field"><label for="ar-project">Project name</label><input id="ar-project" type="text" name="project" required maxlength="255" spellcheck="false"></div>
+      <div class="field"><label for="ar-checkout">Checkout path <span class="muted">(where the producer stages its worktree)</span></label><input id="ar-checkout" type="text" name="checkout_path" placeholder="/srv/checkouts/project" required maxlength="1024" spellcheck="false"></div>
+      <div class="field"><label for="ar-label">Credential label <span class="muted">(optional, for a private repository)</span></label><input id="ar-label" type="text" name="label" maxlength="200" spellcheck="false"></div>
+      <div class="field"><label for="ar-kind">Credential type</label><select id="ar-kind" name="kind"><option value="">None - anonymous fetch</option><option value="github_pat">GitHub token</option><option value="http_basic">HTTP basic</option></select></div>
+      <div class="field"><label for="ar-secret">Credential secret <span class="muted">(optional; never shown again)</span></label><input id="ar-secret" type="password" name="secret" autocomplete="new-password"></div>
+    </div>
+    <div class="editor-actions"><button type="submit" class="btn primary">Register</button></div>
+  </form>
+  {% else %}
+  <p class="muted">Registration needs the producer admin API (OKF_PRODUCER_ADMIN_URL and OKF_PRODUCER_ADMIN_TOKEN together).</p>
+  {% endif %}
+</section>
+{% endblock %}
