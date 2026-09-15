@@ -174,6 +174,7 @@ pub(crate) fn router(app: Shared) -> Router {
             "/admin/registry",
             get(admin_registry_page).post(admin_registry),
         )
+        .route("/admin/registry/new", get(admin_repository_new_page))
         .route(
             "/admin/registry/{id}",
             get(admin_repository_page).post(admin_repository),
@@ -1792,8 +1793,8 @@ struct AdminRegistryPage {
     /// Whether pause/resume and poll-interval writes are possible (a
     /// writer connection is on).
     writable: bool,
-    /// Whether the registration form is offered and the credential column
-    /// reflects the producer's answers (a producer admin API is
+    /// Whether the add-repository button is offered and the credential
+    /// column reflects the producer's answers (a producer admin API is
     /// configured).
     producer_configured: bool,
     /// Whether the credential column reflects the producer's answers; when
@@ -1921,6 +1922,16 @@ struct AdminRepositoryPage {
     /// it (the database reader grant deliberately withholds the column);
     /// `None` while the producer has not answered.
     checkout_path: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "admin/repository-new.html")]
+struct AdminRepositoryNewPage {
+    shell: Shell,
+    admin: AdminShell,
+    /// Whether the registration form is offered (a producer admin API is
+    /// configured); when not, the page says so instead of showing the form.
+    producer_configured: bool,
 }
 
 /// One registered repository as its own page shows it: the full registry
@@ -5746,6 +5757,26 @@ struct AdminBundleForm {
     custom_cron: String,
 }
 
+/// Refresh one bundle. A filesystem or object-store bundle is re-read from
+/// its source (`pgokf.refresh_bundle`). A content bundle has no source to
+/// re-read, so it is rebuilt from the sources the catalog keeps: the same
+/// full-snapshot resync the document workflow runs after a change
+/// (`apply_change` with an empty change, which re-reads every stored file
+/// and calls `register_bundle_content`), under the same concurrency
+/// contract - the process-wide one-rebuild-at-a-time lock and the content
+/// bundle's cross-writer advisory lock. The rebuild needs `store_source`
+/// on; when it is off the action answers with the workflow's readable
+/// refusal, which names the admin step.
+async fn refresh_one_bundle(app: &App, writer: &Db, id: i64) -> Result<SyncOutcome, AppError> {
+    if matches!(app.db.bundle_source(id).await?, Some((kind, _)) if kind == "content") {
+        let store = open_store(app, id).await?.map_err(AppError::bad_request)?;
+        ensure_store_sources(&store, writer).await?;
+        return apply_change(app, writer, &store, Vec::new(), &[]).await;
+    }
+    let _one_at_a_time = app.rebuilds.lock().await;
+    Ok(writer.refresh_bundle(id).await?)
+}
+
 async fn admin_bundles(
     State(app): State<Shared>,
     session: Session,
@@ -5761,8 +5792,7 @@ async fn admin_bundles(
     };
     let notice = match form.action.as_str() {
         "refresh" => {
-            let _one_at_a_time = app.rebuilds.lock().await;
-            let outcome = access.writer.refresh_bundle(id()?).await?;
+            let outcome = refresh_one_bundle(&app, access.writer, id()?).await?;
             format!(
                 "Refreshed bundle {}: {} added, {} updated, {} removed.",
                 outcome.bundle_id, outcome.added, outcome.updated, outcome.removed
@@ -5971,6 +6001,53 @@ async fn admin_registry_page(
         error: None,
     };
     html(&render_admin_registry(&app, &session, outcome).await?)
+}
+
+/// The add-repository page: the registration form on a page of its own,
+/// the same pattern the Providers tab uses for its own long form (a
+/// panel-head button leading to a dedicated `/new` page).
+fn render_admin_repository_new(
+    app: &App,
+    session: &Session,
+    outcome: AdminOutcome,
+) -> AdminRepositoryNewPage {
+    AdminRepositoryNewPage {
+        shell: Shell::new(app, session, "Administration · Add a repository", "admin"),
+        admin: AdminTab::Registry.shell(outcome),
+        producer_configured: app.producer.is_some(),
+    }
+}
+
+async fn admin_repository_new_page(State(app): State<Shared>, session: Session) -> PageResult {
+    admin(&session)?;
+    html(&render_admin_repository_new(
+        &app,
+        &session,
+        AdminOutcome::default(),
+    ))
+}
+
+/// The add-repository page again, saying what was wrong with the
+/// registration: a 400 for a refusal of what was asked, a 503 when the
+/// producer admin API did not answer - on the page the form is on, never a
+/// bare error.
+fn repository_new_refused(
+    app: &App,
+    session: &Session,
+    error: String,
+    unavailable: bool,
+) -> PageResult {
+    let outcome = AdminOutcome {
+        notice: None,
+        error: Some(error),
+    };
+    let mut response = html(&render_admin_repository_new(app, session, outcome))?;
+    *response.status_mut() = if unavailable {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    Ok(response)
 }
 
 /// The Registry tab again, saying what was wrong with the last action: a
@@ -6376,9 +6453,10 @@ fn graph_outcome_notice(receipt: &RegistrationReceipt, project: &str) -> String 
 /// The page-side answer to a refused or failed registration: the 409
 /// guards (cross-tenant re-registration, graph-adoption branch mismatch)
 /// and the 429 rate limit are phrased for what they mean, an outage is an
-/// honest 503 - never a raw dump of the producer's answer.
-async fn registration_failed(app: &App, session: &Session, error: ProducerError) -> PageResult {
-    let (message, unavailable) = match &error {
+/// honest 503 - never a raw dump of the producer's answer. Shown on the
+/// add-repository page, where the form is.
+fn registration_failed(app: &App, session: &Session, error: &ProducerError) -> PageResult {
+    let (message, unavailable) = match error {
         ProducerError::Rejected(status) if *status == StatusCode::CONFLICT => (
             "The producer refused the registration (HTTP 409): this key and branch are already \
              registered under another tenant, or the project name collides with an existing \
@@ -6395,7 +6473,7 @@ async fn registration_failed(app: &App, session: &Session, error: ProducerError)
         ),
         _ => (error.message(), error.is_unavailable()),
     };
-    registry_refused(app, session, message, unavailable).await
+    repository_new_refused(app, session, message, unavailable)
 }
 
 /// The register form, validated against the producer's bounds and ready
@@ -6471,7 +6549,7 @@ async fn registry_register(
     let producer = producer_for(app)?;
     let draft = match registration_draft(form) {
         Ok(draft) => draft,
-        Err(why) => return registry_refused(app, session, why.to_owned(), false).await,
+        Err(why) => return repository_new_refused(app, session, why.to_owned(), false),
     };
     let receipt = match producer
         .register(
@@ -6485,7 +6563,7 @@ async fn registry_register(
         .await
     {
         Ok(receipt) => receipt,
-        Err(error) => return registration_failed(app, session, error).await,
+        Err(error) => return registration_failed(app, session, &error),
     };
     eprintln!(
         "pgokf-web: {} registered registry repository {} ({}, {}, graph {})",
@@ -6515,7 +6593,7 @@ async fn registry_register(
             // The repository IS registered; only the credential did not
             // land. Say exactly that, and where to finish the job.
             Err(error) => {
-                return registry_refused(
+                return repository_new_refused(
                     app,
                     session,
                     format!(
@@ -6526,8 +6604,7 @@ async fn registry_register(
                         error.message()
                     ),
                     error.is_unavailable(),
-                )
-                .await;
+                );
             }
         }
     }
@@ -10545,6 +10622,288 @@ mod tests {
         assert!(rendered.contains("<th>Refresh cadence</th>"));
     }
 
+    #[test]
+    fn admin_bundles_page_offers_refresh_for_content_bundles_too() {
+        // Arrange: one filesystem bundle and one content bundle.
+        let mut content = admin_bundle(10, "notes", None);
+        content.source_type = "content".to_owned();
+        let page = AdminBundlesPage {
+            shell: Shell::bare("Administration · Bundles"),
+            admin: AdminTab::Bundles.shell(AdminOutcome::default()),
+            bundles: vec![
+                AdminBundleRow {
+                    bundle: admin_bundle(7, "docs", Some("fresh")),
+                    cadence: cadence_view(None),
+                },
+                AdminBundleRow {
+                    bundle: content,
+                    cadence: cadence_view(None),
+                },
+            ],
+            cadence_known: true,
+            cadence_note: None,
+        };
+
+        // Act
+        let rendered = page.render().expect("the admin bundles page renders");
+
+        // Assert: Refresh is offered for both, each button's title saying
+        // what it does - a content bundle has no source to re-read, so its
+        // refresh rebuilds it from the sources the catalog keeps.
+        assert_eq!(rendered.matches("value=\"refresh\"").count(), 2);
+        assert!(rendered.contains("title=\"Re-read the source and index what changed\""));
+        assert!(
+            rendered.contains("title=\"Rebuild this bundle from the sources the catalog keeps\"")
+        );
+        // The header note keeps the freshness truth: a content rebuild
+        // re-syncs content; the fresh label still asks for certification.
+        assert!(rendered.contains("refreshing content does not attest freshness"));
+        assert!(rendered.contains("the fresh label still asks for certification"));
+    }
+
+    // ---- Content-bundle refresh (scratch database) ------------------------
+
+    /// The scratch database the content-refresh regression creates and
+    /// drops. Like the scratch tests in `db.rs`, everything skips when no
+    /// local `PostgreSQL` answers.
+    const REFRESH_SCRATCH_DB: &str = "pgokf_web_refresh_sql_test";
+
+    /// The pgokf stand-in fixture: the catalog tables the refresh flow
+    /// reads, a `store_source` switch, and stand-ins for the two writer
+    /// functions that record which one ran. The `register_bundle_content`
+    /// stand-in also records whether the bundle's cross-writer advisory
+    /// lock was held when it ran: a session-level lock another session
+    /// holds cannot be taken, so a successful try means the refresh ran
+    /// WITHOUT the lock the concurrency contract requires.
+    const REFRESH_SCRATCH_FIXTURES: &str = "
+        CREATE SCHEMA pgokf;
+        CREATE TABLE pgokf.fixture (store_source boolean NOT NULL);
+        INSERT INTO pgokf.fixture VALUES (true);
+        CREATE TABLE pgokf.bundles (
+            id bigint PRIMARY KEY,
+            tenant_id text NOT NULL DEFAULT 'default',
+            name text,
+            path text NOT NULL,
+            source_type text NOT NULL,
+            enabled boolean NOT NULL DEFAULT true,
+            retired_at timestamptz,
+            file_count integer NOT NULL DEFAULT 0,
+            okf_version text
+        );
+        CREATE TABLE pgokf.concepts (bundle_id bigint, id text, path text);
+        CREATE TABLE pgokf.concept_source (bundle_id bigint, concept_id text, raw_content bytea);
+        CREATE TABLE pgokf.skills (bundle_id bigint, concept_id text, skill_md bytea);
+        CREATE TABLE pgokf.scripts (bundle_id bigint, concept_id text, exact_bytes bytea);
+        CREATE TABLE pgokf.reference_documents (bundle_id bigint, concept_id text, exact_bytes bytea);
+        CREATE TABLE pgokf.bundle_log (bundle_id bigint, note text);
+        CREATE TABLE pgokf.calls (fn text, detail text);
+        INSERT INTO pgokf.bundles
+            (id, tenant_id, name, path, source_type, enabled, retired_at, file_count, okf_version)
+        VALUES
+            (11, 'default', 'notes', 'content:notes', 'content', true, NULL, 2, NULL),
+            (12, 'default', 'docs', '/bundles/docs', 'filesystem', true, NULL, 1, NULL);
+        INSERT INTO pgokf.concepts VALUES (11, 'a', 'a.md'), (11, 'b', 'b.md');
+        INSERT INTO pgokf.concept_source VALUES
+            (11, 'a', convert_to('# A', 'UTF8')),
+            (11, 'b', convert_to('# B', 'UTF8'));
+        CREATE FUNCTION pgokf.get_config() RETURNS jsonb
+            LANGUAGE sql STABLE
+            AS $$ SELECT jsonb_build_object('store_source',
+                    (SELECT f.store_source FROM pgokf.fixture f)) $$;
+        CREATE FUNCTION pgokf.register_bundle_content(
+            p_name text, p_paths text[], p_contents bytea[], p_meta jsonb)
+        RETURNS TABLE (bundle_id bigint, added integer, updated integer, removed integer)
+        LANGUAGE plpgsql
+        AS $register_bundle_content$
+        DECLARE
+            v_id bigint;
+        BEGIN
+            SELECT b.id INTO v_id
+            FROM pgokf.bundles b
+            WHERE b.name = p_name AND b.source_type = 'content'
+              AND b.tenant_id
+                  = coalesce(nullif(current_setting('pgokf.tenant', true), ''), 'default');
+            IF pg_try_advisory_lock(hashtext('pgokf.content_bundle'), hashtext(p_name)) THEN
+                PERFORM pg_advisory_unlock(hashtext('pgokf.content_bundle'), hashtext(p_name));
+                INSERT INTO pgokf.calls VALUES ('register_bundle_content',
+                    p_name || ' UNLOCKED paths=' || coalesce(array_length(p_paths, 1), 0));
+            ELSE
+                INSERT INTO pgokf.calls VALUES ('register_bundle_content',
+                    p_name || ' locked paths=' || coalesce(array_length(p_paths, 1), 0));
+            END IF;
+            RETURN QUERY SELECT v_id, 0, coalesce(array_length(p_paths, 1), 0), 0;
+        END
+        $register_bundle_content$;
+        CREATE FUNCTION pgokf.refresh_bundle(id bigint)
+        RETURNS TABLE (bundle_id bigint, added integer, updated integer, removed integer)
+        LANGUAGE plpgsql
+        AS $refresh_bundle$
+        BEGIN
+            INSERT INTO pgokf.calls VALUES ('refresh_bundle', id::text);
+            RETURN QUERY SELECT id, 1, 0, 0;
+        END
+        $refresh_bundle$;";
+
+    /// The scratch server, the fixture loaded into a fresh scratch
+    /// database, and the pooled reader/writer over it - or `None` (with a
+    /// notice) when no local `PostgreSQL` answers. `PGOKF_WEB_TEST_DB`
+    /// overrides the default connection string. The admin client (connected
+    /// to the maintenance database) comes back for the final drop; the
+    /// fixture client is the scratch-database connection the assertions
+    /// read the recorded calls through.
+    async fn refresh_scratch() -> Option<(
+        tokio_postgres::Client,
+        tokio_postgres::Client,
+        crate::db::Db,
+    )> {
+        let base: tokio_postgres::Config = std::env::var("PGOKF_WEB_TEST_DB")
+            .unwrap_or_else(|_| {
+                let user = std::env::var("USER").unwrap_or_else(|_| "postgres".to_owned());
+                format!("host=localhost dbname=postgres user={user}")
+            })
+            .parse()
+            .expect("PGOKF_WEB_TEST_DB parses as a libpq connection string");
+        let (admin, connection) = match base.connect(tokio_postgres::NoTls).await {
+            Ok(pair) => pair,
+            Err(error) => {
+                eprintln!(
+                    "skipping the content-refresh regression: no scratch PostgreSQL answers ({error})"
+                );
+                return None;
+            }
+        };
+        tokio::spawn(async move {
+            if let Err(error) = connection.await {
+                eprintln!("scratch admin connection error: {error}");
+            }
+        });
+        admin
+            .batch_execute(&format!("DROP DATABASE IF EXISTS {REFRESH_SCRATCH_DB}"))
+            .await
+            .expect("drop a stale scratch database");
+        admin
+            .batch_execute(&format!("CREATE DATABASE {REFRESH_SCRATCH_DB}"))
+            .await
+            .expect("create the scratch database");
+        let mut scratch = base.clone();
+        scratch.dbname(REFRESH_SCRATCH_DB);
+        let (fixture, connection) = scratch
+            .connect(tokio_postgres::NoTls)
+            .await
+            .expect("connect to the scratch database");
+        tokio::spawn(async move {
+            if let Err(error) = connection.await {
+                eprintln!("scratch fixture connection error: {error}");
+            }
+        });
+        fixture
+            .batch_execute(REFRESH_SCRATCH_FIXTURES)
+            .await
+            .expect("load the refresh fixture");
+        let host = match base.get_hosts().first() {
+            Some(tokio_postgres::config::Host::Tcp(name)) => name.clone(),
+            _ => "localhost".to_owned(),
+        };
+        let user = base.get_user().unwrap_or("postgres").to_owned();
+        let url = format!("host={host} dbname={REFRESH_SCRATCH_DB} user={user}");
+        let db = crate::db::Db::connect(&crate::db::DbConfig {
+            database_url: &url,
+            force_tls: false,
+            pool_size: 4,
+            tenant: None,
+            statement_timeout_ms: 10_000,
+        })
+        .expect("a pool over the scratch database");
+        Some((admin, fixture, db))
+    }
+
+    /// What the stand-in writer functions recorded `(fn, detail)`.
+    async fn recorded_calls(client: &tokio_postgres::Client) -> Vec<(String, String)> {
+        client
+            .query("SELECT fn, detail FROM pgokf.calls ORDER BY ctid", &[])
+            .await
+            .expect("read the recorded calls")
+            .iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn content_bundle_refresh_rebuilds_through_the_locked_resync() {
+        let Some((admin, fixture, db)) = refresh_scratch().await else {
+            return;
+        };
+        let mut app = test_app(Some(db.clone()));
+        app.db = db.clone();
+
+        // A content bundle's refresh is the document workflow's
+        // full-snapshot resync: every stored file re-registered by name,
+        // under the bundle's cross-writer lock - never a filesystem
+        // re-read.
+        let outcome = match refresh_one_bundle(&app, &db, 11).await {
+            Ok(outcome) => outcome,
+            Err(error) => panic!("the content refresh rebuilds: {}", error.message()),
+        };
+        assert_eq!(outcome.bundle_id, 11);
+        assert_eq!(outcome.updated, 2, "both stored files re-registered");
+        assert_eq!(
+            recorded_calls(&fixture).await,
+            vec![(
+                "register_bundle_content".to_owned(),
+                "notes locked paths=2".to_owned()
+            )]
+        );
+
+        // With store_source off the action answers with the workflow's
+        // readable refusal (naming the admin step) before any write.
+        fixture
+            .execute("UPDATE pgokf.fixture SET store_source = false", &[])
+            .await
+            .expect("switch store_source off");
+        fixture
+            .execute("TRUNCATE pgokf.calls", &[])
+            .await
+            .expect("reset the recorded calls");
+        let error = refresh_one_bundle(&app, &db, 11)
+            .await
+            .expect_err("store_source off refuses the rebuild");
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            error.message().contains("store_source"),
+            "the refusal names the setting: {}",
+            error.message()
+        );
+        assert!(
+            error.message().contains("set_config"),
+            "the refusal names the admin step: {}",
+            error.message()
+        );
+        assert_eq!(recorded_calls(&fixture).await, Vec::new());
+
+        // A filesystem bundle's refresh is unchanged: the source re-read,
+        // no content resync.
+        let outcome = match refresh_one_bundle(&app, &db, 12).await {
+            Ok(outcome) => outcome,
+            Err(error) => panic!(
+                "the filesystem refresh re-reads the source: {}",
+                error.message()
+            ),
+        };
+        assert_eq!(outcome.bundle_id, 12);
+        assert_eq!(outcome.added, 1);
+        assert_eq!(
+            recorded_calls(&fixture).await,
+            vec![("refresh_bundle".to_owned(), "12".to_owned())]
+        );
+
+        drop(db);
+        drop(fixture);
+        admin
+            .batch_execute(&format!("DROP DATABASE {REFRESH_SCRATCH_DB} WITH (FORCE)"))
+            .await
+            .expect("drop the scratch database");
+    }
+
     // ---- Registry ---------------------------------------------------------
 
     fn registry_repo(id: &str, project: &str, status: &str) -> RegistryRepository {
@@ -10660,10 +11019,38 @@ mod tests {
         assert!(!rendered.contains("value=\"set-credential\""));
         assert!(!rendered.contains("value=\"remove-credential\""));
         assert!(!rendered.contains("type=\"password\" name=\"secret\" required"));
-        // The add-repository form tops the page (the producer admin API is
-        // configured): remote, branch, project, checkout path, and the
-        // optional credential triple with a never-prefilled secret.
-        assert!(rendered.contains("<details class=\"adder\" id=\"pgokf-add-repository\">"));
+        // The add affordance is the panel-head primary button leading to
+        // the dedicated page - the pattern the other tabs use (the
+        // Providers tab's "Add a provider"); the long form itself is NOT
+        // inline here.
+        assert!(rendered.contains(
+            "<a class=\"btn primary\" href=\"/admin/registry/new\">Add a repository</a>"
+        ));
+        assert!(!rendered.contains("<details class=\"adder\""));
+        assert!(!rendered.contains("name=\"action\" value=\"register\""));
+        assert!(!rendered.contains("name=\"checkout_path\""));
+    }
+
+    #[test]
+    fn admin_repository_new_page_renders_the_registration_form() {
+        // Arrange
+        let page = AdminRepositoryNewPage {
+            shell: Shell::bare("Administration · Add a repository"),
+            admin: AdminTab::Registry.shell(AdminOutcome::default()),
+            producer_configured: true,
+        };
+
+        // Act
+        let rendered = page.render().expect("the add-repository page renders");
+
+        // Assert: the registration form with remote, branch, project,
+        // checkout path, and the optional credential triple with a
+        // never-prefilled secret, posting the unchanged register action.
+        assert!(rendered.contains("<h2>Add a repository</h2>"));
+        assert!(rendered.contains("href=\"/admin/registry\">All repositories</a>"));
+        assert!(rendered.contains(
+            "<form method=\"post\" action=\"/admin/registry\" id=\"pgokf-add-repository\" data-once>"
+        ));
         assert!(rendered.contains("name=\"action\" value=\"register\""));
         assert!(rendered.contains("name=\"remote\""));
         assert!(rendered.contains("name=\"branch\" value=\"main\""));
@@ -10683,9 +11070,27 @@ mod tests {
             !rendered.contains("ssh_key"),
             "the producer refuses ssh_key, so the form never offers it"
         );
-        // The header copy points at the details page and names the CLI as
-        // the scripted alternative.
+        // The copy points at the repository page and names the CLI as the
+        // scripted alternative.
         assert!(rendered.contains("register CLI remains the scripted alternative"));
+    }
+
+    #[test]
+    fn admin_repository_new_page_explains_when_no_producer_is_configured() {
+        // Arrange
+        let page = AdminRepositoryNewPage {
+            shell: Shell::bare("Administration · Add a repository"),
+            admin: AdminTab::Registry.shell(AdminOutcome::default()),
+            producer_configured: false,
+        };
+
+        // Act
+        let rendered = page.render().expect("the add-repository page renders");
+
+        // Assert: an explanation instead of the form.
+        assert!(rendered.contains("Registration needs the producer admin API"));
+        assert!(rendered.contains("OKF_PRODUCER_ADMIN_URL"));
+        assert!(!rendered.contains("name=\"action\" value=\"register\""));
     }
 
     #[test]
@@ -10729,9 +11134,9 @@ mod tests {
         // No inline credential form ever - degraded or not.
         assert!(!producer_down.contains("value=\"set-credential\""));
         assert!(!producer_down.contains("value=\"remove-credential\""));
-        // The add form stays: the producer is configured, and a
+        // The add affordance stays: the producer is configured, and a
         // registration retries the read's failure honestly on submit.
-        assert!(producer_down.contains("name=\"action\" value=\"register\""));
+        assert!(producer_down.contains("href=\"/admin/registry/new\""));
     }
 
     /// A signed-in admin, for the handler tests.

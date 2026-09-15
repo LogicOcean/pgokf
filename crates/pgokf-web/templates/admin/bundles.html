@@ -11,7 +11,7 @@
     <div><button type="submit" class="btn primary">Register</button></div>
   </form>
   </div>
-  <p class="muted">Freshness is the bundle producer's attestation, shown as reported. Refresh cadence schedules a recurring content refresh (a pg_cron job that re-reads the bundle's source); refreshing content does not attest freshness. Schedules run in the scheduler's timezone (pg_cron's <code>cron.timezone</code> setting, GMT by default).</p>
+  <p class="muted">Freshness is the bundle producer's attestation, shown as reported. Refresh cadence schedules a recurring content refresh (a pg_cron job that re-reads the bundle's source); refreshing content does not attest freshness. A content bundle has no source to re-read: its Refresh rebuilds it from the sources the catalog keeps, and the fresh label still asks for certification. Schedules run in the scheduler's timezone (pg_cron's <code>cron.timezone</code> setting, GMT by default).</p>
   {% if let Some(note) = cadence_note %}<p class="notice bad">{{ note }}</p>{% endif %}
   <div class="table-wrap">
   <table class="table admin" id="pgokf-admin-bundles">
@@ -48,7 +48,7 @@
         </td>
         <td class="row-actions">
           {% if !b.bundle.retired %}
-          {% if b.bundle.source_type.as_str() != "content" %}<form method="post" action="/admin/bundles"><input type="hidden" name="id" value="{{ b.bundle.id }}"><input type="hidden" name="action" value="refresh"><button type="submit" class="btn" title="Re-read the source and index what changed">Refresh</button></form>{% endif %}
+          {% if b.bundle.source_type.as_str() == "content" %}<form method="post" action="/admin/bundles"><input type="hidden" name="id" value="{{ b.bundle.id }}"><input type="hidden" name="action" value="refresh"><button type="submit" class="btn" title="Rebuild this bundle from the sources the catalog keeps">Refresh</button></form>{% else %}<form method="post" action="/admin/bundles"><input type="hidden" name="id" value="{{ b.bundle.id }}"><input type="hidden" name="action" value="refresh"><button type="submit" class="btn" title="Re-read the source and index what changed">Refresh</button></form>{% endif %}
           <form method="post" action="/admin/bundles"><input type="hidden" name="id" value="{{ b.bundle.id }}"><input type="hidden" name="action" value="{% if b.bundle.enabled %}disable{% else %}enable{% endif %}"><button type="submit" class="btn">{% if b.bundle.enabled %}Disable{% else %}Enable{% endif %}</button></form>
           <form method="post" action="/admin/bundles"><input type="hidden" name="id" value="{{ b.bundle.id }}"><input type="hidden" name="action" value="retire"><button type="submit" class="btn" data-confirm="Retire {{ b.bundle.name }}? It leaves search and browsing; it can be brought back until it is purged.">Retire</button></form>
           {% else %}
