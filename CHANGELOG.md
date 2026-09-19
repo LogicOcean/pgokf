@@ -577,6 +577,8 @@ leaving a plain document.
 
 ### Security
 
+- Update rustls to 0.23.45 for RUSTSEC-2026-0285 (TLS 1.3 handshake
+  encryption-level validation), and regenerate third-party notices.
 - The `okf.sh` helper a plugin build generates put the web URL inside a
   `${VAR:-...}` default branch, which a shell expands - so a `$(...)` in
   that URL ran as a command on whoever ran the helper, and the URL is a
