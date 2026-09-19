@@ -258,7 +258,7 @@ becomes the clean `0.3.0`, the install script regenerates under that name,
 and one terminal `pgokf--0.3.0-devN--0.3.0.sql` script (a no-op beyond the
 standing `register_dump_relations()` call) lets point-versioned deployments
 reach the release through the same machinery. The released chain from the
-previous tag then runs `... -> 0.2.0 -> 0.3.0-dev1 -> ... -> 0.3.0`; the
+previous tag then runs `... -> 0.2.0 -> 0.3.0-dev -> 0.3.0-dev1 -> ... -> 0.3.0`; the
 fresh-install-vs-upgrade parity harness proves the two routes converge
 object-by-object.
 

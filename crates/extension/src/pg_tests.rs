@@ -5549,6 +5549,7 @@ The anchor concept never changes across the runbook's revisions.\n";
                     None::<f32>.into(),
                     None::<i64>.into(),
                     None::<&str>.into(),
+                    None::<Vec<String>>.into(),
                 ],
             )?;
             let mut lines = Vec::new();

@@ -40,14 +40,14 @@ hmac = "0.13"
 # Reuses the aws-lc-rs already linked through rustls, so verifying an ID
 # token adds no second cryptographic implementation.
 jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs"] }
-okf-parser = { version = "=0.3.0-dev2", path = "../okf-parser" }
-pgokf-companion = { version = "=0.3.0-dev2", path = "../pgokf-companion", features = [
+okf-parser = { version = "=0.3.0-dev3", path = "../okf-parser" }
+pgokf-companion = { version = "=0.3.0-dev3", path = "../pgokf-companion", features = [
     "documents",
     "embeddings",
     "mcp-token",
 ] }
-pgokf-pgconn = { version = "=0.3.0-dev2", path = "../pgokf-pgconn" }
-pgokf-workspace = { version = "=0.3.0-dev2", path = "../pgokf-workspace" }
+pgokf-pgconn = { version = "=0.3.0-dev3", path = "../pgokf-pgconn" }
+pgokf-workspace = { version = "=0.3.0-dev3", path = "../pgokf-workspace" }
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 reqwest = { version = "0.13", default-features = false, features = ["form", "json", "rustls"] }
 serde.workspace = true

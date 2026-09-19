@@ -136,3 +136,13 @@ jobs:
           RUST_TEST_THREADS: "1"
           PGOKF_TEST_PRELOAD: ${{ (matrix.pg == 17 || matrix.pg == 18) && 'pg_textsearch' || '' }}
         run: cargo pgrx test pg${{ matrix.pg }} --no-default-features --features pg${{ matrix.pg }}
+
+      - name: Fresh install versus upgrade parity and mutation probes
+        if: steps.pgdg.outputs.available == 'true' && matrix.pg == 18
+        run: |
+          PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config
+          cargo pgrx install --no-default-features --features pg18 --pg-config "$PG_CONFIG"
+          docker run --rm --entrypoint cat ghcr.io/logicocean/pgokf:0.2.0-pg18 \
+            /usr/share/postgresql/18/extension/pgokf--0.2.0.sql \
+            > "$("$PG_CONFIG" --sharedir)/extension/pgokf--0.2.0.sql"
+          python3 scripts/upgrade-parity.py --pg-config "$PG_CONFIG"

@@ -60,6 +60,8 @@ BEGIN
             ('pgokf.registry_set_poll_interval(uuid, integer)')
         ) AS signatures(signature)
     LOOP
+        -- SQL does not guarantee short-circuit evaluation of AND. Both
+        -- lookups must tolerate an absent function on early dev installs.
         IF pg_catalog.to_regprocedure(v_signature) IS NOT NULL
            AND NOT EXISTS (
             SELECT 1
@@ -67,7 +69,7 @@ BEGIN
             JOIN pg_catalog.pg_extension AS e ON e.oid = d.refobjid
             WHERE e.extname = 'pgokf'
               AND d.classid = 'pg_catalog.pg_proc'::pg_catalog.regclass
-              AND d.objid = v_signature::pg_catalog.regprocedure
+              AND d.objid = pg_catalog.to_regprocedure(v_signature)
         ) THEN
             EXECUTE pg_catalog.format('ALTER EXTENSION pgokf ADD FUNCTION %s', v_signature);
         END IF;

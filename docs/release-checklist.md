@@ -79,19 +79,21 @@ WHERE n.nspname = 'pgokf' AND c.relkind = 'c'
 -- Uncommented catalog tables (public + private):
 SELECT n.nspname||'.'||c.relname
 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE n.nspname IN ('pgokf', 'pgokf_private') AND c.relkind = 'r'
+WHERE n.nspname IN ('pgokf', 'pgokf_private', 'pgokf_web') AND c.relkind = 'r'
   AND obj_description(c.oid, 'pg_class') IS NULL;
 
--- All three API roles must be commented (expect three 't' rows):
+-- All four API roles must be commented (expect four 't' rows):
 SELECT r.rolname, shobj_description(r.oid, 'pg_authid') IS NOT NULL AS has_comment
-FROM pg_roles r WHERE r.rolname LIKE 'pgokf_%' ORDER BY 1;
+FROM pg_roles r WHERE r.rolname IN
+  ('pgokf_reader', 'pgokf_writer', 'pgokf_admin', 'pgokf_dispatcher') ORDER BY 1;
 ```
 
 Each of the first three queries must return **no rows**. As a positive check,
-this confirms full coverage (expect `45/45`, `17/17`, `18/18`: the 44 public
-functions plus the internal `bm25_hits` helper, 17 composite types, and 18
-catalog tables = the 14 public `pgokf` tables plus the 4
-`pgokf_private` tables `config` / `sync_log` / `sync_log_change` / `access_log`):
+this confirms full coverage (expect `70/70`, `24/24`, `29/29`: the 69 public
+functions plus the internal `bm25_hits` helper, 24 composite types, and 29
+catalog tables across `pgokf`, `pgokf_private`, and `pgokf_web`). The
+in-database `every_catalog_object_carries_a_comment` test also checks
+private helper functions.
 
 ```sql
 SELECT 'functions',  count(*) FILTER (WHERE obj_description(p.oid,'pg_proc')  IS NOT NULL)||'/'||count(*)
@@ -101,7 +103,7 @@ FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace JOIN pg_class c ON c.
 WHERE n.nspname='pgokf' AND c.relkind='c'
 UNION ALL SELECT 'tables', count(*) FILTER (WHERE obj_description(c.oid,'pg_class') IS NOT NULL)||'/'||count(*)
 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-WHERE n.nspname IN ('pgokf','pgokf_private') AND c.relkind='r';
+WHERE n.nspname IN ('pgokf','pgokf_private','pgokf_web') AND c.relkind='r';
 ```
 
 ### 4b. Functional smoke
@@ -157,8 +159,46 @@ SELECT md5(string_agg(id||':'||file_hash,',' ORDER BY bundle_id,id)) FROM pgokf.
 > matching full install script; until then, target the version explicitly with
 > `UPDATE TO`.
 
-An upgrade script must never `DROP`, `TRUNCATE`, `DELETE`, or rewrite existing
-catalog data. `tests/api_stability.rs` enforces this on the shipped scripts.
+### Repeatable development-tip parity gate
+
+For this PG18 gate, after installing the current checkout with
+`cargo pgrx install`, place the
+**authentic 0.2.0 install SQL** beside the current install SQL in the target
+PostgreSQL's extension directory. For example, extract it from the published
+0.2.0 PG18 image (do not rename the current install script to simulate an old
+version):
+
+```sh
+docker run --rm --entrypoint cat ghcr.io/logicocean/pgokf:0.2.0-pg18 \
+  /usr/share/postgresql/18/extension/pgokf--0.2.0.sql > /tmp/pgokf--0.2.0.sql
+install -m 644 /tmp/pgokf--0.2.0.sql "$("$PG_CONFIG" --sharedir)/extension/pgokf--0.2.0.sql"
+python3 scripts/upgrade-parity.py --pg-config "$PG_CONFIG"
+```
+
+The harness starts and removes its own local scratch cluster; it accepts no
+production connection. It checks the installed upgrade scripts against this
+checkout, then compares fresh installation with normal, early-dev (missing
+functions), and hand-applied (non-member functions) update routes from 0.2.0
+through every development edge to `default_version`. Each route starts with
+independent API roles, preserves all old columns of populated bundle, concept,
+metadata and source rows, and verifies legacy bundles remain stale even after
+a content resync. An incompatible unowned function must abort adoption without
+changing the catalog or extension version.
+
+The catalog inventory compares function definitions and security settings,
+comments, ownership, current and initial ACLs, relation/type/column definitions,
+constraints, indexes, views,
+policies, triggers, sequences, roles, extension membership and dump registration.
+Deliberate owner, comment, privilege, membership, column, security, policy, role and
+dump-registration mutations must fail comparison. The API-stability suite
+separately checks every historical edge from 0.1.0 and rejects missing targets,
+append-without-bump and disconnected edges. Live data-preservation parity begins
+at 0.2.0; it does not claim to execute the historical breaking 0.1.3 migration.
+
+An upgrade script must never drop data-bearing objects, truncate, delete, or
+rewrite existing catalog data (apart from the documented 0.1.3 remodel).
+Replacing a function overload or widening a constraint in the same transaction
+is allowed; neither carries catalog rows. `tests/api_stability.rs` enforces this on the shipped scripts.
 
 Tear down each scratch cluster when done:
 

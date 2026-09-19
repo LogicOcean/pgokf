@@ -565,6 +565,12 @@ fn check_upgrade_chain_terminates_at(
         ));
     }
 
+    if let Some((from, to)) = edges.iter().find(|(from, _)| !visited.contains(from)) {
+        return Err(format!(
+            "unreachable upgrade edge {from} -> {to}: every shipped step must be reachable from {root}"
+        ));
+    }
+
     // A script whose source IS the default means a new step shipped without
     // bumping default_version: bare UPDATE still targets the old terminal
     // and never runs the new script.
@@ -599,6 +605,26 @@ fn check_upgrade_chain_terminates_at(
         }
     }
 
+    // A reachable closed cycle has no terminal, but installs on that
+    // branch can never update to the default. Walk backwards from every
+    // permitted destination and require every shipped version to reach one.
+    let mut reaches_terminal = std::collections::HashSet::from([default_version.to_string()]);
+    reaches_terminal.extend(PERMITTED_BRANCH_TERMINALS.iter().map(|s| (*s).to_string()));
+    let mut frontier: std::collections::VecDeque<String> =
+        reaches_terminal.iter().cloned().collect();
+    while let Some(version) = frontier.pop_front() {
+        for (from, to) in edges {
+            if *to == version && reaches_terminal.insert(from.clone()) {
+                frontier.push_back(from.clone());
+            }
+        }
+    }
+    if let Some(version) = visited.iter().find(|v| !reaches_terminal.contains(*v)) {
+        return Err(format!(
+            "upgrade version {version} cannot reach a permitted terminal"
+        ));
+    }
+
     Ok(())
 }
 
@@ -629,6 +655,41 @@ fn appended_step_without_default_bump_is_rejected() {
         reason.contains("without bumping default_version"),
         "the rejection must name the missing bump, got: {reason}",
     );
+}
+
+/// A disconnected cycle has no terminal, so checking terminal names alone
+/// misses scripts no supported installation can ever execute.
+#[test]
+fn disconnected_upgrade_cycle_is_rejected() {
+    let edges = vec![
+        ("0.1.0".to_string(), "0.3.0-dev3".to_string()),
+        ("orphan-a".to_string(), "orphan-b".to_string()),
+        ("orphan-b".to_string(), "orphan-a".to_string()),
+    ];
+    let result = check_upgrade_chain_terminates_at(&edges, CHAIN_ROOT, "0.3.0-dev3");
+    assert!(
+        result.is_err(),
+        "unreachable upgrade edges must be rejected"
+    );
+}
+
+#[test]
+fn reachable_cycle_without_a_path_to_default_is_rejected() {
+    let edges = vec![
+        ("0.1.0".to_string(), "0.3.0-dev3".to_string()),
+        ("0.1.0".to_string(), "stranded-a".to_string()),
+        ("stranded-a".to_string(), "stranded-b".to_string()),
+        ("stranded-b".to_string(), "stranded-a".to_string()),
+    ];
+    assert!(check_upgrade_chain_terminates_at(&edges, CHAIN_ROOT, "0.3.0-dev3").is_err());
+}
+
+#[test]
+fn missing_and_renamed_upgrade_targets_are_rejected() {
+    let valid = vec![("0.1.0".to_string(), "0.3.0-dev2".to_string())];
+    assert!(check_upgrade_chain_terminates_at(&valid, CHAIN_ROOT, "0.3.0-dev3").is_err());
+    let renamed = vec![("0.1.0".to_string(), "0.3.0-typo".to_string())];
+    assert!(check_upgrade_chain_terminates_at(&renamed, CHAIN_ROOT, "0.3.0-dev2").is_err());
 }
 
 /// The `0.3.0-dev -> 0.3.0-dev1` script receipts the objects that entered the

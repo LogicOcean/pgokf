@@ -121,7 +121,7 @@ RUST_TEST_THREADS=1 cargo pgrx test pg18 --no-default-features --features pg18 #
 
 ## Project status
 
-Pre-1.0 (`0.2.x`). The enumerated SQL surface is treated as stable and every change ships an upgrade script verified `upgrade == fresh`, but per SemVer a `0.MINOR` bump may still carry a breaking change (called out in [CHANGELOG.md](CHANGELOG.md)). Reaching `1.0.0` is a deliberate decision, not an automatic bump.
+Pre-1.0 (`0.3.0-dev3`, untagged development tip). The enumerated SQL surface is treated as stable and every change ships an upgrade script verified `upgrade == fresh`, but per SemVer a `0.MINOR` bump may still carry a breaking change (called out in [CHANGELOG.md](CHANGELOG.md)). Reaching `1.0.0` is a deliberate decision, not an automatic bump.
 
 The extension builds from source on PostgreSQL 15–19 (`pg15`…`pg19`). Published binaries and Docker images cover 15–18; a 19 image builds once PGDG ships packages, and carries no BM25 provider until Tiger Data publishes a pg19 `pg_textsearch`.
 

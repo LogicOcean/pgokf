@@ -567,6 +567,21 @@ leaving a plain document.
 
 ### Fixed
 
+- Supply the trailing type-filter parameter in the preloaded BM25 planner
+  regression, restoring the live provider gate after the query gained `$12`.
+- **Development upgrade readiness (`0.3.0-dev3`).** Early `0.3.0-dev`
+  installations missing the three later registry/schedule functions now pass
+  the `dev -> dev1` membership probe: both lookups use `to_regprocedure`,
+  because SQL does not guarantee short-circuit evaluation of `AND`. The
+  original edge must be repaired before those installations can reach a
+  later edge; the new `dev2 -> dev3` receipt changes no stored object or data.
+  A checked-in scratch-cluster parity gate covers normal, missing-object and
+  non-member adoption routes, data preservation, and deliberate catalog drift.
+  The API graph guard also rejects disconnected and stranded cycles, with
+  negative tests.
+- Correct release-checklist coverage counts for the development surface and
+  document the repeatable parity and mutation gate.
+
 - Building a BM25 index quoted the `default_text_search_config` value with a
   backslash-escaped quote (`\'`), which PostgreSQL refuses when
   `backslash_quote = off`, and a trailing backslash could run a value on
