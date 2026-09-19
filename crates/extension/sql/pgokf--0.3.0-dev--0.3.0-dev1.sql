@@ -32,10 +32,10 @@
 -- PostgreSQL refuses CREATE OR REPLACE on a non-member object during an
 -- extension update ("an extension is not allowed to replace an object that
 -- it does not own"), so adoption must precede re-creation; objects the
--- extension itself created are already members and are skipped, and where an
--- object is absent the CREATE below makes it a member directly. An
--- installation that reached 0.3.0-dev by any route is byte-identical to a
--- fresh 0.3.0-dev1 install after this script runs.
+-- extension itself created are checked for security drift too, and where an
+-- object is absent the CREATE below makes it a member directly. A
+-- canonical installation converges with fresh 0.3.0-dev1 for these objects.
+-- See docs/api-stability.md for the fail-closed adoption policy.
 --
 -- Never DROP, TRUNCATE, DELETE, or rewrite existing catalog data in an upgrade
 -- script: doing so would break the no-data-loss guarantee asserted by the
@@ -52,7 +52,11 @@
 DO $dev1_membership$
 DECLARE
     v_signature text;
+    v_function pg_catalog.oid;
+    v_owner pg_catalog.oid;
+    v_grantee pg_catalog.oid;
 BEGIN
+    SELECT extowner INTO STRICT v_owner FROM pg_catalog.pg_extension WHERE extname = 'pgokf';
     FOR v_signature IN
         SELECT * FROM (VALUES
             ('pgokf.list_scheduled_refreshes()'),
@@ -60,16 +64,42 @@ BEGIN
             ('pgokf.registry_set_poll_interval(uuid, integer)')
         ) AS signatures(signature)
     LOOP
-        -- SQL does not guarantee short-circuit evaluation of AND. Both
-        -- lookups must tolerate an absent function on early dev installs.
-        IF pg_catalog.to_regprocedure(v_signature) IS NOT NULL
-           AND NOT EXISTS (
+        v_function := pg_catalog.to_regprocedure(v_signature);
+        IF v_function IS NULL THEN
+            CONTINUE;
+        END IF;
+        v_grantee := CASE WHEN v_signature = 'pgokf.list_scheduled_refreshes()'
+            THEN 'pgokf_reader'::pg_catalog.regrole::pg_catalog.oid
+            ELSE 'pgokf_admin'::pg_catalog.regrole::pg_catalog.oid END;
+        -- Fail closed for members as well as detached copies. Replacement
+        -- preserves owner and explicit ACLs. Never erase customized grants:
+        -- the operator must review and restore canonical metadata first.
+        -- ACL order is immaterial; grantor and grant options are not.
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_catalog.pg_proc p
+            WHERE p.oid = v_function AND p.proowner = v_owner
+              AND (SELECT pg_catalog.array_agg(
+                      pg_catalog.format('%s:%s:%s:%s', a.grantor, a.grantee,
+                                        a.privilege_type, a.is_grantable::text) ORDER BY a.grantee)
+                   FROM pg_catalog.aclexplode(p.proacl) a)
+                  = (SELECT pg_catalog.array_agg(
+                      pg_catalog.format('%s:%s:EXECUTE:false', v_owner, grantee) ORDER BY grantee)
+                     FROM (SELECT v_owner AS grantee UNION SELECT v_grantee) expected)
+        ) THEN
+            RAISE EXCEPTION 'pgokf upgrade refuses security metadata for %: expected owner % and only owner plus % EXECUTE grants (owner grantor, no grant options)',
+                v_signature, v_owner::pg_catalog.regrole, v_grantee::pg_catalog.regrole
+                USING ERRCODE = 'object_not_in_prerequisite_state',
+                      HINT = 'Review ownership and explicit ACLs; restore canonical metadata deliberately before retrying. Custom grants are never silently revoked.';
+        END IF;
+        IF NOT EXISTS (
             SELECT 1
             FROM pg_catalog.pg_depend AS d
             JOIN pg_catalog.pg_extension AS e ON e.oid = d.refobjid
             WHERE e.extname = 'pgokf'
+              AND d.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass
+              AND d.deptype = 'e'
               AND d.classid = 'pg_catalog.pg_proc'::pg_catalog.regclass
-              AND d.objid = pg_catalog.to_regprocedure(v_signature)
+              AND d.objid = v_function
         ) THEN
             EXECUTE pg_catalog.format('ALTER EXTENSION pgokf ADD FUNCTION %s', v_signature);
         END IF;

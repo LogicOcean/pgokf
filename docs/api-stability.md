@@ -323,3 +323,23 @@ Every public object must carry a `COMMENT ON`. This is enforced two ways:
 Adding a public object therefore requires, in the same change: the object, its
 `COMMENT ON`, an entry in the enumerated contract test, a changelog entry, and
 (if it changes stored data) an upgrade script.
+
+### Development-function adoption security policy
+
+The dev→dev1 edge repairs the exact signatures
+`pgokf.list_scheduled_refreshes()`, `pgokf.registry_set_status(uuid,text)` and
+`pgokf.registry_set_poll_interval(uuid,integer)`. Missing functions are created.
+Existing functions, including pgokf members, must be owned by the extension
+owner and have exactly two explicit EXECUTE grants: to that owner and to
+`pgokf_reader` for the listing function, or `pgokf_admin` for each writer.
+Both grants must be issued by the owner without grant options. ACL ordering is
+irrelevant. Unexpected owners, additional grants (including PUBLIC), missing
+grants, different grantors and grant options refuse the entire upgrade with a
+security-metadata diagnostic. Custom grants are never silently revoked; the
+operator must review them and deliberately restore this posture before retrying.
+A compatible body may be replaced when this security metadata is canonical.
+Incompatible return/argument definitions or membership in another extension
+still refuse atomically. The live PG18 harness checks catalog and version
+rollback, including ownership, ACLs, initial privileges, body and membership.
+This edge can inspect only installations that traverse dev→dev1; it does not
+repair already-upgraded installations retroactively.

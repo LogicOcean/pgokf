@@ -85,7 +85,41 @@ def main():
                 sql('postgres', 'DROP ROLE pgokf_admin, pgokf_writer, pgokf_reader, pgokf_dispatcher;')
 
             drop_catalog('fresh')
-            for route in ('normal', 'missing', 'unowned'):
+            failures = []
+            for index, signature in enumerate(ADOPT):
+                expected_role = 'pgokf_reader' if index == 0 else 'pgokf_admin'
+                cases = {
+                    'owner': f'ALTER FUNCTION {signature} OWNER TO pgokf_reader;',
+                    'writer': f'GRANT EXECUTE ON FUNCTION {signature} TO pgokf_writer;',
+                    'other': f'GRANT EXECUTE ON FUNCTION {signature} TO hostile_other;',
+                    'missing': f'REVOKE EXECUTE ON FUNCTION {signature} FROM {expected_role};',
+                    'grant_option': f'GRANT EXECUTE ON FUNCTION {signature} TO {expected_role} WITH GRANT OPTION;',
+                    'public': f'GRANT EXECUTE ON FUNCTION {signature} TO PUBLIC;',
+                }
+                if index:
+                    cases['reader'] = f'GRANT EXECUTE ON FUNCTION {signature} TO pgokf_reader;'
+                for detached in (False, True):
+                    for name, mutation in cases.items():
+                        label = f'adoption {index} {detached=} {name}'
+                        sql('postgres', 'CREATE DATABASE hostile; CREATE ROLE hostile_other;')
+                        sql('hostile', "CREATE EXTENSION pgokf VERSION '0.2.0'; ALTER EXTENSION pgokf UPDATE TO '0.3.0-dev';")
+                        if detached:
+                            sql('hostile', f'ALTER EXTENSION pgokf DROP FUNCTION {signature};')
+                        sql('hostile', mutation)
+                        before = sql('hostile', inventory)
+                        try:
+                            sql('hostile', 'ALTER EXTENSION pgokf UPDATE;')
+                        except RuntimeError as error:
+                            assert 'security metadata' in str(error), str(error)
+                            compare(before, sql('hostile', inventory), label + ' rollback')
+                            assert sql('hostile', "SELECT extversion FROM pg_extension WHERE extname='pgokf';") == '0.3.0-dev'
+                            print(label + ': refused atomically', flush=True)
+                        else:
+                            failures.append(label)
+                            print(label + ': UNSAFE ACCEPTANCE', flush=True)
+                        drop_catalog('hostile')
+                        sql('postgres', 'DROP ROLE hostile_other;')
+            for route in ('normal', 'missing', 'unowned', 'body', 'member_body', 'acl_order'):
                 sql('postgres', f'CREATE DATABASE {route};')
                 sql(route, "CREATE EXTENSION pgokf VERSION '0.2.0';" + seed)
                 # Pin the old column names: additive new columns are allowed;
@@ -105,7 +139,14 @@ def main():
                 sql(route, "ALTER EXTENSION pgokf UPDATE TO '0.3.0-dev';")
                 if route != 'normal':
                     for signature in ADOPT:
-                        sql(route, f'ALTER EXTENSION pgokf DROP FUNCTION {signature};')
+                        if route in ('missing', 'unowned', 'body'):
+                            sql(route, f'ALTER EXTENSION pgokf DROP FUNCTION {signature};')
+                        if route == 'acl_order':
+                            sql(route, f'REVOKE EXECUTE ON FUNCTION {signature} FROM postgres; GRANT EXECUTE ON FUNCTION {signature} TO postgres;')
+                        if route in ('body', 'member_body'):
+                            definition = sql(route, f"SELECT pg_get_functiondef('{signature}'::regprocedure);")
+                            definition = re.sub(r'AS \$function\$.*\$function\$', "AS $function$ BEGIN RAISE EXCEPTION 'hostile body'; END $function$", definition, flags=re.S)
+                            sql(route, definition)
                         if route == 'missing':
                             sql(route, f'DROP FUNCTION {signature};')
                 sql(route, 'ALTER EXTENSION pgokf UPDATE;')
@@ -120,33 +161,62 @@ def main():
                 assert sql(route, 'SELECT last_reconciled_at IS NULL FROM pgokf.bundle_freshness;') == evidence == 't'
                 print(f'{route}: parity, data preservation, refresh preserves staleness passed', flush=True)
                 drop_catalog(route)
-            # A conflicting unowned signature must fail atomically, never
-            # silently adopt an incompatible function and advance the receipt.
-            sql('postgres', 'CREATE DATABASE incompatible;')
-            sql('incompatible', "CREATE EXTENSION pgokf VERSION '0.2.0';"
-                "ALTER EXTENSION pgokf UPDATE TO '0.3.0-dev';"
-                "ALTER EXTENSION pgokf DROP FUNCTION pgokf.list_scheduled_refreshes();"
-                "DROP FUNCTION pgokf.list_scheduled_refreshes();"
-                "CREATE FUNCTION pgokf.list_scheduled_refreshes() RETURNS integer "
-                "LANGUAGE sql AS 'SELECT 1';")
-            before = sql('incompatible', inventory)
-            try:
-                sql('incompatible', 'ALTER EXTENSION pgokf UPDATE;')
-            except RuntimeError as error:
-                if 'cannot change return type' not in str(error):
-                    raise
-            else:
-                raise AssertionError('incompatible function was silently adopted')
-            compare(before, sql('incompatible', inventory), 'failed adoption rollback')
-            assert sql('incompatible', "SELECT extversion FROM pg_extension WHERE extname='pgokf';") == '0.3.0-dev'
-            print('incompatible adoption: rejected with catalog and version unchanged', flush=True)
-            drop_catalog('incompatible')
+            # Security-canonical conflicts must still fail at PostgreSQL's
+            # signature/membership checks, with the entire update rolled back.
+            for index, signature in enumerate(ADOPT):
+                for conflict in ('return', 'arguments', 'other_extension'):
+                    sql('postgres', 'CREATE DATABASE incompatible;')
+                    sql('incompatible', "CREATE EXTENSION pgokf VERSION '0.2.0';"
+                        "ALTER EXTENSION pgokf UPDATE TO '0.3.0-dev';"
+                        f"ALTER EXTENSION pgokf DROP FUNCTION {signature};")
+                    if conflict in ('return', 'arguments'):
+                        role = 'pgokf_reader' if index == 0 else 'pgokf_admin'
+                        declaration = f"{signature} RETURNS integer LANGUAGE sql AS 'SELECT 1'"
+                        if conflict == 'arguments':
+                            if index == 0:
+                                declaration = f"{signature} RETURNS TABLE (hostile_id bigint, schedule text) LANGUAGE plpgsql AS 'BEGIN RETURN; END'"
+                            else:
+                                declaration = signature.replace('(uuid,', '(hostile_id uuid,') + " RETURNS void LANGUAGE plpgsql AS 'BEGIN RETURN; END'"
+                        sql('incompatible', f"DROP FUNCTION {signature};"
+                            f"CREATE FUNCTION {declaration};"
+                            f"REVOKE ALL ON FUNCTION {signature} FROM PUBLIC;"
+                            f"GRANT EXECUTE ON FUNCTION {signature} TO {role};")
+                        diagnostic = 'cannot change name of input parameter' if conflict == 'arguments' and index else 'cannot change return type'
+                    else:
+                        sql('incompatible', f'ALTER EXTENSION plpgsql ADD FUNCTION {signature};')
+                        diagnostic = 'already a member of extension'
+                    membership = f"SELECT e.extname FROM pg_depend d JOIN pg_extension e ON e.oid=d.refobjid WHERE d.classid='pg_proc'::regclass AND d.refclassid='pg_extension'::regclass AND d.deptype='e' AND d.objid='{signature}'::regprocedure;"
+                    before = sql('incompatible', inventory + membership)
+                    try:
+                        sql('incompatible', 'ALTER EXTENSION pgokf UPDATE;')
+                    except RuntimeError as error:
+                        assert diagnostic in str(error), str(error)
+                    else:
+                        raise AssertionError(f'{signature} {conflict} was silently adopted')
+                    compare(before, sql('incompatible', inventory + membership), 'failed adoption rollback')
+                    assert sql('incompatible', "SELECT extversion FROM pg_extension WHERE extname='pgokf';") == '0.3.0-dev'
+                    print(f'{signature} {conflict}: refused atomically', flush=True)
+                    drop_catalog('incompatible')
             # A detector that always returns equal is no gate. Each mutation
             # runs in a rolled-back transaction and must alter the inventory.
             sql('postgres', 'CREATE DATABASE fresh;')
             sql('fresh', 'CREATE EXTENSION pgokf;')
             compare(expected, sql('fresh', inventory), 'fresh repeat')
+            # Prove the FK mutation affects behavior, not merely a catalog bit.
+            orphan = "INSERT INTO pgokf.concepts (bundle_id,id,path,title,file_hash,body_text) VALUES (987654321,'orphan','orphan.md','orphan','hash','body');"
+            try:
+                sql('fresh', 'BEGIN;' + orphan + 'ROLLBACK;')
+            except RuntimeError as error:
+                assert 'foreign key constraint' in str(error), str(error)
+            else:
+                raise AssertionError('canonical catalog permits an orphan')
+            assert sql('fresh', 'BEGIN; ALTER TABLE pgokf.concepts DISABLE TRIGGER ALL;' + orphan +
+                       'SELECT count(*) FROM pgokf.concepts WHERE bundle_id=987654321; ROLLBACK;') == '1'
             probes = {
+                'fk enforcement': 'ALTER TABLE pgokf.concepts DISABLE TRIGGER ALL;',
+                'rule': 'CREATE RULE hostile_no_insert AS ON INSERT TO pgokf.concept_metadata DO INSTEAD NOTHING;',
+                'constraint comment': "COMMENT ON CONSTRAINT bundles_pkey ON pgokf.bundles IS 'hostile';",
+                'default acl': 'ALTER DEFAULT PRIVILEGES IN SCHEMA pgokf GRANT ALL ON TABLES TO pgokf_reader;',
                 'owner': 'ALTER FUNCTION pgokf.version() OWNER TO pgokf_admin;',
                 'role': 'GRANT pgokf_reader TO pgokf_dispatcher;',
                 'policy': 'DROP POLICY concepts_tenant_isolation ON pgokf.concepts;',
@@ -164,8 +234,59 @@ def main():
                 except AssertionError:
                     print(f'mutation {name}: rejected', flush=True)
                 else:
-                    raise AssertionError(f'mutation {name}: detector accepted drift')
+                    failures.append('mutation ' + name)
+                    print(f'mutation {name}: UNSAFE ACCEPTANCE', flush=True)
             compare(expected, sql('fresh', inventory), 'probe rollback')
+            definition_probes = {
+                'external enum labels': (
+                    "CREATE TYPE public.hostile_enum AS ENUM ('a'); ALTER EXTENSION pgokf ADD TYPE public.hostile_enum;",
+                    "ALTER TYPE public.hostile_enum ADD VALUE 'b';"),
+                'external domain constraint': (
+                    "CREATE DOMAIN public.hostile_domain AS integer; ALTER EXTENSION pgokf ADD TYPE public.hostile_domain;",
+                    "ALTER DOMAIN public.hostile_domain ADD CONSTRAINT positive CHECK (VALUE > 0);"),
+                'domain base': (
+                    "CREATE DOMAIN pgokf.hostile_domain AS integer; ALTER EXTENSION pgokf ADD TYPE pgokf.hostile_domain;",
+                    "ALTER EXTENSION pgokf DROP TYPE pgokf.hostile_domain; DROP DOMAIN pgokf.hostile_domain; CREATE DOMAIN pgokf.hostile_domain AS bigint; ALTER EXTENSION pgokf ADD TYPE pgokf.hostile_domain;"),
+                'domain collation': (
+                    'CREATE DOMAIN pgokf.hostile_domain AS text COLLATE "C"; ALTER EXTENSION pgokf ADD TYPE pgokf.hostile_domain;',
+                    'ALTER EXTENSION pgokf DROP TYPE pgokf.hostile_domain; DROP DOMAIN pgokf.hostile_domain; CREATE DOMAIN pgokf.hostile_domain AS text COLLATE "POSIX"; ALTER EXTENSION pgokf ADD TYPE pgokf.hostile_domain;'),
+                'enum order': (
+                    "CREATE TYPE pgokf.hostile_enum AS ENUM ('a','b'); ALTER EXTENSION pgokf ADD TYPE pgokf.hostile_enum;",
+                    "ALTER EXTENSION pgokf DROP TYPE pgokf.hostile_enum; DROP TYPE pgokf.hostile_enum; CREATE TYPE pgokf.hostile_enum AS ENUM ('b','a'); ALTER EXTENSION pgokf ADD TYPE pgokf.hostile_enum;"),
+                'enum labels': (
+                    "CREATE TYPE pgokf.hostile_enum AS ENUM ('a','b'); ALTER EXTENSION pgokf ADD TYPE pgokf.hostile_enum;",
+                    "ALTER TYPE pgokf.hostile_enum ADD VALUE 'c' BEFORE 'b';"),
+                'domain default': (
+                    "CREATE DOMAIN pgokf.hostile_domain AS integer DEFAULT 1; ALTER EXTENSION pgokf ADD TYPE pgokf.hostile_domain;",
+                    "ALTER DOMAIN pgokf.hostile_domain SET DEFAULT 2;"),
+                'domain nullability': (
+                    "CREATE DOMAIN pgokf.hostile_domain AS integer; ALTER EXTENSION pgokf ADD TYPE pgokf.hostile_domain;",
+                    "ALTER DOMAIN pgokf.hostile_domain SET NOT NULL;"),
+                'domain constraint': (
+                    "CREATE DOMAIN pgokf.hostile_domain AS integer; ALTER EXTENSION pgokf ADD TYPE pgokf.hostile_domain;",
+                    "ALTER DOMAIN pgokf.hostile_domain ADD CONSTRAINT positive CHECK (VALUE > 0);"),
+                'domain constraint comment': (
+                    "CREATE DOMAIN pgokf.hostile_domain AS integer CONSTRAINT positive CHECK (VALUE > 0); ALTER EXTENSION pgokf ADD TYPE pgokf.hostile_domain;",
+                    "COMMENT ON CONSTRAINT positive ON DOMAIN pgokf.hostile_domain IS 'hostile';"),
+                'rule comment': (
+                    "CREATE RULE hostile AS ON INSERT TO pgokf.concept_metadata DO INSTEAD NOTHING;",
+                    "COMMENT ON RULE hostile ON pgokf.concept_metadata IS 'hostile';"),
+                'trigger comment': (
+                    "CREATE FUNCTION pgokf.hostile_trigger() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'; CREATE TRIGGER hostile BEFORE INSERT ON pgokf.concept_metadata FOR EACH ROW EXECUTE FUNCTION pgokf.hostile_trigger();",
+                    "COMMENT ON TRIGGER hostile ON pgokf.concept_metadata IS 'hostile';"),
+                'policy comment': ('', "COMMENT ON POLICY concepts_tenant_isolation ON pgokf.concepts IS 'hostile';"),
+                'extension comment': ('', "COMMENT ON EXTENSION pgokf IS 'hostile';"),
+                'global default acl': ('', 'ALTER DEFAULT PRIVILEGES GRANT ALL ON TABLES TO pgokf_reader;'),
+            }
+            for name, (setup, mutation) in definition_probes.items():
+                baseline = sql('fresh', 'BEGIN;\n' + setup + '\n' + inventory + '\nROLLBACK;')
+                actual = sql('fresh', 'BEGIN;\n' + setup + '\n' + mutation + '\n' + inventory + '\nROLLBACK;')
+                if baseline == actual:
+                    failures.append(name)
+                    print(f'mutation {name}: UNSAFE ACCEPTANCE', flush=True)
+                else:
+                    print(f'mutation {name}: rejected', flush=True)
+            assert not failures, 'Unsafe acceptances: ' + ', '.join(failures)
         finally:
             if started:
                 run(str(bindir / 'pg_ctl'), '-D', data, '-m', 'immediate', '-w', 'stop')
