@@ -23,6 +23,18 @@ and preserves all data; bundles that predate the upgrade start `stale`
 pre-upgrade embedding rows (which carry no provenance) simply never rank
 semantically until the embedder rewrites them.
 
+### Fixed
+
+- Refuse dev→dev1 function adoption and member replacement when ownership or
+  explicit grants differ from the documented canonical security posture;
+  compatible body repairs remain supported and refusals roll back atomically.
+- Detect disabled internal FK triggers, rewrite rules, default ACLs, omitted
+  catalog comments and enum/domain definition drift in live upgrade parity.
+  Equivalent ACL ordering compares equal.
+- Provide the canonical native macOS workspace test recipe with dynamic symbol
+  lookup and the C locale. Require PG19 test and packaging coverage to fail
+  closed when provisioning is unavailable; retain the untagged dev3 tip.
+
 ### Added
 
 - **Point-versioned development cycle.** The dev line now moves

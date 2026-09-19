@@ -32,6 +32,8 @@ META.json
 
 # Local deployment assets, benchmarks, and scratch files.
 PROMPT.md
+FIX_PROMPT.md
+**/__pycache__/
 deploy/
 scripts/
 **/*.log
