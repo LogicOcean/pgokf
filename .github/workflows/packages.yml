@@ -195,33 +195,20 @@ jobs:
             echo "provides.file present: $f"
           done
 
-  # ---------------------------------------------------------------------------
-  # Per-major, per-architecture .deb (+ rpm spec check). Each architecture
-  # builds natively on its own runner. PG19 is advisory until PGDG ships it.
-  # ---------------------------------------------------------------------------
   deb:
-    name: Build .deb (PostgreSQL ${{ matrix.pg }}, ${{ matrix.arch }})${{ matrix.experimental && ' (advisory)' || '' }}
+    name: Build .deb (PostgreSQL ${{ matrix.pg }}, ${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
-    continue-on-error: ${{ matrix.experimental }}
+    # Every declared major is required; missing provisioning must fail.
     strategy:
       fail-fast: false
       matrix:
-        pg: [15, 16, 17, 18]
+        pg: [15, 16, 17, 18, 19]
         arch: [amd64, arm64]
-        experimental: [false]
         include:
           - arch: amd64
             runner: ubuntu-24.04
           - arch: arm64
             runner: ubuntu-24.04-arm
-          - pg: 19
-            arch: amd64
-            runner: ubuntu-24.04
-            experimental: true
-          - pg: 19
-            arch: arm64
-            runner: ubuntu-24.04-arm
-            experimental: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -244,29 +231,14 @@ jobs:
           echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt noble-pgdg main" \
             | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update
-          # PG19 is not GA as of 2026-08; PGDG publishes no postgresql-19 yet.
-          # Skip the advisory leg gracefully; a required leg fails loudly.
           if ! apt-cache show "postgresql-${{ matrix.pg }}" > /dev/null 2>&1; then
-            if [[ "${{ matrix.experimental }}" == "true" ]]; then
-              echo "::notice::postgresql-${{ matrix.pg }} not published by PGDG yet; skipping advisory leg."
-              echo "available=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
             echo "::error::postgresql-${{ matrix.pg }} is required but missing from PGDG."
             exit 1
           fi
-          # An advisory leg may be only partially published (apt metadata
-          # present but dev packages not installable, as with PostgreSQL 19
-          # pre-GA); skip it gracefully rather than failing. Required legs fail.
           if ! sudo apt-get install -y \
             postgresql-${{ matrix.pg }} \
             postgresql-server-dev-${{ matrix.pg }} \
             libclang-dev; then
-            if [[ "${{ matrix.experimental }}" == "true" ]]; then
-              echo "::notice::postgresql-${{ matrix.pg }} is not fully installable yet; skipping this advisory leg."
-              echo "available=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
             echo "::error::failed to install postgresql-${{ matrix.pg }} (required leg)."
             exit 1
           fi
@@ -339,21 +311,20 @@ jobs:
   # the manifest job below merges the digests into one multi-arch tag.
   # ---------------------------------------------------------------------------
   docker:
-    name: Build image (PostgreSQL ${{ matrix.pg }}, ${{ matrix.arch }})${{ matrix.experimental && ' (advisory)' || '' }}
+    name: Build image (PostgreSQL ${{ matrix.pg }}, ${{ matrix.arch }})
     needs: prep
     runs-on: ${{ matrix.runner }}
-    continue-on-error: ${{ matrix.experimental }}
     # packages:write is needed only by the publish steps below; the
     # workflow-level default stays contents:read.
     permissions:
       contents: read
       packages: write
+    # Every declared major is required; missing provisioning must fail.
     strategy:
       fail-fast: false
       matrix:
-        pg: [15, 16, 17, 18]
+        pg: [15, 16, 17, 18, 19]
         arch: [amd64, arm64]
-        experimental: [false]
         include:
           - arch: amd64
             runner: ubuntu-24.04
@@ -364,14 +335,6 @@ jobs:
           # fails the build instead of silently publishing a provider-less
           # image), the others build with auto (skips) and the smoke test
           # adapts.
-          - pg: 19
-            arch: amd64
-            runner: ubuntu-24.04
-            experimental: true
-          - pg: 19
-            arch: arm64
-            runner: ubuntu-24.04-arm
-            experimental: true
     env:
       VERSION: ${{ needs.prep.outputs.version }}
       LOCAL_TAG: pgokf:${{ needs.prep.outputs.version }}-pg${{ matrix.pg }}
@@ -384,14 +347,8 @@ jobs:
       - name: Check base-image availability
         id: base
         run: |
-          # The Dockerfile builds FROM postgres:${PG_MAJOR}; that base image does
-          # not exist for a pre-GA major (e.g. 19). Skip an advisory leg cleanly
-          # rather than failing on a missing base.
           if docker manifest inspect "postgres:${{ matrix.pg }}" >/dev/null 2>&1; then
             echo "available=true" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ matrix.experimental }}" == "true" ]]; then
-            echo "::notice::postgres:${{ matrix.pg }} base image is not published yet; skipping this advisory leg."
-            echo "available=false" >> "$GITHUB_OUTPUT"
           else
             echo "::error::postgres:${{ matrix.pg }} base image is missing (required leg)."
             exit 1
@@ -474,22 +431,18 @@ jobs:
   # linux/arm64).
   # ---------------------------------------------------------------------------
   docker-manifest:
-    name: Publish multi-arch manifest (PostgreSQL ${{ matrix.pg }})${{ matrix.experimental && ' (advisory)' || '' }}
+    name: Publish multi-arch manifest (PostgreSQL ${{ matrix.pg }})
     needs: [prep, docker]
     if: needs.prep.outputs.publish == 'true'
     runs-on: ubuntu-24.04
-    continue-on-error: ${{ matrix.experimental }}
     permissions:
       contents: read
       packages: write
+    # Every declared major is required; missing provisioning must fail.
     strategy:
       fail-fast: false
       matrix:
-        pg: [15, 16, 17, 18]
-        experimental: [false]
-        include:
-          - pg: 19
-            experimental: true
+        pg: [15, 16, 17, 18, 19]
     env:
       TAG: ghcr.io/logicocean/pgokf:${{ needs.prep.outputs.version }}-pg${{ matrix.pg }}
     steps:
@@ -509,18 +462,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # No working-directory: download-artifact creates nothing when no artifact
-      # matched (the advisory pg19 leg), and a missing directory would fail the
-      # step before the "nothing to publish" branch could run.
       - name: Create and inspect the manifest list
         run: |
           shopt -s nullglob
           digests=(/tmp/digests/*)
           if [[ ${#digests[@]} -eq 0 ]]; then
-            if [[ "${{ matrix.experimental }}" == "true" ]]; then
-              echo "::notice::no images were built for PostgreSQL ${{ matrix.pg }} (advisory); nothing to publish."
-              exit 0
-            fi
             echo "::error::no digests found for PostgreSQL ${{ matrix.pg }}"
             exit 1
           fi

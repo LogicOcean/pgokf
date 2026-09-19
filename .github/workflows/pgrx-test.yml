@@ -10,22 +10,13 @@ permissions:
 
 jobs:
   test:
-    name: PostgreSQL ${{ matrix.pg }}${{ matrix.experimental && ' (advisory)' || '' }}
+    name: PostgreSQL ${{ matrix.pg }}
     runs-on: ubuntu-24.04
-    # Advisory legs (currently PostgreSQL 19) may fail without failing the
-    # workflow; the required legs (15-18) must always pass.
-    continue-on-error: ${{ matrix.experimental }}
+    # Every declared major is required; missing provisioning must fail.
     strategy:
       fail-fast: false
       matrix:
-        pg: [15, 16, 17, 18]
-        experimental: [false]
-        include:
-          # PostgreSQL 19 is not GA as of 2026-08 and PGDG publishes no
-          # postgresql-19 apt package yet. Keep the leg visible so it starts
-          # passing as soon as PGDG ships packages, but do not let it block CI.
-          - pg: 19
-            experimental: true
+        pg: [15, 16, 17, 18, 19]
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -46,32 +37,14 @@ jobs:
           echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt noble-pgdg main" \
             | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update
-          # PostgreSQL 19 is not GA as of 2026-08, so PGDG does not publish a
-          # postgresql-19 package yet. Skip the advisory leg gracefully instead
-          # of hard-failing on `apt-get install`; a required leg with a missing
-          # package still fails loudly.
           if ! apt-cache show "postgresql-${{ matrix.pg }}" > /dev/null 2>&1; then
-            if [[ "${{ matrix.experimental }}" == "true" ]]; then
-              echo "::notice::postgresql-${{ matrix.pg }} is not published by PGDG yet; skipping this advisory leg."
-              echo "available=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
             echo "::error::postgresql-${{ matrix.pg }} is required but missing from PGDG."
             exit 1
           fi
-          # A required leg must install cleanly; an advisory leg may be only
-          # partially published (apt metadata present but the dev packages not
-          # yet installable, as with PostgreSQL 19 pre-GA) - skip it gracefully
-          # rather than showing a spurious red, matching the guard above.
           if ! sudo apt-get install -y \
             postgresql-${{ matrix.pg }} \
             postgresql-server-dev-${{ matrix.pg }} \
             libclang-dev; then
-            if [[ "${{ matrix.experimental }}" == "true" ]]; then
-              echo "::notice::postgresql-${{ matrix.pg }} is not fully installable yet; skipping this advisory leg."
-              echo "available=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
             echo "::error::failed to install postgresql-${{ matrix.pg }} (required leg)."
             exit 1
           fi
