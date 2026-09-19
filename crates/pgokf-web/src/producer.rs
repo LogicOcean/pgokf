@@ -804,7 +804,7 @@ pub(crate) mod tests {
 
     /// The two fixtures below are verbatim in shape from the producer's
     /// `CredentialInfoResponse`
-    /// (`/tmp/registry-ui/src/ast_graph/producer/admin.py`): keys `label`,
+    /// (the producer admin API): keys `label`,
     /// `type`, `secret_last4` (nullable), `state` (`configured` |
     /// `unusable`), `updated_at`. The producer repo mirrors this test on its
     /// side; a drift in the document shape must fail a test here or there.
@@ -814,7 +814,7 @@ pub(crate) mod tests {
     /// The registration and detail fixtures below are verbatim in shape
     /// from the producer's `RepositoryRegistrationResponse` and
     /// `RepositoryDetailResponse`
-    /// (`/tmp/registry-ui/src/ast_graph/producer/admin.py`): the registry
+    /// (the producer admin API): the registry
     /// row's fields plus `graph_outcome` (`provided` | `created` |
     /// `reused` | `adopted`) on the receipt, and `checkout_path` on the
     /// operator detail. The producer repo mirrors this test on its side; a

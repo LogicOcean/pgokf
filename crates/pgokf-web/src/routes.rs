@@ -12017,7 +12017,7 @@ mod tests {
     /// status half is `the_producer_credential_contract_deserializes_and_maps_statuses`
     /// in producer.rs): fixtures verbatim in shape from the producer's
     /// `CredentialInfoResponse`
-    /// (`/tmp/registry-ui/src/ast_graph/producer/admin.py`), served through
+    /// (the producer admin API), served through
     /// the real client, render as the contract intends - the `configured`
     /// one with its last four, the `unusable` one (null `secret_last4`)
     /// labeled, never an unexplained em dash. The producer repo mirrors
