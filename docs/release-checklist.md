@@ -16,9 +16,22 @@ Run from the repository root. All must exit `0`.
 ```bash
 cargo fmt --all -- --check
 cargo clippy -p pgokf --no-default-features --features pg18 --all-targets -- -D warnings
-cargo test  -p pgokf --no-default-features --features pg18
+cargo clippy --locked --workspace --exclude pgokf --all-targets -- -D warnings
+scripts/test-workspace.sh
 ```
 
+`scripts/test-workspace.sh` runs the complete workspace, including extension,
+web and API tests. On native macOS it sets `LC_ALL=C` and appends
+`-C link-arg=-Wl,-undefined,dynamic_lookup` to `RUSTFLAGS`: PostgreSQL resolves
+extension symbols when loading the library. The equivalent direct invocation is:
+
+```bash
+LC_ALL=C RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C link-arg=-Wl,-undefined,dynamic_lookup" \
+  cargo test --workspace --no-default-features --features pg18 --locked
+```
+
+Use the wrapper as the canonical local command on both Linux and macOS.
+The in-database plain and provider-preloaded runs remain separate required gates.
 `cargo test` includes `tests/api_stability.rs`, which fails if any public
 object lacks a `COMMENT ON` or if the locked public-function count drifts.
 
@@ -40,6 +53,14 @@ cd crates/extension && cargo pgrx schema pg18
 
 The output must contain a `COMMENT ON` for every public function, type, and
 table (the `version_comment` finalize block is the last entity emitted).
+
+All declared PG15–19 CI and packaging legs are required. Missing PGDG packages,
+failed provisioning or absent base images fail the workflow; there is no
+advisory success or skipped-coverage green. PG19 coverage is not established
+until its actual clippy and in-database test steps complete. A provisioning
+failure blocks the support/release gate, even when other majors pass.
+`python3 tests/test_ci_coverage.py` (requires PyYAML) executes the missing-package
+failed-install and missing-image branches with local stubs and requires nonzero exits.
 
 ## 4. Per-major live smoke (repeat for PGVER = 15, 16, 17, 18, 19)
 
@@ -128,8 +149,8 @@ shipped chain runs one script per step from `0.1.0 → 0.1.1` through
 
 > **0.1.3 was a breaking pre-release re-model.** The `pgokf.concept_provenance`
 > shape changed to conform to OKF v0.2 (see [CHANGELOG.md](https://github.com/LogicOcean/pgokf/blob/main/CHANGELOG.md)).
-> Because the extension is still pre-release with no tagged release and no
-> external installs, `0.1.2 → 0.1.3` is **not** a no-data-loss in-place upgrade:
+> This remodel preceded the published 0.2.0 release. Its historical exception
+> remains: `0.1.2 → 0.1.3` is **not** a no-data-loss in-place upgrade:
 > re-`CREATE EXTENSION` and re-register bundles (the on-disk bundle is the
 > source of truth, so the projection rebuilds fully from a sync). The
 > no-data-loss upgrade guarantee below applies to every other link in the chain
@@ -178,19 +199,33 @@ python3 scripts/upgrade-parity.py --pg-config "$PG_CONFIG"
 The harness starts and removes its own local scratch cluster; it accepts no
 production connection. It checks the installed upgrade scripts against this
 checkout, then compares fresh installation with normal, early-dev (missing
-functions), and hand-applied (non-member functions) update routes from 0.2.0
+functions), hand-applied (non-member functions), compatible body drift in
+members and nonmembers, and reordered ACL update routes from 0.2.0
 through every development edge to `default_version`. Each route starts with
 independent API roles, preserves all old columns of populated bundle, concept,
 metadata and source rows, and verifies legacy bundles remain stale even after
-a content resync. An incompatible unowned function must abort adoption without
-changing the catalog or extension version.
+a content resync. The [adoption policy](api-stability.md#development-function-adoption-security-policy)
+is fail closed for both detached functions and members: all three signatures
+must have canonical ownership and explicit grants. Security drift, incompatible
+return/argument definitions and membership in another extension must abort without changing
+ownership, ACLs, initial privileges, body, membership or extension version.
 
 The catalog inventory compares function definitions and security settings,
 comments, ownership, current and initial ACLs, relation/type/column definitions,
-constraints, indexes, views,
-policies, triggers, sequences, roles, extension membership and dump registration.
+constraints (including domain constraints), enum labels in order, domain base
+type/default/nullability/collation, indexes, views, rewrite rules, default ACLs,
+policies, user triggers and internal FK-trigger state, sequences, roles,
+extension membership and dump registration. Internal FK-trigger identities use
+the parent constraint/table and trigger function, never generated OID-bearing
+names. ACL entries are sorted before comparison; equivalent grant order is not
+drift. Default ACLs include schema-scoped and global entries because both affect
+future objects. Enum/domain definitions and domain constraints also cover
+extension-owned types outside the three catalog schemas. Comments include constraints, policies, rules, triggers and the
+extension itself.
 Deliberate owner, comment, privilege, membership, column, security, policy, role and
-dump-registration mutations must fail comparison. The API-stability suite
+dump-registration mutations must fail comparison, together with disabled FK
+enforcement, rewrite rules, default ACLs, enum/domain changes and comment probes.
+The API-stability suite
 separately checks every historical edge from 0.1.0 and rejects missing targets,
 append-without-bump and disconnected edges. Live data-preservation parity begins
 at 0.2.0; it does not claim to execute the historical breaking 0.1.3 migration.
@@ -267,7 +302,7 @@ ${PG_BIN}/pg_ctl -D "$DATA" -w stop -m fast && rm -rf /tmp/pgokf-rel
 | ---- | --------------- | -------------- |
 | Format | `cargo fmt --all -- --check` | exit 0 |
 | Lint | `cargo clippy … -D warnings` | exit 0 |
-| Tests | `cargo test -p pgokf …` | all pass, incl. `api_stability` |
+| Tests | `scripts/test-workspace.sh` | all pass, incl. `api_stability` |
 | In-database | `RUST_TEST_THREADS=1 cargo pgrx test pg18 …`, once plain and once with `PGOKF_TEST_PRELOAD=pg_textsearch,pg_search` | all pass; the provider tests run (not skip) in the preloaded run |
 | Supply chain | `cargo deny check`, `cargo audit` | no denials/advisories |
 | Schema | `cargo pgrx schema pg18` | builds; comments present |

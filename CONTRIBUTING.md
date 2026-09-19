@@ -35,7 +35,7 @@ Run the full local gate (what CI runs):
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --no-default-features --features pg18 -- -D warnings
 cargo deny check
-cargo test -p pgokf --no-default-features --features pg18        # unit + api_stability
+scripts/test-workspace.sh        # unit + api_stability
 RUST_TEST_THREADS=1 cargo pgrx test pg18 --no-default-features --features pg18   # in-DB
 ```
 

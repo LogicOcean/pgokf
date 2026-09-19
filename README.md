@@ -112,7 +112,7 @@ cargo pgrx install --pg-config $(which pg_config) --features pg18
 Select the major via the crate feature (`pg15`…`pg19`; default `pg18`). Run the gate:
 
 ```bash
-cargo test -p pgokf --no-default-features --features pg18                     # unit + api-stability
+scripts/test-workspace.sh                     # unit + api-stability
 RUST_TEST_THREADS=1 cargo pgrx test pg18 --no-default-features --features pg18 # in-database
 ```
 
