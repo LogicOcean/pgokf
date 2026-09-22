@@ -20,7 +20,7 @@ def check_support(packages, pgrx):
     if matrix.get('pg') != [15, 16, 17, 18] or matrix.get('include') != [{'pg': 19, 'image_tag': '19beta3'}]:
         errors.append('required pinned beta compatibility')
     job = pgrx['jobs']['test']
-    if job.get('continue-on-error') or 'if' in job:
+    if job.get('continue-on-error') or 'if' in job or 'defaults' in job or 'defaults' in pgrx:
         errors.append('compatibility must fail closed')
     runs = '\n'.join(step.get('run', '') for step in job['steps'])
     for required in ('packaging/install-postgres.sh', 'packaging/check-beta-image.sh',
@@ -40,6 +40,7 @@ def check_support(packages, pgrx):
                 errors.append('compatibility execution skips or waives failure: ' + required)
 
     contracts = {
+        'Nonproduction PostgreSQL 19 Beta 3 image compatibility': ('matrix.pg == 19', 'python3 release-tools/scripts/compatibility-image.py\nversion=$(sed -n "s/^default_version *= *\'\\([^\']*\\)\'.*/\\1/p" crates/extension/pgokf.control)\nSMOKE_WITH_OPTIONAL=0 release-tools/packaging/docker/smoke-test.sh pgokf-beta-compat "$version"'),
         'Validate source compatibility identity': (None, 'python3 release-tools/scripts/compatibility-source.py .'),
         'Verify immutable Beta 3 base': ('matrix.pg == 19', 'release-tools/packaging/check-beta-image.sh'),
         'Install PostgreSQL ${{ matrix.pg }} development files': (None, 'sudo release-tools/packaging/install-postgres.sh ${{ matrix.pg }}\necho "available=true" >> "$GITHUB_OUTPUT"'),

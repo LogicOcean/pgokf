@@ -57,6 +57,10 @@ def check_workflow(workflow, release=False):
             j = jobs[name]
             if 'homebrew-policy' not in j['needs'] or 'if' in j or j.get('continue-on-error', False):
                 errors.append('publication can bypass macOS policy')
+        for name in ('docker-manifest', 'companions-manifest'):
+            j = jobs[name]
+            if j.get('if') != "needs.prep.outputs.publish == 'true'" or j.get('continue-on-error', False) or 'defaults' in j:
+                errors.append('manifest failure propagation changed: ' + name)
         for name in ('prep', 'lint', 'meta', 'deb', 'compatibility'):
             if 'if' in jobs[name] or jobs[name].get('continue-on-error', False):
                 errors.append('release prerequisite bypassed: ' + name)

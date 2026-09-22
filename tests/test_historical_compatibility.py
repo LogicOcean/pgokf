@@ -21,6 +21,9 @@ class HistoricalCompatibility(unittest.TestCase):
         self.assertEqual([s['with'] for s in checkouts], [
             {'ref': '${{ inputs.source_ref || github.sha }}'},
             {'ref': '${{ github.sha }}', 'path': 'release-tools'}])
+        for step in checkouts:
+            self.assertNotIn('if', step)
+            self.assertNotIn('continue-on-error', step)
         self.assertNotIn('if', job)
         self.assertNotIn('continue-on-error', job)
         with tempfile.TemporaryDirectory() as directory:

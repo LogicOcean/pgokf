@@ -27,6 +27,10 @@ mutations = [
     ('removed-execution', workflow, lambda s: s.replace('run: python3 release-tools/scripts/test-homebrew-policy.py', 'run: true')),
     ('bypassed-dependency', workflow, lambda s: s.replace(', homebrew-policy]', ']')),
     ('bypassed-condition', workflow, lambda s: s.replace("if: needs.prep.outputs.version != '0.2.0'", "if: needs.prep.outputs.version == '0.2.0'")),
+    ('manifest-bypass', workflow, lambda s: s.replace("if: needs.prep.outputs.publish == 'true'", 'if: always()')),
+    ('masked-shell-default', '.github/workflows/pgrx-test.yml', lambda s: s.replace('  test:\n', '  test:\n    defaults:\n      run:\n        shell: bash {0}\n')),
+    ('disabled-tooling-checkout', '.github/workflows/pgrx-test.yml', lambda s: s.replace('      - name: Checkout release validation tooling\n', '      - name: Checkout release validation tooling\n        if: false\n')),
+    ('masked-beta-build', '.github/workflows/pgrx-test.yml', lambda s: s.replace('python3 release-tools/scripts/compatibility-image.py', 'python3 release-tools/scripts/compatibility-image.py || true')),
     ('waived-failure', workflow, lambda s: s.replace('  homebrew-policy:\n', '  homebrew-policy:\n    continue-on-error: true\n')),
     ('commented-pgrx', '.github/workflows/pgrx-test.yml', lambda s: s.replace('run: cargo pgrx test', 'run: "# cargo pgrx test').replace('--features pg${{ matrix.pg }}\n\n      - name: Fresh', '--features pg${{ matrix.pg }}"\n\n      - name: Fresh')),
 ]
