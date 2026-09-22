@@ -95,6 +95,9 @@ class Pgokf < Formula
   end
 
   test do
+    # Avoid macOS locale initialization spawning threads in the postmaster.
+    # Use an explicit UTF-8 database independent of the caller's locale.
+    ENV["LC_ALL"] = "C"
     pg = postgresql
     pg_major = pg.version.major.to_s
 
@@ -107,7 +110,8 @@ class Pgokf < Formula
     # End-to-end: initialize a throwaway cluster and CREATE EXTENSION.
     pg_bin = pg.opt_bin
     datadir = testpath/"data"
-    system pg_bin/"initdb", "-D", datadir, "--auth=trust", "-U", "postgres"
+    system pg_bin/"initdb", "-D", datadir, "--auth=trust", "-U", "postgres",
+           "--encoding=UTF8", "--locale=C"
     port = free_port
     system pg_bin/"pg_ctl", "-D", datadir, "-w",
            "-o", "-p #{port} -c listen_addresses=127.0.0.1", "start"

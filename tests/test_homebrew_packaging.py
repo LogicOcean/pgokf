@@ -16,6 +16,8 @@ def check_policy(text):
         'ENV["PGRX_HOME"] = buildpath/"pgrx-home"',
         'system cargo_pgrx, "pgrx", "package"',
         'library = OS.mac? ? "pgokf.dylib" : "pgokf.so"',
+        'ENV["LC_ALL"] = "C"',
+        '"--encoding=UTF8", "--locale=C"',
     ]
     return [line for line in required if line not in text]
 
