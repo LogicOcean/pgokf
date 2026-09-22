@@ -20,29 +20,44 @@ def check_support(packages, pgrx):
     if matrix.get('pg') != [15, 16, 17, 18] or matrix.get('include') != [{'pg': 19, 'image_tag': '19beta3'}]:
         errors.append('required pinned beta compatibility')
     job = pgrx['jobs']['test']
-    if job.get('continue-on-error') or job.get('if'):
+    if job.get('continue-on-error') or 'if' in job:
         errors.append('compatibility must fail closed')
     runs = '\n'.join(step.get('run', '') for step in job['steps'])
     for required in ('packaging/install-postgres.sh', 'packaging/check-beta-image.sh',
                      'cargo clippy --locked -p pgokf', 'cargo pgrx test pg${{ matrix.pg }}',
-                     'PG_IMAGE_TAG=${{ matrix.image_tag }}',
-                     'SMOKE_WITH_OPTIONAL=0 packaging/docker/smoke-test.sh'):
+                     'python3 release-tools/scripts/compatibility-image.py',
+                     'SMOKE_WITH_OPTIONAL=0 release-tools/packaging/docker/smoke-test.sh'):
         if required not in runs:
             errors.append('missing compatibility execution: ' + required)
         for step in job['steps']:
             if required not in step.get('run', ''):
                 continue
             beta_only = required in ('packaging/check-beta-image.sh',
-                                     'PG_IMAGE_TAG=${{ matrix.image_tag }}',
-                                     'SMOKE_WITH_OPTIONAL=0 packaging/docker/smoke-test.sh')
+                                     'python3 release-tools/scripts/compatibility-image.py',
+                                     'SMOKE_WITH_OPTIONAL=0 release-tools/packaging/docker/smoke-test.sh')
             allowed = ('matrix.pg == 19',) if beta_only else (None, "steps.pgdg.outputs.available == 'true'")
             if step.get('if') not in allowed or step.get('continue-on-error'):
                 errors.append('compatibility execution skips or waives failure: ' + required)
 
+    contracts = {
+        'Validate source compatibility identity': (None, 'python3 release-tools/scripts/compatibility-source.py .'),
+        'Verify immutable Beta 3 base': ('matrix.pg == 19', 'release-tools/packaging/check-beta-image.sh'),
+        'Install PostgreSQL ${{ matrix.pg }} development files': (None, 'sudo release-tools/packaging/install-postgres.sh ${{ matrix.pg }}\necho "available=true" >> "$GITHUB_OUTPUT"'),
+        'Clippy': ("steps.pgdg.outputs.available == 'true'", 'cargo clippy --locked -p pgokf --no-default-features --features pg${{ matrix.pg }} --all-targets -- -D warnings'),
+        'Test': ("steps.pgdg.outputs.available == 'true'", 'cargo pgrx test pg${{ matrix.pg }} --release --no-default-features --features pg${{ matrix.pg }}'),
+        'Fresh install versus upgrade parity and mutation probes': ("steps.pgdg.outputs.available == 'true' && matrix.pg == 18", 'PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config\ncargo pgrx install --no-default-features --features pg18 --pg-config "$PG_CONFIG"\nrelease-tools/scripts/compatibility-parity.sh "$PG_CONFIG"'),
+    }
+    for name, (condition, command) in contracts.items():
+        matches = [s for s in job['steps'] if s.get('name') == name]
+        if len(matches) != 1 or matches[0].get('if') != condition or matches[0].get('run', '').strip() != command or matches[0].get('continue-on-error') or 'shell' in matches[0]:
+            errors.append('active execution contract: ' + name)
+    compatibility = packages['jobs'].get('compatibility', {})
+    if 'if' in compatibility or compatibility.get('continue-on-error') or compatibility.get('with') != {'source_ref': '${{ needs.prep.outputs.source_ref }}'}:
+        errors.append('compatibility source/dependency bypass')
     if packages['jobs'].get('compatibility', {}).get('uses') != './.github/workflows/pgrx-test.yml':
         errors.append('publication requires compatibility')
     for name in ('docker', 'companions'):
-        if not set(('prep', 'lint', 'meta', 'deb', 'compatibility')) <= set(packages['jobs'][name]['needs']):
+        if not set(('prep', 'lint', 'meta', 'deb', 'compatibility', 'homebrew-policy')) <= set(packages['jobs'][name]['needs']):
             errors.append('publication gate: ' + name)
     for name in ('docker-manifest', 'companions-manifest'):
         if not {'docker', 'companions'} <= set(packages['jobs'][name]['needs']):

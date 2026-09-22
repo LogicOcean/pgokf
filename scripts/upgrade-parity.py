@@ -62,9 +62,12 @@ def check_committed_install(sql, installed, committed, expected, inventory, vers
 
 
 def main():
+    global ROOT
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--pg-config', default='pg_config')
+    parser.add_argument('--source-root', type=Path, default=ROOT)
     args = parser.parse_args()
+    ROOT = args.source_root.resolve()
     bindir = Path(run(args.pg_config, '--bindir').strip())
     extension = Path(run(args.pg_config, '--sharedir').strip()) / 'extension'
     control = (ROOT / 'crates/extension/pgokf.control').read_text()

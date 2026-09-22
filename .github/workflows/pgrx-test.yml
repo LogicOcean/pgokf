@@ -32,6 +32,15 @@ jobs:
         with:
           ref: ${{ inputs.source_ref || github.sha }}
 
+      - name: Checkout release validation tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: release-tools
+
+      - name: Validate source compatibility identity
+        run: python3 release-tools/scripts/compatibility-source.py .
+
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: "1.96.0"
@@ -41,12 +50,12 @@ jobs:
 
       - name: Verify immutable Beta 3 base
         if: matrix.pg == 19
-        run: packaging/check-beta-image.sh
+        run: release-tools/packaging/check-beta-image.sh
 
       - name: Install PostgreSQL ${{ matrix.pg }} development files
         id: pgdg
         run: |
-          sudo packaging/install-postgres.sh ${{ matrix.pg }}
+          sudo release-tools/packaging/install-postgres.sh ${{ matrix.pg }}
           echo "available=true" >> "$GITHUB_OUTPUT"
 
       # pg_textsearch (the default BM25 provider) ships for 17 and 18 only.
@@ -57,7 +66,7 @@ jobs:
       - name: Install pg_textsearch (BM25 provider tests)
         if: steps.pgdg.outputs.available == 'true' && (matrix.pg == 17 || matrix.pg == 18)
         run: |
-          deb="$(packaging/docker/fetch-pg-textsearch.sh ${{ matrix.pg }} amd64 "${RUNNER_TEMP}")"
+          deb="$(release-tools/packaging/docker/fetch-pg-textsearch.sh ${{ matrix.pg }} amd64 "${RUNNER_TEMP}")"
           sudo apt-get install -y --no-install-recommends "${deb}"
 
       # Keep this version synchronized with the workspace `pgrx` dependency in
@@ -114,17 +123,11 @@ jobs:
         run: |
           PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config
           cargo pgrx install --no-default-features --features pg18 --pg-config "$PG_CONFIG"
-          docker run --rm --entrypoint cat ghcr.io/logicocean/pgokf:0.2.0-pg18 \
-            /usr/share/postgresql/18/extension/pgokf--0.2.0.sql \
-            > "$("$PG_CONFIG" --sharedir)/extension/pgokf--0.2.0.sql"
-          python3 scripts/upgrade-parity.py --pg-config "$PG_CONFIG"
+          release-tools/scripts/compatibility-parity.sh "$PG_CONFIG"
 
       - name: Nonproduction PostgreSQL 19 Beta 3 image compatibility
         if: matrix.pg == 19
         run: |
-          docker build -f packaging/docker/Dockerfile --build-arg PG_MAJOR=19 \
-            --build-arg PG_IMAGE_TAG=${{ matrix.image_tag }} \
-            --build-arg WITH_PGVECTOR=0 --build-arg WITH_PG_CRON=0 \
-            --build-arg WITH_PG_TEXTSEARCH=0 -t pgokf-beta-compat .
+          python3 release-tools/scripts/compatibility-image.py
           version=$(sed -n "s/^default_version *= *'\([^']*\)'.*/\1/p" crates/extension/pgokf.control)
-          SMOKE_WITH_OPTIONAL=0 packaging/docker/smoke-test.sh pgokf-beta-compat "$version"
+          SMOKE_WITH_OPTIONAL=0 release-tools/packaging/docker/smoke-test.sh pgokf-beta-compat "$version"
