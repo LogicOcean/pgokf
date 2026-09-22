@@ -151,7 +151,7 @@ type CallbackMap =
 /// or `PgrxactCallbackEvent::Abort` event will immediately cause the Postgres backend to abort and
 /// the entire cluster to restart.
 ///
-/// As the Postgres internal documentation says:  
+/// As the Postgres internal documentation says:
 ///
 /// At transaction end, the callback occurs post-commit or post-abort, so the callback
 /// functions can only do noncritical cleanup.

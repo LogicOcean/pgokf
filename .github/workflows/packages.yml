@@ -40,6 +40,7 @@ on:
           pgokf.control; the run checks out the tag and proves HEAD is the
           tag's commit. Empty: build and smoke-test the current ref only -
           nothing publishes. A version tag push publishes automatically.
+        type: string
         required: false
         default: ''
 

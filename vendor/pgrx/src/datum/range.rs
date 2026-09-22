@@ -120,7 +120,7 @@ impl<T> From<Option<T>> for RangeBound<T>
 where
     T: RangeSubType,
 {
-    /// Conversion of an [`Option`] to a [`RangeBound`].  
+    /// Conversion of an [`Option`] to a [`RangeBound`].
     ///
     /// `Some` maps to the [`RangeBound::Inclusive`] variant and `None` maps to the
     /// [`RangeBound::Infinite`] value.
@@ -270,7 +270,7 @@ where
         self.inner.take()
     }
 
-    /// Replace the bounds of this [`Range`], returning the old bounds.  
+    /// Replace the bounds of this [`Range`], returning the old bounds.
     ///
     /// An [`Option::None`] will replace this with the "empty" range.
     #[inline]

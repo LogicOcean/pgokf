@@ -31,7 +31,7 @@ use crate::{FromDatum, IntoDatum, PgMemoryContexts, pg_sys};
 pub struct Internal(Option<pg_sys::Datum>);
 
 impl Internal {
-    /// Construct a new Internal from any type.  
+    /// Construct a new Internal from any type.
     ///
     /// The value will be dropped when the [PgMemoryContexts::CurrentMemoryContext] is deleted.
     #[inline(always)]

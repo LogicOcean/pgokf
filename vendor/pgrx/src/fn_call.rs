@@ -30,7 +30,7 @@ pub unsafe trait FnCallArg: Sealed {
     fn type_oid(&self) -> pg_sys::Oid;
 }
 
-/// The kinds of [`fn_call`] arguments.  
+/// The kinds of [`fn_call`] arguments.
 pub enum Arg<T> {
     /// The argument value is a SQL NULL
     Null,

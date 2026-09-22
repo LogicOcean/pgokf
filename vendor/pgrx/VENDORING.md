@@ -33,6 +33,9 @@ the resolved graph rather than ignored.
    the crate) are removed, along with the imports only they used
    (`serde::{Deserialize, Serialize}`, `StringInfo`, `varsize_any_exhdr`).
 3. `src/inoutfuncs.rs`: the doc comment naming serde_cbor is updated.
+4. Five upstream doc-comment lines in `callbacks.rs`, `datum/internal.rs`,
+   `datum/range.rs`, and `fn_call.rs` have trailing spaces removed so the
+   whole-tree whitespace gate passes. No Rust tokens change.
 
 The upstream package's `Cargo.lock` and `Cargo.toml.orig` are retained as
 provenance only; Cargo uses the normalized `Cargo.toml` here and the workspace
