@@ -30,11 +30,23 @@ IMAGE="${1:?usage: $0 <image ref> [expected version]}"
 EXPECTED="${2:-$(sed -n "s/^default_version *= *'\([^']*\)'.*/\1/p" "${REPO_ROOT}/crates/extension/pgokf.control")}"
 DOCKER="${DOCKER:-docker}"
 WITH_OPTIONAL="${SMOKE_WITH_OPTIONAL:-1}"
-NAME="pgokf-smoke-$$"
+RUN_ID="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+NAME="pgokf-smoke-${RUN_ID}"
+EVIDENCE="$(mktemp -d "${TMPDIR:-/tmp}/pgokf-smoke-evidence.XXXXXXXX")"
+OWNED_IDS=()
+export DOCKER
 
 log() { printf '==> %s\n' "$*" >&2; }
 fail() { printf 'FAIL: %s\n' "$*" >&2; ${DOCKER} logs "${NAME}" 2>&1 | tail -40 >&2 || true; exit 1; }
-cleanup() { ${DOCKER} rm -f "${NAME}" >/dev/null 2>&1 || true; }
+cleanup() {
+  local status=$? id
+  for id in "${OWNED_IDS[@]}"; do
+    python3 "${REPO_ROOT}/scripts/cleanup-owned-container.py" "$id" \
+      pgokf.smoke-run "${RUN_ID}" "${EVIDENCE}/${id}.json" || status=1
+  done
+  log "ownership and cleanup receipts: ${EVIDENCE}"
+  return "$status"
+}
 trap cleanup EXIT
 
 # psql inside the container as the bootstrap superuser, over TCP so the
@@ -51,14 +63,16 @@ assert_eq() { # actual expected description
 # with a WITH_* off (including the required PG19 leg) must still start.
 preload="pgokf"
 # shellcheck disable=SC2016  # ${PG_MAJOR} is expanded by the container's shell, on purpose
-carried="$(${DOCKER} run --rm --entrypoint sh "${IMAGE}" \
-  -c 'cd "/usr/share/postgresql/${PG_MAJOR}/extension" && ls pg_cron.control pg_search.control pg_textsearch.control 2>/dev/null' || true)"
+probe_id="$(${DOCKER} create --label "pgokf.smoke-run=${RUN_ID}" --entrypoint sh "${IMAGE}" \
+  -c 'cd "/usr/share/postgresql/${PG_MAJOR}/extension" && ls pg_cron.control pg_search.control pg_textsearch.control 2>/dev/null')"
+OWNED_IDS+=("${probe_id}")
+carried="$(${DOCKER} start -a "${probe_id}" || true)"
 case "${carried}" in *pg_cron.control*) preload="${preload},pg_cron" ;; esac
 case "${carried}" in *pg_textsearch.control*) preload="${preload},pg_textsearch" ;; esac
 case "${carried}" in *pg_search.control*) preload="${preload},pg_search" ;; esac
 
 log "starting ${IMAGE} (shared_preload_libraries=${preload})"
-${DOCKER} run -d --name "${NAME}" \
+main_id="$(${DOCKER} create --name "${NAME}" --label "pgokf.smoke-run=${RUN_ID}" \
   -e POSTGRES_PASSWORD=smoke -e POSTGRES_HOST_AUTH_METHOD=trust \
   -e PGOKF_ADMIN_PASSWORD=admin-pw \
   -e PGOKF_WRITER_PASSWORD=writer-pw \
@@ -66,7 +80,9 @@ ${DOCKER} run -d --name "${NAME}" \
   -e PGOKF_POLICY='{"embedding_dim": 1024, "allowed_roots": ["/bundles"], "store_source": true}' \
   "${IMAGE}" \
   postgres -c "shared_preload_libraries=${preload}" -c cron.database_name=postgres \
-  >/dev/null
+  )"
+OWNED_IDS+=("${main_id}")
+${DOCKER} start "${main_id}" >/dev/null
 
 # Wait for the real condition (extension created at the expected version), not
 # merely for the socket: the entrypoint runs the init hooks after the
@@ -193,15 +209,15 @@ log "ok: backup archive carries the pgokf.concepts data"
 # not the 1024 the target's init hook applied), and a working health probe.
 # pgokf-restore runs pg_restore with --exit-on-error, so nothing is "ignored".
 RESTORE="${NAME}-restore"
-restore_cleanup() { ${DOCKER} rm -f "${RESTORE}" >/dev/null 2>&1 || true; cleanup; }
-trap restore_cleanup EXIT
-${DOCKER} run -d --name "${RESTORE}" \
+restore_id="$(${DOCKER} create --name "${RESTORE}" --label "pgokf.smoke-run=${RUN_ID}" \
   -e POSTGRES_PASSWORD=smoke -e POSTGRES_HOST_AUTH_METHOD=trust \
   -e PGOKF_ADMIN_PASSWORD=admin-pw -e PGOKF_WRITER_PASSWORD=writer-pw -e PGOKF_READER_PASSWORD=reader-pw \
   -e PGOKF_POLICY='{"embedding_dim": 1024, "allowed_roots": ["/bundles"], "store_source": true}' \
   "${IMAGE}" \
   postgres -c "shared_preload_libraries=${preload}" -c cron.database_name=postgres \
-  >/dev/null
+  )"
+OWNED_IDS+=("${restore_id}")
+${DOCKER} start "${restore_id}" >/dev/null
 restored_ready=""
 for _ in $(seq 1 60); do
   got="$(${DOCKER} exec "${RESTORE}" psql -h 127.0.0.1 -U postgres -d postgres -tAc \

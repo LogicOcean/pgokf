@@ -9,13 +9,14 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
 
 
 def docker(*args):
-    return subprocess.check_output(['docker', *args], text=True)
+    return subprocess.check_output([*shlex.split(os.environ.get('DOCKER', 'docker')), *args], text=True)
 
 
 def persist_exclusive(path, value):
