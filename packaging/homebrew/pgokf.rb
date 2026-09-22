@@ -33,9 +33,23 @@ class Pgokf < Formula
     pg_config = pg.opt_bin/"pg_config"
     pg_major = pg.version.major.to_s
 
+    if OS.mac?
+      # Match Homebrew's host deployment policy and selected SDK, rather than
+      # Rust's older default. This source build targets the build host's macOS.
+      ENV["MACOSX_DEPLOYMENT_TARGET"] = MacOS.version.to_s
+      # PostgreSQL resolves these symbols when loading the extension. Preserve
+      # Cargo's encoded-flags precedence and Homebrew's separate Rust flags.
+      if ENV.key?("CARGO_ENCODED_RUSTFLAGS")
+        ENV.append "CARGO_ENCODED_RUSTFLAGS", "-Clink-arg=-Wl,-undefined,dynamic_lookup", "\x1f"
+      else
+        ENV.append "RUSTFLAGS", "-C link-arg=-Wl,-undefined,dynamic_lookup"
+      end
+    end
+
     # cargo-pgrx is the build driver; pin it to the workspace pgrx version and
     # keep it inside the build sandbox so it never touches ~/.cargo.
     ENV["CARGO_HOME"] = buildpath/"cargo-home"
+    ENV["PGRX_HOME"] = buildpath/"pgrx-home"
     system "cargo", "install", "cargo-pgrx",
            "--version", "0.19.2", "--locked",
            "--root", buildpath/"pgrx-tools"
