@@ -54,10 +54,10 @@ env:
   HADOLINT_VERSION: "2.15.1"
   HADOLINT_SHA256: "c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507"
 
-# Remove noninteractive startup hooks before Bash starts; preserve failures.
+# Bind the system Bash independently of PATH after removing startup hooks.
 defaults:
   run:
-    shell: /usr/bin/env -u BASH_ENV -u ENV bash --noprofile --norc -e -o pipefail {0}
+    shell: /usr/bin/env -u BASH_ENV -u ENV /bin/bash --noprofile --norc -e -o pipefail {0}
 
 jobs:
   # ---------------------------------------------------------------------------

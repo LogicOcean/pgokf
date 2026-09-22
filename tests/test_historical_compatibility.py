@@ -76,17 +76,50 @@ class PublicationEligibility(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             hook = root / 'startup'; hook.write_text("trap 'exit 0' EXIT\n")
+            wrapper = root / 'wrapper'
+            wrapper.write_text('#!/bin/sh\n/bin/bash "$@"\nexit 0\n')
+            wrapper.chmod(0o755)
             script = root / 'step.sh'
+            smoke = root / 'release-tools/packaging/docker/smoke-test.sh'
+            smoke.parent.mkdir(parents=True)
+            smoke.write_text('#!/bin/sh\ntouch smoke-reached\n')
+            smoke.chmod(0o755)
             provision = next(s for s in steps if s.get('id') == 'pgdg')['run'].replace('${{ matrix.pg }}', '18')
             beta = next(s for s in steps if s.get('name', '').startswith('Nonproduction'))['run']
-            for body, stub in ((provision, 'sudo() { return 7; };\n'), (beta, 'python3() { return 7; };\n')):
-                script.write_text(stub + body)
-                env = {**os.environ, 'BASH_ENV': str(hook), 'ENV': str(hook), 'GITHUB_OUTPUT': str(root / 'output')}
-                masked = subprocess.run(['bash', '-e', '-o', 'pipefail', str(script)], env=env, capture_output=True)
-                self.assertEqual(masked.returncode, 0, 'probe must reproduce original startup masking')
-                result = subprocess.run(shlex.split(CLEAN_SHELL.replace('{0}', str(script))), env=env, capture_output=True)
-                self.assertEqual(result.returncode, 7)
-                self.assertFalse((root / 'output').exists())
+            for symlink in (False, True):
+                bash = root / 'bash'
+                bash.unlink(missing_ok=True)
+                if symlink:
+                    bash.symlink_to(wrapper)
+                else:
+                    bash.write_bytes(wrapper.read_bytes()); bash.chmod(0o755)
+                env = {**os.environ, 'PATH': str(root) + os.pathsep + os.environ['PATH'],
+                       'BASH_ENV': str(hook), 'ENV': str(hook), 'GITHUB_OUTPUT': str(root / 'output')}
+                for body, stub in ((provision, 'sudo() { return 7; };\n'), (beta, 'python3() { return 7; };\n')):
+                    script.write_text(stub + body)
+                    # Both old defects must remain live negative controls.
+                    for old in ('/bin/bash -e -o pipefail {0}', CLEAN_SHELL.replace('/bin/bash', 'bash')):
+                        masked = subprocess.run([a.replace('{0}', str(script)) for a in shlex.split(old)],
+                                                cwd=root, env=env, capture_output=True)
+                        self.assertEqual(masked.returncode, 0)
+                    for filename in ('ci.yml', 'packages.yml', 'pgrx-test.yml'):
+                        declared = yaml.safe_load((ROOT / '.github/workflows' / filename).read_text()).get('defaults', {}).get('run', {}).get('shell')
+                        self.assertEqual(declared, CLEAN_SHELL)
+                        result = subprocess.run([a.replace('{0}', str(script)) for a in shlex.split(declared)],
+                                                cwd=root, env=env, capture_output=True)
+                        self.assertEqual(result.returncode, 7, (filename, symlink, result.stderr))
+                        self.assertEqual(result.stdout, b'')
+                        self.assertFalse((root / 'output').exists())
+                        self.assertFalse((root / 'smoke-reached').exists())
+
+    def test_shell_policy_resolves_yaml_aliases(self):
+        from workflow_policy import check_shell_policy
+        text = (ROOT / '.github/workflows/pgrx-test.yml').read_text()
+        # Equivalent aliases are accepted; changed aliased values are checked.
+        aliased = text.replace('      - name: Clippy', '      - &clippy\n        name: Clippy')
+        self.assertEqual(check_shell_policy(yaml.safe_load(aliased)), [])
+        bad = aliased.replace('        name: Clippy', '        name: Clippy\n        env: &mask {PATH: /tmp/mask}')
+        self.assertIn('PATH environment override', check_shell_policy(yaml.safe_load(bad)))
 
 
 if __name__ == '__main__':

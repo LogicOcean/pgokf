@@ -397,3 +397,30 @@ Before tagging, run the clean-commit arm64 macOS source-mechanics gate
 `tests/test_homebrew_packaging.py` and `tests/test_cleanup_ownership.py` guards.
 Retain the permanent cleanup evidence limitation in
 [the recovery record](releases/0.3.1-recovery.md#permanent-historical-cleanup-evidence-limitation).
+
+The required CI, packaging and compatibility jobs use
+`/usr/bin/env -u BASH_ENV -u ENV /bin/bash --noprofile --norc -e -o pipefail {0}`.
+The absolute system shell prevents a PATH-selected wrapper from turning a failed
+step into success; clearing startup hooks happens before that shell starts.
+GitHub's [Ubuntu image helpers](https://github.com/actions/runner-images/blob/main/images/ubuntu/scripts/helpers/os.sh)
+use `/bin/bash` on x64 and arm64, and its
+[macOS image setup](https://github.com/actions/runner-images/blob/main/images/macos/scripts/build/configure-machine.sh)
+uses `/bin/bash -e -o pipefail`. The current surfaces are `ubuntu-latest`,
+`ubuntu-24.04`, `ubuntu-24.04-arm` and `macos-15`; no Windows shell is covered.
+
+`tests/workflow_policy.py` validates parsed YAML and rejects PATH env overrides,
+GITHUB_PATH/environment-file manipulation and shell overrides. It also compares
+workflow env and every job's parsed definition with the reviewed digests in
+`tests/workflow-contexts.json`. This closed execution contract catches inserted
+setup steps, changed action inputs/outputs, computed environment-file names and
+YAML aliases without pretending to interpret arbitrary programs. Pinned toolchain
+and Docker setup actions retain their reviewed PATH setup. A legitimate job,
+action or command change requires reviewing that context and updating its digest
+using `execution_context()` in the same change, then rerunning the complete
+Python suite, `scripts/test-policy-mutations.py NEW_EVIDENCE_DIRECTORY` and
+actionlint. Do not regenerate the contract merely to silence a failing check.
+This is a validated workflow execution contract, not a runner sandbox: runner
+binaries, the pinned action implementations and called source scripts remain
+trusted. The regression executes actual provisioning/Beta bodies with failing
+command boundaries under hostile PATH, BASH_ENV and ENV, including a symlinked
+masking wrapper; the step must fail before success outputs or smoke.

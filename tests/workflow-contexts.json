@@ -1,0 +1,32 @@
+{
+  "CI": {
+    "env": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+    "jobs": {
+      "rust": "0895b8b56b4cd8f46d2be5b0df80c823ef0891a6ee5a32cdcbde2266b6692047",
+      "deny": "f487773dbaad36e516844b3c88da4042baf14e5a56a0429d4eb1e36009fa641e",
+      "notices": "7361b079073432c8823a9be60e299cf400360d99a470cff3a98d810cc75c7d7b",
+      "homebrew-policy": "a36863eaa3a3e750225e339a3d20da40c8f7579e1e49145814362f86eb76efb8"
+    }
+  },
+  "packages": {
+    "env": "4b54b06eca505534cdcbd3c2936a45f5442b41393415b9b8fd37eb42a7ac1184",
+    "jobs": {
+      "prep": "cf96cedfb3d6838593ef15f3914cb1c026af8b8ac4766bd88b70cc97c91992b1",
+      "lint": "ed85226187d3cab0c62de05f1007030dc08f227fe48146668f7aca345134b102",
+      "meta": "2fa4f39514a6951b694c2238368468ace0ecc784a373a32c758084ed7b166bbc",
+      "deb": "6da0fbb4a9ccc534dd49604e3ff0cef3849da9b07d499834be181870596fd4cd",
+      "docker": "0759a4a4d4559e48b01f768fff65af317db8918aeeedf43e84ad38641ee1a1c7",
+      "docker-manifest": "34f6111e48406a0277d3e54b6b7bd646e1e5e086a9ef038902161720164fa119",
+      "companions": "511f1ca25ee8902f2adbb41ca6985c2a17202f97a88bd847b56e0bc2ee301c6a",
+      "companions-manifest": "4af1c41cd59d346f58530a7795f3b6a4583bfd93060a61cb6ebf4d6d0854d77b",
+      "compatibility": "0d0328b63046f6348618b0d1c6f95e0297bd72b69027ec3a138359fa5883ee15",
+      "homebrew-policy": "804e3066e77e7ec4d350ec26c3db57d95c2d36e1633c0a1e452ae668dba77686"
+    }
+  },
+  "pgrx test": {
+    "env": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+    "jobs": {
+      "test": "61035590c31dfab4013a455eeff6b4c4bd1b4aca0e2281d7497e35909111bf77"
+    }
+  }
+}

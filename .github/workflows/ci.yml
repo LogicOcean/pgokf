@@ -7,10 +7,10 @@ on:
 permissions:
   contents: read
 
-# Remove noninteractive startup hooks before Bash starts; preserve failures.
+# Bind the system Bash independently of PATH after removing startup hooks.
 defaults:
   run:
-    shell: /usr/bin/env -u BASH_ENV -u ENV bash --noprofile --norc -e -o pipefail {0}
+    shell: /usr/bin/env -u BASH_ENV -u ENV /bin/bash --noprofile --norc -e -o pipefail {0}
 
 jobs:
   rust:
