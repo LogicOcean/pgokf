@@ -2481,7 +2481,7 @@ CREATE SCHEMA IF NOT EXISTS pgokf; /* pgokf::catalog::search_backend::pgokf */
 -- requires:
 --   catalog_tables
 CREATE  FUNCTION pgokf."rebuild_search_index"() RETURNS bool /* bool */
-STRICT 
+STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'rebuild_search_index_wrapper';
 /* </end connected objects> */
@@ -2535,7 +2535,7 @@ CREATE  FUNCTION pgokf."list_bundle_log"(
 	"max_rows" INT DEFAULT 500 /* i32 */
 ) RETURNS SETOF pgokf.bundle_log_entry /* :: pgrx :: heap_tuple :: PgHeapTuple < '_, :: pgrx :: pgbox :: AllocatedByRust
 > */
-STABLE PARALLEL SAFE 
+STABLE PARALLEL SAFE
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'list_bundle_log_wrapper';
 /* </end connected objects> */
@@ -2700,7 +2700,7 @@ CREATE  FUNCTION pgokf."list_sync_changes"(
 	"max_rows" INT DEFAULT 1000 /* i32 */
 ) RETURNS SETOF pgokf.sync_change /* :: pgrx :: heap_tuple :: PgHeapTuple < '_, :: pgrx :: pgbox :: AllocatedByRust
 > */
-STRICT 
+STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'list_sync_changes_wrapper';
 /* </end connected objects> */
@@ -2751,7 +2751,7 @@ CREATE  FUNCTION pgokf."duplicate_concepts"(
 	"min_group" INT DEFAULT 2 /* i32 */
 ) RETURNS SETOF pgokf.duplicate_group /* :: pgrx :: heap_tuple :: PgHeapTuple < '_, :: pgrx :: pgbox :: AllocatedByRust
 > */
-STABLE PARALLEL SAFE 
+STABLE PARALLEL SAFE
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'duplicate_concepts_wrapper';
 /* </end connected objects> */
@@ -2784,7 +2784,7 @@ CREATE  FUNCTION pgokf."concept_neighbors"(
 	"bundle_id" bigint DEFAULT NULL /* Option < i64 > */
 ) RETURNS SETOF pgokf.concept_neighbor /* :: pgrx :: heap_tuple :: PgHeapTuple < '_, :: pgrx :: pgbox :: AllocatedByRust
 > */
-STABLE PARALLEL SAFE 
+STABLE PARALLEL SAFE
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'concept_neighbors_wrapper';
 /* </end connected objects> */
@@ -2879,7 +2879,7 @@ CREATE  FUNCTION pgokf."concept_relationship_neighbors"(
 	"max_results" INT DEFAULT 500 /* i32 */
 ) RETURNS SETOF pgokf.relationship_neighbor /* :: pgrx :: heap_tuple :: PgHeapTuple < '_, :: pgrx :: pgbox :: AllocatedByRust
 > */
-STABLE PARALLEL SAFE 
+STABLE PARALLEL SAFE
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'concept_relationship_neighbors_wrapper';
 /* </end connected objects> */
@@ -2898,7 +2898,7 @@ CREATE  FUNCTION pgokf."replace_relationships"(
 	"rows" jsonb /* pgrx :: JsonB */
 ) RETURNS pgokf.relationship_publication_info /* :: pgrx :: heap_tuple :: PgHeapTuple < '_, :: pgrx :: pgbox :: AllocatedByRust
 > */
-STRICT 
+STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'replace_relationships_wrapper';
 /* </end connected objects> */
@@ -2951,7 +2951,7 @@ CREATE  FUNCTION pgokf."set_config"(
 	"key" TEXT, /* & str */
 	"value" jsonb /* pgrx :: JsonB */
 ) RETURNS void
-STRICT 
+STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'set_config_wrapper';
 /* </end connected objects> */
@@ -2962,7 +2962,7 @@ AS 'MODULE_PATHNAME', 'set_config_wrapper';
 -- requires:
 --   config_table
 CREATE  FUNCTION pgokf."get_config"() RETURNS jsonb /* pgrx :: JsonB */
-STRICT 
+STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'get_config_wrapper';
 /* </end connected objects> */
@@ -3030,7 +3030,7 @@ CREATE  FUNCTION pgokf."export_parquet"(
 	"dest_dir" TEXT /* & str */
 ) RETURNS pgokf.export_result /* :: pgrx :: heap_tuple :: PgHeapTuple < '_, :: pgrx :: pgbox :: AllocatedByRust
 > */
-STRICT 
+STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'export_parquet_wrapper';
 /* </end connected objects> */
@@ -3084,7 +3084,7 @@ CREATE  FUNCTION pgokf."set_bundle_enabled"(
 	"enabled" bool /* bool */
 ) RETURNS pgokf.bundle_info /* :: pgrx :: heap_tuple :: PgHeapTuple < '_, :: pgrx :: pgbox :: AllocatedByRust
 > */
-STRICT 
+STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'set_bundle_enabled_wrapper';
 /* </end connected objects> */
@@ -3098,7 +3098,7 @@ CREATE  FUNCTION pgokf."retire_bundle"(
 	"bundle_id" bigint /* i64 */
 ) RETURNS pgokf.bundle_info /* :: pgrx :: heap_tuple :: PgHeapTuple < '_, :: pgrx :: pgbox :: AllocatedByRust
 > */
-STRICT 
+STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'retire_bundle_wrapper';
 /* </end connected objects> */
@@ -3111,7 +3111,7 @@ AS 'MODULE_PATHNAME', 'retire_bundle_wrapper';
 CREATE  FUNCTION pgokf."purge_retired"(
 	"older_than" interval DEFAULT '7 days' /* Interval */
 ) RETURNS bigint /* i64 */
-STRICT 
+STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'purge_retired_wrapper';
 /* </end connected objects> */
@@ -3125,7 +3125,7 @@ CREATE  FUNCTION pgokf."bundle_info"(
 	"bundle_id" bigint /* i64 */
 ) RETURNS pgokf.bundle_info /* :: pgrx :: heap_tuple :: PgHeapTuple < '_, :: pgrx :: pgbox :: AllocatedByRust
 > */
-STRICT STABLE 
+STRICT STABLE
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'bundle_info_wrapper';
 /* </end connected objects> */
@@ -3139,7 +3139,7 @@ CREATE  FUNCTION pgokf."unretire_bundle"(
 	"bundle_id" bigint /* i64 */
 ) RETURNS pgokf.bundle_info /* :: pgrx :: heap_tuple :: PgHeapTuple < '_, :: pgrx :: pgbox :: AllocatedByRust
 > */
-STRICT 
+STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'unretire_bundle_wrapper';
 /* </end connected objects> */
@@ -3153,7 +3153,7 @@ CREATE  FUNCTION pgokf."unregister_bundle"(
 	"bundle_id" bigint /* i64 */
 ) RETURNS pgokf.bundle_info /* :: pgrx :: heap_tuple :: PgHeapTuple < '_, :: pgrx :: pgbox :: AllocatedByRust
 > */
-STRICT 
+STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'unregister_bundle_wrapper';
 /* </end connected objects> */
@@ -3165,7 +3165,7 @@ AS 'MODULE_PATHNAME', 'unregister_bundle_wrapper';
 --   bundle_info_type
 CREATE  FUNCTION pgokf."list_bundles"() RETURNS SETOF pgokf.bundle_info /* :: pgrx :: heap_tuple :: PgHeapTuple < '_, :: pgrx :: pgbox :: AllocatedByRust
 > */
-STRICT STABLE 
+STRICT STABLE
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'list_bundles_wrapper';
 /* </end connected objects> */
@@ -3291,7 +3291,7 @@ CREATE  FUNCTION pgokf."schedule_refresh"(
 	"bundle_id" bigint, /* i64 */
 	"schedule" TEXT /* & str */
 ) RETURNS TEXT /* String */
-STRICT 
+STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'schedule_refresh_wrapper';
 /* </end connected objects> */
@@ -3304,7 +3304,7 @@ AS 'MODULE_PATHNAME', 'schedule_refresh_wrapper';
 CREATE  FUNCTION pgokf."unschedule_refresh"(
 	"bundle_id" bigint /* i64 */
 ) RETURNS bool /* bool */
-STRICT 
+STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'unschedule_refresh_wrapper';
 /* </end connected objects> */
@@ -3347,7 +3347,7 @@ CREATE  FUNCTION pgokf."concept_search_semantic"(
 	"concept_types" TEXT[] DEFAULT NULL /* :: std :: option :: Option < Vec < String > > */
 ) RETURNS SETOF pgokf.concept_search_result /* :: pgrx :: heap_tuple :: PgHeapTuple < '_, :: pgrx :: pgbox :: AllocatedByRust
 > */
-STABLE PARALLEL SAFE 
+STABLE PARALLEL SAFE
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'concept_search_semantic_wrapper';
 /* </end connected objects> */
@@ -3358,7 +3358,7 @@ AS 'MODULE_PATHNAME', 'concept_search_semantic_wrapper';
 -- requires:
 --   embedding_table
 CREATE  FUNCTION pgokf."rebuild_embedding_index"() RETURNS bool /* bool */
-STRICT 
+STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'rebuild_embedding_index_wrapper';
 /* </end connected objects> */
@@ -3373,7 +3373,7 @@ CREATE  FUNCTION pgokf."set_concept_embedding"(
 	"concept_id" TEXT, /* & str */
 	"embedding" real[] /* Vec < f32 > */
 ) RETURNS void
-STRICT 
+STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'set_concept_embedding_wrapper';
 /* </end connected objects> */
@@ -3391,7 +3391,7 @@ CREATE  FUNCTION pgokf."concept_search_hybrid"(
 	"concept_types" TEXT[] DEFAULT NULL /* :: std :: option :: Option < Vec < String > > */
 ) RETURNS SETOF pgokf.concept_search_result /* :: pgrx :: heap_tuple :: PgHeapTuple < '_, :: pgrx :: pgbox :: AllocatedByRust
 > */
-STABLE PARALLEL RESTRICTED 
+STABLE PARALLEL RESTRICTED
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'concept_search_hybrid_wrapper';
 /* </end connected objects> */
@@ -3410,7 +3410,7 @@ CREATE  FUNCTION pgokf."set_concept_embedding_cas"(
 	"model" TEXT, /* & str */
 	"contract" TEXT /* & str */
 ) RETURNS bool /* bool */
-STRICT 
+STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'set_concept_embedding_cas_wrapper';
 /* </end connected objects> */
@@ -3490,7 +3490,7 @@ CREATE  FUNCTION pgokf."concept_as_of"(
 	"as_of" timestamp with time zone /* TimestampWithTimeZone */
 ) RETURNS SETOF pgokf.concept_version /* :: pgrx :: heap_tuple :: PgHeapTuple < '_, :: pgrx :: pgbox :: AllocatedByRust
 > */
-STRICT STABLE PARALLEL SAFE 
+STRICT STABLE PARALLEL SAFE
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'concept_as_of_wrapper';
 /* </end connected objects> */
@@ -3506,7 +3506,7 @@ CREATE  FUNCTION pgokf."concept_history"(
 	"max_rows" INT DEFAULT 100 /* i32 */
 ) RETURNS SETOF pgokf.concept_version /* :: pgrx :: heap_tuple :: PgHeapTuple < '_, :: pgrx :: pgbox :: AllocatedByRust
 > */
-STRICT STABLE PARALLEL SAFE 
+STRICT STABLE PARALLEL SAFE
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'concept_history_wrapper';
 /* </end connected objects> */
@@ -3539,7 +3539,7 @@ CREATE SCHEMA IF NOT EXISTS pgokf; /* pgokf::catalog::search_status::pgokf */
 -- requires:
 --   embedding_table
 CREATE  FUNCTION pgokf."search_index_status"() RETURNS jsonb /* pgrx :: JsonB */
-STRICT STABLE 
+STRICT STABLE
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'search_index_status_wrapper';
 /* </end connected objects> */
@@ -3604,7 +3604,7 @@ COMMENT ON TYPE pgokf.stale_concept IS
 --   stats_types
 CREATE  FUNCTION pgokf."catalog_stats"() RETURNS SETOF pgokf.catalog_stat /* :: pgrx :: heap_tuple :: PgHeapTuple < '_, :: pgrx :: pgbox :: AllocatedByRust
 > */
-STRICT STABLE PARALLEL SAFE 
+STRICT STABLE PARALLEL SAFE
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'catalog_stats_wrapper';
 /* </end connected objects> */
@@ -3615,7 +3615,7 @@ AS 'MODULE_PATHNAME', 'catalog_stats_wrapper';
 -- requires:
 --   catalog_tables
 CREATE  FUNCTION pgokf."health"() RETURNS jsonb /* pgrx :: JsonB */
-STRICT STABLE 
+STRICT STABLE
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'health_wrapper';
 /* </end connected objects> */
@@ -3630,7 +3630,7 @@ CREATE  FUNCTION pgokf."stale_concepts"(
 	"as_of" timestamp with time zone DEFAULT NULL /* Option < TimestampWithTimeZone > */
 ) RETURNS SETOF pgokf.stale_concept /* :: pgrx :: heap_tuple :: PgHeapTuple < '_, :: pgrx :: pgbox :: AllocatedByRust
 > */
-STABLE PARALLEL SAFE 
+STABLE PARALLEL SAFE
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'stale_concepts_wrapper';
 /* </end connected objects> */
@@ -3782,7 +3782,7 @@ CREATE  FUNCTION pgokf."list_freshness_dependencies"(
 	"max_rows" INT DEFAULT 100 /* i32 */
 ) RETURNS SETOF pgokf.freshness_dependency_info /* :: pgrx :: heap_tuple :: PgHeapTuple < '_, :: pgrx :: pgbox :: AllocatedByRust
 > */
-STRICT 
+STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'list_freshness_dependencies_wrapper';
 /* </end connected objects> */
@@ -3797,7 +3797,7 @@ CREATE  FUNCTION pgokf."release_publication_fence"(
 	"producer" TEXT, /* & str */
 	"fencing_token" bigint /* i64 */
 ) RETURNS void
-STRICT 
+STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'release_publication_fence_wrapper';
 /* </end connected objects> */
@@ -3810,7 +3810,7 @@ AS 'MODULE_PATHNAME', 'release_publication_fence_wrapper';
 CREATE  FUNCTION pgokf."disable_freshness_dependency"(
 	"dependency_id" bigint /* i64 */
 ) RETURNS void
-STRICT 
+STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'disable_freshness_dependency_wrapper';
 /* </end connected objects> */
@@ -3842,7 +3842,7 @@ AS 'MODULE_PATHNAME', 'mark_fresh_wrapper';
 CREATE  FUNCTION pgokf."remove_freshness_dependency"(
 	"dependency_id" bigint /* i64 */
 ) RETURNS void
-STRICT 
+STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'remove_freshness_dependency_wrapper';
 /* </end connected objects> */
@@ -3890,7 +3890,7 @@ CREATE  FUNCTION pgokf."clear_freshness_scope"(
 	"scope_kind" TEXT, /* & str */
 	"scope_key" TEXT /* & str */
 ) RETURNS void
-STRICT 
+STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'clear_freshness_scope_wrapper';
 /* </end connected objects> */
@@ -3905,7 +3905,7 @@ CREATE  FUNCTION pgokf."repair_bundle_freshness"(
 	"state" TEXT, /* & str */
 	"reason_codes" TEXT[] DEFAULT '{}' /* Vec < String > */
 ) RETURNS void
-STRICT 
+STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'repair_bundle_freshness_wrapper';
 /* </end connected objects> */
@@ -4098,7 +4098,7 @@ CREATE  FUNCTION pgokf."claim_catalog_change_events"(
 	"lease_seconds" INT DEFAULT 300 /* i32 */
 ) RETURNS SETOF pgokf.claimed_change_event /* :: pgrx :: heap_tuple :: PgHeapTuple < '_, :: pgrx :: pgbox :: AllocatedByRust
 > */
-STRICT 
+STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'claim_catalog_change_events_wrapper';
 /* </end connected objects> */
@@ -4128,7 +4128,7 @@ CREATE  FUNCTION pgokf."ack_catalog_change_event"(
 	"producer" TEXT, /* & str */
 	"acceptance_key" TEXT /* & str */
 ) RETURNS bool /* bool */
-STRICT 
+STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'ack_catalog_change_event_wrapper';
 /* </end connected objects> */
@@ -4177,7 +4177,7 @@ CREATE  FUNCTION pgokf."export_sources"(
 	"dest_dir" TEXT /* & str */
 ) RETURNS pgokf.export_result /* :: pgrx :: heap_tuple :: PgHeapTuple < '_, :: pgrx :: pgbox :: AllocatedByRust
 > */
-STRICT 
+STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'export_sources_wrapper';
 /* </end connected objects> */
@@ -4191,7 +4191,7 @@ CREATE  FUNCTION pgokf."get_concept_source"(
 	"bundle_id" bigint, /* i64 */
 	"concept_id" TEXT /* & str */
 ) RETURNS bytea /* Vec < u8 > */
-STRICT STABLE 
+STRICT STABLE
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'get_concept_source_wrapper';
 /* </end connected objects> */
@@ -4247,7 +4247,7 @@ CREATE  FUNCTION pgokf."refresh_bundle"(
 	"bundle_id" bigint /* i64 */
 ) RETURNS pgokf.bundle_sync_result /* :: pgrx :: heap_tuple :: PgHeapTuple < '_, :: pgrx :: pgbox :: AllocatedByRust
 > */
-STRICT 
+STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'refresh_bundle_wrapper';
 /* </end connected objects> */
@@ -4289,7 +4289,7 @@ CREATE  FUNCTION pgokf."find_similar"(
 	"limit_count" INT DEFAULT 10 /* i32 */
 ) RETURNS SETOF pgokf.concept_search_result /* :: pgrx :: heap_tuple :: PgHeapTuple < '_, :: pgrx :: pgbox :: AllocatedByRust
 > */
-STABLE PARALLEL RESTRICTED 
+STABLE PARALLEL RESTRICTED
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'find_similar_wrapper';
 /* </end connected objects> */
@@ -4342,7 +4342,7 @@ CREATE  FUNCTION pgokf."search_facets"(
 	"trust_tier" TEXT DEFAULT NULL /* Option < & str > */
 ) RETURNS SETOF pgokf.search_facet /* :: pgrx :: heap_tuple :: PgHeapTuple < '_, :: pgrx :: pgbox :: AllocatedByRust
 > */
-STABLE PARALLEL SAFE 
+STABLE PARALLEL SAFE
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'search_facets_wrapper';
 /* </end connected objects> */
@@ -4435,7 +4435,7 @@ CREATE  FUNCTION pgokf."get_reference"(
 	"include_bytes" bool DEFAULT true /* bool */
 ) RETURNS pgokf.reference_result /* :: pgrx :: heap_tuple :: PgHeapTuple < '_, :: pgrx :: pgbox :: AllocatedByRust
 > */
-STRICT STABLE 
+STRICT STABLE
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'get_reference_wrapper';
 /* </end connected objects> */
@@ -4451,7 +4451,7 @@ CREATE  FUNCTION pgokf."get_script"(
 	"concept_id" TEXT /* & str */
 ) RETURNS pgokf.script_result /* :: pgrx :: heap_tuple :: PgHeapTuple < '_, :: pgrx :: pgbox :: AllocatedByRust
 > */
-STRICT STABLE 
+STRICT STABLE
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'get_script_wrapper';
 /* </end connected objects> */
@@ -4467,7 +4467,7 @@ CREATE  FUNCTION pgokf."get_skill"(
 	"concept_id" TEXT /* & str */
 ) RETURNS pgokf.skill_result /* :: pgrx :: heap_tuple :: PgHeapTuple < '_, :: pgrx :: pgbox :: AllocatedByRust
 > */
-STRICT STABLE 
+STRICT STABLE
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'get_skill_wrapper';
 /* </end connected objects> */
@@ -4562,7 +4562,7 @@ CREATE  FUNCTION pgokf."concept_search"(
 	"after_cursor" jsonb DEFAULT NULL /* Option < pgrx :: JsonB > */
 ) RETURNS SETOF pgokf.concept_search_result /* :: pgrx :: heap_tuple :: PgHeapTuple < '_, :: pgrx :: pgbox :: AllocatedByRust
 > */
-STABLE PARALLEL RESTRICTED 
+STABLE PARALLEL RESTRICTED
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'concept_search_wrapper';
 /* </end connected objects> */
@@ -4596,7 +4596,7 @@ CREATE  FUNCTION pgokf."concept_search_fresh"(
 	"after_cursor" jsonb DEFAULT NULL /* Option < pgrx :: JsonB > */
 ) RETURNS SETOF pgokf.concept_search_fresh_result /* :: pgrx :: heap_tuple :: PgHeapTuple < '_, :: pgrx :: pgbox :: AllocatedByRust
 > */
-STABLE PARALLEL RESTRICTED 
+STABLE PARALLEL RESTRICTED
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'concept_search_fresh_wrapper';
 /* </end connected objects> */
@@ -4677,4 +4677,3 @@ COMMENT ON FUNCTION pgokf.version() IS
 
 SELECT pgokf_private.register_dump_relations();
 /* </end connected objects> */
-
