@@ -1,0 +1,342 @@
+[
+  {
+    "job": "Build companions image (arm64)",
+    "digest": "sha256:b7f7f6d080550d52a3c437d36ca9e20f76fb20dc4b6f2f6cd001e6768b0cd5bf",
+    "repo": "pgokf-companions",
+    "manifest": {
+      "schemaVersion": 2,
+      "mediaType": "application/vnd.oci.image.index.v1+json",
+      "manifests": [
+        {
+          "mediaType": "application/vnd.oci.image.manifest.v1+json",
+          "digest": "sha256:edf208ed3ae5a43e399f6afafa778086190c49945e53663438ca60a52c777c6b",
+          "size": 1057,
+          "platform": {
+            "architecture": "arm64",
+            "os": "linux"
+          }
+        },
+        {
+          "mediaType": "application/vnd.oci.image.manifest.v1+json",
+          "digest": "sha256:36028fe6d4e5c12775e345cade946810d179cc6aa595817aef1a7b97983c6b25",
+          "size": 838,
+          "annotations": {
+            "vnd.docker.reference.digest": "sha256:edf208ed3ae5a43e399f6afafa778086190c49945e53663438ca60a52c777c6b",
+            "vnd.docker.reference.type": "attestation-manifest"
+          },
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        }
+      ]
+    },
+    "registry_digest": "sha256:b7f7f6d080550d52a3c437d36ca9e20f76fb20dc4b6f2f6cd001e6768b0cd5bf"
+  },
+  {
+    "job": "Build companions image (amd64)",
+    "digest": "sha256:72601fb468d8c233edad2ce66dd0d6dd77f4343600c3947630384bfeff501f05",
+    "repo": "pgokf-companions",
+    "manifest": {
+      "schemaVersion": 2,
+      "mediaType": "application/vnd.oci.image.index.v1+json",
+      "manifests": [
+        {
+          "mediaType": "application/vnd.oci.image.manifest.v1+json",
+          "digest": "sha256:03b0d0a0b9f208fa2e57bd9b1a40971f272ec6d356c2e1188800408dacdfe846",
+          "size": 1057,
+          "platform": {
+            "architecture": "amd64",
+            "os": "linux"
+          }
+        },
+        {
+          "mediaType": "application/vnd.oci.image.manifest.v1+json",
+          "digest": "sha256:4952f8e69f1b1a174904538b9e3f897ed1a5c91a596fd821f8f1737ad7518836",
+          "size": 838,
+          "annotations": {
+            "vnd.docker.reference.digest": "sha256:03b0d0a0b9f208fa2e57bd9b1a40971f272ec6d356c2e1188800408dacdfe846",
+            "vnd.docker.reference.type": "attestation-manifest"
+          },
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        }
+      ]
+    },
+    "registry_digest": "sha256:72601fb468d8c233edad2ce66dd0d6dd77f4343600c3947630384bfeff501f05"
+  },
+  {
+    "job": "Build image (PostgreSQL 15, amd64)",
+    "digest": "sha256:65f6cb9d7d8f5f65e0fb2cf2ffb4336fd483b2f01e6621b7aeacbe15b4fe75d4",
+    "repo": "pgokf",
+    "manifest": {
+      "schemaVersion": 2,
+      "mediaType": "application/vnd.oci.image.index.v1+json",
+      "manifests": [
+        {
+          "mediaType": "application/vnd.oci.image.manifest.v1+json",
+          "digest": "sha256:525cdc897686d6522895e45c9fb6ca647e5d07ed0ce0a40731fa93587bc21377",
+          "size": 3904,
+          "platform": {
+            "architecture": "amd64",
+            "os": "linux"
+          }
+        },
+        {
+          "mediaType": "application/vnd.oci.image.manifest.v1+json",
+          "digest": "sha256:559c65cfcb43ed3eb7d27b41216f39aa84825849d8d3dfc5feb4d5c6625bf000",
+          "size": 838,
+          "annotations": {
+            "vnd.docker.reference.digest": "sha256:525cdc897686d6522895e45c9fb6ca647e5d07ed0ce0a40731fa93587bc21377",
+            "vnd.docker.reference.type": "attestation-manifest"
+          },
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        }
+      ]
+    },
+    "registry_digest": "sha256:65f6cb9d7d8f5f65e0fb2cf2ffb4336fd483b2f01e6621b7aeacbe15b4fe75d4"
+  },
+  {
+    "job": "Build image (PostgreSQL 17, arm64)",
+    "digest": "sha256:33def63ec9e306e2d9a3e24f989817111c9e04d07f3a2f9b075b6fb28918fded",
+    "repo": "pgokf",
+    "manifest": {
+      "schemaVersion": 2,
+      "mediaType": "application/vnd.oci.image.index.v1+json",
+      "manifests": [
+        {
+          "mediaType": "application/vnd.oci.image.manifest.v1+json",
+          "digest": "sha256:5de9c511ec54a8405daaea4b5faae00ce1e61d6f8234f8f258550a0f72d78c93",
+          "size": 3906,
+          "platform": {
+            "architecture": "arm64",
+            "os": "linux"
+          }
+        },
+        {
+          "mediaType": "application/vnd.oci.image.manifest.v1+json",
+          "digest": "sha256:faf3a4f53ac4d5e381ef6399ccec42da6688303c4f9aaed11d3e864d14b9fbcf",
+          "size": 838,
+          "annotations": {
+            "vnd.docker.reference.digest": "sha256:5de9c511ec54a8405daaea4b5faae00ce1e61d6f8234f8f258550a0f72d78c93",
+            "vnd.docker.reference.type": "attestation-manifest"
+          },
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        }
+      ]
+    },
+    "registry_digest": "sha256:33def63ec9e306e2d9a3e24f989817111c9e04d07f3a2f9b075b6fb28918fded"
+  },
+  {
+    "job": "Build image (PostgreSQL 18, amd64)",
+    "digest": "sha256:bf23900ac4e769fc3d6bfb3454c3920745ea1ac9b6d8ae8394f16393693242ed",
+    "repo": "pgokf",
+    "manifest": {
+      "schemaVersion": 2,
+      "mediaType": "application/vnd.oci.image.index.v1+json",
+      "manifests": [
+        {
+          "mediaType": "application/vnd.oci.image.manifest.v1+json",
+          "digest": "sha256:0dee34af19b8cb39862779badac580591ee09dcc488f7392009a2d153fd3fd51",
+          "size": 3718,
+          "platform": {
+            "architecture": "amd64",
+            "os": "linux"
+          }
+        },
+        {
+          "mediaType": "application/vnd.oci.image.manifest.v1+json",
+          "digest": "sha256:f1ce4835089e97b8c9d434e9926e30a720aea11eebb91c8f5b703061d2dac215",
+          "size": 838,
+          "annotations": {
+            "vnd.docker.reference.digest": "sha256:0dee34af19b8cb39862779badac580591ee09dcc488f7392009a2d153fd3fd51",
+            "vnd.docker.reference.type": "attestation-manifest"
+          },
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        }
+      ]
+    },
+    "registry_digest": "sha256:bf23900ac4e769fc3d6bfb3454c3920745ea1ac9b6d8ae8394f16393693242ed"
+  },
+  {
+    "job": "Build image (PostgreSQL 18, arm64)",
+    "digest": "sha256:e94b24cabc61afa359a04e78edd72bc58d8a9f9b1a409fe88c75dbdcb8f5012c",
+    "repo": "pgokf",
+    "manifest": {
+      "schemaVersion": 2,
+      "mediaType": "application/vnd.oci.image.index.v1+json",
+      "manifests": [
+        {
+          "mediaType": "application/vnd.oci.image.manifest.v1+json",
+          "digest": "sha256:314ca7bc14ce3b0a0109d873b51bab125f443c6f50e2cd827f4e8a6e4a694ca8",
+          "size": 3718,
+          "platform": {
+            "architecture": "arm64",
+            "os": "linux"
+          }
+        },
+        {
+          "mediaType": "application/vnd.oci.image.manifest.v1+json",
+          "digest": "sha256:9a00d701b5b9cc80c9cd60c010efa4e38e6ced22c9ad97fa3475a11ec3e27f06",
+          "size": 838,
+          "annotations": {
+            "vnd.docker.reference.digest": "sha256:314ca7bc14ce3b0a0109d873b51bab125f443c6f50e2cd827f4e8a6e4a694ca8",
+            "vnd.docker.reference.type": "attestation-manifest"
+          },
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        }
+      ]
+    },
+    "registry_digest": "sha256:e94b24cabc61afa359a04e78edd72bc58d8a9f9b1a409fe88c75dbdcb8f5012c"
+  },
+  {
+    "job": "Build image (PostgreSQL 16, amd64)",
+    "digest": "sha256:ad8c9ed59b9e67e168b170943e6312913144ca3d591c4c4d8bbf575297ec22de",
+    "repo": "pgokf",
+    "manifest": {
+      "schemaVersion": 2,
+      "mediaType": "application/vnd.oci.image.index.v1+json",
+      "manifests": [
+        {
+          "mediaType": "application/vnd.oci.image.manifest.v1+json",
+          "digest": "sha256:0567dac530ed53e45cf878417d8f699ebe10b624e239ce588507c2df418b3571",
+          "size": 3905,
+          "platform": {
+            "architecture": "amd64",
+            "os": "linux"
+          }
+        },
+        {
+          "mediaType": "application/vnd.oci.image.manifest.v1+json",
+          "digest": "sha256:4a1d1a4bbd77f0d1ec907741f67957784dae4bc2ef252fc4ec55089b5beaf1b2",
+          "size": 838,
+          "annotations": {
+            "vnd.docker.reference.digest": "sha256:0567dac530ed53e45cf878417d8f699ebe10b624e239ce588507c2df418b3571",
+            "vnd.docker.reference.type": "attestation-manifest"
+          },
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        }
+      ]
+    },
+    "registry_digest": "sha256:ad8c9ed59b9e67e168b170943e6312913144ca3d591c4c4d8bbf575297ec22de"
+  },
+  {
+    "job": "Build image (PostgreSQL 16, arm64)",
+    "digest": "sha256:189a0da71bf96495e01a8b86975f28576e261f71d285a40e66d53f25e21474d9",
+    "repo": "pgokf",
+    "manifest": {
+      "schemaVersion": 2,
+      "mediaType": "application/vnd.oci.image.index.v1+json",
+      "manifests": [
+        {
+          "mediaType": "application/vnd.oci.image.manifest.v1+json",
+          "digest": "sha256:f7775c7dfe5b425078ac4aa9395dd16250c2b6223aaad3377b45003be648bc9b",
+          "size": 3905,
+          "platform": {
+            "architecture": "arm64",
+            "os": "linux"
+          }
+        },
+        {
+          "mediaType": "application/vnd.oci.image.manifest.v1+json",
+          "digest": "sha256:c064b2847f0cde1ddcd82919267a755dda6bff21b928c9127ead9d46aa63d846",
+          "size": 838,
+          "annotations": {
+            "vnd.docker.reference.digest": "sha256:f7775c7dfe5b425078ac4aa9395dd16250c2b6223aaad3377b45003be648bc9b",
+            "vnd.docker.reference.type": "attestation-manifest"
+          },
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        }
+      ]
+    },
+    "registry_digest": "sha256:189a0da71bf96495e01a8b86975f28576e261f71d285a40e66d53f25e21474d9"
+  },
+  {
+    "job": "Build image (PostgreSQL 17, amd64)",
+    "digest": "sha256:0c03680083cbe8ded7b4b594d928acee17a40ef07fb902814f5c9ef18625d82d",
+    "repo": "pgokf",
+    "manifest": {
+      "schemaVersion": 2,
+      "mediaType": "application/vnd.oci.image.index.v1+json",
+      "manifests": [
+        {
+          "mediaType": "application/vnd.oci.image.manifest.v1+json",
+          "digest": "sha256:d665dba00f57a6e1160c30de15ca78ac3675e4ad36f4a0d95a5ccbee596c4cda",
+          "size": 3906,
+          "platform": {
+            "architecture": "amd64",
+            "os": "linux"
+          }
+        },
+        {
+          "mediaType": "application/vnd.oci.image.manifest.v1+json",
+          "digest": "sha256:f6deca7f30c2ca01537fc724646df4fff3ac10359bbb1cba043224a8b1f4e1d3",
+          "size": 838,
+          "annotations": {
+            "vnd.docker.reference.digest": "sha256:d665dba00f57a6e1160c30de15ca78ac3675e4ad36f4a0d95a5ccbee596c4cda",
+            "vnd.docker.reference.type": "attestation-manifest"
+          },
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        }
+      ]
+    },
+    "registry_digest": "sha256:0c03680083cbe8ded7b4b594d928acee17a40ef07fb902814f5c9ef18625d82d"
+  },
+  {
+    "job": "Build image (PostgreSQL 15, arm64)",
+    "digest": "sha256:8ed242effa9fe0e9ab7ffdaf99f6e6192bb0aa21ed76006481efd62862dc1469",
+    "repo": "pgokf",
+    "manifest": {
+      "schemaVersion": 2,
+      "mediaType": "application/vnd.oci.image.index.v1+json",
+      "manifests": [
+        {
+          "mediaType": "application/vnd.oci.image.manifest.v1+json",
+          "digest": "sha256:d398965904bf3785c05542eb26a10ef76f09549ef5a2265bc53413ff7b16b838",
+          "size": 3904,
+          "platform": {
+            "architecture": "arm64",
+            "os": "linux"
+          }
+        },
+        {
+          "mediaType": "application/vnd.oci.image.manifest.v1+json",
+          "digest": "sha256:475220e4c93d069a69cc1a882534aa98acb841a7f5163405752633e83e87ad78",
+          "size": 838,
+          "annotations": {
+            "vnd.docker.reference.digest": "sha256:d398965904bf3785c05542eb26a10ef76f09549ef5a2265bc53413ff7b16b838",
+            "vnd.docker.reference.type": "attestation-manifest"
+          },
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        }
+      ]
+    },
+    "registry_digest": "sha256:8ed242effa9fe0e9ab7ffdaf99f6e6192bb0aa21ed76006481efd62862dc1469"
+  }
+]

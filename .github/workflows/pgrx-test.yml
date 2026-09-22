@@ -4,6 +4,11 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      source_ref:
+        type: string
+        required: true
 
 permissions:
   contents: read
@@ -16,10 +21,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg: [15, 16, 17, 18, 19]
+        pg: [15, 16, 17, 18]
+        include:
+          - pg: 19
+            image_tag: 19beta3
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
 
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
@@ -28,26 +39,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
+      - name: Verify immutable Beta 3 base
+        if: matrix.pg == 19
+        run: packaging/check-beta-image.sh
+
       - name: Install PostgreSQL ${{ matrix.pg }} development files
         id: pgdg
         run: |
-          sudo install -d /usr/share/postgresql-common/pgdg
-          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-            | sudo gpg --batch --yes --dearmor -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
-          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt noble-pgdg main" \
-            | sudo tee /etc/apt/sources.list.d/pgdg.list
-          sudo apt-get update
-          if ! apt-cache show "postgresql-${{ matrix.pg }}" > /dev/null 2>&1; then
-            echo "::error::postgresql-${{ matrix.pg }} is required but missing from PGDG."
-            exit 1
-          fi
-          if ! sudo apt-get install -y \
-            postgresql-${{ matrix.pg }} \
-            postgresql-server-dev-${{ matrix.pg }} \
-            libclang-dev; then
-            echo "::error::failed to install postgresql-${{ matrix.pg }} (required leg)."
-            exit 1
-          fi
+          sudo packaging/install-postgres.sh ${{ matrix.pg }}
           echo "available=true" >> "$GITHUB_OUTPUT"
 
       # pg_textsearch (the default BM25 provider) ships for 17 and 18 only.
@@ -87,7 +86,7 @@ jobs:
       # crate's default PostgreSQL feature is irrelevant here.
       - name: Clippy
         if: steps.pgdg.outputs.available == 'true'
-        run: cargo clippy -p pgokf --no-default-features --features pg${{ matrix.pg }} --all-targets -- -D warnings
+        run: cargo clippy --locked -p pgokf --no-default-features --features pg${{ matrix.pg }} --all-targets -- -D warnings
 
       # `cargo pgrx test` resolves the extension crate from the working
       # directory and appends the `pg_test` feature itself.
@@ -108,7 +107,7 @@ jobs:
         env:
           RUST_TEST_THREADS: "1"
           PGOKF_TEST_PRELOAD: ${{ (matrix.pg == 17 || matrix.pg == 18) && 'pg_textsearch' || '' }}
-        run: cargo pgrx test pg${{ matrix.pg }} --no-default-features --features pg${{ matrix.pg }}
+        run: cargo pgrx test pg${{ matrix.pg }} --release --no-default-features --features pg${{ matrix.pg }}
 
       - name: Fresh install versus upgrade parity and mutation probes
         if: steps.pgdg.outputs.available == 'true' && matrix.pg == 18
@@ -119,3 +118,13 @@ jobs:
             /usr/share/postgresql/18/extension/pgokf--0.2.0.sql \
             > "$("$PG_CONFIG" --sharedir)/extension/pgokf--0.2.0.sql"
           python3 scripts/upgrade-parity.py --pg-config "$PG_CONFIG"
+
+      - name: Nonproduction PostgreSQL 19 Beta 3 image compatibility
+        if: matrix.pg == 19
+        run: |
+          docker build -f packaging/docker/Dockerfile --build-arg PG_MAJOR=19 \
+            --build-arg PG_IMAGE_TAG=${{ matrix.image_tag }} \
+            --build-arg WITH_PGVECTOR=0 --build-arg WITH_PG_CRON=0 \
+            --build-arg WITH_PG_TEXTSEARCH=0 -t pgokf-beta-compat .
+          version=$(sed -n "s/^default_version *= *'\([^']*\)'.*/\1/p" crates/extension/pgokf.control)
+          SMOKE_WITH_OPTIONAL=0 packaging/docker/smoke-test.sh pgokf-beta-compat "$version"

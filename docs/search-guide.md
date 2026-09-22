@@ -54,7 +54,7 @@ LIMIT 10;
 
 By default the engine is **native PostgreSQL full-text search** - no extensions
 beyond `pgokf` are required, so it works on every supported server (PostgreSQL
-15–19). Concretely, for each row:
+15–18). Concretely, for each row:
 
 - matching is `body_tsv @@ websearch_to_tsquery(<config>, query)`,
 - ranking is `ts_rank_cd(body_tsv, query)`,

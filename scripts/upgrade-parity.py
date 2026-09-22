@@ -202,8 +202,8 @@ def main():
                 drop_catalog(sql, route)
             # Every deployed development point version reaches the final
             # release through ordinary bare UPDATE and converges with fresh.
-            for point in ('0.3.0-dev', '0.3.0-dev1', '0.3.0-dev2', '0.3.0-dev3'):
-                route = 'point_' + point.rsplit('-', 1)[1]
+            for point in ('0.3.0-dev', '0.3.0-dev1', '0.3.0-dev2', '0.3.0-dev3', '0.3.0'):
+                route = 'point_' + point.replace('.', '_').replace('-', '_')
                 sql('postgres', f'CREATE DATABASE {route};')
                 sql(route, "CREATE EXTENSION pgokf VERSION '0.2.0';" + seed)
                 fp = fingerprint(route)

@@ -10,7 +10,25 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-09-22
+## [0.3.1] - 2026-09-22
+
+First publishable 0.3 release candidate. Supersedes the immutable, unpublished
+v0.3.0 candidate: tag CI required unavailable GA PostgreSQL 19 packages/images
+and exposed a Linux strict-Clippy doc-markdown defect. No v0.3.0 GitHub release,
+PGXN upload, Homebrew publication, or deployment occurred. Partial GHCR uploads
+are retired candidate artifacts, not a complete release.
+
+Stable distribution covers PostgreSQL 15–18 (amd64 and arm64). PostgreSQL 19
+Beta 3 remains required source/CI compatibility testing, explicitly pinned and
+non-production, with no stable PG19 image or .deb. Fix Linux documentation
+markup, gate registry publication on package/compatibility checks, reject the
+retired v0.3.0 Homebrew tuple, and add the additive 0.3.0 → 0.3.1 upgrade edge.
+The formula stays on published 0.2.0 until a separate authenticated post-tag
+0.3.1 update. See [recovery](docs/releases/0.3.1-recovery.md).
+
+This release includes the following 0.3 feature set, originally reviewed in
+the unpublished 0.3.0 candidate:
+
 
 **Generic producer capabilities: catalog generations, freshness, a durable
 change-event outbox, generation-bound typed relationships, and
@@ -257,6 +275,11 @@ semantically until the embedder rewrites them.
   effective limit is refused with `22023`, naming the limit. Ships as
   `0.3.0-dev2`: the `0.3.0-dev1 → 0.3.0-dev2` upgrade script re-applies
   the function's `COMMENT ON` text, and the GUC registers in `_PG_init`.
+
+## [0.3.0] - Unpublished immutable candidate (2026-09-22)
+
+Superseded by 0.3.1; failed tag CI. The immutable tag is retained as evidence.
+The feature set is included in 0.3.1 above. This entry is not a publication claim.
 
 ## [0.2.0] - 2026-09-09
 

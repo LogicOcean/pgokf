@@ -222,7 +222,7 @@ fixed signature and result shape:
 
 - **`native`** (the default) - zero-dependency PostgreSQL full-text search
   (`websearch_to_tsquery` + `ts_rank_cd` + `ts_headline` over the weighted
-  `body_tsv` GIN index). It works on every supported server (PG 15–19) with no
+  `body_tsv` GIN index). It works on every supported server (PG 15–18) with no
   extra extension, and remains the right choice for selective queries.
 - **`bm25`** - BM25 top-k over an external provider's `bm25` index, which is
   dramatically faster for broad, relevance-ranked queries. It requires one of

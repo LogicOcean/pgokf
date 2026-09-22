@@ -11,16 +11,11 @@
 class Pgokf < Formula
   desc "Materialized PostgreSQL catalog for Open Knowledge Format bundles"
   homepage "https://github.com/LogicOcean/pgokf"
-  # RELEASE STATE: post-tag consumer. The immutable v0.3.0 source tag was
-  # created first, then its published codeload archive was downloaded and
-  # hashed. This commit advances the URL, authenticated digest, and both test
-  # assertions together. The external LogicOcean/homebrew-pgokf tap must carry
-  # this exact formula. The release sequence and rollback live in
-  # docs/release-checklist.md ("Homebrew formula and tap");
-  # tests/test_release_integrity.py rejects mixed or unauthenticated states.
-  url "https://github.com/LogicOcean/pgokf/archive/refs/tags/v0.3.0.tar.gz"
-  # Authenticated digest of the published v0.3.0 codeload archive.
-  sha256 "f6d7c052b402e5850ffa5de79b4bfc5b024ca4ff03a82567143c58b2a903f6af"
+  # RELEASE STATE: pre-tag 0.3.1. Retain the last published 0.2.0 tuple.
+  # v0.3.0 is an immutable, unpublished failed candidate; never consume it.
+  # Advance directly to 0.3.1 only through docs/release-checklist.md.
+  url "https://github.com/LogicOcean/pgokf/archive/refs/tags/v0.2.0.tar.gz"
+  sha256 "194441d1b4d6bd5cf5f22a39a3b6c923e9a68d7692202ff7c4bb05109df812e5"
   license "AGPL-3.0-only"
   head "https://github.com/LogicOcean/pgokf.git", branch: "main"
 
@@ -91,7 +86,7 @@ class Pgokf < Formula
     control = share/"postgresql@#{pg_major}/extension/pgokf.control"
     control = share/"postgresql/extension/pgokf.control" unless control.exist?
     assert_path_exists control, "pgokf.control not installed"
-    assert_match "default_version = '0.3.0'", control.read
+    assert_match "default_version = '0.2.0'", control.read
 
     # End-to-end: initialize a throwaway cluster and CREATE EXTENSION.
     pg_bin = pg.opt_bin
@@ -105,7 +100,7 @@ class Pgokf < Formula
         "#{pg_bin}/psql -h 127.0.0.1 -p #{port} -U postgres -d postgres " \
         "-tAc \"CREATE EXTENSION pgokf; SELECT extversion FROM pg_extension WHERE extname='pgokf';\"",
       )
-      assert_match "0.3.0", output
+      assert_match "0.2.0", output
     ensure
       system pg_bin/"pg_ctl", "-D", datadir, "-w", "stop"
     end

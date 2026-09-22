@@ -701,7 +701,7 @@ fn read_batch(
 }
 
 /// `open(2)` flag that refuses to traverse a symbolic link at the final path
-/// component (`O_NOFOLLOW`). The Linux value is architecture-specific: x86_64
+/// component (`O_NOFOLLOW`). The Linux value is architecture-specific: `x86_64`
 /// uses `0x2_0000`, while aarch64 uses `0x8000` (verified by compiling a probe
 /// against the target's system headers); macOS uses `0x0000_0100` (macOS SDK
 /// `usr/include/sys/fcntl.h`). Declaring it locally keeps the crate free of a

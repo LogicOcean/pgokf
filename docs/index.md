@@ -26,7 +26,7 @@ inside PostgreSQL, turning the database into a small self-contained install that
 needs no external file store.
 
 - **Extension name and SQL schema:** `pgokf`
-- **Supported PostgreSQL:** 15, 16, 17, 18, 19
+- **Supported PostgreSQL:** 15, 16, 17, 18 (PG19 Beta 3 compatibility testing only)
 - **Built with:** Rust (edition 2024) and [pgrx](https://github.com/pgcentralfoundation/pgrx) 0.19
 - **Search backends:** native PostgreSQL FTS by default; an optional
   `search_backend=bm25` mode routes search through Tiger Data `pg_textsearch`
@@ -143,7 +143,7 @@ your first real bundle - start with [Getting started](getting-started.md).
 | ---- | -------------- |
 | [Architecture](architecture.md) | Parser, sync engine, projection seams, and the search path. |
 | [Benchmarks](benchmarks.md) | A measured 12,000-concept run: ingestion, filters, search, graph traversal, and export. |
-| [Packaging](packaging.md) | Building and distributing the extension across PostgreSQL 15–19. |
+| [Packaging](packaging.md) | Building and distributing the extension across PostgreSQL 15–18. |
 | [API stability](api-stability.md) | What the SQL surface guarantees and how it will evolve. |
 | [Release checklist](release-checklist.md) | The gate a release must pass, including the in-database API-surface audit. |
 

@@ -14,11 +14,11 @@
 # ghcr.io/logicocean/pgokf:<version>-pg<major> on every version tag (so it runs
 # unchanged on x86 servers, arm64 servers, and Apple Silicon).
 #
-# Build (templated for PostgreSQL 15-19 via PG_MAJOR; the BM25 provider is
+# Build (templated for PostgreSQL 15-18 via PG_MAJOR; the BM25 provider is
 # installed where its publisher ships a package - pg_textsearch on 17 and 18):
 #   docker build -f packaging/docker/Dockerfile \
 #     --build-arg PG_MAJOR=18 \
-#     -t pgokf:0.3.0-pg18 .
+#     -t pgokf:0.3.1-pg18 .
 #
 # The build context MUST be the repository root (it copies the source tree;
 # .dockerignore keeps target/ and .git out). The build is DRY: it delegates the
@@ -26,6 +26,7 @@
 # tree verbatim onto the stock postgres image.
 
 ARG PG_MAJOR=18
+ARG PG_IMAGE_TAG=${PG_MAJOR}
 ARG RUST_VERSION=1.96.0
 ARG CARGO_PGRX_VERSION=0.19.2
 
@@ -51,9 +52,10 @@ ARG PGOKF_VERSION=""
 # --------------------------------------------------------------------------
 # Stage 1: build the extension against the matching PostgreSQL server-dev files
 # --------------------------------------------------------------------------
-FROM postgres:${PG_MAJOR} AS builder
+FROM postgres:${PG_IMAGE_TAG} AS builder
 
 ARG PG_MAJOR
+ARG PG_IMAGE_TAG
 ARG RUST_VERSION
 ARG CARGO_PGRX_VERSION
 
@@ -67,7 +69,13 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # Toolchain + PostgreSQL headers. postgresql-server-dev-N comes from the same
 # PGDG apt repo the official postgres image is already configured with.
+COPY packaging/verify-postgres.sh /tmp/verify-postgres.sh
 RUN set -eux; \
+    if [ "$PG_MAJOR" = 19 ]; then \
+        test "$PG_IMAGE_TAG" = 19beta3; \
+        . /etc/os-release; \
+        echo "deb [signed-by=/usr/local/share/keyrings/postgres.gpg.asc] http://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main 19" > /etc/apt/sources.list.d/pgdg.list; \
+    fi; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
         build-essential \
@@ -78,6 +86,7 @@ RUN set -eux; \
         ca-certificates \
         git \
         "postgresql-server-dev-${PG_MAJOR}"; \
+    /tmp/verify-postgres.sh "$PG_MAJOR" "$PG_IMAGE_TAG"; \
     rm -rf /var/lib/apt/lists/*
 
 # Pinned Rust toolchain, matching rust-toolchain.toml / CI.
@@ -102,9 +111,10 @@ RUN cargo pgrx package \
 # --------------------------------------------------------------------------
 # Stage 2: stock postgres image + pgokf + the optional extensions
 # --------------------------------------------------------------------------
-FROM postgres:${PG_MAJOR}
+FROM postgres:${PG_IMAGE_TAG}
 
 ARG PG_MAJOR
+ARG PG_IMAGE_TAG
 ARG WITH_PGVECTOR
 ARG WITH_PG_CRON
 ARG WITH_PG_TEXTSEARCH

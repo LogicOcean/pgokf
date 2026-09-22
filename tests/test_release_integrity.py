@@ -38,7 +38,6 @@ FIRST_PARTY = [
 # commit that also advances the Homebrew formula (docs/release-checklist.md).
 KNOWN_RELEASE_DIGESTS = {
     '0.2.0': '194441d1b4d6bd5cf5f22a39a3b6c923e9a68d7692202ff7c4bb05109df812e5',
-    '0.3.0': 'f6d7c052b402e5850ffa5de79b4bfc5b024ca4ff03a82567143c58b2a903f6af',
 }
 
 
@@ -179,6 +178,8 @@ def parse_formula(formula: str) -> tuple[str, str, list[str]]:
 def check_homebrew(formula: str, version: str) -> list[str]:
     problems = []
     url_version, sha, assertions = parse_formula(formula)
+    if url_version == "0.3.0":
+        return ["v0.3.0 is an unpublished retired candidate, never a published tuple"]
     if not url_version or not sha:
         return ['formula must pin a versioned tag archive url and a sha256']
     if not assertions or any(a != url_version and f"'{url_version}'" not in a for a in assertions):
@@ -315,15 +316,15 @@ class ReleaseIdentity(unittest.TestCase):
         names = [p.name for p in (ROOT / 'crates/extension/sql').iterdir()]
         self.assertEqual(check_sql_graph(names, version), [])
         receipt = [n for n in parse_edges(names)
-                   if n[1] == version and n[0].startswith(f'{version}-dev')]
-        self.assertEqual(len(receipt), 1, 'exactly one devN -> final finalization edge')
+                   if n[1] == version and n[0] == '0.3.0']
+        self.assertEqual(len(receipt), 1, 'exactly one immutable candidate -> final edge')
         self.assertEqual(check_receipt(read(f'crates/extension/sql/pgokf--{receipt[0][0]}--{version}.sql')), [])
 
     def test_sql_graph_mutation_fixtures_are_rejected(self):
         version = control_version(read('crates/extension/pgokf.control'))
         names = [p.name for p in (ROOT / 'crates/extension/sql').iterdir()]
         edge = next(e for e in parse_edges(names)
-                    if e[1] == version and e[0].startswith(f'{version}-dev'))
+                    if e[1] == version and e[0] == '0.3.0')
         edge_name = f'pgokf--{edge[0]}--{version}.sql'
         missing = [n for n in names if n != edge_name]
         self.assertTrue(check_sql_graph(missing, version), 'missing finalization edge must be rejected')
@@ -339,11 +340,11 @@ class ReleaseIdentity(unittest.TestCase):
                         'a receipt carrying a data mutation must be rejected')
 
     def test_install_script_version_binding(self):
-        self.assertEqual(check_install_script(read('crates/extension/sql/pgokf--0.3.0.sql'),
+        self.assertEqual(check_install_script(read('crates/extension/sql/pgokf--0.3.1.sql'),
                                               read('crates/extension/src/lib.rs')), [])
 
     def test_install_script_mutation_fixtures_are_rejected(self):
-        sql = read('crates/extension/sql/pgokf--0.3.0.sql')
+        sql = read('crates/extension/sql/pgokf--0.3.1.sql')
         lib = read('crates/extension/src/lib.rs')
         # The reviewer's planted override: a SQL-language version function.
         override = sql + ("\nCREATE OR REPLACE FUNCTION pgokf.\"version\"() RETURNS TEXT\n"
@@ -383,9 +384,13 @@ class ReleaseIdentity(unittest.TestCase):
 
     def test_homebrew_post_tag_tuple_and_rollback(self):
         version = control_version(read('crates/extension/pgokf.control'))
-        current = read('packaging/homebrew/pgokf.rb')
-        current_version, current_digest, _ = parse_formula(current)
-        self.assertEqual(current_version, version)
+        formula = read('packaging/homebrew/pgokf.rb')
+        old, digest, _ = parse_formula(formula)
+        current_digest = 'a' * 64
+        current = formula.replace(old, version).replace(digest, current_digest)
+        saved = dict(KNOWN_RELEASE_DIGESTS)
+        self.addCleanup(lambda: (KNOWN_RELEASE_DIGESTS.clear(), KNOWN_RELEASE_DIGESTS.update(saved)))
+        KNOWN_RELEASE_DIGESTS[version] = current_digest
         self.assertEqual(check_homebrew(current, version), [])
 
         previous_versions = [release for release in KNOWN_RELEASE_DIGESTS if release != version]
@@ -467,7 +472,7 @@ class ReleaseIdentity(unittest.TestCase):
         code, _ = run(sha_b, sha_a, f'refs/tags/v{version}', '')
         self.assertNotEqual(code, 0, 'HEAD != tag commit must fail closed')
         # Mismatched tags refuse.
-        for bad in ('v0.2.0', 'v0.3.1', f'v{version}-dev3'):
+        for bad in ('v0.2.0', 'v0.3.0', f'v{version}-dev3'):
             code, _ = run(sha_a, sha_a, bad if bad.startswith('v') else bad, '')
             code, _ = run(sha_a, sha_a, f'refs/tags/{bad}', '')
             self.assertNotEqual(code, 0, f'{bad} must fail closed')
@@ -504,7 +509,7 @@ class RealGitPublication(unittest.TestCase):
             git('config', 'user.name', 'Release fixture')
             originals = {p: p.read_text() for p in root.rglob('*') if p.is_file() and '.git' not in p.parts}
             for p, text in originals.items():
-                p.write_text(text.replace('0.3.0', '0.2.0'))
+                p.write_text(text.replace('0.3.1', '0.2.0'))
             git('add', '.')
             git('commit', '-qm', 'Historical fixture')
             git('tag', 'v0.2.0')
@@ -513,7 +518,7 @@ class RealGitPublication(unittest.TestCase):
                 p.write_text(text)
             git('add', '.')
             git('commit', '-qm', 'Current fixture')
-            git('tag', '-a', 'v0.3.0', '-m', 'Annotated fixture')
+            git('tag', '-a', 'v0.3.1', '-m', 'Annotated fixture')
             current = git('rev-parse', 'HEAD')
             def resolve(ref, tag='', publish_input='true'):
                 output = root / 'output'
@@ -524,7 +529,7 @@ class RealGitPublication(unittest.TestCase):
                                         cwd=root, env=env, text=True, capture_output=True)
                 return result.returncode, output.read_text() if output.exists() else ''
             self.assertIn('publish=false', resolve('refs/heads/main')[1])
-            code, output = resolve('refs/tags/v0.3.0')
+            code, output = resolve('refs/tags/v0.3.1')
             self.assertEqual(code, 0)
             self.assertIn('source_ref=' + current, output)
             self.assertIn('publish=true', output)
@@ -536,12 +541,12 @@ class RealGitPublication(unittest.TestCase):
             self.assertIn('source_ref=' + historical, output)
             self.assertIn('version=0.2.0', output)
             self.assertIn('publish=true', output)
-            git('checkout', '-q', 'v0.3.0')
+            git('checkout', '-q', 'v0.3.1')
             for file in ('Cargo.toml', 'Cargo.lock', 'META.json', 'crates/extension/Cargo.toml'):
                 path = root / file
                 original = path.read_text()
-                path.write_text(original.replace('0.3.0', '0.2.0'))
-                self.assertNotEqual(resolve('refs/tags/v0.3.0')[0], 0, file)
+                path.write_text(original.replace('0.3.1', '0.2.0'))
+                self.assertNotEqual(resolve('refs/tags/v0.3.1')[0], 0, file)
                 path.write_text(original)
 
 

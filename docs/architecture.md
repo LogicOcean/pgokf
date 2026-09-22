@@ -263,7 +263,7 @@ were each added without touching the sync engine.
 ### Search
 
 The default backend is PostgreSQL native FTS, so every supported PostgreSQL
-15–19 installation works without another extension. A weighted document favors
+15–18 installation works without another extension. A weighted document favors
 title (A), then tags/type/description (B), then body (D), with a GIN index on
 `body_tsv` for matching. `pgokf.concept_search` matches with
 `websearch_to_tsquery`, ranks with `ts_rank_cd`, attaches a `ts_headline`

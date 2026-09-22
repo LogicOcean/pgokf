@@ -36,14 +36,14 @@ body:
     attributes:
       label: pgokf version
       description: Output of `SELECT pgokf.version();` (or the git tag/commit).
-      placeholder: "0.3.0"
+      placeholder: "0.3.1"
     validations:
       required: true
   - type: dropdown
     id: pg-version
     attributes:
       label: PostgreSQL major version
-      options: ["15", "16", "17", "18", "19", "other (note below)"]
+      options: ["15", "16", "17", "18", "19 Beta 3 (non-production compatibility)", "other (note below)"]
     validations:
       required: true
   - type: checkboxes

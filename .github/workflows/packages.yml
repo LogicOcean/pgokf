@@ -127,7 +127,7 @@ jobs:
 
       - name: Dockerfile semantics check for every major
         run: |
-          for pg in 15 16 17 18 19; do
+          for pg in 15 16 17 18; do
             docker build --check -f packaging/docker/Dockerfile --build-arg PG_MAJOR="$pg" .
           done
           docker build --check -f packaging/docker/Dockerfile.companions .
@@ -224,7 +224,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg: [15, 16, 17, 18, 19]
+        pg: [15, 16, 17, 18]
         arch: [amd64, arm64]
         include:
           - arch: amd64
@@ -336,7 +336,7 @@ jobs:
   # ---------------------------------------------------------------------------
   docker:
     name: Build image (PostgreSQL ${{ matrix.pg }}, ${{ matrix.arch }})
-    needs: prep
+    needs: [prep, lint, meta, deb, compatibility]
     runs-on: ${{ matrix.runner }}
     # packages:write is needed only by the publish steps below; the
     # workflow-level default stays contents:read.
@@ -347,7 +347,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg: [15, 16, 17, 18, 19]
+        pg: [15, 16, 17, 18]
         arch: [amd64, arm64]
         include:
           - arch: amd64
@@ -459,7 +459,7 @@ jobs:
   # ---------------------------------------------------------------------------
   docker-manifest:
     name: Publish multi-arch manifest (PostgreSQL ${{ matrix.pg }})
-    needs: [prep, docker]
+    needs: [prep, docker, companions]
     if: needs.prep.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     permissions:
@@ -469,7 +469,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg: [15, 16, 17, 18, 19]
+        pg: [15, 16, 17, 18]
     env:
       TAG: ghcr.io/logicocean/pgokf:${{ needs.prep.outputs.version }}-pg${{ matrix.pg }}
     steps:
@@ -508,7 +508,7 @@ jobs:
   # ---------------------------------------------------------------------------
   companions:
     name: Build companions image (${{ matrix.arch }})
-    needs: prep
+    needs: [prep, lint, meta, deb, compatibility]
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -585,7 +585,7 @@ jobs:
 
   companions-manifest:
     name: Publish multi-arch companions manifest
-    needs: [prep, companions]
+    needs: [prep, docker, companions]
     if: needs.prep.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     permissions:
@@ -619,3 +619,9 @@ jobs:
           for d in "${digests[@]}"; do refs+=("${COMPANIONS_IMAGE}@sha256:$(basename "$d")"); done
           docker buildx imagetools create -t "$TAG" "${refs[@]}"
           docker buildx imagetools inspect "$TAG"
+
+  compatibility:
+    needs: prep
+    uses: ./.github/workflows/pgrx-test.yml
+    with:
+      source_ref: ${{ needs.prep.outputs.source_ref }}

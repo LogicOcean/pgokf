@@ -6,7 +6,7 @@ gate must pass before the next. The stability rules these gates enforce live in
 [api-stability.md](api-stability.md), and every change must already be recorded
 in [CHANGELOG.md](https://github.com/LogicOcean/pgokf/blob/main/CHANGELOG.md).
 
-Throughout, `PGVER` is a PostgreSQL major (15–19) and `PG_CONFIG` is the path to
+Throughout, `PGVER` is a PostgreSQL major (15–18) and `PG_CONFIG` is the path to
 its `pg_config` (e.g. `/usr/lib/postgresql/18/bin/pg_config`).
 
 ## 1. Static quality gates
@@ -54,15 +54,15 @@ cd crates/extension && cargo pgrx schema pg18
 The output must contain a `COMMENT ON` for every public function, type, and
 table (the `version_comment` finalize block is the last entity emitted).
 
-All declared PG15–19 CI and packaging legs are required. Missing PGDG packages,
+All declared PG15–18 CI and packaging legs are required. Missing PGDG packages,
 failed provisioning or absent base images fail the workflow; there is no
 advisory success or skipped-coverage green. PG19 coverage is not established
-until its actual clippy and in-database test steps complete. A provisioning
+until its pinned **19 Beta 3**, nonpublishing actual clippy and in-database test steps complete. A provisioning
 failure blocks the support/release gate, even when other majors pass.
 `python3 tests/test_ci_coverage.py` (requires PyYAML) executes the missing-package
 failed-install and missing-image branches with local stubs and requires nonzero exits.
 
-## 4. Per-major live smoke (repeat for PGVER = 15, 16, 17, 18, 19)
+## 4. Per-major live smoke (repeat for PGVER = 15, 16, 17, 18)
 
 Install into the target major, then create a scratch cluster whose socket path
 stays short (the UNIX socket path limit is 107 bytes - keep it under a directory
@@ -144,7 +144,7 @@ script as `pgokf--<crate-version>.sql` and copies every upgrade script
 alongside it, so the update path is available without any manual step. The
 shipped chain runs one script per step from `0.1.0 → 0.1.1` through
 `0.1.16 → 0.2.0` and on through the point-versioned development line
-(`0.2.0 → 0.3.0-dev → 0.3.0-dev1 → … → 0.3.0`; see "Development point versions" in
+(`0.2.0 → 0.3.0-dev → 0.3.0-dev1 → … → 0.3.1`; see "Development point versions" in
 [api-stability.md](api-stability.md)) to the current `default_version`.
 
 > **0.1.3 was a breaking pre-release re-model.** The `pgokf.concept_provenance`
@@ -303,7 +303,7 @@ ${PG_BIN}/pg_ctl -D "$DATA" -w stop -m fast && rm -rf /tmp/pgokf-rel
 ## Homebrew formula and tap
 
 The source release and its consuming formula have separate lifecycles. The
-pre-tag 0.3.0 tree and immutable `v0.3.0` tag keep the runnable formula pinned
+pre-tag 0.3.1 tree and immutable `v0.3.1` tag keep the runnable formula pinned
 to **v0.2.0**, its authenticated archive digest, and matching 0.2.0 test
 assertions. This is intentional: a formula cannot contain the digest of the
 archive containing itself. The external distribution is
@@ -312,25 +312,25 @@ archive containing itself. The external distribution is
 After all release gates and independent review, the release operator performs
 these steps in order (these are publication instructions, not local gates):
 
-1. Tag the reviewed source commit as `v0.3.0` and push that immutable tag.
-   Record `git rev-parse 'v0.3.0^{commit}'`. Never move this tag.
+1. Tag the reviewed source commit as `v0.3.1` and push that immutable tag.
+   Record `git rev-parse 'v0.3.1^{commit}'`. Never move this tag.
 2. Download and inspect its archive, failing on HTTP errors:
 
    ```bash
    curl --fail --location --retry 3 \
-     https://github.com/LogicOcean/pgokf/archive/refs/tags/v0.3.0.tar.gz \
-     --output /tmp/pgokf-v0.3.0.tar.gz
-   shasum -a 256 /tmp/pgokf-v0.3.0.tar.gz
-   tar -tzf /tmp/pgokf-v0.3.0.tar.gz
-   tar -xOf /tmp/pgokf-v0.3.0.tar.gz pgokf-0.3.0/crates/extension/pgokf.control
+     https://github.com/LogicOcean/pgokf/archive/refs/tags/v0.3.1.tar.gz \
+     --output /tmp/pgokf-v0.3.1.tar.gz
+   shasum -a 256 /tmp/pgokf-v0.3.1.tar.gz
+   tar -tzf /tmp/pgokf-v0.3.1.tar.gz
+   tar -xOf /tmp/pgokf-v0.3.1.tar.gz pgokf-0.3.1/crates/extension/pgokf.control
    ```
 
-   Verify archive root `pgokf-0.3.0`, control/workspace/PGXN version 0.3.0,
+   Verify archive root `pgokf-0.3.1`, control/workspace/PGXN version 0.3.1,
    and unpacked tracked contents against the tagged commit. Record the exact
    archive bytes and SHA256 in release evidence; do not hash a local repack.
 3. On **main after the tag**, update `packaging/homebrew/pgokf.rb` URL,
    SHA256, both `test do` version assertions, and its release-state comment
-   together. Add the authenticated `0.3.0` digest to `KNOWN_RELEASE_DIGESTS`
+   together. Add the authenticated `0.3.1` digest to `KNOWN_RELEASE_DIGESTS`
    in `tests/test_release_integrity.py` in the same commit. No placeholder is
    allowed. Run `python3 tests/test_release_integrity.py` and
    `python3 tests/test_release_tools.py`. This commit consumes the earlier
@@ -344,7 +344,7 @@ these steps in order (these are publication instructions, not local gates):
    the main commit and then the tested external tap commit only after these
    checks pass. The formula inside the source tag remains the valid 0.2.0 pin.
 5. Verify the external tap fetches the recorded archive digest and the
-   installed extension reports 0.3.0. Record both main and tap commit SHAs.
+   installed extension reports 0.3.1. Record both main and tap commit SHAs.
 
 Rollback: before a valid archive exists, leave the old formula unchanged.
 If validation fails before pushing, correct the local post-tag changes or
@@ -356,7 +356,7 @@ a new release version. A checksum discrepancy requires investigation against
 the recorded archive and tag contents before any formula update.
 
 Manual image catch-up uses current automation with an explicit historical tag:
-`gh workflow run packages.yml --ref main -f release_tag=v0.3.0`.
+`gh workflow run packages.yml --ref main -f release_tag=v0.3.1`.
 Prep retains current resolver tooling separately, checks out the tag source,
 proves HEAD/tag/control/workspace/lock/PGXN identity, and passes the resolved
 commit SHA to all builds. Empty dispatch input is a non-publishing smoke run.
@@ -366,11 +366,11 @@ Extract the exact GitHub release body, review it, and then create the release
 only after the publication gates:
 
 ```bash
-awk '/^## \[0\.3\.0\]/{emit=1; next} emit && /^## \[/{exit} emit {print}' \
-  CHANGELOG.md > /tmp/pgokf-0.3.0-release.md
+awk '/^## \[0\.3\.1\]/{emit=1; next} emit && /^## \[/{exit} emit {print}' \
+  CHANGELOG.md > /tmp/pgokf-0.3.1-release.md
 # Inspect the body and attach the verified per-major assets as appropriate.
-gh release create v0.3.0 --verify-tag --title 'pgokf 0.3.0' \
-  --notes-file /tmp/pgokf-0.3.0-release.md
+gh release create v0.3.1 --verify-tag --title 'pgokf 0.3.1' \
+  --notes-file /tmp/pgokf-0.3.1-release.md
 ```
 
 ## Quick gate summary
@@ -383,7 +383,7 @@ gh release create v0.3.0 --verify-tag --title 'pgokf 0.3.0' \
 | In-database | `RUST_TEST_THREADS=1 cargo pgrx test pg18 …`, once plain and once with `PGOKF_TEST_PRELOAD=pg_textsearch,pg_search` | all pass; the provider tests run (not skip) in the preloaded run |
 | Supply chain | `cargo deny check`, `cargo audit --deny warnings` | no denials/advisories |
 | Schema | `cargo pgrx schema pg18` | builds; comments present |
-| Live smoke | `CREATE EXTENSION` on each major 15–19 | functions work |
+| Live smoke | `CREATE EXTENSION` on each major 15–18 | functions work |
 | COMMENT coverage | `obj_description` queries (§4a) | zero uncommented objects |
 | Upgrade | `ALTER EXTENSION … UPDATE` (§5) | version advances, no data loss |
 | Packaging | `cargo pgrx package` | tree per major |

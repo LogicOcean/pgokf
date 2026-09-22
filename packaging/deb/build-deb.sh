@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 #
 # build-deb.sh -- build a Debian package of the pgokf extension for one
-# PostgreSQL major version (15-19).
+# PostgreSQL major version (15-18).
 #
 # The package installs:
 #   * the shared library  -> $(pg_config --pkglibdir)          (usr/lib/postgresql/N/lib)
@@ -46,8 +46,8 @@ log() { printf '==> %s\n' "$*" >&2; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 case "${PG_MAJOR}" in
-  15|16|17|18|19) ;;
-  *) die "unsupported PG_MAJOR '${PG_MAJOR}' (supported: 15 16 17 18 19)" ;;
+  15|16|17|18) ;;
+  *) die "unsupported PG_MAJOR '${PG_MAJOR}' (supported: 15 16 17 18)" ;;
 esac
 
 command -v dpkg-deb  >/dev/null 2>&1 || die "dpkg-deb not found (install the 'dpkg' package)"

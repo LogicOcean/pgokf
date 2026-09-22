@@ -1,7 +1,7 @@
 # Packaging & Distribution
 
 How pgokf is packaged and released for every supported channel. Supported
-PostgreSQL majors: **15, 16, 17, 18, 19**. Every declared major is a
+PostgreSQL majors: **15, 16, 17, 18**. PostgreSQL 19 Beta 3 is required nonpublishing compatibility testing, not production support. Every stable major is a
 **required** leg of the test and packaging matrices: missing PGDG packages,
 failed provisioning, or absent base images fail the workflow rather than
 skipping coverage.
@@ -30,8 +30,8 @@ target/release/pgokf-pg18/
     ├── lib/postgresql/18/lib/pgokf.so                      # $(pg_config --pkglibdir)
     └── share/postgresql/18/extension/
         ├── pgokf.control
-        ├── pgokf--0.3.0.sql
-        └── pgokf--0.3.0-dev3--0.3.0.sql                   # $(pg_config --sharedir)/extension
+        ├── pgokf--0.3.1.sql
+        └── pgokf--0.3.0--0.3.1.sql                   # $(pg_config --sharedir)/extension
 ```
 
 On PGDG RPM systems the same command against `/usr/pgsql-18/bin/pg_config`
@@ -72,9 +72,9 @@ and calls `dpkg-deb --root-owner-group --build`. Output defaults to
 Inspect and install:
 
 ```bash
-dpkg-deb -I postgresql-18-pgokf_0.3.0-1_amd64.deb   # control metadata
-dpkg-deb -c postgresql-18-pgokf_0.3.0-1_amd64.deb   # payload file list
-sudo apt install ./postgresql-18-pgokf_0.3.0-1_amd64.deb
+dpkg-deb -I postgresql-18-pgokf_0.3.1-1_amd64.deb   # control metadata
+dpkg-deb -c postgresql-18-pgokf_0.3.1-1_amd64.deb   # payload file list
+sudo apt install ./postgresql-18-pgokf_0.3.1-1_amd64.deb
 ```
 
 Building the `.deb` for a major requires that major's `postgresql-server-dev-N`
@@ -98,16 +98,16 @@ mock -r rocky-9-x86_64 --define 'pgmajorversion 16' \
 
 `%build` installs the pinned `cargo-pgrx` into a build-local root and runs the
 build primitive; `%install` copies the staged tree into `%{buildroot}`.
-`Source0` is a `pgokf-0.3.0.tar.gz` of the repository at the release tag.
+`Source0` is a `pgokf-0.3.1.tar.gz` of the repository at the release tag.
 
 ---
 
 ## PGXN (`META.json`)
 
 [`META.json`](https://github.com/LogicOcean/pgokf/blob/main/META.json) is a PGXN meta-spec v1.0.0 distribution manifest
-(`name` `pgokf`, `version` `0.3.0`, `provides.pgokf`, `prereqs` PostgreSQL
+(`name` `pgokf`, `version` `0.3.1`, `provides.pgokf`, `prereqs` PostgreSQL
 ≥ 15, `resources`, `AGPL-3.0-only` core license). `provides.pgokf.file` points at the generated
-`crates/extension/sql/pgokf--0.3.0.sql`, which the release bump commits into
+`crates/extension/sql/pgokf--0.3.1.sql`, which the release bump commits into
 the tree before the PGXN zip is built.
 
 Validate locally:
@@ -140,7 +140,7 @@ carries the `pgokf-backup` and `pgokf-restore` tools. Build from the **repositor
 ```bash
 docker build -f packaging/docker/Dockerfile \
   --build-arg PG_MAJOR=18 \
-  -t pgokf:0.3.0-pg18 .
+  -t pgokf:0.3.1-pg18 .
 ```
 
 A second Dockerfile,
@@ -184,7 +184,7 @@ commit and then the external tap; follow the exact
 
 ## Release process
 
-`PGVER` ranges over 15-19; every major is a required CI and packaging leg.
+`PGVER` ranges over 15-18; every stable major is a required CI and packaging leg. PostgreSQL 19 Beta 3 is a separate required, nonpublishing compatibility leg.
 
 1. **Gate.** Complete [release-checklist.md](release-checklist.md) (static,
    supply-chain, schema, and per-major live smoke gates). Confirm
@@ -195,13 +195,13 @@ commit and then the external tap; follow the exact
    (crate and control file, `META.json`, the rpm spec,
    the companions' path-dependency pins, the compose and Docker examples, and
    `Cargo.lock`).
-3. **Tag.** `git tag v0.3.0 && git push origin v0.3.0`. CI
+3. **Tag.** `git tag -a v0.3.1 -m "pgokf 0.3.1" && git push origin v0.3.1`. CI
    ([`.github/workflows/packages.yml`](https://github.com/LogicOcean/pgokf/blob/main/.github/workflows/packages.yml))
    builds the `.deb`s (uploaded as workflow artifacts), validates `META.json`,
    and builds the Docker images per major.
-4. **PGXN.** Emit the generated SQL into the tree
-   (`cd crates/extension && cargo pgrx schema pg18 > sql/pgokf--0.3.0.sql`),
-   build the distribution zip (repo contents + `META.json` + generated SQL),
+4. **PGXN.** Verify the already committed, twice-generated SQL against the
+   immutable tagged source; do not mutate the tag or regenerate its distribution
+   contents after tagging. Build the distribution zip from that exact source,
    and upload it at <https://manager.pgxn.org/> under the `pgokf` distribution.
 5. **Docker.** Automatic: pushing the version tag runs the packages workflow,
    which builds, smoke-tests, then pushes

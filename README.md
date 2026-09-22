@@ -5,13 +5,13 @@
 [![CI](https://github.com/LogicOcean/pgokf/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/LogicOcean/pgokf/actions/workflows/ci.yml)
 [![pgrx test](https://github.com/LogicOcean/pgokf/actions/workflows/pgrx-test.yml/badge.svg?branch=main)](https://github.com/LogicOcean/pgokf/actions/workflows/pgrx-test.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
-[![PostgreSQL 15–19](https://img.shields.io/badge/PostgreSQL-15%E2%80%9319-336791.svg)](https://www.postgresql.org/)
+[![PostgreSQL 15–18](https://img.shields.io/badge/PostgreSQL-15%E2%80%9318-336791.svg)](https://www.postgresql.org/)
 [![Built with pgrx](https://img.shields.io/badge/built%20with-pgrx%200.19-000000.svg)](https://github.com/pgcentralfoundation/pgrx)
 [![Status: pre-1.0](https://img.shields.io/badge/status-pre--1.0-orange.svg)](docs/api-stability.md)
 
 An OKF **bundle** is just a directory of UTF-8 Markdown "concept" documents with YAML frontmatter - runbooks, wikis, service catalogs, datasets. The bundle on disk stays the portable source of truth; `pgokf` materializes it into a PostgreSQL projection optimized for search and graph queries, and keeps them in sync incrementally.
 
-- **Extension & schema:** `pgokf` · **OKF conformance:** v0.2 · **PostgreSQL:** 15–19
+- **Extension & schema:** `pgokf` · **OKF conformance:** v0.2 · **PostgreSQL:** 15–18
 - **Built with:** Rust (edition 2024) + [pgrx](https://github.com/pgcentralfoundation/pgrx) 0.19 · **Safety:** `#![forbid(unsafe_code)]`, clippy-pedantic, `cargo deny`
 
 ---
@@ -121,9 +121,11 @@ RUST_TEST_THREADS=1 cargo pgrx test pg18 --no-default-features --features pg18 #
 
 ## Project status
 
-Pre-1.0 (`0.3.0`). The enumerated SQL surface is treated as stable and every change ships an upgrade script verified `upgrade == fresh`, but per SemVer a `0.MINOR` bump may still carry a breaking change (called out in [CHANGELOG.md](CHANGELOG.md)). Reaching `1.0.0` is a deliberate decision, not an automatic bump.
+Pre-1.0 (`0.3.1`). The enumerated SQL surface is treated as stable and every change ships an upgrade script verified `upgrade == fresh`, but per SemVer a `0.MINOR` bump may still carry a breaking change (called out in [CHANGELOG.md](CHANGELOG.md)). Reaching `1.0.0` is a deliberate decision, not an automatic bump.
 
-The extension builds from source on PostgreSQL 15–19 (`pg15`…`pg19`), and release CI requires all five majors on both architectures - a missing major fails the workflow rather than skipping it. The previously published 0.2.0 binaries and Docker images cover 15–18; the `v0.3.0` tag workflow publishes the full 15–19 matrix. PostgreSQL 19 images carry no BM25 provider until Tiger Data publishes a pg19 `pg_textsearch`.
+Published stable artifacts target PostgreSQL 15–18 on amd64 and arm64. Source/CI compatibility is also required on **PostgreSQL 19 Beta 3** (`pg19`, explicit `postgres:19beta3`, PGDG component `19`), for non-production testing only. No stable PG19 image or .deb is published. A missing or changed beta fails CI; GA promotion requires an explicit reviewed matrix, provisioning, and documentation change.
+
+`v0.3.0` is an immutable unpublished candidate, superseded by 0.3.1 after tag CI exposed unavailable GA PG19 artifacts and a Linux strict-Clippy documentation defect. Partial GHCR uploads do not constitute a complete release. It was not Homebrew-published, PGXN-published, or deployed; see [release recovery](docs/releases/0.3.1-recovery.md).
 
 ## License
 

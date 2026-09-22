@@ -47,6 +47,10 @@ for path in root.glob('crates/*/Cargo.toml'):
                 assert dep.get('version') == '=' + version, path
 IDENTITY
 
+if [[ "$version" == 0.3.0 ]]; then
+    echo "::error::v0.3.0 is an unpublished retired candidate; publication is forbidden"
+    exit 1
+fi
 publish=false
 source_ref=$(git rev-parse HEAD)
 head=$(git rev-parse HEAD)

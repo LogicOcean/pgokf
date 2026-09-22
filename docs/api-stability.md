@@ -254,14 +254,15 @@ statements must be idempotent - `CREATE OR REPLACE`, guarded `DO` blocks -
 and must adopt hand-applied copies into extension membership.
 
 **Collapse at finalization.** When the cycle closes, `default_version`
-becomes the clean `0.3.0`, the install script regenerates under that name
+becomes the clean `0.3.1`, the install script regenerates under that name
 and is committed (pgrx's entity ordering is unstable across invocations, so
 the committed snapshot is validated by the catalog it produces, not by
 byte-equality with a regeneration),
-and one terminal `pgokf--0.3.0-devN--0.3.0.sql` script (a no-op beyond the
+and the preserved `pgokf--0.3.0-dev3--0.3.0.sql` receipt followed by
+`pgokf--0.3.0--0.3.1.sql` (a no-op beyond the
 standing `register_dump_relations()` call) lets point-versioned deployments
-reach the release through the same machinery. The released chain from the
-previous tag then runs `... -> 0.2.0 -> 0.3.0-dev -> 0.3.0-dev1 -> ... -> 0.3.0`; the
+reach the release through the same machinery. The upgrade chain from the
+previous tag then runs `... -> 0.2.0 -> 0.3.0-dev -> 0.3.0-dev1 -> ... -> 0.3.0 -> 0.3.1`; the
 fresh-install-vs-upgrade parity harness proves the two routes converge
 object-by-object, and that every deployed point version reaches the release
 through a bare `ALTER EXTENSION pgokf UPDATE`.
@@ -347,3 +348,9 @@ still refuse atomically. The live PG18 harness checks catalog and version
 rollback, including ownership, ACLs, initial privileges, body and membership.
 This edge can inspect only installations that traverse dev→dev1; it does not
 repair already-upgraded installations retroactively.
+
+The immutable `v0.3.0` tag is an unpublished candidate superseded by `0.3.1`:
+its tag CI demanded unavailable GA PG19 artifacts and found a Linux strict-Clippy
+defect. The preserved graph includes `0.3.0-dev3 → 0.3.0 → 0.3.1`, with no
+outgoing edge from 0.3.1. Candidate installations can upgrade additively; the
+candidate was not a published release or a production deployment.
