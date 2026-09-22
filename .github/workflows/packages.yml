@@ -110,6 +110,9 @@ jobs:
           ref: ${{ needs.prep.outputs.source_ref }}
 
       - name: Portable source-packaging and cleanup guards
+        # The supported 0.2.0 catch-up tag predates these recovery test files.
+        # Every current/future candidate must execute them; 0.3.0 is retired.
+        if: needs.prep.outputs.version != '0.2.0'
         run: |
           python3 tests/test_homebrew_packaging.py
           python3 tests/test_cleanup_ownership.py

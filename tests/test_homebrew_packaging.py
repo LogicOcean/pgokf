@@ -42,6 +42,10 @@ class HomebrewPackaging(unittest.TestCase):
             text = (ROOT / '.github/workflows' / workflow).read_text()
             for guard in ('test_homebrew_packaging.py', 'test_cleanup_ownership.py'):
                 self.assertIn('python3 tests/' + guard, text)
+        packages = (ROOT / '.github/workflows/packages.yml').read_text()
+        step = packages.split('- name: Portable source-packaging and cleanup guards', 1)[1].split('- name:', 1)[0]
+        self.assertIn("if: needs.prep.outputs.version != '0.2.0'", step)
+        self.assertNotIn('continue-on-error', step)
 
     def test_live_gate_cannot_fall_back_to_workspace_wrapper(self):
         text = (ROOT / 'scripts/test-homebrew-packaging.py').read_text()
