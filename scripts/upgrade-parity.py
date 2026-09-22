@@ -83,10 +83,21 @@ def main():
             expected = sql('fresh', inventory)
             print(f'Fresh {version}: {len(expected.splitlines())} inventory rows', flush=True)
 
+            def drop_catalog(db):
+                sql('postgres', f'DROP DATABASE {db};')
+                # Roles are cluster-global: never let a fresh installation
+                # supply roles that an upgrade forgot to create.
+                sql('postgres', 'DROP ROLE pgokf_admin, pgokf_writer, pgokf_reader, pgokf_dispatcher;')
+
             if committed_install.is_file():
                 # The committed install script must not be a divergent
                 # snapshot: a catalog created through it inventories exactly
-                # like one created through the freshly generated script.
+                # like one created through the freshly generated script. It
+                # must also BOOTSTRAP standalone: the fresh catalog's
+                # cluster-global roles are dropped first, so the committed
+                # script cannot borrow them - its own role creation, ownership,
+                # ACLs and extension membership are what the comparison proves.
+                drop_catalog('fresh')
                 installed = extension / committed_install.name
                 backup = installed.read_bytes()
                 try:
@@ -94,18 +105,17 @@ def main():
                     sql('postgres', 'CREATE DATABASE fresh_committed;')
                     sql('fresh_committed', 'CREATE EXTENSION pgokf;')
                     compare(expected, sql('fresh_committed', inventory), 'committed install script')
-                    sql('postgres', 'DROP DATABASE fresh_committed;')
+                    assert sql('fresh_committed', 'SELECT pgokf.version();') == version
+                    drop_catalog('fresh_committed')
                 finally:
                     installed.write_bytes(backup)
-                print('committed install script: catalog parity passed', flush=True)
+                print('committed install script: standalone bootstrap, role creation, '
+                      'owner/ACL/membership catalog parity passed', flush=True)
 
-            def drop_catalog(db):
-                sql('postgres', f'DROP DATABASE {db};')
-                # Roles are cluster-global: never let a fresh installation
-                # supply roles that an upgrade forgot to create.
-                sql('postgres', 'DROP ROLE pgokf_admin, pgokf_writer, pgokf_reader, pgokf_dispatcher;')
-
-            drop_catalog('fresh')
+            # The committed-script check above already dropped 'fresh' (and the
+            # cluster roles) when it ran.
+            if not committed_install.is_file():
+                drop_catalog('fresh')
             failures = []
             for index, signature in enumerate(ADOPT):
                 expected_role = 'pgokf_reader' if index == 0 else 'pgokf_admin'

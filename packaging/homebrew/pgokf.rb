@@ -11,14 +11,19 @@
 class Pgokf < Formula
   desc "Materialized PostgreSQL catalog for Open Knowledge Format bundles"
   homepage "https://github.com/LogicOcean/pgokf"
-  # The tag tracks default_version in crates/extension/pgokf.control, the single
-  # source of truth for the extension version; bump the url, the sha256 below,
-  # and the version assertions in `test do` together.
-  url "https://github.com/LogicOcean/pgokf/archive/refs/tags/v0.3.0.tar.gz"
-  # Digest of the GitHub-generated tag tarball. Regenerate on every release with:
-  #   curl -fsSL https://github.com/LogicOcean/pgokf/archive/refs/tags/vX.Y.Z.tar.gz | shasum -a 256
-  # (The pre-tag bump necessarily still carries the previous tarball's digest;
-  # the release checklist recomputes it once the v0.3.0 tag exists.)
+  # RELEASE STATE: pre-tag pin. A formula inside the source tag can never name
+  # the archive of the tag that contains it - the sha256 would have to be a
+  # fixed point of the archive's own contents - so ahead of a release the
+  # formula stays pinned to the LAST PUBLISHED release: url, that archive's
+  # authenticated digest, and the version assertions in `test do`, all
+  # agreeing. After the new tag is pushed and its archive exists, one explicit
+  # main commit advances url + sha256 + assertions together (the digest is
+  # computed from the published codeload archive), and the external tap
+  # (LogicOcean/homebrew-pgokf) receives the same update. The exact sequence
+  # and rollback live in docs/release-checklist.md ("Homebrew formula and
+  # tap"); tests/test_release_integrity.py rejects any other state.
+  url "https://github.com/LogicOcean/pgokf/archive/refs/tags/v0.2.0.tar.gz"
+  # Authenticated digest of the published v0.2.0 codeload archive.
   sha256 "194441d1b4d6bd5cf5f22a39a3b6c923e9a68d7692202ff7c4bb05109df812e5"
   license "AGPL-3.0-only"
   head "https://github.com/LogicOcean/pgokf.git", branch: "main"
@@ -90,7 +95,7 @@ class Pgokf < Formula
     control = share/"postgresql@#{pg_major}/extension/pgokf.control"
     control = share/"postgresql/extension/pgokf.control" unless control.exist?
     assert_predicate control, :exist?, "pgokf.control not installed"
-    assert_match "default_version = '0.3.0'", control.read
+    assert_match "default_version = '0.2.0'", control.read
 
     # End-to-end: initialize a throwaway cluster and CREATE EXTENSION.
     pg_bin = pg.opt_bin
@@ -104,7 +109,7 @@ class Pgokf < Formula
         "#{pg_bin}/psql -h 127.0.0.1 -p #{port} -U postgres -d postgres " \
         "-tAc 'CREATE EXTENSION pgokf; SELECT extversion FROM pg_extension WHERE extname=''pgokf'';'",
       )
-      assert_match "0.3.0", output
+      assert_match "0.2.0", output
     ensure
       system pg_bin/"pg_ctl", "-D", datadir, "-w", "stop"
     end

@@ -1,9 +1,10 @@
 # Packaging & Distribution
 
 How pgokf is packaged and released for every supported channel. Supported
-PostgreSQL majors: **15, 16, 17, 18, 19** (19 is not GA as of 2026-08 and PGDG
-publishes no `postgresql-19` package yet - its build/CI legs are advisory until
-PGDG ships packages).
+PostgreSQL majors: **15, 16, 17, 18, 19**. Every declared major is a
+**required** leg of the test and packaging matrices: missing PGDG packages,
+failed provisioning, or absent base images fail the workflow rather than
+skipping coverage.
 
 Every format shares one build primitive, so there is exactly one place where
 the extension image is produced.
@@ -181,7 +182,7 @@ dependency at each release.
 
 ## Release process
 
-`PGVER` ranges over 15-19; 19 is best-effort until PGDG ships packages.
+`PGVER` ranges over 15-19; every major is a required CI and packaging leg.
 
 1. **Gate.** Complete [release-checklist.md](release-checklist.md) (static,
    supply-chain, schema, and per-major live smoke gates). Confirm

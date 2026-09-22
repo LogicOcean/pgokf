@@ -6,7 +6,10 @@ name: packages
 # merged into one multi-architecture manifest per tag - so the published
 # images run unchanged on x86 servers, arm64 servers, and Apple Silicon.
 # Runs on tags (a release) and on demand; also on pushes touching packaging so
-# the build scripts stay green.
+# the build scripts stay green. Publication is immutable-tag-only: a version
+# tag push, or a workflow_dispatch whose explicit release_tag input names that
+# tag - either way the resolver proves the checked-out HEAD is the tag's
+# commit, and every job builds that exact source.
 on:
   push:
     branches:
@@ -30,13 +33,15 @@ on:
       - ".github/workflows/packages.yml"
   workflow_dispatch:
     inputs:
-      publish_images:
+      release_tag:
         description: >-
-          Push the smoke-tested images to GHCR for the version in
-          pgokf.control. Use this to publish images for a release whose tag
-          predates the publish step; a version tag publishes automatically.
-        type: boolean
-        default: false
+          Republish images from an existing immutable version tag (historical
+          catch-up). Must be exactly v<default_version> of that tag's
+          pgokf.control; the run checks out the tag and proves HEAD is the
+          tag's commit. Empty: build and smoke-test the current ref only -
+          nothing publishes. A version tag push publishes automatically.
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -53,9 +58,13 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Resolve the one version every artifact carries, and whether this run
-  # publishes images. The control file is the single source of truth (the same
-  # one build-deb.sh reads); a version tag must agree with it.
+  # Resolve the one version every artifact carries, whether this run publishes
+  # images, and the exact immutable source every job builds. The control file
+  # is the single source of truth (the same one build-deb.sh reads).
+  # Publication is immutable-tag-only: packaging/resolve-release.sh accepts a
+  # tag push or an explicit dispatch tag only when the tag is v<default_version>
+  # AND the checked-out HEAD is that tag's commit, so a branch HEAD or untagged
+  # commit can never publish versioned images/manifests.
   # ---------------------------------------------------------------------------
   prep:
     name: Resolve version and publish intent
@@ -63,32 +72,21 @@ jobs:
     outputs:
       version: ${{ steps.resolve.outputs.version }}
       publish: ${{ steps.resolve.outputs.publish }}
+      source_ref: ${{ steps.resolve.outputs.source_ref }}
     steps:
+      # A dispatch catch-up checks out the named immutable tag; every other
+      # event checks out its own ref. fetch-depth: 0 so the tag object is
+      # present and the resolver can prove HEAD is the tag's commit.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag != '' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
 
-      - name: Read default_version from pgokf.control
+      - name: Resolve version, publish intent, and source ref
         id: resolve
         env:
-          PUBLISH_INPUT: ${{ inputs.publish_images }}
-        run: |
-          version=$(sed -n "s/^default_version *= *'\([^']*\)'.*/\1/p" crates/extension/pgokf.control)
-          [ -n "$version" ] || { echo "::error::could not read default_version from pgokf.control"; exit 1; }
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "resolved extension version: $version"
-
-          publish=false
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            tag="${GITHUB_REF#refs/tags/v}"
-            if [[ "$tag" != "$version" ]]; then
-              echo "::error::tag v$tag does not match pgokf.control default_version $version"
-              exit 1
-            fi
-            publish=true
-          elif [[ "$PUBLISH_INPUT" == "true" ]]; then
-            publish=true
-          fi
-          echo "publish=$publish" >> "$GITHUB_OUTPUT"
-          echo "publish images: $publish"
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
+        run: packaging/resolve-release.sh
 
   # ---------------------------------------------------------------------------
   # Static checks on the container packaging: Dockerfiles, the shell scripts
@@ -96,9 +94,12 @@ jobs:
   # ---------------------------------------------------------------------------
   lint:
     name: Lint container packaging
+    needs: prep
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prep.outputs.source_ref || github.sha }}
 
       - name: hadolint (pinned binary, checksum-verified)
         run: |
@@ -136,9 +137,12 @@ jobs:
   # ---------------------------------------------------------------------------
   meta:
     name: Validate META.json (PGXN)
+    needs: prep
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prep.outputs.source_ref || github.sha }}
 
       - name: jq well-formedness + required PGXN v1 fields
         run: |
@@ -151,11 +155,12 @@ jobs:
           ' META.json
           echo "META.json: valid JSON, all required PGXN meta-spec v1 fields present."
 
-      # The main SQL named by provides.*.file is a generated build artifact
-      # (target/, gitignored); the PGXN release process emits it into the tree
-      # before zipping (see docs/packaging.md). Reproduce that emit here so the
-      # manifest's promised file is proven to exist at dist-build time, rather
-      # than only when a human runs the release steps.
+      # The main SQL named by provides.*.file is committed at the release
+      # bump (generated by `cargo pgrx schema`; pgrx's entity ordering is
+      # unstable across invocations, so equality is the normalized statement
+      # multiset, not bytes). Regenerate it here and prove the committed
+      # snapshot is content-identical, so the manifest's promised file is
+      # proven canonical at dist time.
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -178,25 +183,19 @@ jobs:
           cargo install --locked cargo-pgrx --version "${CARGO_PGRX_VERSION}"
           cargo pgrx init --pg18=/usr/lib/postgresql/18/bin/pg_config
 
-      - name: Emit generated SQL and assert every provides.file exists
+      - name: Regenerate the install SQL and compare with the committed snapshot
         run: |
-          # Emit the main SQL exactly as the PGXN release process does
-          # (docs/packaging.md), targeting the path the manifest promises.
           target=$(jq -r '.provides.pgokf.file' META.json)
-          mkdir -p "$(dirname "$target")"
-          ( cd crates/extension && cargo pgrx schema pg18 ) > "$target"
-          # Every path named by provides.*.file must now exist in the tree.
-          mapfile -t provided_files < <(jq -r '.provides[].file' META.json)
-          for f in "${provided_files[@]}"; do
-            if [[ ! -f "$f" ]]; then
-              echo "::error::provides.file '$f' does not exist at dist-build time"
-              exit 1
-            fi
-            echo "provides.file present: $f"
-          done
+          if [[ ! -f "$target" ]]; then
+            echo "::error::committed install script '$target' is missing"
+            exit 1
+          fi
+          ( cd crates/extension && cargo pgrx schema pg18 ) > /tmp/pgokf-regenerated.sql
+          python3 scripts/compare-install-sql.py "$target" /tmp/pgokf-regenerated.sql
 
   deb:
     name: Build .deb (PostgreSQL ${{ matrix.pg }}, ${{ matrix.arch }})
+    needs: prep
     runs-on: ${{ matrix.runner }}
     # Every declared major is required; missing provisioning must fail.
     strategy:
@@ -211,6 +210,8 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prep.outputs.source_ref || github.sha }}
 
       # Pinned via the action ref (1.96.0), consistent with ci.yml and
       # pgrx-test.yml; RUST_TOOLCHAIN below documents the same version for the
@@ -341,6 +342,8 @@ jobs:
       WITH_PG_TEXTSEARCH: ${{ (matrix.pg == 17 || matrix.pg == 18) && '1' || 'auto' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prep.outputs.source_ref || github.sha }}
 
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
@@ -377,7 +380,8 @@ jobs:
         if: steps.base.outputs.available == 'true'
         run: packaging/docker/smoke-test.sh "$LOCAL_TAG" "$VERSION"
 
-      # Publish only from a version tag (or an explicit dispatch), and only
+      # Publish only when prep proved an immutable v<default_version> tag and
+      # checked out its commit, and only
       # after the smoke test above proved the image starts, creates the
       # extensions, and materializes a bundle. The push re-runs the build
       # against the BuildKit cache the smoke-tested build just filled (every
@@ -466,8 +470,8 @@ jobs:
         run: |
           shopt -s nullglob
           digests=(/tmp/digests/*)
-          if [[ ${#digests[@]} -eq 0 ]]; then
-            echo "::error::no digests found for PostgreSQL ${{ matrix.pg }}"
+          if [[ ${#digests[@]} -ne 2 ]]; then
+            echo "::error::expected both architectures for PostgreSQL ${{ matrix.pg }}, found ${#digests[@]} digest(s)"
             exit 1
           fi
           refs=()
@@ -499,6 +503,8 @@ jobs:
       LOCAL_TAG: pgokf-companions:${{ needs.prep.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prep.outputs.source_ref || github.sha }}
 
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
@@ -585,7 +591,7 @@ jobs:
         run: |
           shopt -s nullglob
           digests=(/tmp/digests/*)
-          [[ ${#digests[@]} -gt 0 ]] || { echo "::error::no companions digests found"; exit 1; }
+          [[ ${#digests[@]} -eq 2 ]] || { echo "::error::expected both companions architectures, found ${#digests[@]} digest(s)"; exit 1; }
           refs=()
           for d in "${digests[@]}"; do refs+=("${COMPANIONS_IMAGE}@sha256:$(basename "$d")"); done
           docker buildx imagetools create -t "$TAG" "${refs[@]}"

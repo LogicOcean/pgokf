@@ -22,3 +22,7 @@
 
 # cargo-about scratch output; the committed notices file is THIRD-PARTY-NOTICES.txt
 /notices-fresh.txt
+
+# Python test/import caches.
+__pycache__/
+*.py[cod]

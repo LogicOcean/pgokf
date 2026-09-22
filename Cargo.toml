@@ -52,6 +52,11 @@ thiserror = "2.0"
 tracing = "0.1"
 walkdir = "2.5"
 
+# pgrx 0.19.2 with the unmaintained serde_cbor dependency (RUSTSEC-2021-0127)
+# removed. Exact source revision and delta: vendor/pgrx/VENDORING.md.
+[patch.crates-io]
+pgrx = { path = "vendor/pgrx" }
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 

@@ -1,11 +1,7 @@
 [advisories]
-# RUSTSEC-2021-0127: serde_cbor is unmaintained. It remains a mandatory
-# dependency of pgrx 0.19.x (pgokf -> pgrx 0.19.2 -> serde_cbor 0.11.2) and
-# the advisory offers no fixed release. Re-evaluate at the next pgrx upgrade
-# or by 2027-02-28, whichever comes first.
-ignore = [
-  { id = "RUSTSEC-2021-0127", reason = "serde_cbor is unmaintained but is a mandatory dependency of pgrx 0.19.x with no fixed release" },
-]
+# No ignored advisories. pgrx is vendored (vendor/pgrx, see its VENDORING.md)
+# with the unmaintained serde_cbor dependency removed, so the resolved graph
+# carries no advisory.
 
 [bans]
 multiple-versions = "warn"
