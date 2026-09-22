@@ -35,11 +35,8 @@ on:
     inputs:
       release_tag:
         description: >-
-          Republish images from an existing immutable version tag (historical
-          catch-up). Must be exactly v<default_version> of that tag's
-          pgokf.control; the run checks out the tag and proves HEAD is the
-          tag's commit. Empty: build and smoke-test the current ref only -
-          nothing publishes. A version tag push publishes automatically.
+          Publish only the current v0.3.1 immutable release tag. Historical and
+          retired tags are unsupported. Empty: build and smoke-test only.
         type: string
         required: false
         default: ''
@@ -56,6 +53,11 @@ env:
   # Pinned Dockerfile linter (binary + checksum) for the lint job.
   HADOLINT_VERSION: "2.15.1"
   HADOLINT_SHA256: "c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507"
+
+# Remove noninteractive startup hooks before Bash starts; preserve failures.
+defaults:
+  run:
+    shell: /usr/bin/env -u BASH_ENV -u ENV bash --noprofile --norc -e -o pipefail {0}
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -75,10 +77,10 @@ jobs:
       publish: ${{ steps.resolve.outputs.publish }}
       source_ref: ${{ steps.resolve.outputs.source_ref }}
     steps:
-      # A dispatch catch-up checks out the named immutable tag; every other
+      # An explicit dispatch checks out the current immutable tag; every other
       # event checks out its own ref. fetch-depth: 0 so the tag object is
       # present and the resolver can prove HEAD is the tag's commit.
-      # Keep current release automation available for tags predating it.
+      # Keep validation tooling separate from the proven release source.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
@@ -110,9 +112,6 @@ jobs:
           ref: ${{ needs.prep.outputs.source_ref }}
 
       - name: Portable source-packaging and cleanup guards
-        # The supported 0.2.0 catch-up tag predates these recovery test files.
-        # Every current/future candidate must execute them; 0.3.0 is retired.
-        if: needs.prep.outputs.version != '0.2.0'
         run: |
           python3 -m pip install PyYAML==6.0.3
           python3 tests/test_homebrew_packaging.py
@@ -210,21 +209,11 @@ jobs:
       - name: Regenerate the install SQL and compare with the committed snapshot
         run: |
           target=$(jq -r '.provides.pgokf.file' META.json)
-          # The published 0.2.0 tag predates committed install snapshots.
-          # Its historical catch-up still validates the generated provides.file.
-          # Current/future releases must ship and match their snapshot.
-          if [[ ! -f "$target" && "${{ needs.prep.outputs.version }}" != 0.2.0 ]]; then
-            echo "::error::committed install script '$target' is missing"
-            exit 1
-          fi
+          test -f "$target"
           ( cd crates/extension && cargo pgrx schema pg18 --no-default-features --features pg18 ) > /tmp/pgokf-regenerated.sql
           ( cd crates/extension && cargo pgrx schema pg18 --no-default-features --features pg18 ) > /tmp/pgokf-regenerated-again.sql
           python3 release-tools/scripts/compare-install-sql.py /tmp/pgokf-regenerated.sql /tmp/pgokf-regenerated-again.sql
-          if [[ -f "$target" ]]; then
-            python3 release-tools/scripts/compare-install-sql.py "$target" /tmp/pgokf-regenerated.sql
-          else
-            cp /tmp/pgokf-regenerated.sql "$target"
-          fi
+          python3 release-tools/scripts/compare-install-sql.py "$target" /tmp/pgokf-regenerated.sql
 
   deb:
     name: Build .deb (PostgreSQL ${{ matrix.pg }}, ${{ matrix.arch }})

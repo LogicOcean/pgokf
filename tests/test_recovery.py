@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Recovery invariants: intentionally require review to change the GA boundary."""
 import copy
+from workflow_policy import effective_matrix, check_shell_policy
 from pathlib import Path
 import unittest
 import yaml
@@ -9,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def check_support(packages, pgrx):
-    errors = []
+    errors = check_shell_policy(packages) + check_shell_policy(pgrx)
     for name in ('deb', 'docker', 'docker-manifest'):
         matrix = packages['jobs'][name]['strategy']['matrix']
         if (matrix['pg'] != [15, 16, 17, 18]
@@ -19,8 +20,10 @@ def check_support(packages, pgrx):
     matrix = pgrx['jobs']['test']['strategy']['matrix']
     if matrix.get('pg') != [15, 16, 17, 18] or matrix.get('include') != [{'pg': 19, 'image_tag': '19beta3'}]:
         errors.append('required pinned beta compatibility')
+    if effective_matrix(matrix) != [{'pg': pg} for pg in (15, 16, 17, 18)] + [{'pg': 19, 'image_tag': '19beta3'}]:
+        errors.append('effective compatibility coverage changed')
     job = pgrx['jobs']['test']
-    if job.get('continue-on-error') or 'if' in job or 'defaults' in job or 'defaults' in pgrx:
+    if job.get('continue-on-error') or 'if' in job or 'defaults' in job:
         errors.append('compatibility must fail closed')
     runs = '\n'.join(step.get('run', '') for step in job['steps'])
     for required in ('packaging/install-postgres.sh', 'packaging/check-beta-image.sh',
@@ -87,6 +90,20 @@ class Recovery(unittest.TestCase):
             bad = copy.deepcopy(pgrx)
             bad['jobs']['test']['strategy']['matrix'][field] = value
             self.assertTrue(check_support(packages, bad))
+
+    def test_effective_matrix_yaml_forms(self):
+        packages, pgrx = self.workflows()
+        for value in ('[{pg: 18}]', '- pg: 18', '[{pg: 15}, {pg: 16}, {pg: 17}, {pg: 18}]', '[&leg {pg: 18}, *leg]'):
+            bad = copy.deepcopy(pgrx)
+            bad['jobs']['test']['strategy']['matrix']['exclude'] = yaml.safe_load(value)
+            self.assertTrue(check_support(packages, bad), value)
+        # Includes run after exclusions; an explicit included Beta job survives
+        # an exclusion of the same major from the base Cartesian expansion.
+        matrix = {'pg': [18], 'arch': ['amd64', 'arm64'],
+                  'exclude': [{'arch': 'arm64'}],
+                  'include': [{'pg': 18, 'runner': 'linux'}, {'pg': 19, 'image_tag': '19beta3'}]}
+        self.assertEqual(effective_matrix(matrix), [
+            {'pg': 18, 'arch': 'amd64', 'runner': 'linux'}, {'pg': 19, 'image_tag': '19beta3'}])
 
     def test_publication_gate_mutations(self):
         packages, pgrx = self.workflows()

@@ -9,7 +9,7 @@
 #     is the commit that tag object points at;
 #   * a manual workflow_dispatch publishes only when its explicit
 #     release_tag input names an existing v<default_version> tag whose commit
-#     is the checked-out HEAD (historical catch-up on the immutable tag);
+#     is the checked-out HEAD (current release only);
 #   * every other ref/input combination builds and smoke-tests but publishes
 #     nothing - a branch HEAD or untagged commit can never publish versioned
 #     images or manifests.
@@ -24,8 +24,7 @@ version=$(sed -n "s/^default_version *= *'\([^']*\)'.*/\1/p" crates/extension/pg
 echo "version=$version" >> "$GITHUB_OUTPUT"
 echo "resolved extension version: $version"
 
-# Check source identity even for historical catch-up, without depending on
-# scripts existing in that historical tree.
+# Check every artifact identity before exposing any publication outputs.
 python3 - "$version" <<'IDENTITY'
 import json, pathlib, sys, tomllib
 root = pathlib.Path('.')
@@ -47,10 +46,11 @@ for path in root.glob('crates/*/Cargo.toml'):
                 assert dep.get('version') == '=' + version, path
 IDENTITY
 
-if [[ "$version" == 0.3.0 ]]; then
-    echo "::error::v0.3.0 is an unpublished retired candidate; publication is forbidden"
+if [[ "$version" != 0.3.1 ]]; then
+    echo "::error::only current release 0.3.1 is eligible; historical/retired source $version is forbidden"
     exit 1
 fi
+git diff --quiet HEAD -- || { echo "::error::tracked source differs from HEAD"; exit 1; }
 publish=false
 source_ref=$(git rev-parse HEAD)
 head=$(git rev-parse HEAD)
@@ -68,7 +68,7 @@ if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
     publish=true
     source_ref="$head"
 elif [[ -n "${RELEASE_TAG_INPUT:-}" ]]; then
-    # Manual catch-up: republish from an explicit existing immutable tag.
+    # Explicit current-release dispatch still requires immutable tag identity.
     case "$RELEASE_TAG_INPUT" in
         v*) ;;
         *) echo "::error::release_tag must name a version tag (got '$RELEASE_TAG_INPUT')"; exit 1 ;;

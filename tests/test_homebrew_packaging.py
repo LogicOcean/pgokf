@@ -14,8 +14,8 @@ GUARDS = ['python3 tests/test_homebrew_packaging.py', 'python3 tests/test_cleanu
 
 def check_workflow(workflow, release=False):
     errors = []
-    if 'defaults' in workflow:
-        errors.append('workflow shell defaults may mask failures')
+    from workflow_policy import check_shell_policy
+    errors.extend(check_shell_policy(workflow))
     jobs = workflow['jobs']
     job = jobs.get('homebrew-policy', {})
     if job.get('runs-on') != 'macos-15' or 'if' in job or job.get('continue-on-error', False):
@@ -40,7 +40,7 @@ def check_workflow(workflow, release=False):
     if len(matches) != 1:
         return errors + ['missing guard execution']
     step = matches[0]
-    condition = "needs.prep.outputs.version != '0.2.0'" if release else None
+    condition = None
     if step.get('if') != condition or step.get('continue-on-error', False) or 'shell' in step:
         errors.append('guard condition/failure propagation changed')
     # A small closed execution language: only plain python invocations, each on

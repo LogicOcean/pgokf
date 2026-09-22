@@ -218,7 +218,7 @@ def check_packages_workflow(text: str) -> list[str]:
             problems.append('publish_images boolean must not exist: it let arbitrary branch source '
                             'publish release image names; use the release_tag input')
         if 'release_tag' not in dispatch[1]:
-            problems.append('workflow_dispatch needs an explicit release_tag input for catch-up publication')
+            problems.append('workflow_dispatch needs an explicit release_tag input for current publication')
     if not re.search(r'uses: actions/checkout@[0-9a-f]{40}.*?\n\s+with:\n\s+fetch-depth: 0', text):
         problems.append('prep checkout must fetch-depth: 0 to prove tag identity')
     if 'packaging/resolve-release.sh' not in text:
@@ -449,6 +449,7 @@ class ReleaseIdentity(unittest.TestCase):
 
         def run(git_head, git_tag_sha, ref, release_tag):
             stub = (f'git() {{\n'
+                    f'  if [ "$1" = diff ]; then return 0; fi\n'
                     f'  if [ "$1" = rev-parse ] && [ "$2" = HEAD ]; then echo "{git_head}"; return; fi\n'
                     f'  if [ "$1" = rev-parse ]; then echo "{git_tag_sha}"; return; fi\n'
                     f'  return 1\n'
@@ -477,10 +478,10 @@ class ReleaseIdentity(unittest.TestCase):
             code, _ = run(sha_a, sha_a, bad if bad.startswith('v') else bad, '')
             code, _ = run(sha_a, sha_a, f'refs/tags/{bad}', '')
             self.assertNotEqual(code, 0, f'{bad} must fail closed')
-        # Historical catch-up dispatch on the exact immutable tag publishes.
+        # Current-release dispatch on the exact immutable tag publishes.
         code, out = run(sha_a, sha_a, 'refs/heads/main', f'v{version}')
         self.assertEqual((code, 'publish=true' in out), (0, True),
-                         'explicit existing tag catch-up must publish')
+                         'explicit current tag must publish')
         # Catch-up naming another version, a non-tag, or a tag whose commit
         # is not checked out refuses.
         for bad_tag, head, tag_sha in (('v0.2.0', sha_a, sha_a), ('release', sha_a, sha_a),
@@ -514,7 +515,6 @@ class RealGitPublication(unittest.TestCase):
             git('add', '.')
             git('commit', '-qm', 'Historical fixture')
             git('tag', 'v0.2.0')
-            historical = git('rev-parse', 'HEAD')
             for p, text in originals.items():
                 p.write_text(text)
             git('add', '.')
@@ -538,10 +538,9 @@ class RealGitPublication(unittest.TestCase):
             self.assertNotEqual(resolve('refs/heads/main', 'v0.2.0')[0], 0)
             git('checkout', '-q', 'v0.2.0')
             code, output = resolve('refs/heads/main', 'v0.2.0')
-            self.assertEqual(code, 0)
-            self.assertIn('source_ref=' + historical, output)
-            self.assertIn('version=0.2.0', output)
-            self.assertIn('publish=true', output)
+            self.assertNotEqual(code, 0)
+            self.assertNotIn('publish=true', output)
+            self.assertNotEqual(resolve('refs/tags/v0.2.0')[0], 0)
             git('checkout', '-q', 'v0.3.1')
             for file in ('Cargo.toml', 'Cargo.lock', 'META.json', 'crates/extension/Cargo.toml'):
                 path = root / file

@@ -355,12 +355,15 @@ move the source tag, or substitute bytes under it. A source defect requires
 a new release version. A checksum discrepancy requires investigation against
 the recorded archive and tag contents before any formula update.
 
-Manual image catch-up uses current automation with an explicit historical tag:
+An authorized current-release retry may name only the exact current tag:
 `gh workflow run packages.yml --ref main -f release_tag=v0.3.1`.
 Prep retains current resolver tooling separately, checks out the tag source,
 proves HEAD/tag/control/workspace/lock/PGXN identity, and passes the resolved
 commit SHA to all builds. Empty dispatch input is a non-publishing smoke run.
-A branch source cannot publish release image names.
+A branch source cannot publish release image names. Historical catch-up is unsupported:
+0.2.0 remains the published predecessor, 0.3.0 remains rejected, and 0.3.1 is
+the only next eligible release. Current machinery refuses historical source
+before any package upload, image push, or manifest job can run.
 
 Extract the exact GitHub release body, review it, and then create the release
 only after the publication gates:
