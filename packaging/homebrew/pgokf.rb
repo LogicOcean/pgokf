@@ -113,16 +113,17 @@ class Pgokf < Formula
     system pg_bin/"initdb", "-D", datadir, "--auth=trust", "-U", "postgres",
            "--encoding=UTF8", "--locale=C"
     port = free_port
-    system pg_bin/"pg_ctl", "-D", datadir, "-w",
-           "-o", "-p #{port} -c listen_addresses=127.0.0.1", "start"
     begin
+      # Keep the daemon from holding Homebrew's command-output pipe open.
+      system pg_bin/"pg_ctl", "-D", datadir, "-l", testpath/"postgres.log", "-w",
+             "-o", "-p #{port} -c listen_addresses=127.0.0.1", "start"
       output = shell_output(
         "#{pg_bin}/psql -h 127.0.0.1 -p #{port} -U postgres -d postgres " \
         "-tAc \"CREATE EXTENSION pgokf; SELECT extversion FROM pg_extension WHERE extname='pgokf';\"",
       )
       assert_match "0.2.0", output
     ensure
-      system pg_bin/"pg_ctl", "-D", datadir, "-w", "stop"
+      system pg_bin/"pg_ctl", "-D", datadir, "-w", "stop" if (datadir/"postmaster.pid").exist?
     end
   end
 end

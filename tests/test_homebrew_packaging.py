@@ -18,6 +18,7 @@ def check_policy(text):
         'library = OS.mac? ? "pgokf.dylib" : "pgokf.so"',
         'ENV["LC_ALL"] = "C"',
         '"--encoding=UTF8", "--locale=C"',
+        '"-l", testpath/"postgres.log"',
     ]
     return [line for line in required if line not in text]
 
