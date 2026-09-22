@@ -14,6 +14,8 @@ GUARDS = ['python3 tests/test_homebrew_packaging.py', 'python3 tests/test_cleanu
 
 def check_workflow(workflow, release=False):
     errors = []
+    if 'defaults' in workflow:
+        errors.append('workflow shell defaults may mask failures')
     jobs = workflow['jobs']
     job = jobs.get('homebrew-policy', {})
     if job.get('runs-on') != 'macos-15' or 'if' in job or job.get('continue-on-error', False):
@@ -26,7 +28,11 @@ def check_workflow(workflow, release=False):
         expected[1]['run'] = 'python3 release-tools/scripts/test-homebrew-policy.py'
     if steps != expected:
         errors.append('Homebrew API execution contract changed')
+    if 'defaults' in job:
+        errors.append('macOS shell defaults changed')
     guard_job = jobs['lint' if release else 'rust']
+    if 'defaults' in guard_job:
+        errors.append('portable shell defaults changed')
     if 'if' in guard_job or guard_job.get('continue-on-error', False):
         errors.append('portable guards disabled')
     name = 'Portable source-packaging and cleanup guards' if release else 'Test required PostgreSQL coverage guards'
@@ -67,6 +73,10 @@ class HomebrewPackaging(unittest.TestCase):
         for filename in ('ci.yml', 'packages.yml'):
             workflow = yaml.safe_load((ROOT / '.github/workflows' / filename).read_text())
             self.assertEqual(check_workflow(workflow, filename == 'packages.yml'), [])
+            if filename == 'packages.yml':
+                from test_recovery import check_support
+                pgrx = yaml.safe_load((ROOT / '.github/workflows/pgrx-test.yml').read_text())
+                self.assertEqual(check_support(workflow, pgrx), [])
             for mutation in ('disabled-job', 'disabled-step', 'comment', 'dead-branch', 'mask', 'removed', 'condition'):
                 bad = copy.deepcopy(workflow)
                 job = bad['jobs']['homebrew-policy']
