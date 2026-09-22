@@ -34,15 +34,18 @@ RUN_ID="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
 NAME="pgokf-smoke-${RUN_ID}"
 EVIDENCE="$(mktemp -d "${TMPDIR:-/tmp}/pgokf-smoke-evidence.XXXXXXXX")"
 OWNED_IDS=()
+OWNED_PROOFS=()
 export DOCKER
 
 log() { printf '==> %s\n' "$*" >&2; }
 fail() { printf 'FAIL: %s\n' "$*" >&2; ${DOCKER} logs "${NAME}" 2>&1 | tail -40 >&2 || true; exit 1; }
 cleanup() {
-  local status=$? id
+  local status=$? id i
+  i=0
   for id in "${OWNED_IDS[@]}"; do
     python3 "${REPO_ROOT}/scripts/cleanup-owned-container.py" "$id" \
-      pgokf.smoke-run "${RUN_ID}" "${EVIDENCE}/${id}.json" || status=1
+      pgokf.smoke-run "${RUN_ID}" "${EVIDENCE}/${id}.json" "${OWNED_PROOFS[$i]}" || status=1
+    i=$((i + 1))
   done
   log "ownership and cleanup receipts: ${EVIDENCE}"
   return "$status"
@@ -63,25 +66,27 @@ assert_eq() { # actual expected description
 # with a WITH_* off (including the required PG19 leg) must still start.
 preload="pgokf"
 # shellcheck disable=SC2016  # ${PG_MAJOR} is expanded by the container's shell, on purpose
-probe_id="$(${DOCKER} create --label "pgokf.smoke-run=${RUN_ID}" --entrypoint sh "${IMAGE}" \
+probe_id="$(python3 "${REPO_ROOT}/scripts/create-owned-container.py" pgokf.smoke-run "${RUN_ID}" "${EVIDENCE}/probe.json" "${IMAGE}" --entrypoint sh -- \
   -c 'cd "/usr/share/postgresql/${PG_MAJOR}/extension" && ls pg_cron.control pg_search.control pg_textsearch.control 2>/dev/null')"
 OWNED_IDS+=("${probe_id}")
+OWNED_PROOFS+=("${EVIDENCE}/probe.json")
 carried="$(${DOCKER} start -a "${probe_id}" || true)"
 case "${carried}" in *pg_cron.control*) preload="${preload},pg_cron" ;; esac
 case "${carried}" in *pg_textsearch.control*) preload="${preload},pg_textsearch" ;; esac
 case "${carried}" in *pg_search.control*) preload="${preload},pg_search" ;; esac
 
 log "starting ${IMAGE} (shared_preload_libraries=${preload})"
-main_id="$(${DOCKER} create --name "${NAME}" --label "pgokf.smoke-run=${RUN_ID}" \
+main_id="$(python3 "${REPO_ROOT}/scripts/create-owned-container.py" pgokf.smoke-run "${RUN_ID}" "${EVIDENCE}/main.json" "${IMAGE}" --name "${NAME}" \
   -e POSTGRES_PASSWORD=smoke -e POSTGRES_HOST_AUTH_METHOD=trust \
   -e PGOKF_ADMIN_PASSWORD=admin-pw \
   -e PGOKF_WRITER_PASSWORD=writer-pw \
   -e PGOKF_READER_PASSWORD=reader-pw \
   -e PGOKF_POLICY='{"embedding_dim": 1024, "allowed_roots": ["/bundles"], "store_source": true}' \
-  "${IMAGE}" \
+  -- \
   postgres -c "shared_preload_libraries=${preload}" -c cron.database_name=postgres \
   )"
 OWNED_IDS+=("${main_id}")
+OWNED_PROOFS+=("${EVIDENCE}/main.json")
 ${DOCKER} start "${main_id}" >/dev/null
 
 # Wait for the real condition (extension created at the expected version), not
@@ -209,14 +214,15 @@ log "ok: backup archive carries the pgokf.concepts data"
 # not the 1024 the target's init hook applied), and a working health probe.
 # pgokf-restore runs pg_restore with --exit-on-error, so nothing is "ignored".
 RESTORE="${NAME}-restore"
-restore_id="$(${DOCKER} create --name "${RESTORE}" --label "pgokf.smoke-run=${RUN_ID}" \
+restore_id="$(python3 "${REPO_ROOT}/scripts/create-owned-container.py" pgokf.smoke-run "${RUN_ID}" "${EVIDENCE}/restore.json" "${IMAGE}" --name "${RESTORE}" \
   -e POSTGRES_PASSWORD=smoke -e POSTGRES_HOST_AUTH_METHOD=trust \
   -e PGOKF_ADMIN_PASSWORD=admin-pw -e PGOKF_WRITER_PASSWORD=writer-pw -e PGOKF_READER_PASSWORD=reader-pw \
   -e PGOKF_POLICY='{"embedding_dim": 1024, "allowed_roots": ["/bundles"], "store_source": true}' \
-  "${IMAGE}" \
+  -- \
   postgres -c "shared_preload_libraries=${preload}" -c cron.database_name=postgres \
   )"
 OWNED_IDS+=("${restore_id}")
+OWNED_PROOFS+=("${EVIDENCE}/restore.json")
 ${DOCKER} start "${restore_id}" >/dev/null
 restored_ready=""
 for _ in $(seq 1 60); do

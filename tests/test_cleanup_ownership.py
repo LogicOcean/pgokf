@@ -25,11 +25,11 @@ class CleanupOwnership(unittest.TestCase):
 
                 def docker(*args):
                     if args[0] == 'inspect':
-                        return json.dumps([dict(Id=cid, Config={'Labels': {'run': 'other' if mode == 'wrong-label' else 'mine'}},
+                        return json.dumps([dict(Id=cid, Created='today', Config={'Labels': {'run': 'other' if mode == 'wrong-label' else 'mine'}},
                                                 Mounts=[dict(Type='volume', Name='exact-volume')])])
                     if args[:2] == ('volume', 'inspect'):
                         return json.dumps([dict(Name='exact-volume')])
-                    self.assertEqual(args, ('rm', '-fv', cid))
+                    self.assertEqual(args, ('rm', '-f', cid))
                     captured = json.loads(receipt.read_text())
                     self.assertEqual(captured['container']['Id'], cid)
                     self.assertEqual(captured['volumes'][0]['Name'], 'exact-volume')
