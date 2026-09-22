@@ -1,4 +1,5 @@
 # Execute with `brew ruby` and a formula in a disposable local tap.
+raise "macOS required" unless RUBY_PLATFORM.include?("darwin")
 require "formula"
 require "extend/ENV/shared"
 ENV.extend(SharedEnvExtension)
@@ -20,7 +21,8 @@ formula.define_singleton_method(:system) { |*| throw :environment_ready }
   ENV["CARGO_ENCODED_RUSTFLAGS"] = encoded if encoded
   ENV["HOMEBREW_RUSTFLAGS"] = "-Cdebuginfo=1"
   ENV["MACOSX_DEPLOYMENT_TARGET"] = "11.0"
-  catch(:environment_ready) { formula.install }
+  reached = catch(:environment_ready) { formula.install; :not_reached }
+  raise "install command never executed" if reached == :not_reached
   raise "host deployment target lost" unless ENV.fetch("MACOSX_DEPLOYMENT_TARGET") == MacOS.version.to_s
   raise "Homebrew flags lost" unless ENV.fetch("HOMEBREW_RUSTFLAGS") == "-Cdebuginfo=1"
   if encoded

@@ -24,6 +24,7 @@ jobs:
           python3 tests/test_recovery.py
           python3 tests/test_homebrew_packaging.py
           python3 tests/test_cleanup_ownership.py
+          python3 tests/test_historical_compatibility.py
           python3 tests/test_ci_coverage.py
           python3 tests/test_release_integrity.py
           python3 tests/test_release_tools.py
@@ -66,3 +67,10 @@ jobs:
             diff -u THIRD-PARTY-NOTICES.txt /tmp/notices-fresh.txt | head -40
             exit 1
           fi
+
+  homebrew-policy:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Execute actual Homebrew environment policy
+        run: python3 scripts/test-homebrew-policy.py
