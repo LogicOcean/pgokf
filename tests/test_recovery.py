@@ -11,7 +11,10 @@ ROOT = Path(__file__).resolve().parents[1]
 def check_support(packages, pgrx):
     errors = []
     for name in ('deb', 'docker', 'docker-manifest'):
-        if packages['jobs'][name]['strategy']['matrix']['pg'] != [15, 16, 17, 18]:
+        matrix = packages['jobs'][name]['strategy']['matrix']
+        if (matrix['pg'] != [15, 16, 17, 18]
+                or any('pg' in row for row in matrix.get('include', []))
+                or matrix.get('exclude')):
             errors.append('stable GA boundary: ' + name)
     matrix = pgrx['jobs']['test']['strategy']['matrix']
     if matrix.get('pg') != [15, 16, 17, 18] or matrix.get('include') != [{'pg': 19, 'image_tag': '19beta3'}]:
@@ -26,6 +29,16 @@ def check_support(packages, pgrx):
                      'SMOKE_WITH_OPTIONAL=0 packaging/docker/smoke-test.sh'):
         if required not in runs:
             errors.append('missing compatibility execution: ' + required)
+        for step in job['steps']:
+            if required not in step.get('run', ''):
+                continue
+            beta_only = required in ('packaging/check-beta-image.sh',
+                                     'PG_IMAGE_TAG=${{ matrix.image_tag }}',
+                                     'SMOKE_WITH_OPTIONAL=0 packaging/docker/smoke-test.sh')
+            allowed = ('matrix.pg == 19',) if beta_only else (None, "steps.pgdg.outputs.available == 'true'")
+            if step.get('if') not in allowed or step.get('continue-on-error'):
+                errors.append('compatibility execution skips or waives failure: ' + required)
+
     if packages['jobs'].get('compatibility', {}).get('uses') != './.github/workflows/pgrx-test.yml':
         errors.append('publication requires compatibility')
     for name in ('docker', 'companions'):
@@ -50,6 +63,10 @@ class Recovery(unittest.TestCase):
             bad = copy.deepcopy(packages)
             bad['jobs'][name]['strategy']['matrix']['pg'].append(19)
             self.assertTrue(check_support(bad, pgrx))
+            bad = copy.deepcopy(packages)
+            bad['jobs'][name]['strategy']['matrix'].setdefault('include', []).append(
+                {'pg': 19, 'arch': 'amd64', 'runner': 'ubuntu-24.04'})
+            self.assertTrue(check_support(bad, pgrx), 'include must not bypass stable boundary')
         for field, value in [('include', []), ('include', [{'pg': 19, 'image_tag': '19'}])]:
             bad = copy.deepcopy(pgrx)
             bad['jobs']['test']['strategy']['matrix'][field] = value
@@ -66,6 +83,12 @@ class Recovery(unittest.TestCase):
         bad = copy.deepcopy(pgrx)
         bad['jobs']['test']['steps'] = []
         self.assertTrue(check_support(packages, bad))
+        for field, value in [('if', 'false'), ('continue-on-error', True)]:
+            bad = copy.deepcopy(pgrx)
+            step = next(s for s in bad['jobs']['test']['steps'] if s.get('name') == 'Test')
+            step[field] = value
+            self.assertTrue(check_support(packages, bad), 'beta tests cannot silently skip or waive failure')
+
 
     def test_version_and_upgrade_edge(self):
         self.assertIn("default_version = '0.3.1'", (ROOT / 'crates/extension/pgokf.control').read_text())
