@@ -67,6 +67,9 @@ def main():
                                                      archive=str(archive), tap=tap_name), indent=2))
     try:
         run('tap-init', ['git', '-C', str(tap), 'init', '-q'])
+        run('environment', ['brew', 'ruby', str(ROOT / 'scripts/test-homebrew-environment.rb'), f'{tap_name}/pgokf'])
+        if 'PASS: four actual formula environment composition cases' not in (out / 'environment.log').read_text():
+            raise RuntimeError('formula environment composition failed')
         run('audit', ['brew', 'audit', '--strict', f'{tap_name}/pgokf'])
         run('install', ['brew', 'install', '--build-from-source', '--verbose', probe])
         run('test', ['brew', 'test', '--verbose', probe])
