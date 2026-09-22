@@ -53,11 +53,12 @@ def main():
     formulas.mkdir()
     original = (ROOT / 'packaging/homebrew/pgokf.rb').read_text()
     (formulas / 'pgokf.rb').write_text(original)
-    probe_name = 'pgokf-packaging-probe'
+    probe_name = f'pgokf-packaging-probe-{token}'
     probe = f'{tap_name}/{probe_name}'
     # Restrict substitutions to the authenticated tuple, class and assertions.
-    local = original.replace('class Pgokf < Formula', 'class PgokfPackagingProbe < Formula')
+    local = original.replace('class Pgokf < Formula', f'class PgokfPackagingProbe{token.capitalize()} < Formula')
     local = local.replace('https://github.com/LogicOcean/pgokf/archive/refs/tags/v0.2.0.tar.gz', archive.as_uri())
+    local = local.replace(f'  url "{archive.as_uri()}"', f'  url "{archive.as_uri()}"\n  version "0.3.1"')
     local = local.replace('194441d1b4d6bd5cf5f22a39a3b6c923e9a68d7692202ff7c4bb05109df812e5', digest)
     local = local.replace("default_version = '0.2.0'", "default_version = '0.3.1'")
     local = local.replace('assert_match "0.2.0", output', 'assert_match "0.3.1", output')
