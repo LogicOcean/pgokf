@@ -47,6 +47,32 @@ class CleanupOwnership(unittest.TestCase):
                         if mode == 'occupied-receipt':
                             self.assertEqual(receipt.read_text(), 'prior evidence')
 
+class CleanupRaces(unittest.TestCase):
+    def test_inspect_and_publication_races_preserve_container(self):
+        cid = 'b' * 64
+        for mode in ('changed-container', 'inspect-failure', 'file-fsync', 'directory-fsync'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                calls = []
+                inspections = []
+                def docker(*args):
+                    calls.append(args)
+                    if args[0] != 'inspect':
+                        self.fail('destruction after ambiguous capture')
+                    inspections.append(1)
+                    if mode == 'inspect-failure':
+                        raise OSError('inspect unavailable')
+                    return json.dumps([dict(Id=cid, Created='changed' if mode == 'changed-container' and len(inspections) > 1 else 'original',
+                                            Config={'Labels': {'run': 'mine'}}, Mounts=[])])
+                syncs = []
+                def fsync(_):
+                    syncs.append(1)
+                    if mode == 'file-fsync' or mode == 'directory-fsync' and len(syncs) == 2:
+                        raise OSError('durability failed')
+                with patch.object(cleanup, 'docker', docker), patch.object(cleanup.os, 'fsync', fsync):
+                    with self.assertRaises((ValueError, OSError)):
+                        cleanup.cleanup(cid, 'run', 'mine', Path(directory) / 'receipt.json')
+                self.assertTrue(all(c[0] == 'inspect' for c in calls))
+
 
 if __name__ == '__main__':
     unittest.main()
