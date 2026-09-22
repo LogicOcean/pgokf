@@ -33,6 +33,12 @@ class HomebrewPackaging(unittest.TestCase):
         self.assertNotIn('ENV["HOMEBREW_RUSTFLAGS"] =', text)
         self.assertNotIn('ENV["RUSTFLAGS"] =', text)
 
+    def test_portable_guards_are_release_gates(self):
+        for workflow in ('ci.yml', 'packages.yml'):
+            text = (ROOT / '.github/workflows' / workflow).read_text()
+            for guard in ('test_homebrew_packaging.py', 'test_cleanup_ownership.py'):
+                self.assertIn('python3 tests/' + guard, text)
+
     def test_live_gate_cannot_fall_back_to_workspace_wrapper(self):
         text = (ROOT / 'scripts/test-homebrew-packaging.py').read_text()
         self.assertIn("'install', '--build-from-source'", text)

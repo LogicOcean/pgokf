@@ -109,6 +109,11 @@ jobs:
         with:
           ref: ${{ needs.prep.outputs.source_ref }}
 
+      - name: Portable source-packaging and cleanup guards
+        run: |
+          python3 tests/test_homebrew_packaging.py
+          python3 tests/test_cleanup_ownership.py
+
       - name: hadolint (pinned binary, checksum-verified)
         run: |
           curl -fsSL -o /usr/local/bin/hadolint \
