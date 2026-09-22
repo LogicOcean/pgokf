@@ -63,9 +63,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # --------------------------------------------------------------------------
 FROM debian:${DEBIAN_CODENAME}-slim
 
+ARG PGOKF_VERSION="0.3.1"
+
 LABEL org.opencontainers.image.title="pgokf-companions" \
       org.opencontainers.image.description="pgokf network companions: pgokf-ingest, pgokf-embed, pgokf-mcp, pgokf-web" \
       org.opencontainers.image.source="https://github.com/LogicOcean/pgokf" \
+      org.opencontainers.image.version="${PGOKF_VERSION}" \
       org.opencontainers.image.licenses="AGPL-3.0-only"
 
 # ca-certificates: the rustls trust store for TLS to PostgreSQL, object stores,

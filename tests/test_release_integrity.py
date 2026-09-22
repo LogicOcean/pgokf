@@ -282,6 +282,7 @@ class ReleaseIdentity(unittest.TestCase):
         self.assertIn(f'ghcr.io/logicocean/pgokf-companions:{version}', env_example)
         self.assertIn(f'"{version}"', read('.github/ISSUE_TEMPLATE/bug_report.yml'))
         for dockerfile in ('packaging/docker/Dockerfile', 'packaging/docker/Dockerfile.companions'):
+            self.assertIn(f'ARG PGOKF_VERSION="{version}"', read(dockerfile))
             for stale in re.findall(r'(?m)(?:pgokf|pgokf-companions):(\d+\.\d+\.\d+)(?:-pg\d+)?\b', read(dockerfile)):
                 self.assertEqual(stale, version, f'{dockerfile} example pins a stale version')
 

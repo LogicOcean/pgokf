@@ -47,7 +47,7 @@ ARG PG_TEXTSEARCH_VERSION=1.4.0
 ARG PG_SEARCH_VERSION=0.25.6
 # Extension version for the OCI label; CI passes the value read from
 # crates/extension/pgokf.control. Purely informational.
-ARG PGOKF_VERSION=""
+ARG PGOKF_VERSION="0.3.1"
 
 # --------------------------------------------------------------------------
 # Stage 1: build the extension against the matching PostgreSQL server-dev files

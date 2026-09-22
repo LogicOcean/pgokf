@@ -33,16 +33,16 @@ GNU Affero General Public License v3.0 only
 ================================================================================
 
 Used by:
-  - pgokf 0.3.0  (https://github.com/LogicOcean/pgokf)
-  - okf-parser 0.3.0  (https://github.com/LogicOcean/pgokf)
-  - okf-sync 0.3.0  (https://github.com/LogicOcean/pgokf)
-  - pgokf-companion 0.3.0  (https://github.com/LogicOcean/pgokf)
-  - pgokf-embed 0.3.0  (https://github.com/LogicOcean/pgokf)
-  - pgokf-ingest 0.3.0  (https://github.com/LogicOcean/pgokf)
-  - pgokf-mcp 0.3.0  (https://github.com/LogicOcean/pgokf)
-  - pgokf-pgconn 0.3.0  (https://github.com/LogicOcean/pgokf)
-  - pgokf-web 0.3.0  (https://github.com/LogicOcean/pgokf)
-  - pgokf-workspace 0.3.0  (https://github.com/LogicOcean/pgokf)
+  - pgokf 0.3.1  (https://github.com/LogicOcean/pgokf)
+  - okf-parser 0.3.1  (https://github.com/LogicOcean/pgokf)
+  - okf-sync 0.3.1  (https://github.com/LogicOcean/pgokf)
+  - pgokf-companion 0.3.1  (https://github.com/LogicOcean/pgokf)
+  - pgokf-embed 0.3.1  (https://github.com/LogicOcean/pgokf)
+  - pgokf-ingest 0.3.1  (https://github.com/LogicOcean/pgokf)
+  - pgokf-mcp 0.3.1  (https://github.com/LogicOcean/pgokf)
+  - pgokf-pgconn 0.3.1  (https://github.com/LogicOcean/pgokf)
+  - pgokf-web 0.3.1  (https://github.com/LogicOcean/pgokf)
+  - pgokf-workspace 0.3.1  (https://github.com/LogicOcean/pgokf)
 
 GNU AFFERO GENERAL PUBLIC LICENSE
 Version 3, 19 November 2007
