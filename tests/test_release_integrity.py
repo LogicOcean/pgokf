@@ -38,6 +38,7 @@ FIRST_PARTY = [
 # commit that also advances the Homebrew formula (docs/release-checklist.md).
 KNOWN_RELEASE_DIGESTS = {
     '0.2.0': '194441d1b4d6bd5cf5f22a39a3b6c923e9a68d7692202ff7c4bb05109df812e5',
+    '0.3.0': 'f6d7c052b402e5850ffa5de79b4bfc5b024ca4ff03a82567143c58b2a903f6af',
 }
 
 
@@ -381,18 +382,26 @@ class ReleaseIdentity(unittest.TestCase):
                         'a stale formula test assertion must be rejected')
 
     def test_homebrew_post_tag_tuple_and_rollback(self):
-        from unittest.mock import patch
         version = control_version(read('crates/extension/pgokf.control'))
-        before = read('packaging/homebrew/pgokf.rb')
-        old, digest, _ = parse_formula(before)
-        # Synthetic authenticated archive record only inside this test.
-        post = before.replace(old, version).replace(digest, 'a' * 64)
-        with patch.dict(KNOWN_RELEASE_DIGESTS, {version: 'a' * 64}):
-            self.assertEqual(check_homebrew(post, version), [])
-            self.assertTrue(check_homebrew(post.replace(
-                "default_version = '" + version + "'", "default_version = '0.2.0'"), version))
-            self.assertTrue(check_homebrew(post.replace('a' * 64, digest), version))
-            self.assertEqual(check_homebrew(before, version), [], 'complete old tuple is a valid rollback')
+        current = read('packaging/homebrew/pgokf.rb')
+        current_version, current_digest, _ = parse_formula(current)
+        self.assertEqual(current_version, version)
+        self.assertEqual(check_homebrew(current, version), [])
+
+        previous_versions = [release for release in KNOWN_RELEASE_DIGESTS if release != version]
+        self.assertTrue(previous_versions, 'a post-tag formula needs a known published rollback tuple')
+        previous = max(previous_versions, key=lambda release: tuple(map(int, release.split('.'))))
+        rollback = current.replace(version, previous).replace(
+            current_digest, KNOWN_RELEASE_DIGESTS[previous])
+        self.assertEqual(check_homebrew(rollback, version), [],
+                         'complete prior-release tuple is a valid rollback')
+        self.assertTrue(check_homebrew(
+            current.replace(current_digest, KNOWN_RELEASE_DIGESTS[previous]), version),
+            'current URL with a prior-release digest must be rejected')
+        self.assertTrue(check_homebrew(
+            current.replace(f"default_version = '{version}'",
+                            f"default_version = '{previous}'"), version),
+            'a mixed current/previous assertion tuple must be rejected')
 
     def test_homebrew_unknown_current_digest_rejected(self):
         version = control_version(read('crates/extension/pgokf.control'))
