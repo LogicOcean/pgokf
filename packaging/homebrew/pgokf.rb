@@ -6,7 +6,7 @@
 #   brew install pgokf
 #
 # Builds the extension from source against Homebrew's PostgreSQL and installs
-# the .so + control + sql into the Homebrew postgresql keg so
+# the shared library + control + sql into the Homebrew postgresql keg so
 # `CREATE EXTENSION pgokf;` works on a `brew services`-managed cluster.
 class Pgokf < Formula
   desc "Materialized PostgreSQL catalog for Open Knowledge Format bundles"
@@ -71,8 +71,10 @@ class Pgokf < Formula
     libdir = Pathname.new(Utils.safe_popen_read(pg_config, "--pkglibdir").strip)
     sharedir = Pathname.new(Utils.safe_popen_read(pg_config, "--sharedir").strip)
 
+    # PostgreSQL 16+ uses .dylib on Darwin, matching cargo-pgrx's package.
+    library = OS.mac? ? "pgokf.dylib" : "pgokf.so"
     (prefix/libdir.relative_path_from(HOMEBREW_PREFIX)).install \
-      staged/"#{libdir.relative_path_from(Pathname.new("/"))}/pgokf.so"
+      staged/"#{libdir.relative_path_from(Pathname.new("/"))}/#{library}"
 
     ext_dst = prefix/sharedir.relative_path_from(HOMEBREW_PREFIX)/"extension"
     ext_src = staged/"#{sharedir.relative_path_from(Pathname.new("/"))}/extension"

@@ -15,6 +15,7 @@ def check_policy(text):
         'ENV.append "RUSTFLAGS", "-C link-arg=-Wl,-undefined,dynamic_lookup"',
         'ENV["PGRX_HOME"] = buildpath/"pgrx-home"',
         'system cargo_pgrx, "pgrx", "package"',
+        'library = OS.mac? ? "pgokf.dylib" : "pgokf.so"',
     ]
     return [line for line in required if line not in text]
 
