@@ -73,6 +73,23 @@ class CleanupRaces(unittest.TestCase):
                         cleanup.cleanup(cid, 'run', 'mine', Path(directory) / 'receipt.json')
                 self.assertTrue(all(c[0] == 'inspect' for c in calls))
 
+    def test_invalid_nonce_and_duplicate_claims_refuse_before_deletion(self):
+        cid = 'c' * 64
+        container = dict(Id=cid, Created='original', Config={'Labels': {'run': 'mine'}},
+                         Mounts=[dict(Type='volume', Name='owned')])
+        volume = dict(Name='owned', CreatedAt='today', Labels={'run': 'mine'})
+        for nonce, copies in [(None, 1), ('', 1), ('bad', 1), ('d' * 32, 2)]:
+            with self.subTest(nonce=nonce, copies=copies), tempfile.TemporaryDirectory() as directory:
+                proof = Path(directory) / 'proof.json'
+                proof.write_text(json.dumps(dict(nonce=nonce, volumes=[volume] * copies,
+                    container=cleanup.identity(container), ownership_label={'run': 'mine'})))
+                def docker(*args):
+                    if args[0] == 'inspect': return json.dumps([container])
+                    if args[:2] == ('volume', 'inspect'): return json.dumps([volume])
+                    self.fail('destruction with invalid creation proof')
+                with patch.object(cleanup, 'docker', docker), self.assertRaises(ValueError):
+                    cleanup.cleanup(cid, 'run', 'mine', Path(directory) / 'delete.json', proof)
+
 
 if __name__ == '__main__':
     unittest.main()

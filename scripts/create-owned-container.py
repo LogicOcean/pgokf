@@ -17,6 +17,8 @@ spec.loader.exec_module(cleanup)
 
 
 def create(key, value, receipt, image, *args):
+    if not key or not value or key == 'pgokf.creation-nonce':
+        raise ValueError('nonempty independent ownership label required')
     if Path(receipt).exists():
         raise FileExistsError(receipt)
     nonce = uuid.uuid4().hex

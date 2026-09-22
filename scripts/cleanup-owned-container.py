@@ -53,6 +53,11 @@ def cleanup(container_id, key, value, receipt, creation=None):
     owned = []
     if creation:
         proof = json.loads(Path(creation).read_text())
+        if not isinstance(proof.get('nonce'), str) or not re.fullmatch(r'[a-f0-9]{32}', proof['nonce']):
+            raise ValueError('invalid volume creation nonce')
+        names = [volume['Name'] for volume in proof['volumes']]
+        if len(names) != len(set(names)):
+            raise ValueError('ambiguous duplicate volume creation records')
         if proof['container'] != identity(container) or proof['ownership_label'] != {key: value}:
             raise ValueError('creation receipt does not bind this container')
         for volume in proof['volumes']:
