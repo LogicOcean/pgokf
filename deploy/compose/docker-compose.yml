@@ -30,7 +30,7 @@ x-pg-url: &writer-url "postgresql://${PGOKF_WRITER_ROLE:-okf_writer}:${PGOKF_WRI
 
 services:
   db:
-    image: ${PGOKF_IMAGE:?PGOKF_IMAGE is required (e.g. ghcr.io/logicocean/pgokf:0.2.0-pg18 or a locally built tag)}
+    image: ${PGOKF_IMAGE:?PGOKF_IMAGE is required (e.g. ghcr.io/logicocean/pgokf:0.3.0-pg18 or a locally built tag)}
     container_name: pgokf-db
     restart: always
     # PostgreSQL parallel workers and the BM25 index build share memory through
@@ -106,7 +106,7 @@ services:
         max-file: "5"
 
   embed:
-    image: ${PGOKF_COMPANIONS_IMAGE:?PGOKF_COMPANIONS_IMAGE is required (e.g. ghcr.io/logicocean/pgokf-companions:0.2.0 or a locally built tag)}
+    image: ${PGOKF_COMPANIONS_IMAGE:?PGOKF_COMPANIONS_IMAGE is required (e.g. ghcr.io/logicocean/pgokf-companions:0.3.0 or a locally built tag)}
     container_name: pgokf-embed
     restart: always
     depends_on:

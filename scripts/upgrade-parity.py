@@ -50,6 +50,11 @@ def main():
     for source in (ROOT / 'crates/extension/sql').glob('pgokf--*--*.sql'):
         if (extension / source.name).read_bytes() != source.read_bytes():
             raise AssertionError(f'installed upgrade differs from checkout: {source.name}')
+    # A clean release commits its generated fresh install script. pgrx's
+    # entity ordering is unstable across invocations, so the committed
+    # snapshot cannot byte-match a regeneration; it is validated semantically
+    # below (a catalog created through it must inventory-equal fresh).
+    committed_install = ROOT / 'crates/extension/sql' / f'pgokf--{version}.sql'
     if not (extension / 'pgokf--0.2.0.sql').is_file():
         raise AssertionError('install the authentic 0.2.0 install SQL first (see release checklist)')
     # Short socket path; private permissions and no TCP listener. Ignore ambient
@@ -77,6 +82,22 @@ def main():
             assert sql('fresh', 'SELECT pgokf.version();') == version
             expected = sql('fresh', inventory)
             print(f'Fresh {version}: {len(expected.splitlines())} inventory rows', flush=True)
+
+            if committed_install.is_file():
+                # The committed install script must not be a divergent
+                # snapshot: a catalog created through it inventories exactly
+                # like one created through the freshly generated script.
+                installed = extension / committed_install.name
+                backup = installed.read_bytes()
+                try:
+                    installed.write_bytes(committed_install.read_bytes())
+                    sql('postgres', 'CREATE DATABASE fresh_committed;')
+                    sql('fresh_committed', 'CREATE EXTENSION pgokf;')
+                    compare(expected, sql('fresh_committed', inventory), 'committed install script')
+                    sql('postgres', 'DROP DATABASE fresh_committed;')
+                finally:
+                    installed.write_bytes(backup)
+                print('committed install script: catalog parity passed', flush=True)
 
             def drop_catalog(db):
                 sql('postgres', f'DROP DATABASE {db};')
@@ -119,23 +140,37 @@ def main():
                             print(label + ': UNSAFE ACCEPTANCE', flush=True)
                         drop_catalog('hostile')
                         sql('postgres', 'DROP ROLE hostile_other;')
-            for route in ('normal', 'missing', 'unowned', 'body', 'member_body', 'acl_order'):
-                sql('postgres', f'CREATE DATABASE {route};')
-                sql(route, "CREATE EXTENSION pgokf VERSION '0.2.0';" + seed)
+            def fingerprint(db):
                 # Pin the old column names: additive new columns are allowed;
                 # every old value in every populated table must survive.
-                columns = json.loads(sql(route, """
+                columns = json.loads(sql(db, """
                     SELECT json_object_agg(table_name, cols) FROM (
                       SELECT c.table_name, string_agg(quote_ident(c.column_name), ',' ORDER BY c.ordinal_position) cols
                       FROM information_schema.columns c
                       WHERE c.table_schema = 'pgokf' AND c.table_name IN
                         ('bundles','concepts','concept_source','concept_metadata') GROUP BY c.table_name
                     ) s;"""))
-                fingerprint = '\nUNION ALL\n'.join(
+                fp = '\nUNION ALL\n'.join(
                     f"SELECT '{table}:' || row_to_json(r)::text FROM (SELECT {cols} FROM pgokf.{table}) r"
                     for table, cols in sorted(columns.items()))
-                fingerprint = f'SELECT * FROM ({fingerprint}) rows ORDER BY 1;'
-                before = sql(route, fingerprint)
+                return f'SELECT * FROM ({fp}) rows ORDER BY 1;'
+
+            def check_upgrade_invariants(route, before, fp):
+                assert sql(route, "SELECT extversion FROM pg_extension WHERE extname='pgokf';") == version
+                compare(before, sql(route, fp), route + ' data')
+                assert sql(route, "SELECT state || ':' || array_to_string(reason_codes, ',') FROM pgokf.bundle_freshness;") == 'stale:legacy_pre_0.3.0'
+                compare(expected, sql(route, inventory), route)
+                evidence = sql(route, 'SELECT last_reconciled_at IS NULL FROM pgokf.bundle_freshness;')
+                sql(route, "SELECT pgokf.register_bundle_content('upgrade-fixture', ARRAY['entry.md'], "
+                    "ARRAY[convert_to('---\ntype: Concept\ntitle: Refreshed fixture\n---\nBody', 'UTF8')]);")
+                assert sql(route, 'SELECT state FROM pgokf.bundle_freshness;') == 'stale'
+                assert sql(route, 'SELECT last_reconciled_at IS NULL FROM pgokf.bundle_freshness;') == evidence == 't'
+
+            for route in ('normal', 'missing', 'unowned', 'body', 'member_body', 'acl_order'):
+                sql('postgres', f'CREATE DATABASE {route};')
+                sql(route, "CREATE EXTENSION pgokf VERSION '0.2.0';" + seed)
+                fp = fingerprint(route)
+                before = sql(route, fp)
                 sql(route, "ALTER EXTENSION pgokf UPDATE TO '0.3.0-dev';")
                 if route != 'normal':
                     for signature in ADOPT:
@@ -150,16 +185,22 @@ def main():
                         if route == 'missing':
                             sql(route, f'DROP FUNCTION {signature};')
                 sql(route, 'ALTER EXTENSION pgokf UPDATE;')
-                assert sql(route, "SELECT extversion FROM pg_extension WHERE extname='pgokf';") == version
-                compare(before, sql(route, fingerprint), route + ' data')
-                assert sql(route, "SELECT state || ':' || array_to_string(reason_codes, ',') FROM pgokf.bundle_freshness;") == 'stale:legacy_pre_0.3.0'
-                compare(expected, sql(route, inventory), route)
-                evidence = sql(route, 'SELECT last_reconciled_at IS NULL FROM pgokf.bundle_freshness;')
-                sql(route, "SELECT pgokf.register_bundle_content('upgrade-fixture', ARRAY['entry.md'], "
-                    "ARRAY[convert_to('---\ntype: Concept\ntitle: Refreshed fixture\n---\nBody', 'UTF8')]);")
-                assert sql(route, 'SELECT state FROM pgokf.bundle_freshness;') == 'stale'
-                assert sql(route, 'SELECT last_reconciled_at IS NULL FROM pgokf.bundle_freshness;') == evidence == 't'
+                check_upgrade_invariants(route, before, fp)
                 print(f'{route}: parity, data preservation, refresh preserves staleness passed', flush=True)
+                drop_catalog(route)
+            # Every deployed development point version reaches the final
+            # release through ordinary bare UPDATE and converges with fresh.
+            for point in ('0.3.0-dev', '0.3.0-dev1', '0.3.0-dev2', '0.3.0-dev3'):
+                route = 'point_' + point.rsplit('-', 1)[1]
+                sql('postgres', f'CREATE DATABASE {route};')
+                sql(route, "CREATE EXTENSION pgokf VERSION '0.2.0';" + seed)
+                fp = fingerprint(route)
+                before = sql(route, fp)
+                sql(route, f"ALTER EXTENSION pgokf UPDATE TO '{point}';")
+                assert sql(route, "SELECT extversion FROM pg_extension WHERE extname='pgokf';") == point
+                sql(route, 'ALTER EXTENSION pgokf UPDATE;')
+                check_upgrade_invariants(route, before, fp)
+                print(f'{route}: {point} reaches {version} with parity', flush=True)
                 drop_catalog(route)
             # Security-canonical conflicts must still fail at PostgreSQL's
             # signature/membership checks, with the entire update rolled back.

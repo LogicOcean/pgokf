@@ -33,7 +33,7 @@ Name:           %{sname}_%{pgmajorversion}
 # single source of truth for the extension version. build-deb.sh and the Docker
 # job read that file directly; a spec is parsed before Source0 is unpacked, so
 # this one cannot -- bump it by hand with every release.
-Version:        0.2.0
+Version:        0.3.0
 Release:        1%{?dist}
 Summary:        Materialized PostgreSQL catalog for Open Knowledge Format bundles
 
@@ -101,6 +101,16 @@ cp -a target/release/%{sname}-pg%{pgmajorversion}/. %{buildroot}/
 %{pginstdir}/share/extension/%{sname}--*--*.sql
 
 %changelog
+* Tue Sep 22 2026 David Saroka <david.saroka@gmail.com> - 0.3.0-1
+- Release 0.3.0: generic producer capabilities - catalog generations and
+  publication fences, bundle/concept freshness with transitive dependency
+  invalidation, the durable catalog-change outbox (pgokf_dispatcher role),
+  generation-bound typed relationships, embedding provenance with a
+  compare-and-set setter, freshness-aware search and workspace plugins,
+  refresh-cadence and repository-registry controls on the web admin page.
+  Upgrade chain pgokf--0.2.0--0.3.0-dev.sql through
+  pgokf--0.3.0-dev3--0.3.0.sql; additive and data-preserving.
+
 * Tue Sep 08 2026 David Saroka <david.saroka@gmail.com> - 0.2.0-1
 - Release 0.2.0: Agent Skills packages (SKILL.md with scripts/, references/,
   assets/) are catalog content: virtual Skill/Script/Reference concepts, exact

@@ -472,32 +472,63 @@ fn default_version_matches_the_crate_version() {
 
 /// A development-cycle default version is a point version: `MAJOR.MINOR.PATCH`
 /// optionally followed by `-devN` with N >= 1 (`0.3.0-dev1`, `0.3.0-dev2`,
-/// ...). `PostgreSQL` treats extension version names as opaque strings and
-/// finds update paths by exact `pgokf--<from>--<to>.sql` file-name matching,
-/// so the suffix needs no ordering semantics - but the convention keeps the
-/// chain readable and collapses into the clean tag at finalization.
+/// ...). A clean `MAJOR.MINOR.PATCH` with no suffix is a finalized release
+/// version and is equally valid. `PostgreSQL` treats extension version names
+/// as opaque strings and finds update paths by exact
+/// `pgokf--<from>--<to>.sql` file-name matching, so the suffix needs no
+/// ordering semantics - but the convention keeps the chain readable and
+/// collapses into the clean tag at finalization.
 #[test]
 fn default_version_follows_the_point_version_convention() {
     // Arrange
     let default_version = control_default_version();
 
     // Act / Assert
-    let (core, dev) = match default_version.split_once('-') {
+    if let Err(reason) = check_point_version_convention(&default_version) {
+        panic!("default_version {default_version}: {reason}");
+    }
+}
+
+/// Validate the point-version shape: `MAJOR.MINOR.PATCH` (a finalized
+/// release) or `MAJOR.MINOR.PATCH-devN` with N >= 1 (a development point).
+fn check_point_version_convention(version: &str) -> Result<(), String> {
+    let (core, dev) = match version.split_once('-') {
         Some((core, suffix)) => (core, Some(suffix)),
-        None => (default_version.as_str(), None),
+        None => (version, None),
     };
     let parts: Vec<&str> = core.split('.').collect();
-    assert!(
-        parts.len() == 3 && parts.iter().all(|part| part.parse::<u32>().is_ok()),
-        "default_version {default_version} is not MAJOR.MINOR.PATCH[-devN]",
-    );
+    if !(parts.len() == 3 && parts.iter().all(|part| part.parse::<u32>().is_ok())) {
+        return Err(format!("{version} is not MAJOR.MINOR.PATCH[-devN]"));
+    }
     if let Some(suffix) = dev {
-        let number = suffix.strip_prefix("dev").unwrap_or_else(|| {
-            panic!("default_version {default_version}: pre-release suffix must be devN")
-        });
+        let number = suffix
+            .strip_prefix("dev")
+            .ok_or_else(|| format!("{version}: pre-release suffix must be devN"))?;
+        if !number.parse::<u32>().is_ok_and(|n| n >= 1) {
+            return Err(format!("{version}: dev point numbers start at 1"));
+        }
+    }
+    Ok(())
+}
+
+/// Final release versions are first-class point versions: a clean
+/// `MAJOR.MINOR.PATCH` validates, and the dev-suffix rules are not weakened -
+/// dev numbering still starts at 1 and no other pre-release suffix is
+/// accepted.
+#[test]
+fn final_release_versions_follow_the_point_version_convention() {
+    // Act / Assert: clean releases and proper dev points are recognized.
+    for good in ["0.3.0", "0.2.0", "1.0.0", "0.3.0-dev1", "0.3.0-dev3"] {
         assert!(
-            number.parse::<u32>().is_ok_and(|n| n >= 1),
-            "default_version {default_version}: dev point numbers start at 1",
+            check_point_version_convention(good).is_ok(),
+            "{good} must be a valid point version",
+        );
+    }
+    // The dev rules are unchanged: no dev0, no bare -dev, no other suffixes.
+    for bad in ["0.3.0-dev0", "0.3.0-dev", "0.3.0-rc1", "0.3", "0.3.0.1"] {
+        assert!(
+            check_point_version_convention(bad).is_err(),
+            "{bad} must be rejected",
         );
     }
 }
@@ -662,11 +693,11 @@ fn appended_step_without_default_bump_is_rejected() {
 #[test]
 fn disconnected_upgrade_cycle_is_rejected() {
     let edges = vec![
-        ("0.1.0".to_string(), "0.3.0-dev3".to_string()),
+        ("0.1.0".to_string(), "0.3.0".to_string()),
         ("orphan-a".to_string(), "orphan-b".to_string()),
         ("orphan-b".to_string(), "orphan-a".to_string()),
     ];
-    let result = check_upgrade_chain_terminates_at(&edges, CHAIN_ROOT, "0.3.0-dev3");
+    let result = check_upgrade_chain_terminates_at(&edges, CHAIN_ROOT, "0.3.0");
     assert!(
         result.is_err(),
         "unreachable upgrade edges must be rejected"
@@ -676,20 +707,130 @@ fn disconnected_upgrade_cycle_is_rejected() {
 #[test]
 fn reachable_cycle_without_a_path_to_default_is_rejected() {
     let edges = vec![
-        ("0.1.0".to_string(), "0.3.0-dev3".to_string()),
+        ("0.1.0".to_string(), "0.3.0".to_string()),
         ("0.1.0".to_string(), "stranded-a".to_string()),
         ("stranded-a".to_string(), "stranded-b".to_string()),
         ("stranded-b".to_string(), "stranded-a".to_string()),
     ];
-    assert!(check_upgrade_chain_terminates_at(&edges, CHAIN_ROOT, "0.3.0-dev3").is_err());
+    assert!(check_upgrade_chain_terminates_at(&edges, CHAIN_ROOT, "0.3.0").is_err());
 }
 
 #[test]
 fn missing_and_renamed_upgrade_targets_are_rejected() {
-    let valid = vec![("0.1.0".to_string(), "0.3.0-dev2".to_string())];
-    assert!(check_upgrade_chain_terminates_at(&valid, CHAIN_ROOT, "0.3.0-dev3").is_err());
+    let valid = vec![("0.1.0".to_string(), "0.3.0-dev3".to_string())];
+    assert!(check_upgrade_chain_terminates_at(&valid, CHAIN_ROOT, "0.3.0").is_err());
     let renamed = vec![("0.1.0".to_string(), "0.3.0-typo".to_string())];
-    assert!(check_upgrade_chain_terminates_at(&renamed, CHAIN_ROOT, "0.3.0-dev2").is_err());
+    assert!(check_upgrade_chain_terminates_at(&renamed, CHAIN_ROOT, "0.3.0-dev3").is_err());
+}
+
+/// The finalization step of a point-versioned cycle, locked as fixtures: the
+/// terminal `devN -> X.Y.Z` edge must exist and be named exactly, and the
+/// clean release it lands on is the graph's terminal - no script may be
+/// sourced from it.
+#[test]
+fn finalization_edge_fixtures() {
+    // Arrange: a dev chain that stops at dev3 without the finalization edge.
+    let dev_chain: Vec<(String, String)> = vec![
+        ("0.1.0".to_string(), "0.3.0-dev".to_string()),
+        ("0.3.0-dev".to_string(), "0.3.0-dev1".to_string()),
+        ("0.3.0-dev1".to_string(), "0.3.0-dev2".to_string()),
+        ("0.3.0-dev2".to_string(), "0.3.0-dev3".to_string()),
+    ];
+    let mut finalized = dev_chain.clone();
+    finalized.push(("0.3.0-dev3".to_string(), "0.3.0".to_string()));
+
+    // Act
+    let missing = check_upgrade_chain_terminates_at(&dev_chain, CHAIN_ROOT, "0.3.0");
+    let complete = check_upgrade_chain_terminates_at(&finalized, CHAIN_ROOT, "0.3.0");
+    let mut renamed_edges = dev_chain.clone();
+    renamed_edges.push(("0.3.0-dev3".to_string(), "0.3.0-final".to_string()));
+    let renamed = check_upgrade_chain_terminates_at(&renamed_edges, CHAIN_ROOT, "0.3.0");
+    let mut sourced_edges = finalized.clone();
+    sourced_edges.push(("0.3.0".to_string(), "0.3.1".to_string()));
+    let sourced = check_upgrade_chain_terminates_at(&sourced_edges, CHAIN_ROOT, "0.3.0");
+
+    // Assert
+    assert!(
+        missing.is_err(),
+        "a dev chain missing its finalization edge must be rejected"
+    );
+    assert!(
+        complete.is_ok(),
+        "the finalized chain must validate: {complete:?}"
+    );
+    assert!(
+        renamed.is_err(),
+        "a finalization edge under a renamed target must be rejected"
+    );
+    assert!(
+        sourced.is_err(),
+        "a script sourced from the final release must be rejected"
+    );
+}
+
+/// The terminal edge that closed the 0.3.0 development cycle into the clean
+/// 0.3.0 release is a pure receipt: it re-registers the dump relations and
+/// touches nothing else - no object redefinition, no data rewrite. The file
+/// is historical once shipped; this test keeps it minimal forever.
+#[test]
+fn the_0_3_0_finalization_edge_is_a_minimal_receipt() {
+    // Arrange
+    let script = read_to_string(&crate_dir().join("sql").join("pgokf--0.3.0-dev3--0.3.0.sql"));
+
+    // Act: strip line comments and split into normalized statements.
+    let executable: String = script
+        .lines()
+        .map(|line| line.split("--").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_uppercase();
+    let statements: Vec<String> = executable
+        .split(';')
+        .map(|statement| statement.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|statement| !statement.is_empty())
+        .collect();
+
+    // Assert: exactly one statement, the standing dump-relation receipt.
+    assert_eq!(
+        statements,
+        ["SELECT PGOKF_PRIVATE.REGISTER_DUMP_RELATIONS()"],
+        "pgokf--0.3.0-dev3--0.3.0.sql must be a minimal receipt - the dump-relation \
+         registration and nothing else; finalization rewrites no object and no data",
+    );
+}
+
+/// A finalized (clean, suffix-free) `default_version` commits its fresh
+/// install script: `sql/pgokf--<default_version>.sql` is generated by the
+/// pgrx schema workflow and checked in, so the release tree carries the
+/// canonical base install the PGXN artifact points at and the parity harness
+/// validates semantically (pgrx's entity ordering is unstable across
+/// invocations, so equality is the resulting catalog, not bytes). Mid-cycle
+/// (dev point versions) the install script is a build product and is not
+/// committed.
+#[test]
+fn a_clean_release_commits_its_fresh_install_script() {
+    // Arrange
+    let default_version = control_default_version();
+    if default_version.contains('-') {
+        // A dev point version: generated at build time, not committed.
+        return;
+    }
+
+    // Act / Assert
+    let script = crate_dir()
+        .join("sql")
+        .join(format!("pgokf--{default_version}.sql"));
+    assert!(
+        script.is_file(),
+        "clean release {default_version} must commit its generated install script \
+         sql/pgokf--{default_version}.sql (cargo pgrx schema); the parity harness \
+         applies it in a scratch database and compares the resulting catalog",
+    );
+    let content = read_to_string(&script);
+    assert!(
+        content.contains("CREATE EXTENSION"),
+        "sql/pgokf--{default_version}.sql does not look like a pgrx-generated install script",
+    );
 }
 
 /// The `0.3.0-dev -> 0.3.0-dev1` script receipts the objects that entered the

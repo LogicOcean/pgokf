@@ -10,11 +10,14 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-22
+
 **Generic producer capabilities: catalog generations, freshness, a durable
 change-event outbox, generation-bound typed relationships, and
-freshness-aware workspace plugins** (the schema step toward **0.3.0**;
-development builds ship as point versions `0.3.0-dev1`, `0.3.0-dev2`, ... -
-see "Development point versions" in
+freshness-aware workspace plugins** (the schema step to **0.3.0**; the
+development cycle shipped as point versions `0.3.0-dev`, `0.3.0-dev1`, ...
+`0.3.0-dev3`, each reaching the release through ordinary
+`ALTER EXTENSION pgokf UPDATE` - see "Development point versions" in
 [docs/api-stability.md](docs/api-stability.md)). Everything here is
 producer-neutral: the catalog manages generic bundles, concepts, paths, and
 opaque producer revisions only. `ALTER EXTENSION pgokf UPDATE` is additive
@@ -33,7 +36,21 @@ semantically until the embedder rewrites them.
   Equivalent ACL ordering compares equal.
 - Provide the canonical native macOS workspace test recipe with dynamic symbol
   lookup and the C locale. Require PG19 test and packaging coverage to fail
-  closed when provisioning is unavailable; retain the untagged dev3 tip.
+  closed when provisioning is unavailable.
+- Supply the trailing type-filter parameter in the preloaded BM25 planner
+  regression, restoring the live provider gate after the query gained `$12`.
+- **Development upgrade readiness (`0.3.0-dev3`).** Early `0.3.0-dev`
+  installations missing the three later registry/schedule functions now pass
+  the `dev -> dev1` membership probe: both lookups use `to_regprocedure`,
+  because SQL does not guarantee short-circuit evaluation of `AND`. The
+  original edge must be repaired before those installations can reach a
+  later edge; the new `dev2 -> dev3` receipt changes no stored object or data.
+  A checked-in scratch-cluster parity gate covers normal, missing-object and
+  non-member adoption routes, data preservation, and deliberate catalog drift.
+  The API graph guard also rejects disconnected and stranded cycles, with
+  negative tests.
+- Correct release-checklist coverage counts for the development surface and
+  document the repeatable parity and mutation gate.
 
 ### Added
 
@@ -578,21 +595,6 @@ leaving a plain document.
   on. It was read-only in every configuration before this release.
 
 ### Fixed
-
-- Supply the trailing type-filter parameter in the preloaded BM25 planner
-  regression, restoring the live provider gate after the query gained `$12`.
-- **Development upgrade readiness (`0.3.0-dev3`).** Early `0.3.0-dev`
-  installations missing the three later registry/schedule functions now pass
-  the `dev -> dev1` membership probe: both lookups use `to_regprocedure`,
-  because SQL does not guarantee short-circuit evaluation of `AND`. The
-  original edge must be repaired before those installations can reach a
-  later edge; the new `dev2 -> dev3` receipt changes no stored object or data.
-  A checked-in scratch-cluster parity gate covers normal, missing-object and
-  non-member adoption routes, data preservation, and deliberate catalog drift.
-  The API graph guard also rejects disconnected and stranded cycles, with
-  negative tests.
-- Correct release-checklist coverage counts for the development surface and
-  document the repeatable parity and mutation gate.
 
 - Building a BM25 index quoted the `default_text_search_config` value with a
   backslash-escaped quote (`\'`), which PostgreSQL refuses when
@@ -1690,7 +1692,8 @@ queries, native full-text search, and link-graph traversal.
 - The `pgokf_private` schema and its `config` table are readable and writable
   only by the extension owner and `pgokf_admin`; readers cannot see policy.
 
-[Unreleased]: https://github.com/LogicOcean/pgokf/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/LogicOcean/pgokf/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/LogicOcean/pgokf/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/LogicOcean/pgokf/compare/v0.1.16...v0.2.0
 [0.1.16]: https://github.com/LogicOcean/pgokf/compare/v0.1.15...v0.1.16
 [0.1.15]: https://github.com/LogicOcean/pgokf/compare/v0.1.14...v0.1.15

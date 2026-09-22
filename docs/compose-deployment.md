@@ -49,8 +49,8 @@ attach to it.
   architecture; see [packaging/docker/README.md](https://github.com/LogicOcean/pgokf/blob/main/packaging/docker/README.md)):
 
   ```bash
-  docker build -f packaging/docker/Dockerfile --build-arg PG_MAJOR=18 -t pgokf:0.2.0-pg18 .
-  docker build -f packaging/docker/Dockerfile.companions -t pgokf-companions:0.2.0 .
+  docker build -f packaging/docker/Dockerfile --build-arg PG_MAJOR=18 -t pgokf:0.3.0-pg18 .
+  docker build -f packaging/docker/Dockerfile.companions -t pgokf-companions:0.3.0 .
   ```
 
 - An OpenAI-compatible embeddings endpoint if you want semantic / hybrid

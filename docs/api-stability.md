@@ -254,13 +254,17 @@ statements must be idempotent - `CREATE OR REPLACE`, guarded `DO` blocks -
 and must adopt hand-applied copies into extension membership.
 
 **Collapse at finalization.** When the cycle closes, `default_version`
-becomes the clean `0.3.0`, the install script regenerates under that name,
+becomes the clean `0.3.0`, the install script regenerates under that name
+and is committed (pgrx's entity ordering is unstable across invocations, so
+the committed snapshot is validated by the catalog it produces, not by
+byte-equality with a regeneration),
 and one terminal `pgokf--0.3.0-devN--0.3.0.sql` script (a no-op beyond the
 standing `register_dump_relations()` call) lets point-versioned deployments
 reach the release through the same machinery. The released chain from the
 previous tag then runs `... -> 0.2.0 -> 0.3.0-dev -> 0.3.0-dev1 -> ... -> 0.3.0`; the
 fresh-install-vs-upgrade parity harness proves the two routes converge
-object-by-object.
+object-by-object, and that every deployed point version reaches the release
+through a bare `ALTER EXTENSION pgokf UPDATE`.
 
 ## Deprecation process
 

@@ -143,8 +143,8 @@ The extension ships forward-compatible upgrade scripts named
 script as `pgokf--<crate-version>.sql` and copies every upgrade script
 alongside it, so the update path is available without any manual step. The
 shipped chain runs one script per step from `0.1.0 → 0.1.1` through
-`0.1.16 → 0.2.0` and on into the point-versioned development line
-(`0.2.0 → 0.3.0-dev → 0.3.0-dev1 → …`; see "Development point versions" in
+`0.1.16 → 0.2.0` and on through the point-versioned development line
+(`0.2.0 → 0.3.0-dev → 0.3.0-dev1 → … → 0.3.0`; see "Development point versions" in
 [api-stability.md](api-stability.md)) to the current `default_version`.
 
 > **0.1.3 was a breaking pre-release re-model.** The `pgokf.concept_provenance`
@@ -180,7 +180,7 @@ SELECT md5(string_agg(id||':'||file_hash,',' ORDER BY bundle_id,id)) FROM pgokf.
 > matching full install script; until then, target the version explicitly with
 > `UPDATE TO`.
 
-### Repeatable development-tip parity gate
+### Repeatable upgrade-parity gate
 
 For this PG18 gate, after installing the current checkout with
 `cargo pgrx install`, place the
@@ -198,10 +198,15 @@ python3 scripts/upgrade-parity.py --pg-config "$PG_CONFIG"
 
 The harness starts and removes its own local scratch cluster; it accepts no
 production connection. It checks the installed upgrade scripts against this
-checkout, then compares fresh installation with normal, early-dev (missing
+checkout (a committed fresh install script must yield an identical catalog -
+pgrx's entity ordering is unstable across invocations, so that comparison is
+the resulting inventory, not bytes),
+then compares fresh installation with normal, early-dev (missing
 functions), hand-applied (non-member functions), compatible body drift in
 members and nonmembers, and reordered ACL update routes from 0.2.0
-through every development edge to `default_version`. Each route starts with
+through every development edge to `default_version`, plus one route per
+deployed development point version (dev, dev1, dev2, dev3) reaching the
+release through a bare `ALTER EXTENSION pgokf UPDATE`. Each route starts with
 independent API roles, preserves all old columns of populated bundle, concept,
 metadata and source rows, and verifies legacy bundles remain stale even after
 a content resync. The [adoption policy](api-stability.md#development-function-adoption-security-policy)
