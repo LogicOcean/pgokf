@@ -73,6 +73,10 @@ def main():
             raise RuntimeError('formula environment composition failed')
         run('audit', ['brew', 'audit', '--strict', f'{tap_name}/pgokf'])
         run('install', ['brew', 'install', '--build-from-source', '--verbose', probe])
+        prefix = Path(subprocess.check_output(['brew', '--prefix', probe], env=env, text=True).strip())
+        shutil.copytree(prefix, out / 'installed', symlinks=True)
+        library, = (out / 'installed').glob('lib/**/pgokf.so')
+        run('mach-o', ['otool', '-l', str(library)])
         run('test', ['brew', 'test', '--verbose', probe])
         if hashlib.sha256(archive.read_bytes()).hexdigest() != digest:
             raise RuntimeError('immutable source archive changed')
