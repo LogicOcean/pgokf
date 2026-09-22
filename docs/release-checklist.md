@@ -388,3 +388,9 @@ gh release create v0.3.1 --verify-tag --title 'pgokf 0.3.1' \
 | Upgrade | `ALTER EXTENSION … UPDATE` (§5) | version advances, no data loss |
 | Packaging | `cargo pgrx package` | tree per major |
 | Release | version bump, tag, PGXN | tag == control == crate version |
+
+Before tagging, run the clean-commit arm64 macOS source-mechanics gate
+`scripts/test-homebrew-packaging.py NEW_EVIDENCE_DIRECTORY`, plus the portable
+`tests/test_homebrew_packaging.py` and `tests/test_cleanup_ownership.py` guards.
+Retain the permanent cleanup evidence limitation in
+[the recovery record](releases/0.3.1-recovery.md#permanent-historical-cleanup-evidence-limitation).

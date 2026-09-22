@@ -22,6 +22,8 @@ jobs:
           python3 -m pip install PyYAML==6.0.3
           python3 tests/test_postgres_pin.py
           python3 tests/test_recovery.py
+          python3 tests/test_homebrew_packaging.py
+          python3 tests/test_cleanup_ownership.py
           python3 tests/test_ci_coverage.py
           python3 tests/test_release_integrity.py
           python3 tests/test_release_tools.py
