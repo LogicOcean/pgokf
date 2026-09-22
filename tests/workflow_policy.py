@@ -12,7 +12,7 @@ def effective_matrix(matrix):
     unmatched includes create standalone jobs (including an excluded leg).
     """
     axes = {k: v for k, v in matrix.items() if k not in ('include', 'exclude')}
-    original = [dict(zip(axes, values)) for values in product(*axes.values())]
+    original = [dict(zip(axes, values)) for values in product(*axes.values())] if axes else []
     original = [row for row in original if not any(
         all(row.get(k) == v for k, v in exclusion.items())
         for exclusion in matrix.get('exclude', []))]

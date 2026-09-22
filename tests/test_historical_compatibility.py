@@ -10,6 +10,17 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class PublicationEligibility(unittest.TestCase):
+    def test_current_tooling_checkout_contract(self):
+        workflow = yaml.safe_load((ROOT / '.github/workflows/pgrx-test.yml').read_text())
+        steps = workflow['jobs']['test']['steps']
+        checkouts = [s for s in steps if s.get('uses', '').startswith('actions/checkout@')]
+        self.assertEqual([s.get('with') for s in checkouts], [
+            {'ref': '${{ inputs.source_ref || github.sha }}'},
+            {'ref': '${{ github.sha }}', 'path': 'release-tools'}])
+        for step in checkouts:
+            self.assertNotIn('if', step)
+            self.assertNotIn('continue-on-error', step)
+
     def test_historical_refusal_and_unreachable_artifacts(self):
         workflow = yaml.safe_load((ROOT / '.github/workflows/packages.yml').read_text())
         jobs = workflow['jobs']

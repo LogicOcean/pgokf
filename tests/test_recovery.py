@@ -102,6 +102,8 @@ class Recovery(unittest.TestCase):
         matrix = {'pg': [18], 'arch': ['amd64', 'arm64'],
                   'exclude': [{'arch': 'arm64'}],
                   'include': [{'pg': 18, 'runner': 'linux'}, {'pg': 19, 'image_tag': '19beta3'}]}
+        self.assertEqual(effective_matrix({'include': [{'arch': 'amd64'}, {'arch': 'arm64'}]}),
+                         [{'arch': 'amd64'}, {'arch': 'arm64'}])
         self.assertEqual(effective_matrix(matrix), [
             {'pg': 18, 'arch': 'amd64', 'runner': 'linux'}, {'pg': 19, 'image_tag': '19beta3'}])
 
