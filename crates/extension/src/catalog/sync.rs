@@ -1892,22 +1892,22 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
     struct TempBundle {
         root: PathBuf,
+        // TempDir allocates exclusively and owns cleanup for this one directory.
+        _directory: tempfile::TempDir,
     }
 
     impl TempBundle {
         fn new() -> Self {
-            let nonce = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("clock before epoch")
-                .as_nanos();
-            let root =
-                std::env::temp_dir().join(format!("pgokf-sync-{}-{nonce}", std::process::id()));
-            fs::create_dir_all(&root).expect("create temp bundle root");
-            Self { root }
+            let directory = tempfile::Builder::new()
+                .prefix("pgokf-sync-")
+                .tempdir()
+                .expect("create exclusive temp bundle root");
+            Self {
+                root: directory.path().to_path_buf(),
+                _directory: directory,
+            }
         }
 
         fn write(&self, relative: &str, contents: &str) {
@@ -1928,10 +1928,76 @@ mod tests {
         }
     }
 
-    impl Drop for TempBundle {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.root);
+    #[test]
+    fn temp_bundles_are_exclusive_and_cleanup_is_owned_under_contention() {
+        const THREADS: usize = 32;
+        const PER_THREAD: usize = 64;
+        let barrier = std::sync::Barrier::new(THREADS);
+        let bundles = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..THREADS)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        (0..PER_THREAD)
+                            .map(|_| {
+                                let bundle = TempBundle::new();
+                                bundle.write("owner.md", &bundle.root.to_string_lossy());
+                                bundle
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .flat_map(|worker| worker.join().expect("fixture worker"))
+                .collect::<Vec<_>>()
+        });
+        let paths: std::collections::HashSet<_> =
+            bundles.iter().map(|bundle| bundle.root.clone()).collect();
+        assert_eq!(paths.len(), THREADS * PER_THREAD);
+        let (removed, retained): (Vec<_>, Vec<_>) = bundles
+            .into_iter()
+            .enumerate()
+            .partition(|(index, _)| index % 2 == 0);
+        let removed_paths: Vec<_> = removed.iter().map(|(_, b)| b.root.clone()).collect();
+        drop(removed);
+        assert!(removed_paths.iter().all(|path| !path.exists()));
+        for (_, bundle) in &retained {
+            assert_eq!(
+                fs::read_to_string(bundle.root.join("owner.md")).unwrap(),
+                bundle.root.to_string_lossy()
+            );
         }
+        drop(retained);
+        assert!(paths.iter().all(|path| !path.exists()));
+    }
+
+    #[test]
+    fn old_timestamp_allocation_accepts_shared_ownership_negative_control() {
+        // Inject a repeated clock reading: timestamps are not unique IDs.
+        // Keep the destructive old cleanup recipe inside an exclusive parent.
+        let parent = tempfile::tempdir().unwrap();
+        let nonce = 123_456_789_u128;
+        let root = parent
+            .path()
+            .join(format!("pgokf-sync-{}-{nonce}", std::process::id()));
+        let barrier = std::sync::Barrier::new(32);
+        std::thread::scope(|scope| {
+            for index in 0..32 {
+                let root = &root;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    fs::create_dir_all(root).unwrap();
+                    fs::write(root.join(format!("{index}.md")), "shared").unwrap();
+                });
+            }
+        });
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 32);
+        // One old destructor destroys all 32 fixtures, not just its own file.
+        fs::remove_dir_all(&root).unwrap();
+        assert!(!root.join("31.md").exists());
     }
 
     #[test]

@@ -41,6 +41,7 @@ pgrx.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+tempfile = "3"
 # In-database (`#[pg_test]`) harness. Pinned to the same version as `pgrx`
 # (0.19.2, via the workspace) so the test runner and the extension ABI agree;
 # `default-features = false` mirrors the workspace `pgrx` dependency, and the
