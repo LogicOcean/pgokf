@@ -175,8 +175,10 @@ brew tap logicocean/pgokf
 brew install pgokf
 ```
 
-Update `url`, `sha256` (from the release tarball), and the `postgresql@N`
-dependency at each release.
+The pre-tag tree retains the last published URL, digest, and test assertions.
+After the immutable source tag exists, update the formula in a separate main
+commit and then the external tap; follow the exact
+[Homebrew sequence and rollback](release-checklist.md#homebrew-formula-and-tap).
 
 ---
 
@@ -190,7 +192,7 @@ dependency at each release.
 2. **Version bump.** Bump every pin of the version together, as one
    deliberate commit - the exact list lives in
    [release-checklist.md](release-checklist.md#7-version-bump-changelog-tag)
-   (crate and control file, `META.json`, the rpm spec and Homebrew formula,
+   (crate and control file, `META.json`, the rpm spec,
    the companions' path-dependency pins, the compose and Docker examples, and
    `Cargo.lock`).
 3. **Tag.** `git tag v0.3.0 && git push origin v0.3.0`. CI
@@ -206,9 +208,10 @@ dependency at each release.
    `ghcr.io/logicocean/pgokf:<version>-pg<major>` for each supported major.
    A newly created GHCR package is private; flip it to public once, in the
    package settings, on the first release only.
-6. **Homebrew.** In [`LogicOcean/homebrew-pgokf`](https://github.com/LogicOcean/homebrew-pgokf),
-   update `Formula/pgokf.rb` `url` + `sha256` for the new tag
-   (`curl -fsSL <tarball> | shasum -a 256`) and push.
+6. **Homebrew.** Hash the immutable tag archive, then advance URL, digest,
+   and test assertions together in a post-tag main commit and in
+   `LogicOcean/homebrew-pgokf`'s `Formula/pgokf.rb`. Follow the
+   [verification and rollback sequence](release-checklist.md#homebrew-formula-and-tap).
 7. **Announce.** GitHub Release notes from the CHANGELOG entry.
 
 ## Build-output hygiene

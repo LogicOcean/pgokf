@@ -77,16 +77,23 @@ jobs:
       # A dispatch catch-up checks out the named immutable tag; every other
       # event checks out its own ref. fetch-depth: 0 so the tag object is
       # present and the resolver can prove HEAD is the tag's commit.
+      # Keep current release automation available for tags predating it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: release-tools
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag != '' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+          path: release-source
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag != '' && format('refs/tags/{0}', inputs.release_tag) || github.sha }}
 
       - name: Resolve version, publish intent, and source ref
         id: resolve
         env:
           RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
-        run: packaging/resolve-release.sh
+        working-directory: release-source
+        run: ../release-tools/packaging/resolve-release.sh
 
   # ---------------------------------------------------------------------------
   # Static checks on the container packaging: Dockerfiles, the shell scripts
@@ -99,7 +106,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.prep.outputs.source_ref || github.sha }}
+          ref: ${{ needs.prep.outputs.source_ref }}
 
       - name: hadolint (pinned binary, checksum-verified)
         run: |
@@ -119,7 +126,7 @@ jobs:
 
       - name: Dockerfile semantics check for every major
         run: |
-          for pg in 15 16 17 18; do
+          for pg in 15 16 17 18 19; do
             docker build --check -f packaging/docker/Dockerfile --build-arg PG_MAJOR="$pg" .
           done
           docker build --check -f packaging/docker/Dockerfile.companions .
@@ -142,7 +149,13 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.prep.outputs.source_ref || github.sha }}
+          ref: ${{ needs.prep.outputs.source_ref }}
+
+      - name: Checkout release validation tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: release-tools
 
       - name: jq well-formedness + required PGXN v1 fields
         run: |
@@ -186,12 +199,21 @@ jobs:
       - name: Regenerate the install SQL and compare with the committed snapshot
         run: |
           target=$(jq -r '.provides.pgokf.file' META.json)
-          if [[ ! -f "$target" ]]; then
+          # The published 0.2.0 tag predates committed install snapshots.
+          # Its historical catch-up still validates the generated provides.file.
+          # Current/future releases must ship and match their snapshot.
+          if [[ ! -f "$target" && "${{ needs.prep.outputs.version }}" != 0.2.0 ]]; then
             echo "::error::committed install script '$target' is missing"
             exit 1
           fi
-          ( cd crates/extension && cargo pgrx schema pg18 ) > /tmp/pgokf-regenerated.sql
-          python3 scripts/compare-install-sql.py "$target" /tmp/pgokf-regenerated.sql
+          ( cd crates/extension && cargo pgrx schema pg18 --no-default-features --features pg18 ) > /tmp/pgokf-regenerated.sql
+          ( cd crates/extension && cargo pgrx schema pg18 --no-default-features --features pg18 ) > /tmp/pgokf-regenerated-again.sql
+          python3 release-tools/scripts/compare-install-sql.py /tmp/pgokf-regenerated.sql /tmp/pgokf-regenerated-again.sql
+          if [[ -f "$target" ]]; then
+            python3 release-tools/scripts/compare-install-sql.py "$target" /tmp/pgokf-regenerated.sql
+          else
+            cp /tmp/pgokf-regenerated.sql "$target"
+          fi
 
   deb:
     name: Build .deb (PostgreSQL ${{ matrix.pg }}, ${{ matrix.arch }})
@@ -211,7 +233,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.prep.outputs.source_ref || github.sha }}
+          ref: ${{ needs.prep.outputs.source_ref }}
 
       # Pinned via the action ref (1.96.0), consistent with ci.yml and
       # pgrx-test.yml; RUST_TOOLCHAIN below documents the same version for the
@@ -343,7 +365,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.prep.outputs.source_ref || github.sha }}
+          ref: ${{ needs.prep.outputs.source_ref }}
 
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
@@ -504,7 +526,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.prep.outputs.source_ref || github.sha }}
+          ref: ${{ needs.prep.outputs.source_ref }}
 
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 

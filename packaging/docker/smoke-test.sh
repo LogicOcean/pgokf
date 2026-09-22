@@ -48,7 +48,7 @@ assert_eq() { # actual expected description
 }
 
 # Preload whatever optional libraries the image actually carries; an image built
-# with a WITH_* off (or the pg19 advisory leg) must still start.
+# with a WITH_* off (including the required PG19 leg) must still start.
 preload="pgokf"
 # shellcheck disable=SC2016  # ${PG_MAJOR} is expanded by the container's shell, on purpose
 carried="$(${DOCKER} run --rm --entrypoint sh "${IMAGE}" \

@@ -37,6 +37,30 @@ def compare(expected, actual, label):
         raise AssertionError(f'{label}: catalog drift\n{delta}')
 
 
+def drop_catalog(sql, db):
+    # Database removal must precede role removal: ACL/owner dependencies are
+    # database-local. Missing roles are expected after a failed bootstrap.
+    assert re.fullmatch(r'[a-z_][a-z_0-9]*', db)
+    sql('postgres', f'DROP DATABASE IF EXISTS {db};')
+    sql('postgres', 'DROP ROLE IF EXISTS pgokf_admin, pgokf_writer, pgokf_reader, pgokf_dispatcher;')
+
+
+def check_committed_install(sql, installed, committed, expected, inventory, version):
+    backup = installed.read_bytes()
+    try:
+        installed.write_bytes(committed.read_bytes())
+        try:
+            sql('postgres', 'CREATE DATABASE fresh_committed;')
+            sql('fresh_committed', 'CREATE EXTENSION pgokf;')
+            compare(expected, sql('fresh_committed', inventory), 'committed install script')
+            assert sql('fresh_committed', 'SELECT pgokf.version();') == version
+        finally:
+            drop_catalog(sql, 'fresh_committed')
+    finally:
+        # Also restore when database/role cleanup itself fails.
+        installed.write_bytes(backup)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--pg-config', default='pg_config')
@@ -55,6 +79,8 @@ def main():
     # snapshot cannot byte-match a regeneration; it is validated semantically
     # below (a catalog created through it must inventory-equal fresh).
     committed_install = ROOT / 'crates/extension/sql' / f'pgokf--{version}.sql'
+    if '-' not in version and not committed_install.is_file():
+        raise AssertionError('final release requires a committed install script')
     if not (extension / 'pgokf--0.2.0.sql').is_file():
         raise AssertionError('install the authentic 0.2.0 install SQL first (see release checklist)')
     # Short socket path; private permissions and no TCP listener. Ignore ambient
@@ -83,39 +109,15 @@ def main():
             expected = sql('fresh', inventory)
             print(f'Fresh {version}: {len(expected.splitlines())} inventory rows', flush=True)
 
-            def drop_catalog(db):
-                sql('postgres', f'DROP DATABASE {db};')
-                # Roles are cluster-global: never let a fresh installation
-                # supply roles that an upgrade forgot to create.
-                sql('postgres', 'DROP ROLE pgokf_admin, pgokf_writer, pgokf_reader, pgokf_dispatcher;')
-
+            # Drop the generated catalog and all extension roles on both
+            # release and development paths, before any standalone bootstrap.
+            drop_catalog(sql, 'fresh')
             if committed_install.is_file():
-                # The committed install script must not be a divergent
-                # snapshot: a catalog created through it inventories exactly
-                # like one created through the freshly generated script. It
-                # must also BOOTSTRAP standalone: the fresh catalog's
-                # cluster-global roles are dropped first, so the committed
-                # script cannot borrow them - its own role creation, ownership,
-                # ACLs and extension membership are what the comparison proves.
-                drop_catalog('fresh')
-                installed = extension / committed_install.name
-                backup = installed.read_bytes()
-                try:
-                    installed.write_bytes(committed_install.read_bytes())
-                    sql('postgres', 'CREATE DATABASE fresh_committed;')
-                    sql('fresh_committed', 'CREATE EXTENSION pgokf;')
-                    compare(expected, sql('fresh_committed', inventory), 'committed install script')
-                    assert sql('fresh_committed', 'SELECT pgokf.version();') == version
-                    drop_catalog('fresh_committed')
-                finally:
-                    installed.write_bytes(backup)
+                check_committed_install(sql, extension / committed_install.name,
+                                        committed_install, expected, inventory, version)
                 print('committed install script: standalone bootstrap, role creation, '
                       'owner/ACL/membership catalog parity passed', flush=True)
 
-            # The committed-script check above already dropped 'fresh' (and the
-            # cluster roles) when it ran.
-            if not committed_install.is_file():
-                drop_catalog('fresh')
             failures = []
             for index, signature in enumerate(ADOPT):
                 expected_role = 'pgokf_reader' if index == 0 else 'pgokf_admin'
@@ -148,7 +150,7 @@ def main():
                         else:
                             failures.append(label)
                             print(label + ': UNSAFE ACCEPTANCE', flush=True)
-                        drop_catalog('hostile')
+                        drop_catalog(sql, 'hostile')
                         sql('postgres', 'DROP ROLE hostile_other;')
             def fingerprint(db):
                 # Pin the old column names: additive new columns are allowed;
@@ -197,7 +199,7 @@ def main():
                 sql(route, 'ALTER EXTENSION pgokf UPDATE;')
                 check_upgrade_invariants(route, before, fp)
                 print(f'{route}: parity, data preservation, refresh preserves staleness passed', flush=True)
-                drop_catalog(route)
+                drop_catalog(sql, route)
             # Every deployed development point version reaches the final
             # release through ordinary bare UPDATE and converges with fresh.
             for point in ('0.3.0-dev', '0.3.0-dev1', '0.3.0-dev2', '0.3.0-dev3'):
@@ -211,7 +213,7 @@ def main():
                 sql(route, 'ALTER EXTENSION pgokf UPDATE;')
                 check_upgrade_invariants(route, before, fp)
                 print(f'{route}: {point} reaches {version} with parity', flush=True)
-                drop_catalog(route)
+                drop_catalog(sql, route)
             # Security-canonical conflicts must still fail at PostgreSQL's
             # signature/membership checks, with the entire update rolled back.
             for index, signature in enumerate(ADOPT):
@@ -247,7 +249,7 @@ def main():
                     compare(before, sql('incompatible', inventory + membership), 'failed adoption rollback')
                     assert sql('incompatible', "SELECT extversion FROM pg_extension WHERE extname='pgokf';") == '0.3.0-dev'
                     print(f'{signature} {conflict}: refused atomically', flush=True)
-                    drop_catalog('incompatible')
+                    drop_catalog(sql, 'incompatible')
             # A detector that always returns equal is no gate. Each mutation
             # runs in a rolled-back transaction and must alter the inventory.
             sql('postgres', 'CREATE DATABASE fresh;')

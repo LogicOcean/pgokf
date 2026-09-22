@@ -24,8 +24,31 @@ version=$(sed -n "s/^default_version *= *'\([^']*\)'.*/\1/p" crates/extension/pg
 echo "version=$version" >> "$GITHUB_OUTPUT"
 echo "resolved extension version: $version"
 
+# Check source identity even for historical catch-up, without depending on
+# scripts existing in that historical tree.
+python3 - "$version" <<'IDENTITY'
+import json, pathlib, sys, tomllib
+root = pathlib.Path('.')
+version = sys.argv[1]
+workspace = tomllib.loads((root / 'Cargo.toml').read_text())
+assert workspace['workspace']['package']['version'] == version, 'workspace/control mismatch'
+meta = json.loads((root / 'META.json').read_text())
+assert meta['version'] == meta['provides']['pgokf']['version'] == version, 'PGXN/control mismatch'
+lock = tomllib.loads((root / 'Cargo.lock').read_text())
+for path in root.glob('crates/*/Cargo.toml'):
+    manifest = tomllib.loads(path.read_text())
+    package = manifest['package']
+    assert package['version'] == {'workspace': True} or package['version'] == version, path
+    entries = [p for p in lock['package'] if p['name'] == package['name']]
+    assert len(entries) == 1 and entries[0]['version'] == version, path
+    for section in ('dependencies', 'dev-dependencies', 'build-dependencies'):
+        for dep in manifest.get(section, {}).values():
+            if isinstance(dep, dict) and 'path' in dep:
+                assert dep.get('version') == '=' + version, path
+IDENTITY
+
 publish=false
-source_ref=""
+source_ref=$(git rev-parse HEAD)
 head=$(git rev-parse HEAD)
 if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
     tag="${GITHUB_REF#refs/tags/v}"
@@ -39,7 +62,7 @@ if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
         exit 1
     fi
     publish=true
-    source_ref="$GITHUB_REF"
+    source_ref="$head"
 elif [[ -n "${RELEASE_TAG_INPUT:-}" ]]; then
     # Manual catch-up: republish from an explicit existing immutable tag.
     case "$RELEASE_TAG_INPUT" in
@@ -57,7 +80,7 @@ elif [[ -n "${RELEASE_TAG_INPUT:-}" ]]; then
         exit 1
     fi
     publish=true
-    source_ref="refs/tags/$RELEASE_TAG_INPUT"
+    source_ref="$head"
 fi
 echo "publish=$publish" >> "$GITHUB_OUTPUT"
 echo "source_ref=$source_ref" >> "$GITHUB_OUTPUT"

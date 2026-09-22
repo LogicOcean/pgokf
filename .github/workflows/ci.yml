@@ -21,6 +21,8 @@ jobs:
         run: |
           python3 -m pip install PyYAML==6.0.3
           python3 tests/test_ci_coverage.py
+          python3 tests/test_release_integrity.py
+          python3 tests/test_release_tools.py
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --workspace --exclude pgokf --all-targets -- -D warnings
       - run: cargo test --locked --workspace --exclude pgokf

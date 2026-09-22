@@ -22,6 +22,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -182,6 +183,8 @@ def check_homebrew(formula: str, version: str) -> list[str]:
     if not assertions or any(a != url_version and f"'{url_version}'" not in a for a in assertions):
         problems.append(f'formula test assertions {assertions} do not match url version {url_version}')
     if url_version == version:
+        if sha != KNOWN_RELEASE_DIGESTS.get(version):
+            problems.append("current formula requires an authenticated post-tag digest record")
         # Post-tag state: the digest must be the new archive's, never a
         # previous release's authenticated digest carried forward.
         for old, digest in KNOWN_RELEASE_DIGESTS.items():
@@ -221,6 +224,24 @@ def check_packages_workflow(text: str) -> list[str]:
     if 'needs.prep.outputs.source_ref' not in text:
         problems.append('downstream jobs must check out needs.prep.outputs.source_ref '
                         '(the proven tag commit), never the dispatch branch HEAD')
+    import yaml
+    jobs = yaml.safe_load(text)['jobs']
+    for name, job in jobs.items():
+        if name != 'prep':
+            for step in job.get('steps', []):
+                if step.get('name') == 'Checkout release validation tooling':
+                    if step.get('with') != {'ref': '${{ github.sha }}', 'path': 'release-tools'}:
+                        problems.append('validation tooling must use the workflow commit in a separate directory')
+                    continue
+                if step.get('uses', '').startswith('actions/checkout@'):
+                    if step.get('with', {}).get('ref') != '${{ needs.prep.outputs.source_ref }}':
+                        problems.append(f'{name} must check out the proven source SHA')
+        for key, value in job.get('env', {}).items():
+            if key in ('VERSION', 'LOCAL_TAG', 'TAG') and 'needs.prep.outputs.version' not in str(value):
+                problems.append(f'{name} {key} must use the proven package version')
+    for manifest, build in (('docker-manifest', 'docker'), ('companions-manifest', 'companions')):
+        if build not in jobs[manifest]['needs']:
+            problems.append(f'{manifest} must require every {build} matrix leg')
     for line in text.splitlines():
         if re.search(r'pgokf(-companions)?:0\.[0-9]', line):
             problems.append(f'hardcoded image version in workflow: {line.strip()}')
@@ -245,6 +266,9 @@ class ReleaseIdentity(unittest.TestCase):
     def test_version_agrees_across_artifacts(self):
         version = control_version(read('crates/extension/pgokf.control'))
         self.assertEqual(workspace_version(read('Cargo.toml')), version, 'workspace version')
+        for name, manifest in manifests().items():
+            declaration = tomllib.loads(manifest)['package']['version']
+            self.assertIn(declaration, ({'workspace': True}, version), name)
         meta = json.loads(read('META.json'))
         self.assertEqual(meta['version'], version, 'META.json version')
         self.assertEqual(meta['provides']['pgokf']['version'], version, 'META.json provides version')
@@ -328,6 +352,15 @@ class ReleaseIdentity(unittest.TestCase):
         self.assertTrue(check_install_script(sql, wrong_source),
                         'a hardcoded version() body must be rejected')
 
+    def test_homebrew_sql_survives_shell_quoting(self):
+        import shlex
+        formula = read('packaging/homebrew/pgokf.rb')
+        expression = re.search(r'output = shell_output\(\s*(.*?)\s*,?\s*\)', formula, re.S)[1].rstrip(',')
+        code = 'pg_bin="/bin"; port=15432; puts(' + expression + ')'
+        command = subprocess.check_output(['ruby', '-e', code], text=True).strip()
+        arguments = shlex.split(command)
+        self.assertIn("WHERE extname='pgokf';", arguments[-1])
+
     def test_homebrew_state_machine(self):
         version = control_version(read('crates/extension/pgokf.control'))
         self.assertEqual(check_homebrew(read('packaging/homebrew/pgokf.rb'), version), [])
@@ -347,8 +380,50 @@ class ReleaseIdentity(unittest.TestCase):
         self.assertTrue(check_homebrew(stale_assert, version),
                         'a stale formula test assertion must be rejected')
 
+    def test_homebrew_post_tag_tuple_and_rollback(self):
+        from unittest.mock import patch
+        version = control_version(read('crates/extension/pgokf.control'))
+        before = read('packaging/homebrew/pgokf.rb')
+        old, digest, _ = parse_formula(before)
+        # Synthetic authenticated archive record only inside this test.
+        post = before.replace(old, version).replace(digest, 'a' * 64)
+        with patch.dict(KNOWN_RELEASE_DIGESTS, {version: 'a' * 64}):
+            self.assertEqual(check_homebrew(post, version), [])
+            self.assertTrue(check_homebrew(post.replace(
+                "default_version = '" + version + "'", "default_version = '0.2.0'"), version))
+            self.assertTrue(check_homebrew(post.replace('a' * 64, digest), version))
+            self.assertEqual(check_homebrew(before, version), [], 'complete old tuple is a valid rollback')
+
+    def test_homebrew_unknown_current_digest_rejected(self):
+        version = control_version(read('crates/extension/pgokf.control'))
+        good = read('packaging/homebrew/pgokf.rb')
+        old, digest, _ = parse_formula(good)
+        mutation = good.replace(old, version).replace(digest, 'a' * 64)
+        self.assertTrue(check_homebrew(mutation, version))
+
     def test_packages_workflow_guards(self):
         self.assertEqual(check_packages_workflow(read('.github/workflows/packages.yml')), [])
+
+    def test_stale_workflow_version_and_source_rejected(self):
+        good = read('.github/workflows/packages.yml')
+        self.assertTrue(check_packages_workflow(good.replace(
+            'VERSION: ${{ needs.prep.outputs.version }}', 'VERSION: 0.2.0')))
+        self.assertTrue(check_packages_workflow(good.replace(
+            'ref: ${{ needs.prep.outputs.source_ref }}', 'ref: ${{ github.sha }}')))
+
+    def test_dependency_patch_boundary(self):
+        for path in (ROOT / 'crates').rglob('*.rs'):
+            self.assertNotRegex(path.read_text(), r'\bPostgresType\b', str(path))
+        for name in ('packaging/docker/Dockerfile', 'packaging/docker/Dockerfile.companions'):
+            self.assertIn('COPY . .', read(name))
+        self.assertNotRegex(read('.dockerignore'), r'(?m)^/?vendor/?$')
+        metadata = json.loads(subprocess.check_output(
+            ['cargo', 'metadata', '--locked', '--format-version', '1'], cwd=ROOT))
+        resolved = [p for p in metadata['packages'] if p['name'] == 'pgrx']
+        self.assertEqual(len(resolved), 1)
+        self.assertEqual(Path(resolved[0]['manifest_path']), ROOT / 'vendor/pgrx/Cargo.toml')
+        self.assertEqual(resolved[0]['version'], '0.19.2')
+        self.assertNotIn('serde_cbor', [p['name'] for p in metadata['packages']])
 
     def test_resolve_release_script(self):
         """Execute the actual workflow resolver with synthetic refs and a
@@ -378,6 +453,7 @@ class ReleaseIdentity(unittest.TestCase):
         # Matching tag event on the tag's own commit publishes.
         code, out = run(sha_a, sha_a, f'refs/tags/v{version}', '')
         self.assertEqual((code, 'publish=true' in out), (0, True), 'matching tag must publish')
+        self.assertIn('source_ref=' + sha_a, out, 'jobs must build the proven SHA')
         # Tag event where HEAD is not the tag's commit refuses.
         code, _ = run(sha_b, sha_a, f'refs/tags/v{version}', '')
         self.assertNotEqual(code, 0, 'HEAD != tag commit must fail closed')
@@ -396,6 +472,68 @@ class ReleaseIdentity(unittest.TestCase):
                                        (f'v{version}', sha_b, sha_a)):
             code, _ = run(head, tag_sha, 'refs/heads/main', bad_tag)
             self.assertNotEqual(code, 0, f'dispatch {bad_tag} with HEAD/tag mismatch must fail closed')
+
+
+class RealGitPublication(unittest.TestCase):
+    """Tag fixtures exist only in a temporary repository, never the checkout."""
+    def test_tag_dispatch_and_identity(self):
+        import shutil
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work)
+            for name in ('Cargo.toml', 'Cargo.lock', 'META.json', 'crates/extension/pgokf.control'):
+                target = root / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(ROOT / name, target)
+            for path in ROOT.glob('crates/*/Cargo.toml'):
+                target = root / path.relative_to(ROOT)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(path, target)
+            def git(*args):
+                return subprocess.check_output(['git', *args], cwd=root, text=True).strip()
+            git('init', '-q')
+            git('config', 'user.email', 'fixture@example.invalid')
+            git('config', 'user.name', 'Release fixture')
+            originals = {p: p.read_text() for p in root.rglob('*') if p.is_file() and '.git' not in p.parts}
+            for p, text in originals.items():
+                p.write_text(text.replace('0.3.0', '0.2.0'))
+            git('add', '.')
+            git('commit', '-qm', 'Historical fixture')
+            git('tag', 'v0.2.0')
+            historical = git('rev-parse', 'HEAD')
+            for p, text in originals.items():
+                p.write_text(text)
+            git('add', '.')
+            git('commit', '-qm', 'Current fixture')
+            git('tag', '-a', 'v0.3.0', '-m', 'Annotated fixture')
+            current = git('rev-parse', 'HEAD')
+            def resolve(ref, tag='', publish_input='true'):
+                output = root / 'output'
+                output.unlink(missing_ok=True)
+                env = {**os.environ, 'GITHUB_REF': ref, 'RELEASE_TAG_INPUT': tag,
+                       'PUBLISH_INPUT': publish_input, 'GITHUB_OUTPUT': str(output)}
+                result = subprocess.run(['bash', str(ROOT / 'packaging/resolve-release.sh')],
+                                        cwd=root, env=env, text=True, capture_output=True)
+                return result.returncode, output.read_text() if output.exists() else ''
+            self.assertIn('publish=false', resolve('refs/heads/main')[1])
+            code, output = resolve('refs/tags/v0.3.0')
+            self.assertEqual(code, 0)
+            self.assertIn('source_ref=' + current, output)
+            self.assertIn('publish=true', output)
+            self.assertNotEqual(resolve('refs/tags/v0.2.0')[0], 0)
+            self.assertNotEqual(resolve('refs/heads/main', 'v0.2.0')[0], 0)
+            git('checkout', '-q', 'v0.2.0')
+            code, output = resolve('refs/heads/main', 'v0.2.0')
+            self.assertEqual(code, 0)
+            self.assertIn('source_ref=' + historical, output)
+            self.assertIn('version=0.2.0', output)
+            self.assertIn('publish=true', output)
+            git('checkout', '-q', 'v0.3.0')
+            for file in ('Cargo.toml', 'Cargo.lock', 'META.json', 'crates/extension/Cargo.toml'):
+                path = root / file
+                original = path.read_text()
+                path.write_text(original.replace('0.3.0', '0.2.0'))
+                self.assertNotEqual(resolve('refs/tags/v0.3.0')[0], 0, file)
+                path.write_text(original)
 
 
 if __name__ == '__main__':

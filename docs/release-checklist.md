@@ -267,7 +267,7 @@ ${PG_BIN}/pg_ctl -D "$DATA" -w stop -m fast && rm -rf /tmp/pgokf-rel
 - [ ] Bump `version` in the workspace `Cargo.toml` (and `default_version` in
       `pgokf.control`) as a **single, deliberate commit**, together with every
       other pin of the version: `META.json`, `packaging/rpm/pgokf.spec`,
-      `packaging/homebrew/pgokf.rb`, the `=<version>` path-dependency pins in
+      the `=<version>` path-dependency pins in
       the companion crates, the image tags in `deploy/compose/.env.example`
       and the `packaging/docker/*` / `docs/` examples, and `Cargo.lock`
       (`cargo update --workspace`).
@@ -284,10 +284,8 @@ ${PG_BIN}/pg_ctl -D "$DATA" -w stop -m fast && rm -rf /tmp/pgokf-rel
       release date; add fresh compare/tag links.
 - [ ] Re-run gates 1–5 against the bumped version.
 - [ ] Tag `vX.Y.Z` and push the tag.
-- [ ] After the tag exists, recompute the release tarball's SHA256
-      (`curl -fsSL <tarball> | shasum -a 256`) and commit it into
-      `packaging/homebrew/pgokf.rb` (the pre-tag bump necessarily carries the
-      previous tarball's digest); the same value goes to the tap in step 8.
+- [ ] Keep the runnable Homebrew formula on the last published release through
+      this tag. Follow the separate post-tag main/tap sequence below.
 
 ## 8. Publish
 
@@ -299,7 +297,81 @@ ${PG_BIN}/pg_ctl -D "$DATA" -w stop -m fast && rm -rf /tmp/pgokf-rel
 - [ ] Publish to [PGXN](https://pgxn.org): update `META.json` (name, version,
       abstract, `provides`, license, resources), build the release zip, and
       upload. Confirm the version and extension name match the tag.
+- [ ] Complete the post-tag main and external Homebrew tap sequence below.
 - [ ] Announce in the changelog links and the repository release notes.
+
+## Homebrew formula and tap
+
+The source release and its consuming formula have separate lifecycles. The
+pre-tag 0.3.0 tree and immutable `v0.3.0` tag keep the runnable formula pinned
+to **v0.2.0**, its authenticated archive digest, and matching 0.2.0 test
+assertions. This is intentional: a formula cannot contain the digest of the
+archive containing itself. The external distribution is
+[`LogicOcean/homebrew-pgokf`](https://github.com/LogicOcean/homebrew-pgokf).
+
+After all release gates and independent review, the release operator performs
+these steps in order (these are publication instructions, not local gates):
+
+1. Tag the reviewed source commit as `v0.3.0` and push that immutable tag.
+   Record `git rev-parse 'v0.3.0^{commit}'`. Never move this tag.
+2. Download and inspect its archive, failing on HTTP errors:
+
+   ```bash
+   curl --fail --location --retry 3 \
+     https://github.com/LogicOcean/pgokf/archive/refs/tags/v0.3.0.tar.gz \
+     --output /tmp/pgokf-v0.3.0.tar.gz
+   shasum -a 256 /tmp/pgokf-v0.3.0.tar.gz
+   tar -tzf /tmp/pgokf-v0.3.0.tar.gz
+   tar -xOf /tmp/pgokf-v0.3.0.tar.gz pgokf-0.3.0/crates/extension/pgokf.control
+   ```
+
+   Verify archive root `pgokf-0.3.0`, control/workspace/PGXN version 0.3.0,
+   and unpacked tracked contents against the tagged commit. Record the exact
+   archive bytes and SHA256 in release evidence; do not hash a local repack.
+3. On **main after the tag**, update `packaging/homebrew/pgokf.rb` URL,
+   SHA256, both `test do` version assertions, and its release-state comment
+   together. Add the authenticated `0.3.0` digest to `KNOWN_RELEASE_DIGESTS`
+   in `tests/test_release_integrity.py` in the same commit. No placeholder is
+   allowed. Run `python3 tests/test_release_integrity.py` and
+   `python3 tests/test_release_tools.py`. This commit consumes the earlier
+   immutable tag; do not retag it.
+4. Copy that exact formula to `Formula/pgokf.rb` in a local checkout of
+   `LogicOcean/homebrew-pgokf`. Verify `cmp` against the main formula, run
+   `brew audit --strict Formula/pgokf.rb`, then in the local tap run
+   `brew install --build-from-source logicocean/pgokf/pgokf` and
+   `brew test logicocean/pgokf/pgokf`. The formula test creates an isolated
+   cluster and checks the installed control and extension version. Publish
+   the main commit and then the tested external tap commit only after these
+   checks pass. The formula inside the source tag remains the valid 0.2.0 pin.
+5. Verify the external tap fetches the recorded archive digest and the
+   installed extension reports 0.3.0. Record both main and tap commit SHAs.
+
+Rollback: before a valid archive exists, leave the old formula unchanged.
+If validation fails before pushing, correct the local post-tag changes or
+restore the entire old URL/digest/assertion tuple. If a bad post-tag formula
+has already been published, revert the complete main and tap formula commits
+together to the last verified tuple; never publish a mixed tuple, delete or
+move the source tag, or substitute bytes under it. A source defect requires
+a new release version. A checksum discrepancy requires investigation against
+the recorded archive and tag contents before any formula update.
+
+Manual image catch-up uses current automation with an explicit historical tag:
+`gh workflow run packages.yml --ref main -f release_tag=v0.3.0`.
+Prep retains current resolver tooling separately, checks out the tag source,
+proves HEAD/tag/control/workspace/lock/PGXN identity, and passes the resolved
+commit SHA to all builds. Empty dispatch input is a non-publishing smoke run.
+A branch source cannot publish release image names.
+
+Extract the exact GitHub release body, review it, and then create the release
+only after the publication gates:
+
+```bash
+awk '/^## \[0\.3\.0\]/{emit=1; next} emit && /^## \[/{exit} emit {print}' \
+  CHANGELOG.md > /tmp/pgokf-0.3.0-release.md
+# Inspect the body and attach the verified per-major assets as appropriate.
+gh release create v0.3.0 --verify-tag --title 'pgokf 0.3.0' \
+  --notes-file /tmp/pgokf-0.3.0-release.md
+```
 
 ## Quick gate summary
 
@@ -309,7 +381,7 @@ ${PG_BIN}/pg_ctl -D "$DATA" -w stop -m fast && rm -rf /tmp/pgokf-rel
 | Lint | `cargo clippy … -D warnings` | exit 0 |
 | Tests | `scripts/test-workspace.sh` | all pass, incl. `api_stability` |
 | In-database | `RUST_TEST_THREADS=1 cargo pgrx test pg18 …`, once plain and once with `PGOKF_TEST_PRELOAD=pg_textsearch,pg_search` | all pass; the provider tests run (not skip) in the preloaded run |
-| Supply chain | `cargo deny check`, `cargo audit` | no denials/advisories |
+| Supply chain | `cargo deny check`, `cargo audit --deny warnings` | no denials/advisories |
 | Schema | `cargo pgrx schema pg18` | builds; comments present |
 | Live smoke | `CREATE EXTENSION` on each major 15–19 | functions work |
 | COMMENT coverage | `obj_description` queries (§4a) | zero uncommented objects |

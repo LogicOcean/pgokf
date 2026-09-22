@@ -107,7 +107,7 @@ class Pgokf < Formula
     begin
       output = shell_output(
         "#{pg_bin}/psql -h 127.0.0.1 -p #{port} -U postgres -d postgres " \
-        "-tAc 'CREATE EXTENSION pgokf; SELECT extversion FROM pg_extension WHERE extname=''pgokf'';'",
+        "-tAc \"CREATE EXTENSION pgokf; SELECT extversion FROM pg_extension WHERE extname='pgokf';\"",
       )
       assert_match "0.2.0", output
     ensure
