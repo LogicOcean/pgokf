@@ -39,7 +39,11 @@ def persist_exclusive(path, value):
 
 
 def identity(container):
-    return {field: container[field] for field in ('Id', 'Created', 'Mounts', 'Config')}
+    # Docker returns mounts in map iteration order; compare their full contents,
+    # not incidental list order. No identity fields are discarded.
+    result = {field: container[field] for field in ('Id', 'Created', 'Mounts', 'Config')}
+    result['Mounts'] = sorted(result['Mounts'], key=lambda mount: json.dumps(mount, sort_keys=True))
+    return result
 
 
 def cleanup(container_id, key, value, receipt, creation=None):
@@ -58,7 +62,7 @@ def cleanup(container_id, key, value, receipt, creation=None):
         names = [volume['Name'] for volume in proof['volumes']]
         if len(names) != len(set(names)):
             raise ValueError('ambiguous duplicate volume creation records')
-        if proof['container'] != identity(container) or proof['ownership_label'] != {key: value}:
+        if identity(proof['container']) != identity(container) or proof['ownership_label'] != {key: value}:
             raise ValueError('creation receipt does not bind this container')
         for volume in proof['volumes']:
             labels = volume.get('Labels') or {}

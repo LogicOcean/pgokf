@@ -90,6 +90,27 @@ class CleanupRaces(unittest.TestCase):
                 with patch.object(cleanup, 'docker', docker), self.assertRaises(ValueError):
                     cleanup.cleanup(cid, 'run', 'mine', Path(directory) / 'delete.json', proof)
 
+    def test_docker_mount_order_is_not_a_creation_identity_change(self):
+        cid = 'e' * 64
+        mounts = [dict(Type='volume', Name='first'), dict(Type='volume', Name='second')]
+        container = dict(Id=cid, Created='original', Config={'Labels': {'run': 'mine'}}, Mounts=mounts)
+        with tempfile.TemporaryDirectory() as directory:
+            proof = Path(directory) / 'proof.json'
+            proof.write_text(json.dumps(dict(container=container, volumes=[], nonce='f' * 32,
+                                             ownership_label={'run': 'mine'})))
+            calls = []
+            def docker(*args):
+                calls.append(args)
+                if args[0] == 'inspect':
+                    return json.dumps([{**container, 'Mounts': list(reversed(mounts))}])
+                if args[:2] == ('volume', 'inspect'):
+                    return json.dumps([dict(Name=args[2])])
+                self.assertEqual(args, ('rm', '-f', cid))
+                return cid
+            with patch.object(cleanup, 'docker', docker):
+                cleanup.cleanup(cid, 'run', 'mine', Path(directory) / 'delete.json', proof)
+            self.assertIn(('rm', '-f', cid), calls)
+
 
 if __name__ == '__main__':
     unittest.main()
