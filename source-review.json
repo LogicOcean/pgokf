@@ -58,7 +58,7 @@
       "executable": false
     },
     "CHANGELOG.md": {
-      "sha256": "a78b5714a3be988b53d11d2ab0f271e767d486fd459b12ca31c052a2c00d1e64",
+      "sha256": "25d6334ed70a5145a027535d79796ce89fff7a817b01a52ec4dd768ed92370be",
       "executable": false
     },
     "CODE_OF_CONDUCT.md": {
@@ -74,11 +74,11 @@
       "executable": false
     },
     "Cargo.lock": {
-      "sha256": "b6427bc8a8a9501c161c6663319702101461d1f2ed9316cac81d9c3e350e43fc",
+      "sha256": "1dcf7938708ffb921bb3d8616b6b7988c686d26f62672835a7af6075a909256f",
       "executable": false
     },
     "Cargo.toml": {
-      "sha256": "9e9ebb5c9d327da67022ae1829c7fb55e6f1d225fee51b3d52ae14ba8c9957df",
+      "sha256": "031263a19fb39ac192cf6d987f23491899a9ab1aa3144a8c1426accb8a6c3862",
       "executable": false
     },
     "LICENSE": {
@@ -102,7 +102,7 @@
       "executable": false
     },
     "THIRD-PARTY-NOTICES.txt": {
-      "sha256": "ee1006c94b6e60187be17570d9c2e819ad692d055a470deedf831c6323dbe508",
+      "sha256": "43db9e524c46732c27a2567c3d0aec5bf03162cf4ecef247223a778549cd9e51",
       "executable": false
     },
     "about.hbs": {
@@ -550,7 +550,7 @@
       "executable": false
     },
     "crates/pgokf-mcp/Cargo.toml": {
-      "sha256": "961a9c0eaeb86d9e801914783b7b176f6fbfe88978c112e13b01001c63e49f7a",
+      "sha256": "5707ee60afabf3a5be4587c91bd3978ed63d7bd9440aecc765c3cd823169b495",
       "executable": false
     },
     "crates/pgokf-mcp/README.md": {
@@ -558,11 +558,11 @@
       "executable": false
     },
     "crates/pgokf-mcp/src/catalog.rs": {
-      "sha256": "6a6d8da60f1883763c82446208f0b1c7269cedb7193c72cb83f5b107d513f75b",
+      "sha256": "5bccee1cb134e5be5cc0064b71f366d009d2f26b11663da6f96a4374f04aa04f",
       "executable": false
     },
     "crates/pgokf-mcp/src/cursor.rs": {
-      "sha256": "43d7c083dec61f66905e83a8799c5d97dc0cc0b911cd2914f21cbde43e1865f5",
+      "sha256": "152ec6cdfc56727d8e1268bc1416080db6134dc08c5b1809c02761168038bc69",
       "executable": false
     },
     "crates/pgokf-mcp/src/dispatch.rs": {
@@ -594,7 +594,7 @@
       "executable": false
     },
     "crates/pgokf-mcp/src/resources.rs": {
-      "sha256": "5322642dfab2b5fab09865e138e48b1285487091cd2b0745d62f695db2998921",
+      "sha256": "26a929fe547ffcdfb172043f116e29afd3ef526466eafdd943747c19ad7f260a",
       "executable": false
     },
     "crates/pgokf-mcp/src/rpc.rs": {
@@ -630,7 +630,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/Cargo.toml": {
-      "sha256": "c70f5dd51984c3415fb54c1e6abdc801dd15c07a81eaa815895775d1dd688c62",
+      "sha256": "710e3e5c6a1b3587cf6ceda15e895d9a6db58a87b6fdbe21304f948bd05005dc",
       "executable": false
     },
     "crates/pgokf-verifier/README.md": {
@@ -762,7 +762,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/src/package_archive.rs": {
-      "sha256": "df3b397594c3e30e936f1af2b721760fd3edd672543fa02cb2e801b6af65daac",
+      "sha256": "04fe46f3b77ddda5cd7169012525e85361e88a4fac32f99717c8766485c1510e",
       "executable": false
     },
     "crates/pgokf-verifier/src/policy_campaign.rs": {
@@ -906,7 +906,7 @@
       "executable": false
     },
     "crates/pgokf-web/Cargo.toml": {
-      "sha256": "6e763fabdedc461d012a01775c1cf42b4c6be7b6a00135f0c19f212be2dd3d99",
+      "sha256": "e0ba6a6fb6036f53437c4ca4de0940803e842a3e325bd6a8d977536edb085b58",
       "executable": false
     },
     "crates/pgokf-web/README.md": {
@@ -1158,7 +1158,7 @@
       "executable": false
     },
     "crates/pgokf-workspace/Cargo.toml": {
-      "sha256": "5a106ff222f15f09a7306c5c12a3e03d74cf04728deb9111b027999ec2caf15c",
+      "sha256": "7e6b0b81f954cf99f621fed30cabb7900bc58d543bcd72f65aaf40dfe3d81176",
       "executable": false
     },
     "crates/pgokf-workspace/README.md": {
@@ -1166,7 +1166,7 @@
       "executable": false
     },
     "crates/pgokf-workspace/src/archive.rs": {
-      "sha256": "230ad2bddb04cc7444e662b3e75b0c4ffa65547d4f9c9b525dc5d6601e034202",
+      "sha256": "a8c151f1588a43b169c4125902465a7f0ad406516c1dae7b024618e1e40d9f34",
       "executable": false
     },
     "crates/pgokf-workspace/src/freshness.rs": {

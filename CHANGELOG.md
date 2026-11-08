@@ -76,6 +76,17 @@ workspace and control advance with it while distribution artifacts stay at
   exact per-file bytes via `resources/read`) publishing the canonical
   `pgokf.skills` packages.
 
+### Security
+
+- Clear the current RustSec advisory set: update the Arrow/Parquet, QUIC,
+  sanitizer, TLS, async, Markdown, WebPKI and Zstandard patch lines; move release
+  ZIP handling to `zip` 9.4; replace the deprecated
+  `serde_yaml`/`unsafe-libyaml` stack with the maintained
+  `yaml_serde`/`libyaml-rs` implementation; and disable Askama's unused
+  external-config feature so the unmaintained `basic-toml` parser is no longer
+  linked. MCP cursor and resource digests now use the workspace's HMAC 0.13 and
+  SHA-2 0.11 generations while preserving fixed wire/digest vectors.
+
 ## [0.3.1] - 2026-09-22
 
 First publishable 0.3 release candidate. Supersedes the immutable, unpublished

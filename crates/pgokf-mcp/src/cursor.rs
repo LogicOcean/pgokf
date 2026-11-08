@@ -1,7 +1,7 @@
 //! Authenticated, scope-bound keyset cursors. Tokens are never authorization.
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::Sha256;
@@ -201,6 +201,19 @@ mod tests {
         let codec = CursorCodec::new([42; 32]);
         let binding = binding();
         let token = codec.issue(&binding, json!(["a", 42]), 100).unwrap();
+        // Fixed wire vector, independently calculated with HMAC-SHA-256.
+        // Dependency upgrades must preserve issued tokens and accept existing ones.
+        let expected = concat!(
+            "eyJleHAiOjEwMDAsImYiOiJmaWx0ZXItc2hhMjU2IiwiZyI6ImdlbmVyYXRpb24t",
+            "c2hhMjU2IiwiayI6WyJhIiw0Ml0sIm0iOiJza2lsbHMvbGlzdCIsInAiOiJyZWFk",
+            "ZXIvdG9rZW4tZGlnZXN0IiwidCI6ImFjbWUiLCJ2Ijoxfb4uiGFMcw38ApLaXvHb",
+            "Sg1m5L_IkzmqvjzrX267hYfo",
+        );
+        assert_eq!(token, expected);
+        assert_eq!(
+            codec.validate(expected, &binding, 100).unwrap(),
+            json!(["a", 42])
+        );
         assert_eq!(
             codec.validate(&token, &binding, 100).unwrap(),
             json!(["a", 42])

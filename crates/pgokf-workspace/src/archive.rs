@@ -252,7 +252,7 @@ mod tests {
         let mut archive = zip::ZipArchive::new(Cursor::new(first)).expect("valid zip");
         assert_eq!(archive.len(), 1);
         assert_eq!(
-            archive.by_index(0).expect("entry").name(),
+            archive.by_index(0).expect("entry").name().expect("name"),
             "okf-knowledge/INDEX.md"
         );
     }

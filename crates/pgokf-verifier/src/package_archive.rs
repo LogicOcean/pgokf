@@ -19,8 +19,9 @@ pub fn deb_digest(bytes: &[u8]) -> Result<(String, String), String> {
     let mut names = std::collections::BTreeSet::new();
     for index in 0..archive.len() {
         let mut file = archive.by_index(index).map_err(|e| e.to_string())?;
+        let name = file.name().map_err(|e| e.to_string())?.into_owned();
         let path = file.enclosed_name().ok_or("archive path traversal")?;
-        if !names.insert(file.name().to_owned()) {
+        if !names.insert(name.clone()) {
             return Err("duplicate archive entry".into());
         }
         if file
@@ -47,7 +48,7 @@ pub fn deb_digest(bytes: &[u8]) -> Result<(String, String), String> {
             if data.len() as u64 > MAX_ARCHIVE {
                 return Err("package expanded size limit exceeded".into());
             }
-            package = Some((file.name().into(), crate::release_runtime::digest(&data)));
+            package = Some((name, crate::release_runtime::digest(&data)));
         }
     }
     package.ok_or_else(|| "expected exactly one deb".into())

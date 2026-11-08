@@ -859,12 +859,18 @@ fn epoch_seconds() -> Result<u64, crate::service::DomainError> {
 
 fn filter_digest(params: &Value) -> String {
     use sha2::{Digest as _, Sha256};
+    use std::fmt::Write as _;
     let mut normalized = params.clone();
     if let Some(object) = normalized.as_object_mut() {
         object.remove("cursor");
         object.remove("_meta");
     }
-    format!("{:x}", Sha256::digest(normalized.to_string().as_bytes()))
+    Sha256::digest(normalized.to_string().as_bytes())
+        .iter()
+        .fold(String::with_capacity(64), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
 }
 
 fn cursor_error(error: crate::cursor::CursorError) -> crate::service::DomainError {
@@ -1033,6 +1039,16 @@ fn opt_string_vec(args: &Value, key: &str) -> Result<Option<Vec<String>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filter_digest_preserves_sha256_hex_and_ignores_transport_fields() {
+        let expected = "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a";
+        assert_eq!(filter_digest(&json!({})), expected);
+        assert_eq!(
+            filter_digest(&json!({"cursor": "next", "_meta": {"progressToken": 1}})),
+            expected
+        );
+    }
 
     #[test]
     fn inline_content_keeps_text_and_base64_encodes_binary() {

@@ -51,7 +51,7 @@ pgrx = { version = "0.19.2", default-features = false }
 pulldown-cmark = "0.13"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-serde_yaml = "=0.9.34"
+serde_yaml = { package = "yaml_serde", version = "0.10.7" }
 stratify = { version = "1.1.0", features = ["logging"] }
 thiserror = "2.0"
 tracing = "0.1"
