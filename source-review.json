@@ -674,7 +674,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/src/corpus.rs": {
-      "sha256": "a3a00b7d763004c2013aa6876346ae6c79e7f14b7d18e1dd165895d1b5a942ae",
+      "sha256": "6a18577848b9071d2b5e26f55c8ad87f0f536e108527f7df88aa530562358f01",
       "executable": false
     },
     "crates/pgokf-verifier/src/historical.rs": {

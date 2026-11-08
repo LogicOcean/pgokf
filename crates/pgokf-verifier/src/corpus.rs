@@ -444,7 +444,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
     if !args.len().is_multiple_of(2) {
         return Err("corpus requires option/value pairs".into());
     }
-    for pair in args.chunks_exact(2) {
+    for pair in args.as_chunks::<2>().0 {
         match pair[0].as_str() {
             "--count" => count = pair[1].parse().map_err(|_| "invalid count")?,
             "--seed" => seed = pair[1].parse().map_err(|_| "invalid seed")?,
