@@ -8,6 +8,14 @@
       "rust": "263717c46395f4c591d8d2d49e315ef94c4f8a5f5d27acf06bc715d93b21566d"
     }
   },
+  "Docs": {
+    "env": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+    "jobs": {
+      "build": "8c631bd99c2db8bbed53e47fe00866edf9ca895b68feab48c5b50827c986afe9",
+      "deploy": "32a8802cca747f14ea557994f59d3ef347cd0f5648a500b40926a1f8c2326e19",
+      "pages-policy": "dcc68e61400ef619cf4f74d44e6cc3e8927f34d81e1af668ef37b2bc8901bf55"
+    }
+  },
   "packages": {
     "env": "4b54b06eca505534cdcbd3c2936a45f5442b41393415b9b8fd37eb42a7ac1184",
     "jobs": {

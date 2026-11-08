@@ -1,6 +1,10 @@
 use pgokf_verifier::workflow::*;
 use serde_json::{Value, json};
-use std::path::Path;
+use std::{
+    io::Write,
+    path::Path,
+    process::{Command, Stdio},
+};
 fn workflow(name: &str) -> Value {
     parse(
         &std::fs::read_to_string(
@@ -23,17 +27,243 @@ fn contexts() -> Contexts {
     )
     .unwrap()
 }
+
+fn pages_metadata(version: &str) -> Value {
+    let pgokf = format!("path+file:///workspace/crates/extension#pgokf@{version}");
+    let parser = format!("path+file:///workspace/crates/okf-parser#okf-parser@{version}");
+    json!({
+        "packages": [
+            {"id": pgokf, "name": "pgokf", "version": version},
+            {"id": parser, "name": "okf-parser", "version": version}
+        ],
+        "workspace_members": [pgokf, parser]
+    })
+}
+
+fn run_pages_policy(event: &str, manual_allow: &str, metadata: &Value) -> (bool, String) {
+    let output = tempfile::NamedTempFile::new().unwrap();
+    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("scripts/pages-deploy-policy.sh");
+    let mut child = Command::new("bash")
+        .arg(script)
+        .env("GITHUB_EVENT_NAME", event)
+        .env("INPUT_DEPLOY_PAGES", manual_allow)
+        .env("GITHUB_OUTPUT", output.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(serde_json::to_string(metadata).unwrap().as_bytes())
+        .unwrap();
+    let success = child.wait().unwrap().success();
+    let outputs = std::fs::read_to_string(output.path()).unwrap();
+    (success, outputs)
+}
+
+#[test]
+fn pages_policy_allows_only_explicit_manual_dispatch() {
+    for version in ["0.4.0", "0.4.0-dev3"] {
+        let (success, outputs) =
+            run_pages_policy("workflow_dispatch", "true", &pages_metadata(version));
+        assert!(success, "{version}");
+        assert_eq!(
+            outputs,
+            format!("version={version}\ndeploy=true\n"),
+            "{version}"
+        );
+    }
+}
+
+#[test]
+fn pages_policy_blocks_every_push_and_manual_default_or_false() {
+    for version in ["0.3.1", "0.4.0", "0.4.0-dev3"] {
+        let (success, outputs) = run_pages_policy("push", "", &pages_metadata(version));
+        assert!(success, "push {version}");
+        assert_eq!(
+            outputs,
+            format!("version={version}\ndeploy=false\n"),
+            "push {version}"
+        );
+    }
+    for manual_allow in ["", "false"] {
+        let (success, outputs) =
+            run_pages_policy("workflow_dispatch", manual_allow, &pages_metadata("0.4.0"));
+        assert!(success, "manual {manual_allow:?}");
+        assert_eq!(
+            outputs, "version=0.4.0\ndeploy=false\n",
+            "manual {manual_allow:?}"
+        );
+    }
+}
+
+#[test]
+fn pages_policy_rejects_missing_malformed_and_mismatched_versions() {
+    let mut mismatch = pages_metadata("0.4.0");
+    mismatch["packages"][1]["version"] = json!("0.4.1");
+    for metadata in [
+        json!({}),
+        pages_metadata("dev3"),
+        pages_metadata("0.4.0-01"),
+        pages_metadata("0.4.0\n"),
+        json!({
+            "packages":[{"id":"pgokf","name":"pgokf","version":"0.4.0"}],
+            "workspace_members":"pgokf"
+        }),
+        json!({
+            "packages":{"id":"pgokf","name":"pgokf","version":"0.4.0"},
+            "workspace_members":["pgokf"]
+        }),
+        json!({
+            "packages":[
+                {"id":"A","name":"pgokf","version":"0.4.0"},
+                {"id":"B","name":"okf-parser","version":"0.4.0"},
+                {"id":"B","name":"okf-parser","version":"0.4.0"},
+                {"id":"C-actual","name":"third","version":"0.4.0-dev3"}
+            ],
+            "workspace_members":["A","B","C"]
+        }),
+        mismatch,
+    ] {
+        let (success, outputs) = run_pages_policy("push", "", &metadata);
+        assert!(!success, "{metadata}");
+        assert!(outputs.is_empty(), "{metadata}: {outputs}");
+    }
+    let (success, outputs) = run_pages_policy("workflow_dispatch", "yes", &pages_metadata("0.4.0"));
+    assert!(!success);
+    assert!(outputs.is_empty());
+}
+
+#[test]
+fn docs_pages_workflow_has_a_fail_closed_deployment_gate() {
+    assert_eq!(
+        check_pages_policy(&workflow("docs"), &contexts()),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn docs_pages_build_is_not_suppressed_by_workflow_concurrency() {
+    let docs = workflow("docs");
+    assert!(docs.get("concurrency").is_none());
+    assert_eq!(
+        docs["jobs"]["deploy"]["concurrency"],
+        json!({"group":"pages","cancel-in-progress":false})
+    );
+}
+
+#[test]
+fn docs_pages_gate_rejects_bypasses_and_failed_build_deployment() {
+    for case in [
+        "manual-default",
+        "push-path-filter",
+        "policy-continue",
+        "build-continue",
+        "missing-build-need",
+        "failed-build-bypass",
+        "push-event-bypass",
+        "manual-input-bypass",
+        "deploy-continue",
+        "workflow-write-permission",
+        "policy-write-permission",
+        "build-write-permission",
+        "deploy-missing-concurrency",
+        "policy-script-replacement",
+        "unknown-pages-writer",
+        "workflow-default-shell",
+        "policy-default-shell",
+        "policy-container",
+        "build-default-shell",
+        "build-site-replacement",
+    ] {
+        let mut docs = workflow("docs");
+        match case {
+            "manual-default" => {
+                docs["on"]["workflow_dispatch"]["inputs"]["deploy_pages"]["default"] = json!(true);
+            }
+            "push-path-filter" => {
+                docs["on"]["push"]["paths"] = json!(["docs/**"]);
+            }
+            "policy-continue" => docs["jobs"]["pages-policy"]["continue-on-error"] = json!(true),
+            "build-continue" => docs["jobs"]["build"]["continue-on-error"] = json!(true),
+            "missing-build-need" => docs["jobs"]["deploy"]["needs"] = json!(["pages-policy"]),
+            "failed-build-bypass" => {
+                docs["jobs"]["deploy"]["if"] =
+                    json!("${{ github.event_name == 'workflow_dispatch' && inputs.deploy_pages == true && needs.pages-policy.result == 'success' && needs.pages-policy.outputs.deploy == 'true' }}");
+            }
+            "push-event-bypass" => {
+                docs["jobs"]["deploy"]["if"] =
+                    json!("${{ inputs.deploy_pages == true && needs.build.result == 'success' && needs.pages-policy.result == 'success' && needs.pages-policy.outputs.deploy == 'true' }}");
+            }
+            "manual-input-bypass" => {
+                docs["jobs"]["deploy"]["if"] =
+                    json!("${{ github.event_name == 'workflow_dispatch' && needs.build.result == 'success' && needs.pages-policy.result == 'success' && needs.pages-policy.outputs.deploy == 'true' }}");
+            }
+            "deploy-continue" => docs["jobs"]["deploy"]["continue-on-error"] = json!(true),
+            "workflow-write-permission" => docs["permissions"]["pages"] = json!("write"),
+            "policy-write-permission" => {
+                docs["jobs"]["pages-policy"]["permissions"] = json!({"pages":"write"});
+            }
+            "build-write-permission" => {
+                docs["jobs"]["build"]["permissions"] = json!({"id-token":"write"});
+            }
+            "deploy-missing-concurrency" => {
+                docs["jobs"]["deploy"].as_object_mut().unwrap().remove("concurrency");
+            }
+            "policy-script-replacement" => docs["jobs"]["pages-policy"]["steps"]
+                .as_array_mut()
+                .unwrap()
+                .insert(
+                    1,
+                    json!({"run":"printf '#!/bin/sh\\nprintf deploy=true\\n' > scripts/pages-deploy-policy.sh"}),
+                ),
+            "workflow-default-shell" => {
+                docs["defaults"] = json!({"run":{"shell":"bash scripts/hostile-shell.sh {0}"}});
+            }
+            "policy-default-shell" => {
+                docs["jobs"]["pages-policy"]["defaults"] =
+                    json!({"run":{"shell":"bash scripts/hostile-shell.sh {0}"}});
+            }
+            "policy-container" => {
+                docs["jobs"]["pages-policy"]["container"] = json!("hostile:latest");
+            }
+            "build-default-shell" => {
+                docs["jobs"]["build"]["defaults"] =
+                    json!({"run":{"shell":"bash scripts/ignore-failures.sh {0}"}});
+            }
+            "build-site-replacement" => docs["jobs"]["build"]["steps"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"run":"rm -rf site && cp -R hostile-site site"})),
+            _ => {
+                docs["jobs"]["hostile"] = json!({
+                    "runs-on":"ubuntu-latest",
+                    "permissions":{"pages":"write","id-token":"write"},
+                    "steps":[{"run":"deploy-with-custom-client"}]
+                });
+            }
+        }
+        assert!(!check_pages_policy(&docs, &contexts()).is_empty(), "{case}");
+    }
+}
 #[test]
 fn reviewed_context_digests_are_exactly_equal() {
     let contracts = contexts();
-    for file in ["ci", "packages", "pgrx-test"] {
+    for file in ["ci", "docs", "packages", "pgrx-test"] {
         let w = workflow(file);
         assert_eq!(
             &execution_context(&w).unwrap(),
             &contracts[w["name"].as_str().unwrap()],
             "{file}"
         );
-        assert!(check_shell_policy(&w, &contracts).is_empty());
+        if file != "docs" {
+            assert!(check_shell_policy(&w, &contracts).is_empty());
+        }
     }
 }
 #[test]

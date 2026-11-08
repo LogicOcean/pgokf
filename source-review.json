@@ -38,7 +38,7 @@
       "executable": false
     },
     ".github/workflows/docs.yml": {
-      "sha256": "660fdebd0e6afa0013e2c650fdad3e3c0dcc6e195d53fa17091b55717daf4293",
+      "sha256": "3d64ca3f5628e47b1fcbf1030aed8bbb3db45e7cde93f5e8b195a53707c3d36b",
       "executable": false
     },
     ".github/workflows/packages.yml": {
@@ -690,7 +690,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/src/main.rs": {
-      "sha256": "055826f8834bef6e568187344aed7a70b549dafc5c3248c44e519bfa3cdc9d89",
+      "sha256": "d00c9250e8288af6987a1e0bc17ca54da0b30eb7a87d748a8fef214a56d742fb",
       "executable": false
     },
     "crates/pgokf-verifier/src/mcp/golden.rs": {
@@ -834,7 +834,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/src/workflow.rs": {
-      "sha256": "c22c722f544c74ea5f6e2f22e44b5a9bf0b15ea12da0150d85d4b3c98d3ef4df",
+      "sha256": "a1871312a84182c16518220c1a7478ddaa40db8c1f546d929ffc8568552a9ba8",
       "executable": false
     },
     "crates/pgokf-verifier/tests/artifact_smoke.rs": {
@@ -902,7 +902,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/tests/workflow.rs": {
-      "sha256": "9f767440a833f1cfb3edadd3b58e3e98fed62a7c9eb99286d58008c7925e229e",
+      "sha256": "605e335018ea5ba2a9fde80514eb260afd34fd37be543dd617c8a2a1c61a72cf",
       "executable": false
     },
     "crates/pgokf-web/Cargo.toml": {
@@ -1270,7 +1270,7 @@
       "executable": false
     },
     "docs/release-checklist.md": {
-      "sha256": "ee882708b702061abadc3f880798a17e6726067590d4b10a1c97773e679b7048",
+      "sha256": "c30a3b8a8a23b65425f64d8359e983e059f46ddbc9c1ce3b1cf4064408995748",
       "executable": false
     },
     "docs/releases/0.3.0-partial-ghcr.json": {
@@ -1460,6 +1460,10 @@
     "scripts/compatibility-parity.sh": {
       "sha256": "68f8417361907fdc3e1fbf7e8277b260c2cbfa0103c60b98a8d01af873fa20df",
       "executable": true
+    },
+    "scripts/pages-deploy-policy.sh": {
+      "sha256": "5e5c9f7dadb091813a9b2d472d9fef6b2e51e76601bd44948c18b52bfabb6432",
+      "executable": false
     },
     "scripts/test-homebrew-environment.rb": {
       "sha256": "015a5dd408e2b0f7a05339c7e810dc72ccfbc1c49384295f4f3a3ef5e2b4829f",
@@ -2566,7 +2570,7 @@
       "executable": false
     },
     "tests/workflow-contexts.json": {
-      "sha256": "84bbf6d722a9fa51371a54e2d4de133c37eb34318059aecfb1b04c21f7354679",
+      "sha256": "6ea2ccfac55eab751c76597eef65bd70813a9ccf201eb042ce4cf0497423e7b9",
       "executable": false
     },
     "vendor/pgrx/.cargo_vcs_info.json": {

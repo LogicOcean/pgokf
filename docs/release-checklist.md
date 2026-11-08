@@ -427,6 +427,13 @@ using `workflow::execution_context()` in the same change, then rerunning
 `cargo test --locked -p pgokf-verifier`, `policy-campaign . NEW_EVIDENCE_DIRECTORY`,
 the implementation campaign described in
 [Rust verification](rust-verification.md), and actionlint. Do not regenerate the contract merely to silence a failing check.
+
+The Docs workflow runs `mkdocs build --strict` on every push to `main`, including
+stable release merges, but a push can never deploy GitHub Pages. Pages publication
+is manual-only: use `workflow_dispatch` and explicitly set the default-false
+`deploy_pages` input to `true`. The deploy job still requires successful build and
+policy jobs, and it alone receives `pages: write` and `id-token: write`.
+
 This is a validated workflow execution contract, not a runner sandbox: runner
 binaries, the pinned action implementations and called source scripts remain
 trusted. The regression executes actual provisioning/Beta bodies with failing

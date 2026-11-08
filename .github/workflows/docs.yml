@@ -1,6 +1,7 @@
 name: Docs
 
-# Build and publish the MkDocs Material site to GitHub Pages.
+# Build the MkDocs Material site on every main push. Publish it only from a
+# manual dispatch whose operator explicitly opts in below.
 #
 # The build runs with `--strict`, so a missing nav page or a broken internal
 # link fails CI rather than silently shipping a broken site.
@@ -8,26 +9,37 @@ name: Docs
 on:
   push:
     branches: [main]
-    paths:
-      - docs/**
-      - mkdocs.yml
-      - CHANGELOG.md
-      - .github/workflows/docs.yml
-  # Allow manual runs from the Actions tab.
+  # Manual publication is fail-closed unless the operator explicitly opts in.
   workflow_dispatch:
+    inputs:
+      deploy_pages:
+        description: Manually deploy the successfully built site to GitHub Pages
+        required: true
+        type: boolean
+        default: false
 
-# Least-privilege token: Pages deployment needs pages:write + id-token:write.
+# Build and policy jobs only need repository read access. Deployment permissions
+# are granted only to the gated deploy job below.
 permissions:
   contents: read
-  pages: write
-  id-token: write
-
-# Serialize deployments; never cancel an in-flight publish.
-concurrency:
-  group: pages
-  cancel-in-progress: false
 
 jobs:
+  pages-policy:
+    name: Resolve Pages deployment policy
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.policy.outputs.version }}
+      deploy: ${{ steps.policy.outputs.deploy }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve manual-only Pages deployment policy
+        id: policy
+        env:
+          INPUT_DEPLOY_PAGES: ${{ inputs.deploy_pages }}
+        run: cargo metadata --locked --no-deps --format-version 1 | bash scripts/pages-deploy-policy.sh
+
   build:
     name: Build (mkdocs --strict)
     runs-on: ubuntu-latest
@@ -67,8 +79,16 @@ jobs:
 
   deploy:
     name: Deploy to GitHub Pages
-    needs: build
+    needs: [build, pages-policy]
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_pages == true && needs.build.result == 'success' && needs.pages-policy.result == 'success' && needs.pages-policy.outputs.deploy == 'true' }}
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    # Serialize deployments without suppressing strict builds for queued pushes.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

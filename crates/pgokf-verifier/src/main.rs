@@ -329,7 +329,7 @@ fn run() -> Result<(), String> {
         }
         [command, root] if command == "workflow-contexts" => {
             let mut contexts = pgokf_verifier::workflow::Contexts::new();
-            for name in ["ci", "packages", "pgrx-test"] {
+            for name in ["ci", "docs", "packages", "pgrx-test"] {
                 let source = std::fs::read_to_string(
                     Path::new(root).join(format!(".github/workflows/{name}.yml")),
                 )
@@ -475,6 +475,10 @@ fn run() -> Result<(), String> {
                 &read("packages")?,
                 &read("ci")?,
                 &read("pgrx-test")?,
+            ));
+            errors.extend(pgokf_verifier::workflow::check_pages_policy(
+                &read("docs")?,
+                &contexts,
             ));
             if errors.is_empty() {
                 Ok(())

@@ -286,6 +286,160 @@ fn dependencies(job: &Value) -> BTreeSet<&str> {
     }
 }
 
+/// Enforce the strict-build, manual-only GitHub Pages deployment boundary.
+#[must_use]
+#[allow(clippy::too_many_lines)] // One closed workflow boundary with explicit diagnostics.
+pub fn check_pages_policy(docs: &Value, contexts: &Contexts) -> Vec<String> {
+    const POLICY_COMMAND: &str = "cargo metadata --locked --no-deps --format-version 1 | bash scripts/pages-deploy-policy.sh";
+    const DEPLOY_CONDITION: &str = "${{ github.event_name == 'workflow_dispatch' && inputs.deploy_pages == true && needs.build.result == 'success' && needs.pages-policy.result == 'success' && needs.pages-policy.outputs.deploy == 'true' }}";
+    let mut errors = Vec::new();
+
+    if docs.get("defaults").is_some() {
+        errors.push("Pages workflow shell defaults are forbidden".into());
+    }
+    if docs.get("concurrency").is_some() {
+        errors.push("workflow concurrency must not suppress strict Pages builds".into());
+    }
+    match execution_context(docs) {
+        Ok(actual) if contexts.get("Docs") == Some(&actual) => {}
+        _ => errors.push("unreviewed Pages execution context".into()),
+    }
+
+    if docs["on"]["workflow_dispatch"]["inputs"]["deploy_pages"]
+        != json!({
+            "description":"Manually deploy the successfully built site to GitHub Pages",
+            "required":true,
+            "type":"boolean",
+            "default":false
+        })
+    {
+        errors
+            .push("manual Pages deployment requires an explicit default-false allow input".into());
+    }
+    if docs["on"]["push"] != json!({"branches":["main"]}) {
+        errors.push("strict Pages build must run on every main-branch push".into());
+    }
+    if docs["permissions"] != json!({"contents":"read"}) {
+        errors.push("Pages workflow-level permissions must be read-only".into());
+    }
+
+    let Some(jobs) = docs["jobs"].as_object() else {
+        errors.push("Pages jobs missing".into());
+        return errors;
+    };
+    if jobs.keys().map(String::as_str).collect::<BTreeSet<_>>()
+        != BTreeSet::from(["pages-policy", "build", "deploy"])
+    {
+        errors.push("Pages job inventory changed".into());
+    }
+    let policy = &docs["jobs"]["pages-policy"];
+    if policy["runs-on"] != "ubuntu-latest"
+        || policy.get("if").is_some()
+        || policy.get("continue-on-error").is_some()
+        || policy.get("needs").is_some()
+        || policy.get("permissions").is_some()
+        || policy["outputs"]
+            != json!({
+                "version":"${{ steps.policy.outputs.version }}",
+                "deploy":"${{ steps.policy.outputs.deploy }}"
+            })
+    {
+        errors.push("Pages policy job must run directly and fail closed".into());
+    }
+    if policy["steps"]
+        != json!([
+            {
+                "name":"Checkout",
+                "uses":"actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+            },
+            {
+                "name":"Resolve manual-only Pages deployment policy",
+                "id":"policy",
+                "env":{"INPUT_DEPLOY_PAGES":"${{ inputs.deploy_pages }}"},
+                "run":POLICY_COMMAND
+            }
+        ])
+    {
+        errors.push("exact Cargo-metadata Pages policy execution required".into());
+    }
+
+    let build = &docs["jobs"]["build"];
+    let build_steps = build["steps"].as_array();
+    if build["runs-on"] != "ubuntu-latest"
+        || build.get("if").is_some()
+        || build.get("continue-on-error").is_some()
+        || build.get("needs").is_some()
+        || build.get("permissions").is_some()
+        || build_steps.is_none_or(|steps| {
+            steps.iter().any(|step| {
+                step.get("if").is_some()
+                    || step
+                        .get("continue-on-error")
+                        .is_some_and(|value| value != &json!(false))
+            })
+        })
+        || build_steps.is_none_or(|steps| {
+            steps
+                .iter()
+                .filter(|step| step["run"] == "mkdocs build --strict")
+                .count()
+                != 1
+        })
+    {
+        errors.push("strict Pages build must remain an unconditional required job".into());
+    }
+
+    let deploy = &docs["jobs"]["deploy"];
+    if deploy["needs"] != json!(["build", "pages-policy"])
+        || deploy["if"] != DEPLOY_CONDITION
+        || deploy.get("continue-on-error").is_some()
+        || deploy["runs-on"] != "ubuntu-latest"
+        || deploy["permissions"] != json!({"pages":"write","id-token":"write"})
+        || deploy["concurrency"] != json!({"group":"pages","cancel-in-progress":false})
+        || deploy["environment"]
+            != json!({
+                "name":"github-pages",
+                "url":"${{ steps.deployment.outputs.page_url }}"
+            })
+    {
+        errors.push(
+            "Pages deployment must require successful build and approved policy output".into(),
+        );
+    }
+    if deploy["steps"]
+        != json!([{
+            "name":"Deploy",
+            "id":"deployment",
+            "uses":"actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128"
+        }])
+    {
+        errors.push("exact pinned Pages deployment step required".into());
+    }
+
+    let mut deploy_actions = Vec::new();
+    for (job_name, job) in jobs {
+        for step in job["steps"].as_array().into_iter().flatten() {
+            if step["uses"]
+                .as_str()
+                .is_some_and(|action| action.starts_with("actions/deploy-pages@"))
+            {
+                deploy_actions.push((job_name.as_str(), step));
+            }
+        }
+    }
+    if deploy_actions.len() != 1
+        || deploy_actions[0].0 != "deploy"
+        || deploy_actions[0].1["id"] != "deployment"
+        || deploy_actions[0].1["uses"]
+            != "actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128"
+        || deploy_actions[0].1.get("if").is_some()
+        || deploy_actions[0].1.get("continue-on-error").is_some()
+    {
+        errors.push("unique pinned Pages deployment action required".into());
+    }
+    errors
+}
+
 /// Stable packaging remains PG15–18; pinned PG19 compatibility is required.
 /// Exact execution-context contracts bind all current commands and conditions.
 #[must_use]
