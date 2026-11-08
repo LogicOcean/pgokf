@@ -1286,7 +1286,7 @@
       "executable": false
     },
     "docs/releases/0.3.0-validation.md": {
-      "sha256": "d6bde2e0fda53dbf7b04b0b9b30fa4b539458bacff01559fa8195464c4174189",
+      "sha256": "e0eabbcd8479d3ef9a55df222de474ec43f78eeb5128caa6806dac4dd870bb78",
       "executable": false
     },
     "docs/releases/0.3.1-recovery.md": {
@@ -2586,7 +2586,7 @@
       "executable": false
     },
     "vendor/pgrx/Cargo.lock": {
-      "sha256": "7707a1fd63fefc2a9daec4094984b5db48a3abd8b9bef72cd1acba781c8657d7",
+      "sha256": "84719005e7747383dc9801b516a20dfa4c1c688534afed7552a2066282d25aa8",
       "executable": false
     },
     "vendor/pgrx/Cargo.toml": {
@@ -2606,7 +2606,7 @@
       "executable": false
     },
     "vendor/pgrx/VENDORING.md": {
-      "sha256": "7a0b5d29e50928beff686befcecedb9827cfda8a669234231622b177a4b4e2bc",
+      "sha256": "5471de6ce1e9c73cf377254c16b4d7dd40adf5247a94e72f720bee4be9ceba15",
       "executable": false
     },
     "vendor/pgrx/src/aggregate.rs": {

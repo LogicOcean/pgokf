@@ -36,21 +36,35 @@ the resolved graph rather than ignored.
 4. Five upstream doc-comment lines in `callbacks.rs`, `datum/internal.rs`,
    `datum/range.rs`, and `fn_call.rs` have trailing spaces removed so the
    whole-tree whitespace gate passes. No Rust tokens change.
+5. `Cargo.lock` is reconciled with the patched normalized manifest. Cargo 1.96
+   updates `anyhow` from 1.0.100 to 1.0.103 and `futures-task`/`futures-util`
+   from 0.3.31 to 0.3.32; the now-unused `serde_cbor`, `half`, and `pin-utils`
+   packages leave the lock graph. No pgrx source or version changes.
 
-The upstream package's `Cargo.lock` and `Cargo.toml.orig` are retained as
-provenance only; Cargo uses the normalized `Cargo.toml` here and the workspace
-root lockfile. Their old serde_cbor references do not enter the resolved graph.
-The added `LICENSE` is byte-identical to the upstream repository license at
-the pinned revision (SHA256
+The upstream package's `Cargo.toml.orig` is retained byte-for-byte as provenance.
+The tracked `Cargo.lock` is not used by pgokf workspace builds, which resolve
+through the workspace root lockfile, but it ships in source archives and is
+integrity-reviewed. It is therefore maintained as a strict-audit-clean snapshot
+of the patched normalized `Cargo.toml`, rather than preserving dependencies that
+the patched crate no longer declares. The original upstream package lock SHA-256
+was `7707a1fd63fefc2a9daec4094984b5db48a3abd8b9bef72cd1acba781c8657d7`.
+The reconciled lock passes Cargo 1.96 `metadata --locked` and unsuppressed
+`cargo audit --deny warnings` when the crate is checked standalone. The added
+`LICENSE` is byte-identical to the upstream repository license at the pinned
+revision (SHA256
 `074f7499b019ffe4bc37b61842f709ccd8bf9800c456e6a2d14f0353c4973fe3`).
 No other upstream source file is changed. The helpers existed for `#[derive(PostgresType)]`
 default storage functions; no crate in this workspace (and nothing in
 `pgrx-macros`/`pgrx-sql-entity-graph` output used here) derives a custom
 `PostgresType`, so the removal changes no runtime or SQL behavior - any
 future use fails at compile time, which is the fail-closed property we want.
-The workspace's dependency-graph regression
-(`tests/test_release_integrity.py`) fails if `serde_cbor` re-enters
-`Cargo.lock` or the patch is dropped.
+The Rust release-identity verifier
+(`crates/pgokf-verifier/src/release_identity.rs`) rejects `serde_cbor` in the
+workspace lock graph. Its mutation and locked-metadata coverage
+(`crates/pgokf-verifier/tests/release_identity.rs`) also proves that Cargo
+resolves this vendored `pgrx` package rather than the registry crate. Both this
+note and the vendored lock are hash- and mode-bound by `source-review.json`;
+`pgokf-verifier source-guard` rejects byte or executable-mode drift.
 
 ## Updating
 
