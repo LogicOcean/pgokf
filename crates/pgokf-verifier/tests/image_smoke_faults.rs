@@ -165,7 +165,7 @@ fn server_observation_fault_is_refused() {
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
         Path::new(&evidence),
         &image,
-        "0.4.0-dev3",
+        env!("CARGO_PKG_VERSION"),
         true,
     );
     let error = result.unwrap_err();

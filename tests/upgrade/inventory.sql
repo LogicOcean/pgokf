@@ -2,7 +2,7 @@
 -- Stable identities, never database-local OIDs. Keep comments, ACLs, column
 -- order, security attributes, membership and dump registration in the comparison.
 -- Read-only catalog SELECTs only, so it can also inventory an installed catalog
--- inside a READ ONLY transaction; scripts/catalog_parity.py compares two
+-- inside a READ ONLY transaction; the pgokf-verifier parity gate compares two
 -- inventories under the declared exceptions (tests/upgrade/catalog-exceptions.json).
 SET search_path = pg_catalog;
 WITH namespaces AS (

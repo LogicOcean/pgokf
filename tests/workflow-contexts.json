@@ -4,7 +4,7 @@
     "jobs": {
       "deny": "f487773dbaad36e516844b3c88da4042baf14e5a56a0429d4eb1e36009fa641e",
       "homebrew-policy": "cc4a602afaa1181b7f2e6c6ed842516ceb834b0e328edd097b182c290feb84bf",
-      "notices": "5b9fa8623ad65bbc5d5cd3a0f4f21a05b05d054ab60d21bab33d9ada5c148c0d",
+      "notices": "e4e6c42523bc7287c97b98abdceb65cd42d66d43b4976875750fc68a7b6c0fd7",
       "rust": "263717c46395f4c591d8d2d49e315ef94c4f8a5f5d27acf06bc715d93b21566d"
     }
   },

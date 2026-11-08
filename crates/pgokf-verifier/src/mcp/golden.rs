@@ -586,7 +586,7 @@ mod tests {
     }
     #[test]
     fn normalization_preserves_nonvolatile_bytes() {
-        let input = json!({"catalog_generation":42,"rank":0.123,"sync_hash":"abcd","modified_at":"2026-01-01T12:00:00Z","text":"unchanged 42", "name":"pgokf-mcp","version":"0.4.0-dev3"});
+        let input = json!({"catalog_generation":42,"rank":0.123,"sync_hash":"abcd","modified_at":"2026-01-01T12:00:00Z","text":"unchanged 42", "name":"pgokf-mcp","version":env!("CARGO_PKG_VERSION")});
         let output = normalize(&input, "fixture-bundle");
         assert_eq!(output["catalog_generation"], "<GEN>");
         assert_eq!(output["modified_at"], "<TS>");

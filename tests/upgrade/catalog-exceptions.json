@@ -1,5 +1,5 @@
 {
-  "comment": "The only differences a reconciled pgokf catalog may show against a fresh install of the same version (scripts/catalog_parity.py; docs/api-stability.md, Declared catalog exceptions). tests/test_release_integrity.py pins this file exactly: widening it is a reviewed change, never a silent one.",
+  "comment": "The only differences a reconciled pgokf catalog may show against a fresh install of the same version (pgokf-verifier parity; docs/api-stability.md, Declared catalog exceptions). The Rust verifier accepts only the reviewed exception schema and complete column orders: widening them is a reviewed change, never a silent one.",
   "column_order": {
     "pgokf_web.users": {
       "fresh": ["name", "role", "password_hash", "display_name", "provider", "created_at", "updated_at"],

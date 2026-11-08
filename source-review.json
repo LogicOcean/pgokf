@@ -10,7 +10,7 @@
       "executable": false
     },
     ".github/ISSUE_TEMPLATE/bug_report.yml": {
-      "sha256": "b2b2a0d550fe9dca853cc8eeb591429185c25d1a04dd21fb87250b3898903ef6",
+      "sha256": "7184654afdc7189bce4a65ea59c04e4b3fe036aabe53306e84fa4fbf443e7148",
       "executable": false
     },
     ".github/ISSUE_TEMPLATE/commercial_license.yml": {
@@ -34,7 +34,7 @@
       "executable": false
     },
     ".github/workflows/ci.yml": {
-      "sha256": "152658de809da0cb502f46b044f9497f504a3b1536f170d827e7962c998f930c",
+      "sha256": "bfadf937a959c11a7a54efcef7621a2ce7f5a0dd024890b576afc8c1a99b8721",
       "executable": false
     },
     ".github/workflows/docs.yml": {
@@ -42,7 +42,7 @@
       "executable": false
     },
     ".github/workflows/packages.yml": {
-      "sha256": "3914ea0c391d1c5dafb510479106f28c42d9d27f0bc4001768300456cdaf09d4",
+      "sha256": "197c1436942400705c985042403f68fef5189bbf71994da5c205c0c3f5aa2684",
       "executable": false
     },
     ".github/workflows/pgrx-test.yml": {
@@ -58,7 +58,7 @@
       "executable": false
     },
     "CHANGELOG.md": {
-      "sha256": "25d6334ed70a5145a027535d79796ce89fff7a817b01a52ec4dd768ed92370be",
+      "sha256": "d2ed1afca6256fb5ba4cd5e8347961d866b1b1b75652c39382caba8f32ad4a6f",
       "executable": false
     },
     "CODE_OF_CONDUCT.md": {
@@ -74,11 +74,11 @@
       "executable": false
     },
     "Cargo.lock": {
-      "sha256": "1dcf7938708ffb921bb3d8616b6b7988c686d26f62672835a7af6075a909256f",
+      "sha256": "6973833a8475760765bf86a78011415584c2c92376ac153981ff0be974c58023",
       "executable": false
     },
     "Cargo.toml": {
-      "sha256": "031263a19fb39ac192cf6d987f23491899a9ab1aa3144a8c1426accb8a6c3862",
+      "sha256": "8c69df28a13dc3089f1b87ca43b55c622871ab0933e832bc59fb0d35e492973c",
       "executable": false
     },
     "LICENSE": {
@@ -90,11 +90,11 @@
       "executable": false
     },
     "META.json": {
-      "sha256": "62abee29e8153732aa18d7901196e4c6203abf1a9d5015bf28404fe4e9406ef7",
+      "sha256": "156f48806c12420420cf57ce46310225da02a02c93c5180e70b351eb9353bbac",
       "executable": false
     },
     "README.md": {
-      "sha256": "2c4a16838fde81d54526342a3a5d8636b7821cea2933f1c1133f9de3fb694d6f",
+      "sha256": "97a2987d5cbbac48feb6a27d42eb073658858f972b077edb06a74de3a8a67b51",
       "executable": false
     },
     "SECURITY.md": {
@@ -102,23 +102,23 @@
       "executable": false
     },
     "THIRD-PARTY-NOTICES.txt": {
-      "sha256": "43db9e524c46732c27a2567c3d0aec5bf03162cf4ecef247223a778549cd9e51",
+      "sha256": "614ed383b154d1954694b32c8b6717f6d9346d9b7674e6b15a06d0571e2bc547",
       "executable": false
     },
     "about.hbs": {
-      "sha256": "ad39e40de285a4c324f3ad06471c7afbec56a88db46d7584be547542601f45f0",
+      "sha256": "3b1fd0a24d2ef4e4b6c3e89236040c7092ccf73fe34c95fb9a9acf12fb3b37f9",
       "executable": false
     },
     "about.toml": {
-      "sha256": "e2453f8cc579576ebb15020452dae914450e49a223d746c3933d5864d153882b",
+      "sha256": "4a3aff49973e1dca2a5a8ca478d8263f62003207b71981e34157e22f659b67ad",
       "executable": false
     },
     "crates/extension/Cargo.toml": {
-      "sha256": "bd01035b4fbe3a0ed6a20da9aebce849d3f548f22e73376c8d95084273c76ecb",
+      "sha256": "90bb261e9c72c73dcbd9a397fa62763a1f6d2e7a4ca7d44b2d3f67971231a123",
       "executable": false
     },
     "crates/extension/pgokf.control": {
-      "sha256": "2cb2adcda0848bd8f55a6e41ca6395ca4c49aba094e8185e5c564817057ef558",
+      "sha256": "8975a0633fd21d4e10e1aa271be9e1f5d9a71f51b08d7901ae6bc8481589f621",
       "executable": false
     },
     "crates/extension/sql/bootstrap.sql": {
@@ -234,7 +234,15 @@
       "executable": false
     },
     "crates/extension/sql/pgokf--0.4.0-dev2--0.4.0-dev3.sql": {
-      "sha256": "356312b39ad066cbeba1ecd46c38a3c1659c1b9460cfc4021a6a301f49bde4d2",
+      "sha256": "48e28a0776fe337e5ba0001abc1b3b95ac1ed5516ec427416187c10b5459f2ef",
+      "executable": false
+    },
+    "crates/extension/sql/pgokf--0.4.0-dev3--0.4.0.sql": {
+      "sha256": "6f12d630244553cc4f89ba44882d0c4aa67cd5d481bbb841e1d3b738f4aaf8c8",
+      "executable": false
+    },
+    "crates/extension/sql/pgokf--0.4.0.sql": {
+      "sha256": "68a8f0b1d2196edc08210ca83ab8cf42d30c9129d6c1597fec881042ec67ce98",
       "executable": false
     },
     "crates/extension/src/catalog/access.rs": {
@@ -394,7 +402,7 @@
       "executable": false
     },
     "crates/extension/tests/api_stability.rs": {
-      "sha256": "7b0c882cf0b1adff9678b08451e26b9c605a52a5e3477745dafd81d1533a57c9",
+      "sha256": "ab8122d7bc8e11f82eb46cf61620a4db54b40c0870add6d072b49e93b365ac9f",
       "executable": false
     },
     "crates/okf-parser/Cargo.toml": {
@@ -502,7 +510,7 @@
       "executable": false
     },
     "crates/pgokf-companion/Cargo.toml": {
-      "sha256": "06346376aadd24f8debe960f006e824094f4928349f6e98de329abf3f47b4df1",
+      "sha256": "be1f50c0a14dbff58025e434822e2cc83c07679850ce3124f1ce95c14bc76b05",
       "executable": false
     },
     "crates/pgokf-companion/src/documents.rs": {
@@ -522,7 +530,7 @@
       "executable": false
     },
     "crates/pgokf-embed/Cargo.toml": {
-      "sha256": "e440cbe61baf92f32a39c795ce17735a0ab4a4a2af7f56c2ab59a948a8932ff7",
+      "sha256": "4a094df29ff5cf3fed1cdc826a32c595656b2d25e4fdcb5535974074e0d9b20b",
       "executable": false
     },
     "crates/pgokf-embed/README.md": {
@@ -538,7 +546,7 @@
       "executable": false
     },
     "crates/pgokf-ingest/Cargo.toml": {
-      "sha256": "b15ffab9f1a138e589e1bb611aefb5ed968ca5e5e8a4f8c90f607af7022bbda9",
+      "sha256": "5579a8c21a8d03129a9f0f38650e2f5449f9038f6f30ef17f49f41f36ba90d49",
       "executable": false
     },
     "crates/pgokf-ingest/README.md": {
@@ -550,7 +558,7 @@
       "executable": false
     },
     "crates/pgokf-mcp/Cargo.toml": {
-      "sha256": "5707ee60afabf3a5be4587c91bd3978ed63d7bd9440aecc765c3cd823169b495",
+      "sha256": "ee6022b7678998b3a8b5834e13d6d75380a1ca23468aa6a8a4e295aff72ccd45",
       "executable": false
     },
     "crates/pgokf-mcp/README.md": {
@@ -634,7 +642,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/README.md": {
-      "sha256": "e018fde62f7d0691f8ea9dd1a584515c2ce91b2cb4a49cb22f0924fd5979c24d",
+      "sha256": "9edb0d47fb9df70b2af77af9a86a2d191719a8a8531cdb025cc41c06220a413c",
       "executable": false
     },
     "crates/pgokf-verifier/fixtures/environment-mutations.json": {
@@ -642,7 +650,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/fixtures/reconciliation-mutations.json": {
-      "sha256": "9277ca3c66fa61883fad22612b151477e84702391ae6c0aaba9f2341c9d0a15f",
+      "sha256": "8a1f3793b058de3a53a456f7912a1fdc15b55c8b772c2628745b938fd25069df",
       "executable": false
     },
     "crates/pgokf-verifier/fixtures/upgrade-probes.json": {
@@ -694,7 +702,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/src/mcp/golden.rs": {
-      "sha256": "ee6e280690f59291fd13d37d39eb9d190fd27e63eefcdbb8dc262e7b2f15196c",
+      "sha256": "6bdc17c41e572f47a72229f1c45979e2ded48023808ca9d8adfdf08f8188ef5e",
       "executable": false
     },
     "crates/pgokf-verifier/src/mcp/golden_live.rs": {
@@ -746,7 +754,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/src/migration.rs": {
-      "sha256": "b9027180fdfc61acdb6309966ff987baa1b019ace952a7a21b47435714d5eb97",
+      "sha256": "5f2f0306608315cfb8a55a9efaefe0df33e8d46c5589b263f53426d49194a083",
       "executable": false
     },
     "crates/pgokf-verifier/src/mutations.rs": {
@@ -830,7 +838,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/src/upgrade.rs": {
-      "sha256": "f4b27185a7e78b1883d2a1a93a8796f06879ae02f9ff41d222f7a4291f272351",
+      "sha256": "e7b69442f5b64c009d57b0cbdb3fac2d737a1ea96612619190f60e4ea762fa0d",
       "executable": false
     },
     "crates/pgokf-verifier/src/workflow.rs": {
@@ -854,7 +862,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/tests/image_smoke_faults.rs": {
-      "sha256": "e3625e0983315ad89abec5223a5b387e32cc2d0c16e0bcc99f21397e0c08debf",
+      "sha256": "cb91c9ba21537363f0c5bd291c3284d3d0ec5047df0344f8f8e7511ca7d2b403",
       "executable": false
     },
     "crates/pgokf-verifier/tests/mutation_runner.rs": {
@@ -882,7 +890,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/tests/release_identity.rs": {
-      "sha256": "37e4ea29eca858f113920582d74066150c178e13496c17b18aca447912e212b6",
+      "sha256": "5e74f28db50531ee59591281bc8ec64c63124379503e55f8fd3d1fed72a3a820",
       "executable": false
     },
     "crates/pgokf-verifier/tests/service_limits.rs": {
@@ -894,7 +902,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/tests/sql_source.rs": {
-      "sha256": "6360d4541c140cc0193d5ab5a76194ee2e4ab8e07ec9794df6d026964eacccb9",
+      "sha256": "6228ac85e0aa15a1d10389610f19f6121fbc7d14bdbcb12a1acb2e11b748fa0e",
       "executable": false
     },
     "crates/pgokf-verifier/tests/support/policy_cases.rs": {
@@ -906,7 +914,7 @@
       "executable": false
     },
     "crates/pgokf-web/Cargo.toml": {
-      "sha256": "e0ba6a6fb6036f53437c4ca4de0940803e842a3e325bd6a8d977536edb085b58",
+      "sha256": "dbcc12ffbb79d16fa2d946cc0791937f010b63e04dd8c9e8761d946c8ed88820",
       "executable": false
     },
     "crates/pgokf-web/README.md": {
@@ -1194,7 +1202,7 @@
       "executable": false
     },
     "deploy/compose/.env.example": {
-      "sha256": "770c67850836500ce39f482a78848e94576256c8f583a5978ef4d96dc7568087",
+      "sha256": "9748e47473970f4dc9fbe45902b51a05fd684e75e9ab2ef725e8b73b45db9ad5",
       "executable": false
     },
     "deploy/compose/README.md": {
@@ -1202,7 +1210,7 @@
       "executable": false
     },
     "deploy/compose/docker-compose.yml": {
-      "sha256": "e9fe4e916c7af5f9634ecde82d1f9e39b53e2f10faad21d7a35e0c4639a8d512",
+      "sha256": "ad5679af8dc01c2f36a79c9d02bd23153a5c400ababcbaff35f81c2b07245597",
       "executable": false
     },
     "docs/api-stability.md": {
@@ -1218,7 +1226,7 @@
       "executable": false
     },
     "docs/compose-deployment.md": {
-      "sha256": "563c713802c4b70763b307df1d9c2b164213e63cb33fa2374470ba243298b353",
+      "sha256": "d24f320a6628b9331a9c59f4a78237ba40c0d4479a36b5c861994aa0a22eee02",
       "executable": false
     },
     "docs/configuration.md": {
@@ -1234,7 +1242,7 @@
       "executable": false
     },
     "docs/getting-started.md": {
-      "sha256": "e6d8fa29f52d022483323c2e5145bc6c1ff38e9daa7f3ad19ce7020eb0f6d28f",
+      "sha256": "7779877da11fdb36472da60fe690863c9b92a2cf6d90c0e9ffc4bbd3a1c0bcd8",
       "executable": false
     },
     "docs/glossary.md": {
@@ -1246,7 +1254,7 @@
       "executable": false
     },
     "docs/mcp-0.4-development.md": {
-      "sha256": "29ed0c8726c394207e47ec35abb779f30097101948fddd619af8f9e4bc5aad50",
+      "sha256": "32c450fa86b135018a4748d9dba64c0dffd7617531f9855c07998ea29abfb143",
       "executable": false
     },
     "docs/multi-tenancy.md": {
@@ -1262,15 +1270,15 @@
       "executable": false
     },
     "docs/operations.md": {
-      "sha256": "3d90190ed01b4459d7bfc0ae800ebebbd7c0c30a2a3b3b754d2d4b8107304ee9",
+      "sha256": "c16805959e96e12c481e8c9ab7aefe167802e35d867da1c262c45f90dc2b95bf",
       "executable": false
     },
     "docs/packaging.md": {
-      "sha256": "5f8be335d75dd1b2f252fada58661930c0efc91564196fe8da2c9140bebfc186",
+      "sha256": "462b59c57f15891a57367f396bca9cedbdeeb679a8386459d716b2046dc6d603",
       "executable": false
     },
     "docs/release-checklist.md": {
-      "sha256": "c30a3b8a8a23b65425f64d8359e983e059f46ddbc9c1ce3b1cf4064408995748",
+      "sha256": "8803cf615971fb416a998465beeb9d7098f495ff1abee39f549cb4e6d788ee9c",
       "executable": false
     },
     "docs/releases/0.3.0-partial-ghcr.json": {
@@ -1350,7 +1358,7 @@
       "executable": true
     },
     "packaging/deb/build-deb.sh": {
-      "sha256": "1e84fbf586c9fe37242ed362fa688fb335fac0866298eff970cfb661a56064fa",
+      "sha256": "67b80bd67cad673dda9327cc205b299d581d725baa4aebe2c80e24d01f6919c7",
       "executable": true
     },
     "packaging/deb/control.template": {
@@ -1358,15 +1366,15 @@
       "executable": false
     },
     "packaging/docker/Dockerfile": {
-      "sha256": "4fd504e0f9f957aae14eeebd47876a11319ad58d16061af50f1e49fd4e0f4b6e",
+      "sha256": "53ee9ec35f1b5e56405a986d257df001082b7a949cfc03fcfbfce3539a8f9fb2",
       "executable": false
     },
     "packaging/docker/Dockerfile.companions": {
-      "sha256": "17298a1fcb17dc5223380989d05d5e12b6c40445d9acdb2ee49ac69060ce0751",
+      "sha256": "b5f8e0a16465a95be10cc0c906bf94093f2b5801d26f2999e0951e7c6ac9584b",
       "executable": false
     },
     "packaging/docker/README.md": {
-      "sha256": "fa480ddcc498c2bcbeaf567fdc114e3849cfac5fd8403a89607c07d8eb56aced",
+      "sha256": "4493d7ff3193104ba8d81d27acfbe240f54a9854f3f51717d51115ee3c082cc0",
       "executable": false
     },
     "packaging/docker/bin/pgokf-backup": {
@@ -1430,7 +1438,7 @@
       "executable": true
     },
     "packaging/homebrew/pgokf.rb": {
-      "sha256": "ce84821441a6990390ec6a179a3f32260dd89e3b7ee15c586ba513d2055a0f56",
+      "sha256": "674da254977d5ad8d7253cbcaef4ebfee1e8f8e73b7062ecc8f32503bea557d1",
       "executable": false
     },
     "packaging/install-postgres.sh": {
@@ -1442,7 +1450,7 @@
       "executable": true
     },
     "packaging/rpm/pgokf.spec": {
-      "sha256": "1acc7b253afbc0874d9f21ce6dc2d8e03d037c49072116418eea67b513c6ef49",
+      "sha256": "0bd66c5c6820ba7e7823b231e4aa7a905052788d9f40991f6c6a63013275c7c7",
       "executable": false
     },
     "packaging/verify-postgres.sh": {
@@ -1642,7 +1650,7 @@
       "executable": false
     },
     "spec/mcp-native-coverage.json": {
-      "sha256": "7dd79ed4a090a8305d09221604d0c9fc6099427be40f6b2adb1d30797e8a130d",
+      "sha256": "fed44b438c1b6a47b980c376bdcab937ae8a1200e369ffe1a9dfb8901af67e4b",
       "executable": false
     },
     "spec/mcp-wire-sources.json": {
@@ -2230,7 +2238,7 @@
       "executable": false
     },
     "tests/mcp-golden/bundle/index.md": {
-      "sha256": "887baf5fb94b8f0921705b56754e4d00ae5873d8f72995d298725dbc33d45729",
+      "sha256": "dc5e11874887c8413a94d81c3f3b9f52b6aedd7be80280ae32d4d264ee35dcea",
       "executable": false
     },
     "tests/mcp-golden/bundle/runbooks/failover-appendix.md": {
@@ -2546,15 +2554,15 @@
       "executable": false
     },
     "tests/upgrade/catalog-exceptions.json": {
-      "sha256": "a230a8699b8bc76762ac72410fc0ac80af2736ba184d2e7532929969ebd7ec14",
+      "sha256": "27846c21143ca241263e93c51d52cca8218881073309ae85f5d37f4cd19fda3a",
       "executable": false
     },
     "tests/upgrade/inventory.sql": {
-      "sha256": "463992b6fa1ca82b161f5c625dd9a7837bbf6067e1aaf1017a86fd9589a11fa9",
+      "sha256": "cdeca47c653c60502a171be8217b69ff913ec3627477198cd0b2f4d79f9ce949",
       "executable": false
     },
     "tests/upgrade/live-drift.sql": {
-      "sha256": "9df17bdf9f503abe624834b509cb86074b61131388933663a80dcad6b3593e2b",
+      "sha256": "601806416514e3507082b640e17fd83d3ab80f73c609a93e152fb3a0b113f6fe",
       "executable": false
     },
     "tests/upgrade/seed.sql": {
@@ -2562,15 +2570,15 @@
       "executable": false
     },
     "tests/upgrade/web-identity-statements.json": {
-      "sha256": "867d3347561280d91dafb5c8a8e8d6fbac5adcb705792b2b42e0c10466581635",
+      "sha256": "c4a9872208d25305e5e7ff9e16f1e6a05d313f6315ac9b61cca4fe6094334725",
       "executable": false
     },
     "tests/upgrade/web-seed.sql": {
-      "sha256": "cc55cafd8987c7786e20ace17ba75d0f1581a7ae1af8ba3992bfa037272553e4",
+      "sha256": "202936844dfda764781a0d45441bf50f5e0c99c73378fc2d7ca5a5e830bb7ec7",
       "executable": false
     },
     "tests/workflow-contexts.json": {
-      "sha256": "6ea2ccfac55eab751c76597eef65bd70813a9ccf201eb042ce4cf0497423e7b9",
+      "sha256": "309f6fa86c52276ba92682fa9e99dbe483923e77d4bf131d949f97b855f23ea0",
       "executable": false
     },
     "vendor/pgrx/.cargo_vcs_info.json": {

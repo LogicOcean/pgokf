@@ -83,7 +83,7 @@ cargo run --locked -p pgokf-verifier -- workflow-check .
 cargo run --locked -p pgokf-verifier -- checkout-shapes . evidence-checkouts
 cargo run --locked -p pgokf-verifier -- homebrew-policy .
 cargo run --locked -p pgokf-verifier -- homebrew-packaging . evidence-homebrew
-cargo run --locked -p pgokf-verifier -- homebrew-observation evidence-homebrew/test.log 0.4.0-dev3
+cargo run --locked -p pgokf-verifier -- homebrew-observation evidence-homebrew/test.log 0.4.0
 cargo run --locked -p pgokf-verifier -- compatibility-image . . pgokf-beta-compat beta-image.json
 cargo run --locked -p pgokf-verifier -- image-smoke . IMAGE VERSION optional evidence-image
 cargo run --locked -p pgokf-verifier -- package-checksums 1.4.0 packaging/docker/pg_textsearch.sha256
@@ -107,7 +107,7 @@ For a local rollback rehearsal, build both immutable images from authenticated
 Git source, using a clean current checkout with full release history:
 
 ```sh
-cargo run --locked -p pgokf-verifier -- image-build . . 0.4.0-dev3 18 pgokf-local-current current-image.json
+cargo run --locked -p pgokf-verifier -- image-build . . 0.4.0 18 pgokf-local-current current-image.json
 cargo run --locked -p pgokf-verifier -- image-build . . 0.2.0 18 pgokf-local-previous previous-image.json
 cargo run --locked -p pgokf-verifier -- rollback-manifest current-image.json previous-image.json packaging/homebrew/pgokf.rb rollback.json
 cargo run --locked -p pgokf-verifier -- rollback-check rollback.json

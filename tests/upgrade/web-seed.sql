@@ -2,7 +2,7 @@
 -- Representative web identity state, by named columns, with fixed times: an
 -- identity provider, a password person with a display name, one without, a
 -- person that provider signed in, an MCP token, and live users-mode and
--- provider sessions beside an expired one. scripts/upgrade-parity.py seeds it
+-- provider sessions beside an expired one. The pgokf-verifier parity gate seeds it
 -- identically into a fresh catalog and into each drifted one before the drift.
 INSERT INTO pgokf_web.identity_providers
     (id, enabled, kind, issuer, client_id, redirect_url, provider_name, updated_by, created_at, updated_at)

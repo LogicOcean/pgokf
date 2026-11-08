@@ -38,25 +38,24 @@ fn release_identity_includes_verifier_and_all_distribution_artifacts() {
     distribution_identity(&root(), &identity).unwrap();
 }
 #[test]
+fn stable_0_4_0_source_and_distribution_identity_are_exact() {
+    let identity = source_identity(&root()).unwrap();
+    assert_eq!(identity.version, "0.4.0");
+    assert_eq!(identity.distribution_version, "0.4.0");
+    distribution_identity(&root(), &identity).unwrap();
+}
+#[test]
 fn release_identity_mutations_fail() {
     for (path, before, after) in [
-        (
-            "Cargo.toml",
-            "version = \"0.4.0-dev3\"",
-            "version = \"0.2.0\"",
-        ),
-        (
-            "Cargo.lock",
-            "version = \"0.4.0-dev3\"",
-            "version = \"0.2.0\"",
-        ),
+        ("Cargo.toml", "version = \"0.4.0\"", "version = \"0.2.0\""),
+        ("Cargo.lock", "version = \"0.4.0\"", "version = \"0.2.0\""),
         (
             "META.json",
-            "\"version\": \"0.3.1\"",
+            "\"version\": \"0.4.0\"",
             "\"version\": \"0.2.0\"",
         ),
-        ("crates/extension/Cargo.toml", "=0.4.0-dev3", "=0.2.0"),
-        ("crates/extension/pgokf.control", "0.4.0-dev3", "0.3.0"),
+        ("crates/extension/Cargo.toml", "=0.4.0", "=0.2.0"),
+        ("crates/extension/pgokf.control", "0.4.0", "0.3.0"),
     ] {
         let f = fixture();
         edit(f.path(), path, before, after);
@@ -68,11 +67,11 @@ fn duplicate_lock_meta_and_control_identities_fail() {
     for (path, added) in [
         (
             "Cargo.lock",
-            "\n[[package]]\nname = \"pgokf-verifier\"\nversion = \"0.4.0-dev3\"\n",
+            "\n[[package]]\nname = \"pgokf-verifier\"\nversion = \"0.4.0\"\n",
         ),
         (
             "crates/extension/pgokf.control",
-            "\ndefault_version = '0.4.0-dev3'\n",
+            "\ndefault_version = '0.4.0'\n",
         ),
     ] {
         let f = fixture();
@@ -86,8 +85,8 @@ fn duplicate_lock_meta_and_control_identities_fail() {
     edit(
         f.path(),
         "META.json",
-        "\"version\": \"0.3.1\"",
-        "\"version\": \"0.3.1\", \"version\": \"0.3.1\"",
+        "\"version\": \"0.4.0\"",
+        "\"version\": \"0.4.0\", \"version\": \"0.4.0\"",
     );
     assert!(source_identity(f.path()).is_err());
 }
@@ -117,7 +116,7 @@ fn formula_authenticated_forward_and_rollback_tuples() {
     let mut records = published_digests();
     authenticate_formula(&tuple, &records).unwrap();
     let mut current = tuple.clone();
-    current.version = "0.4.0-dev3".into();
+    current.version = env!("CARGO_PKG_VERSION").into();
     current.assertions = vec![current.version.clone(); 2];
     current.sha256 = "a".repeat(64);
     assert!(authenticate_formula(&current, &records).is_err());
@@ -295,7 +294,7 @@ fn distribution_version_prefix_and_comment_cannot_hide_stale_value() {
         ".github/ISSUE_TEMPLATE/bug_report.yml",
         "packaging/docker/Dockerfile",
         "packaging/docker/Dockerfile.companions",
-        "crates/extension/sql/pgokf--0.3.1.sql",
+        "crates/extension/sql/pgokf--0.4.0.sql",
     ] {
         let dest = f.path().join(path);
         std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
@@ -303,7 +302,7 @@ fn distribution_version_prefix_and_comment_cannot_hide_stale_value() {
     }
     let path = f.path().join("deploy/compose/.env.example");
     let text = std::fs::read_to_string(&path).unwrap();
-    std::fs::write(path,format!("{}\n# ghcr.io/logicocean/pgokf:0.3.1-pg18\n# ghcr.io/logicocean/pgokf-companions:0.3.1\n",text.replace("0.3.1","0.3.10"))).unwrap();
+    std::fs::write(path,format!("{}\n# ghcr.io/logicocean/pgokf:0.4.0-pg18\n# ghcr.io/logicocean/pgokf-companions:0.4.0\n",text.replace("0.4.0","0.4.1"))).unwrap();
     let identity = source_identity(f.path()).unwrap();
     assert!(distribution_identity(f.path(), &identity).is_err());
 }
@@ -373,15 +372,15 @@ fn active_distribution_declarations_cannot_be_replaced_by_comments() {
     for (file, before, after, comment) in [
         (
             "packaging/docker/Dockerfile",
-            "ARG PGOKF_VERSION=\"0.3.1\"",
-            "ARG PGOKF_VERSION=\"0.3.10\"",
-            "# ARG PGOKF_VERSION=\"0.3.1\"",
+            "ARG PGOKF_VERSION=\"0.4.0\"",
+            "ARG PGOKF_VERSION=\"0.4.1\"",
+            "# ARG PGOKF_VERSION=\"0.4.0\"",
         ),
         (
             ".github/ISSUE_TEMPLATE/bug_report.yml",
-            "placeholder: \"0.3.1\"",
-            "placeholder: \"0.3.10\"",
-            "# \"0.3.1\"",
+            "placeholder: \"0.4.0\"",
+            "placeholder: \"0.4.1\"",
+            "# \"0.4.0\"",
         ),
     ] {
         let f = fixture();
@@ -391,7 +390,7 @@ fn active_distribution_declarations_cannot_be_replaced_by_comments() {
             ".github/ISSUE_TEMPLATE/bug_report.yml",
             "packaging/docker/Dockerfile",
             "packaging/docker/Dockerfile.companions",
-            "crates/extension/sql/pgokf--0.3.1.sql",
+            "crates/extension/sql/pgokf--0.4.0.sql",
         ] {
             let dest = f.path().join(path);
             std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
@@ -456,22 +455,22 @@ fn rpm_install_presence_and_documented_image_tags_are_validated() {
             ".github/ISSUE_TEMPLATE/bug_report.yml",
             "packaging/docker/Dockerfile",
             "packaging/docker/Dockerfile.companions",
-            "crates/extension/sql/pgokf--0.3.1.sql",
+            "crates/extension/sql/pgokf--0.4.0.sql",
         ] {
             let dest = f.path().join(path);
             std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
             std::fs::copy(root().join(path), dest).unwrap();
         }
         match mutation {
-            "rpm" => edit(f.path(), "packaging/rpm/pgokf.spec", "0.3.1", "0.3.10"),
+            "rpm" => edit(f.path(), "packaging/rpm/pgokf.spec", "0.4.0", "0.4.1"),
             "install" => {
-                std::fs::remove_file(f.path().join("crates/extension/sql/pgokf--0.3.1.sql"))
+                std::fs::remove_file(f.path().join("crates/extension/sql/pgokf--0.4.0.sql"))
                     .unwrap();
             }
             _ => {
                 let p = f.path().join("packaging/docker/Dockerfile");
                 let mut s = std::fs::read_to_string(&p).unwrap();
-                s.push_str("\n# docker run ghcr.io/logicocean/pgokf:0.3.10-pg18\n");
+                s.push_str("\n# docker run ghcr.io/logicocean/pgokf:0.4.1-pg18\n");
                 std::fs::write(p, s).unwrap();
             }
         }

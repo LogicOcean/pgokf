@@ -329,6 +329,10 @@ pub fn check_repository(root: &Path, version: &str) -> Result<(), String> {
             "pgokf--0.4.0-dev1--0.4.0-dev2.sql",
             "c69eeb709bde20858e762acb37fcdff24c70521f4d9c1fb69c8846472f18f022",
         ),
+        (
+            "pgokf--0.4.0-dev2--0.4.0-dev3.sql",
+            "48e28a0776fe337e5ba0001abc1b3b95ac1ed5516ec427416187c10b5459f2ef",
+        ),
     ] {
         let bytes = std::fs::read(dir.join(name)).map_err(|e| e.to_string())?;
         if Sha256::digest(bytes)

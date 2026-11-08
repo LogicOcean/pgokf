@@ -1301,9 +1301,10 @@
     "version": 1,
     "kind": "requirement-and-operation-scoped semantic predicates",
     "source_files": [
-      "tests/mcp_semantics.py",
-      "tests/mcp_surface.py",
-      "tests/mcp_wire.py"
+      "crates/pgokf-verifier/src/mcp/native/semantic_rules.rs",
+      "crates/pgokf-verifier/src/mcp/native/semantics.rs",
+      "crates/pgokf-verifier/src/mcp/native/surface.rs",
+      "crates/pgokf-verifier/src/mcp/wire.rs"
     ],
     "count_policy": "Each label has an explicit floor. Skill per-entry predicates require all 55 baseline entries. Runtime totals and test events are diagnostics only, never requirement evidence."
   },

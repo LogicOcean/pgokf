@@ -10,6 +10,8 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-08
+
 - Add the 0.4 development MCP Tools registry, structured results, strict schemas,
   modern per-request protocol handling, canonical Resources and optional Skills.
 - Preserve successful legacy Tool text; reject unknown/wrong-typed optional
@@ -18,7 +20,7 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 - Add generation-stamped freshness evidence to compatibility Tool metadata and
   serve Skill manifests as bare `text/markdown` without changing stored bytes.
 - See `docs/mcp-0.4-development.md` for capabilities, cursor/cache semantics and
-  explicit omissions. This development entry does not claim release approval.
+  explicit omissions. Tagging and artifact publication remain separate steps.
 - Open point version `0.4.0-dev2` with the ordinary
   `pgokf--0.4.0-dev1--0.4.0-dev2.sql` edge, which reconciles search-function
   drift found on a field catalog that followed an unpublished early 0.3.0-dev
@@ -49,22 +51,25 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
   the product's own statements against both orders. `0.4.0-dev2` is not
   rewritten in place.
 
+- Finalize the development line as stable `0.4.0`: advance source,
+  distribution, package and OCI identities together; commit the generated
+  `pgokf--0.4.0.sql` install script; and add the receipt-only
+  `pgokf--0.4.0-dev3--0.4.0.sql` edge so an installed dev3 catalog reaches the
+  stable release through ordinary `ALTER EXTENSION UPDATE`. The final edge
+  changes no objects or data beyond the standing dump-relation registration.
 
-The 0.4.0 development line opens at point version `0.4.0-dev1`
+The 0.4.0 development line opened at point version `0.4.0-dev1`
 (`MAJOR.MINOR.PATCH-devN` convention; see "Development point versions" in
-[docs/api-stability.md](docs/api-stability.md)). The workspace version and
-`pgokf.control` `default_version` advance to `0.4.0-dev1`; distribution
-artifacts (META.json, RPM spec, Dockerfiles, compose env, issue template,
-Homebrew formula) stay pinned at the last published release 0.3.1, and no
-`pgokf--0.4.0-dev1.sql` install script is committed - for dev points it is a
-build product. The additive upgrade edge
-`crates/extension/sql/pgokf--0.3.1--0.4.0-dev1.sql` adds and backfills the
-exact `SKILL.md` SHA-256 and byte-size columns, then registers dump relations.
-The line continues at `0.4.0-dev2` through `pgokf--0.4.0-dev1--0.4.0-dev2.sql`
-(search-function reconciliation, above) and at `0.4.0-dev3` through
-`pgokf--0.4.0-dev2--0.4.0-dev3.sql` (web identity comments, above); the
-workspace and control advance with it while distribution artifacts stay at
-0.3.1.
+[docs/api-stability.md](docs/api-stability.md)). During development the
+workspace version and `pgokf.control` `default_version` advanced with each
+point, while distribution artifacts stayed pinned at 0.3.1 and dev install
+scripts remained build products. The additive
+`crates/extension/sql/pgokf--0.3.1--0.4.0-dev1.sql` edge added and backfilled
+the exact `SKILL.md` SHA-256 and byte-size columns, then registered dump
+relations. The line continued at `0.4.0-dev2` through
+`pgokf--0.4.0-dev1--0.4.0-dev2.sql` (search-function reconciliation, above)
+and at `0.4.0-dev3` through `pgokf--0.4.0-dev2--0.4.0-dev3.sql` (web identity
+comments, above), before the receipt-only dev3-to-stable finalization edge.
 
 ### Added
 
@@ -1792,7 +1797,9 @@ queries, native full-text search, and link-graph traversal.
 - The `pgokf_private` schema and its `config` table are readable and writable
   only by the extension owner and `pgokf_admin`; readers cannot see policy.
 
-[Unreleased]: https://github.com/LogicOcean/pgokf/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/LogicOcean/pgokf/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/LogicOcean/pgokf/compare/v0.3.1...v0.4.0
+[0.3.1]: https://github.com/LogicOcean/pgokf/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/LogicOcean/pgokf/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/LogicOcean/pgokf/compare/v0.1.16...v0.2.0
 [0.1.16]: https://github.com/LogicOcean/pgokf/compare/v0.1.15...v0.1.16

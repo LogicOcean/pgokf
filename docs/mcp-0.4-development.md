@@ -1,8 +1,8 @@
 # MCP 0.4 development surface
 
-The 0.4.0 development line (currently point version `0.4.0-dev3`) implements MCP `2026-07-28` alongside
+The finalized 0.4.0 source implements MCP `2026-07-28` alongside
 legacy initialization revisions `2024-11-05`, `2025-03-26`, and `2025-06-18`.
-This is development work, not a published release or a blanket conformance claim.
+Tagging and publication are separate release steps; this is not a blanket conformance claim.
 
 | Surface | Implementation |
 | --- | --- |

@@ -26,9 +26,9 @@
 -- exceptions" in docs/api-stability.md): exactly these two tables, exactly
 -- the fresh or the recorded appended order, every other column property
 -- (name, type, default, nullability, collation, generated, identity, ACL,
--- comment) equal to a fresh install. tests/test_release_integrity.py refuses
--- positional access to either table or row type in shipped code, and
--- scripts/upgrade-parity.py replays the product's own statements against
+-- comment) equal to a fresh install. The pgokf-verifier positional-check gate
+-- refuses positional access to either table or row type in shipped code, and
+-- the pgokf-verifier parity gate replays the product's own statements against
 -- both orders.
 --
 -- The 0.4.0-dev2 edge's claim that a drifted catalog ends object-for-object

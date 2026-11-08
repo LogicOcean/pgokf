@@ -23,7 +23,7 @@
 --     row kept - the shape a hand migration adding those columns leaves;
 --   * superseded comments on the pgokf_web schema, the pgokf_web.users table
 --     and its name, role, password_hash, created_at and updated_at columns.
--- scripts/upgrade-parity.py checks that this fixture differs from a factory
+-- The pgokf-verifier parity gate checks that this fixture differs from a factory
 -- catalog in exactly these objects, so an incomplete fixture fails the gate.
 
 -- Current overloads: detach (dropping their initial privileges), re-create

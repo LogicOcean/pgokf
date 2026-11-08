@@ -5,7 +5,7 @@ ingested as a concept: `pgokf` skips `index.md` and `log.md` at every
 directory level.
 
 The documents in this bundle seed the golden legacy MCP wire fixtures captured
-by `tests/test_mcp_golden.py`:
+by the `pgokf-verifier mcp-golden` gate:
 
 - `runbooks/failover` - a failover runbook linking to the service and appendix
 - `runbooks/failover-appendix` - the appendix, linking back to the runbook

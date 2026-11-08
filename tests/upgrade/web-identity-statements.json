@@ -1,5 +1,5 @@
 {
-  "comment": "Every statement the product runs against pgokf_web.users/sessions (scripts/catalog_parity.py product_statements; tests/test_release_integrity.py keeps this list equal to the source), with the arguments (and, where not 00000, the SQLSTATE) scripts/upgrade-parity.py executes them with, in order, as pgokf_writer, against a fresh catalog and against each reconciled catalog that keeps the declared column order. The transcripts must be identical.",
+  "comment": "Every statement the product runs against pgokf_web.users/sessions (pgokf-verifier positional-statements enumerates the product source and pgokf-verifier parity keeps this list equal to it), with the arguments (and, where not 00000, the SQLSTATE) the parity gate executes them with, in order, as pgokf_writer, against a fresh catalog and against each reconciled catalog that keeps the declared column order. The transcripts must be identical.",
   "statements": [
     {
       "sql": "SELECT 1 FROM pgokf_web.users LIMIT 0",

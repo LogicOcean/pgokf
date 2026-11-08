@@ -35,7 +35,7 @@ on:
     inputs:
       release_tag:
         description: >-
-          Publish only the current v0.3.1 immutable release tag. Historical and
+          Publish only the current v0.4.0 immutable release tag. Historical and
           retired tags are unsupported. Empty: build and smoke-test only.
         type: string
         required: false

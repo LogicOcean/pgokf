@@ -6,9 +6,9 @@ hits, confined bundle registration to a directory you control, registered a
 bundle of OKF concepts, searched it full-text, walked its link graph, and
 retrieved a concept's original source bytes.
 
-These examples target PostgreSQL 18 with `pgokf` 0.3.1. The walkthrough
+These examples target PostgreSQL 18 with `pgokf` 0.4.0. The walkthrough
 was originally exercised on the unpublished 0.3.0 candidate; version output
-below is updated for 0.3.1. If your numbers differ, it is because your bundle differs, the shapes
+below is updated for 0.4.0. If your numbers differ, it is because your bundle differs, the shapes
 will match.
 
 - New to the OKF document format? See [okf-authoring.md](okf-authoring.md) and
@@ -63,7 +63,7 @@ SELECT pgokf.version();
 CREATE EXTENSION
  version
 ---------
- 0.3.1
+ 0.4.0
 (1 row)
 ```
 

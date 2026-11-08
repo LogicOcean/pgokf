@@ -14,9 +14,9 @@
 class Pgokf < Formula
   desc "Materialized PostgreSQL catalog for Open Knowledge Format bundles"
   homepage "https://github.com/LogicOcean/pgokf"
-  # RELEASE STATE: pre-tag 0.3.1. Retain the last published 0.2.0 tuple.
+  # RELEASE STATE: pre-tag 0.4.0. Retain the last published 0.2.0 tuple.
   # v0.3.0 is an immutable, unpublished failed candidate; never consume it.
-  # Advance directly to 0.3.1 only through docs/release-checklist.md.
+  # Advance to 0.4.0 only after its immutable tag archive is authenticated.
   url "https://github.com/LogicOcean/pgokf/archive/refs/tags/v0.2.0.tar.gz"
   sha256 "194441d1b4d6bd5cf5f22a39a3b6c923e9a68d7692202ff7c4bb05109df812e5"
   license "AGPL-3.0-only"

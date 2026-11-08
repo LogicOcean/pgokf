@@ -6,7 +6,8 @@
 # passes `cargo deny check licenses` also has a reproducible notice here.
 #
 # Regenerate with:
-#   cargo about generate --workspace --all-features -o THIRD-PARTY-NOTICES.txt about.hbs
+#   cargo about generate --locked --workspace --all-features -o /dev/stdout about.hbs \
+#     | LC_ALL=C sed 's/[[:blank:]]*$//' > THIRD-PARTY-NOTICES.txt
 
 # Every target matters: the .deb/.rpm ship a Linux cdylib, but the companions
 # are built on whatever a user targets, so do not filter by triple.

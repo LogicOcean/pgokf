@@ -69,8 +69,9 @@ jobs:
             | tar xz --strip-components=1 -C /usr/local/bin --wildcards '*/cargo-about'
       - name: Regenerate and diff
         run: |
-          cargo about generate --workspace --all-features \
-            -o /tmp/notices-fresh.txt about.hbs
+          cargo about generate --locked --workspace --all-features \
+            -o /dev/stdout about.hbs \
+            | LC_ALL=C sed 's/[[:blank:]]*$//' > /tmp/notices-fresh.txt
           cargo run --locked -p pgokf-verifier -- notices-check THIRD-PARTY-NOTICES.txt /tmp/notices-fresh.txt
 
   homebrew-policy:

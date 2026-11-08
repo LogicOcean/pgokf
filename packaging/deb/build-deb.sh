@@ -96,7 +96,8 @@ cp -a "${STAGED_TREE}/usr" "${PKG_ROOT}/usr"
 DOC_DIR="${PKG_ROOT}/usr/share/doc/${PKG_NAME}"
 if [ ! -f "${REPO_ROOT}/THIRD-PARTY-NOTICES.txt" ]; then
   echo "error: THIRD-PARTY-NOTICES.txt is missing; regenerate it with" >&2
-  echo "  cargo about generate --workspace --all-features -o THIRD-PARTY-NOTICES.txt about.hbs" >&2
+  echo "  cargo about generate --locked --workspace --all-features -o /dev/stdout about.hbs \\" >&2
+  echo "    | LC_ALL=C sed 's/[[:blank:]]*$//' > THIRD-PARTY-NOTICES.txt" >&2
   exit 1
 fi
 install -Dm644 "${REPO_ROOT}/LICENSE"                 "${DOC_DIR}/copyright"
