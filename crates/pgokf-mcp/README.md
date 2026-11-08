@@ -1,5 +1,11 @@
 # pgokf-mcp
 
+The 0.4 development surface adds modern MCP, Resources and the optional Skills
+extension. See [development protocol details](../../docs/mcp-0.4-development.md)
+for request metadata, exact capabilities and compatibility changes. The legacy
+setup examples below remain useful; this is not a published 0.4 release.
+
+
 A **Model Context Protocol** server that exposes the [`pgokf`](../extension)
 catalog to AI agents as MCP tools.
 
@@ -206,8 +212,8 @@ much longer trail than a search.
 
 `writer` and `admin` change the catalog, and need this server to hold a
 `pgokf_writer` connection of its own (`--writer-url`). Without one their tools
-are still listed - so an agent discovers them and is told plainly that this
-endpoint does not write - and every call answers with that. Two rules hold
+are not advertised - discovery lists only what this endpoint can execute - and
+a call to one is refused with the `writer_unavailable` code. Two rules hold
 whatever writes:
 
 - **A contribution arrives unverified.** Whatever a document claims under
@@ -296,3 +302,20 @@ the `initialize` result (with `serverInfo` and `capabilities`), the `tools/list`
 result (a `tools` array), and the `tools/call` result (an `isError:false` tool
 result whose text is the JSON search hits from the live catalog). This is
 exactly the end-to-end check the release runs.
+
+Compatibility read/search Tools attach generation-stamped effective freshness in
+`_meta["io.logicocean.pgokf/catalogEvidence"]`, keyed by composite identity and
+canonical Resource URI. This separately observed evidence does not change legacy
+text bytes or imply snapshot consistency with earlier Tool execution. Traversal,
+Resources and Skills retain their own freshness annotations. Skill manifest reads
+use bare `text/markdown` and preserve the exact stored bytes.
+
+MCP acceptance requires two independent gates: the preselected unmodified
+whole official scenarios (Gate A), and the complete native PG18/HTTP coverage
+join and mutation controls (Gate B). See the
+[acceptance specification](../../spec/pgokf-0.4.0-mcp.md#11-acceptance-criteria),
+[applicability manifest](../../spec/mcp-conformance-applicability.json) and
+[native requirement ledger](../../spec/mcp-native-coverage.json). All designated
+commands must pass. The historical full alpha.11 fixture-coupled diagnostic
+remains external non-gating research; it is not declared passed. No blanket
+official conformance or production-server certification is claimed.

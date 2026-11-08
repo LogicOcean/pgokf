@@ -10,12 +10,13 @@ members = [
     "crates/pgokf-pgconn",
     "crates/pgokf-web",
     "crates/pgokf-workspace",
+    "crates/pgokf-verifier",
 ]
-default-members = ["crates/okf-parser", "crates/okf-sync"]
+default-members = ["crates/okf-parser", "crates/okf-sync", "crates/pgokf-verifier"]
 resolver = "2"
 
 [workspace.package]
-version = "0.3.1"
+version = "0.4.0-dev3"
 edition = "2024"
 rust-version = "1.96"
 license = "AGPL-3.0-only"
@@ -42,6 +43,10 @@ parquet = { version = "59", default-features = false, features = [
 ] }
 blake3 = "1.8"
 globset = "0.4"
+# JSON Schema 2020-12 validation for the MCP tool registry. Default features
+# (resolve-file, resolve-http, reqwest) stay off: no network or file $ref
+# resolution, per spec/pgokf-0.4.0-mcp.md §4.2.
+jsonschema = { version = "0.57", default-features = false }
 pgrx = { version = "0.19.2", default-features = false }
 pulldown-cmark = "0.13"
 serde = { version = "1.0", features = ["derive"] }

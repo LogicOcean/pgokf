@@ -1,0 +1,28 @@
+[
+  {
+    "auth": "writer",
+    "request": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "method": "tools/call",
+      "params": {
+        "arguments": {},
+        "name": "list_bundles"
+      }
+    },
+    "response": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "result": {
+        "content": [
+          {
+            "text": "[\n  {\n    \"enabled\": true,\n    \"file_count\": 6,\n    \"id\": 1,\n    \"name\": \"golden-fs\",\n    \"retired\": false,\n    \"source_type\": \"filesystem\"\n  },\n  {\n    \"enabled\": true,\n    \"file_count\": 1,\n    \"id\": 2,\n    \"name\": \"golden-content\",\n    \"retired\": false,\n    \"source_type\": \"content\"\n  },\n  {\n    \"enabled\": true,\n    \"file_count\": 0,\n    \"id\": 3,\n    \"name\": \"golden-scratch\",\n    \"retired\": false,\n    \"source_type\": \"content\"\n  }\n]",
+            "type": "text"
+          }
+        ],
+        "isError": false
+      }
+    },
+    "status": 200
+  }
+]

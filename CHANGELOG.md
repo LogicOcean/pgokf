@@ -10,6 +10,72 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 ## [Unreleased]
 
+- Add the 0.4 development MCP Tools registry, structured results, strict schemas,
+  modern per-request protocol handling, canonical Resources and optional Skills.
+- Preserve successful legacy Tool text; reject unknown/wrong-typed optional
+  arguments, enforce legacy stdio initialization, and hide unavailable writers.
+- Persist exact SKILL.md SHA-256 and byte size through the ordinary upgrade edge.
+- Add generation-stamped freshness evidence to compatibility Tool metadata and
+  serve Skill manifests as bare `text/markdown` without changing stored bytes.
+- See `docs/mcp-0.4-development.md` for capabilities, cursor/cache semantics and
+  explicit omissions. This development entry does not claim release approval.
+- Open point version `0.4.0-dev2` with the ordinary
+  `pgokf--0.4.0-dev1--0.4.0-dev2.sql` edge, which reconciles search-function
+  drift found on a field catalog that followed an unpublished early 0.3.0-dev
+  build: it drops the superseded 0.2.0 `concept_search_semantic` /
+  `concept_search_hybrid` overloads (whose overlapping defaults made every
+  defaulted call ambiguous) and the 11-argument `bm25_hits` helper, installs
+  the 12-argument helper the BM25 path calls, and restores fresh-install ACLs,
+  comments and extension initial privileges. Each retired object is dropped
+  only in its exact published shape, with no dependents, `RESTRICT`; any other
+  shape or custom grant aborts the update with a named diagnostic and no
+  change. Factory catalogs pass through unchanged. `0.4.0-dev1` is not
+  rewritten in place.
+- Open point version `0.4.0-dev3` with the ordinary
+  `pgokf--0.4.0-dev2--0.4.0-dev3.sql` edge, which completes that field
+  catalog's reconciliation: it restores the seven superseded `pgokf_web`
+  comments (the schema, `pgokf_web.users`, and its `name`, `role`,
+  `password_hash`, `created_at` and `updated_at` columns) verbatim from the
+  fresh-install source, and nothing else. The `0.4.0-dev2` edge's claim that a
+  drifted catalog ends object-for-object equal to a fresh install held for the
+  search functions only: the same catalog also keeps `display_name`/`provider`
+  appended at the end of `pgokf_web.users` and `provider` at the end of
+  `pgokf_web.sessions` (and so of their row types). That physical column order
+  is not rebuilt; it is the one declared catalog exception
+  (`tests/upgrade/catalog-exceptions.json`, "Declared catalog exceptions" in
+  `docs/api-stability.md`), exactly these two tables and their recorded order,
+  with every other column property compared. Shipped code is checked to read
+  and write both tables by named columns only, and the upgrade gate replays
+  the product's own statements against both orders. `0.4.0-dev2` is not
+  rewritten in place.
+
+
+The 0.4.0 development line opens at point version `0.4.0-dev1`
+(`MAJOR.MINOR.PATCH-devN` convention; see "Development point versions" in
+[docs/api-stability.md](docs/api-stability.md)). The workspace version and
+`pgokf.control` `default_version` advance to `0.4.0-dev1`; distribution
+artifacts (META.json, RPM spec, Dockerfiles, compose env, issue template,
+Homebrew formula) stay pinned at the last published release 0.3.1, and no
+`pgokf--0.4.0-dev1.sql` install script is committed - for dev points it is a
+build product. The additive upgrade edge
+`crates/extension/sql/pgokf--0.3.1--0.4.0-dev1.sql` adds and backfills the
+exact `SKILL.md` SHA-256 and byte-size columns, then registers dump relations.
+The line continues at `0.4.0-dev2` through `pgokf--0.4.0-dev1--0.4.0-dev2.sql`
+(search-function reconciliation, above) and at `0.4.0-dev3` through
+`pgokf--0.4.0-dev2--0.4.0-dev3.sql` (web identity comments, above); the
+workspace and control advance with it while distribution artifacts stay at
+0.3.1.
+
+### Added
+
+- MCP server projections per [spec/pgokf-0.4.0-mcp.md](https://github.com/LogicOcean/pgokf/blob/main/spec/pgokf-0.4.0-mcp.md):
+  the 2026-07-28 protocol revision with validated `structuredContent` tool
+  results, stable URI-addressed Resources (`resources/list`,
+  `resources/templates/list`, `resources/read`), and the
+  `io.modelcontextprotocol/skills` extension (`skills/list`, `skills/get`,
+  exact per-file bytes via `resources/read`) publishing the canonical
+  `pgokf.skills` packages.
+
 ## [0.3.1] - 2026-09-22
 
 First publishable 0.3 release candidate. Supersedes the immutable, unpublished

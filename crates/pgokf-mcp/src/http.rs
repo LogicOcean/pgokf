@@ -82,8 +82,8 @@ const LOOKUP_WAIT: Duration = Duration::from_secs(2);
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// The `MCP-Protocol-Version` header a Streamable HTTP client may send. It
-/// is not read — every revision this server speaks carries these messages
-/// unchanged — but a browser client must be allowed to send it.
+/// is validated against modern per-request metadata; legacy traffic remains
+/// compatible with clients that omit it.
 const PROTOCOL_HEADER: HeaderName = HeaderName::from_static("mcp-protocol-version");
 
 /// What the HTTP transport needs.
@@ -454,7 +454,10 @@ fn cors_layer(allowed: &[String]) -> Result<CorsLayer> {
             header::CONTENT_TYPE,
             header::ACCEPT,
             PROTOCOL_HEADER,
+            HeaderName::from_static("mcp-method"),
+            HeaderName::from_static("mcp-name"),
         ])
+        .expose_headers([PROTOCOL_HEADER])
         .max_age(CORS_MAX_AGE))
 }
 
@@ -567,20 +570,49 @@ async fn not_found() -> HttpResponse {
 async fn rpc(
     State(server): State<Shared>,
     Extension(bearer): Extension<Bearer>,
+    headers: HeaderMap,
     body: String,
 ) -> HttpResponse {
+    let header_modern =
+        headers.get(PROTOCOL_HEADER).and_then(|v| v.to_str().ok()) == Some(crate::modern::VERSION);
     let request = match crate::rpc::parse_request(&body) {
         Ok(request) => request,
-        Err(response) => return Json(response).into_response(),
+        Err(response) => {
+            let body_modern = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .is_some_and(|value| crate::modern::is_modern_value(&value));
+            return rpc_response(response, header_modern || body_modern);
+        }
     };
+    let modern = header_modern || crate::modern::is_modern(&request);
+    if modern && let Err(response) = crate::modern::validate_http(&headers, &request) {
+        return rpc_response(response, true);
+    }
     if request.is_notification() {
-        // Nothing is ever sent back for a notification; the specification
-        // asks for 202 with no body.
         return StatusCode::ACCEPTED.into_response();
     }
     let id = request.reply_id();
     let caller = Caller::Remote(bearer);
-    Json(dispatch::handle(&server.catalog, &caller, &request, id).await).into_response()
+    rpc_response(
+        dispatch::handle(&server.catalog, &caller, &request, id).await,
+        modern,
+    )
+}
+
+/// Legacy HTTP keeps its 0.3.1 status mapping. Modern HTTP exposes protocol
+/// failures through status and JSON-RPC while carrying the response revision.
+fn rpc_response(mut response: crate::rpc::Response, modern: bool) -> HttpResponse {
+    if modern {
+        crate::modern::normalize_error_id(&mut response);
+        (
+            crate::modern::http_status(&response),
+            [(PROTOCOL_HEADER, crate::modern::VERSION)],
+            Json(response),
+        )
+            .into_response()
+    } else {
+        Json(response).into_response()
+    }
 }
 
 /// The token a request presents, from `Authorization: Bearer`. Only the
@@ -729,6 +761,7 @@ mod tests {
 
     fn bearer(tenant: Option<&str>) -> Bearer {
         Bearer {
+            principal_id: "test-principal".into(),
             name: "fleet".to_owned(),
             role: Role::Reader,
             tenant: tenant.map(str::to_owned),

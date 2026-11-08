@@ -1,0 +1,41 @@
+[
+  {
+    "request": {
+      "id": 1,
+      "jsonrpc": "2.0",
+      "method": "ping"
+    },
+    "response": {
+      "id": 1,
+      "jsonrpc": "2.0",
+      "result": {}
+    }
+  },
+  {
+    "request": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "limit": 1,
+          "query": "failover"
+        },
+        "name": "concept_search"
+      }
+    },
+    "response": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "result": {
+        "content": [
+          {
+            "text": "[\n  {\n    \"bundle_id\": 1,\n    \"concept_id\": \"runbooks/failover-appendix\",\n    \"headline\": \"<b>failover</b> appendix Supporting reference material for the widget <b>failover</b> runbook. Widget <b>failover</b> appendix\\nSupporting material\",\n    \"path\": \"runbooks/failover-appendix.md\",\n    \"rank\": 1.6,\n    \"title\": \"Widget failover appendix\",\n    \"type\": \"Runbook\"\n  }\n]",
+            "type": "text"
+          }
+        ],
+        "isError": false
+      }
+    }
+  }
+]

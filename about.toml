@@ -19,6 +19,8 @@ accepted = [
     "CDLA-Permissive-2.0",
     "ISC",
     "MIT",
+    # borrow-or-share, via jsonschema: MIT without attribution requirement.
+    "MIT-0",
     "MPL-2.0",
     "Unicode-3.0",
     "Unicode-DFS-2016",

@@ -33,7 +33,7 @@
 //!   as-of query at or after the removal instant returns no row.
 //!
 //! Because every statement of one sync binds a single captured instant
-//! ([`capture_sync_instant`], a `clock_timestamp()` read once per [`project`]),
+//! (`capture_sync_instant`, a `clock_timestamp()` read once per `project`),
 //! the closed version's `valid_to` equals the new version's `valid_from`, so
 //! intervals stay contiguous and non-overlapping and exactly one open version
 //! exists per live concept, while successive syncs advance in time. Enabling
@@ -61,8 +61,8 @@
 //!
 //! # Reader surface
 //!
-//! [`concept_history`](pgokf::concept_history) returns a concept's version
-//! timeline newest-first, and [`concept_as_of`](pgokf::concept_as_of) returns the
+//! `concept_history` returns a concept's version
+//! timeline newest-first, and `concept_as_of` returns the
 //! single version valid at an instant. Both are reader-level, `STABLE`, and run
 //! with invoker rights over the public projection table, so the caller's own
 //! opt-in tenant row-level security applies - matching `pgokf.concept_neighbors`
@@ -343,7 +343,7 @@ fn record_removed_tombstones(
 
 /// Record the SCD-2 version history of one sync from its delta.
 ///
-/// Called by [`crate::catalog::sync::run_bundle_sync`] inside the advisory-locked
+/// Called by `crate::catalog::sync::run_bundle_sync` inside the advisory-locked
 /// sync transaction, only when the durable `track_history` key is on, so history
 /// commits atomically with the sync. `stored` is the pre-sync `path -> file_hash`
 /// projection (used to classify each staged concept as added vs updated),

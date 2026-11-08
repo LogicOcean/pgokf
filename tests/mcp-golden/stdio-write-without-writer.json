@@ -1,0 +1,30 @@
+[
+  {
+    "request": {
+      "id": 23,
+      "jsonrpc": "2.0",
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "bundle": "golden-content",
+          "path": "runbooks/unconfigured.md",
+          "text": "---\ntype: Runbook\ntitle: Golden stdio write\n---\n\n# Golden stdio write\n\nWritten over stdio by the golden MCP harness, then deleted again.\n"
+        },
+        "name": "put_document"
+      }
+    },
+    "response": {
+      "id": 23,
+      "jsonrpc": "2.0",
+      "result": {
+        "content": [
+          {
+            "text": "\"this MCP server has no writer connection, so it cannot change the catalog: start it with --writer-url (OKF_PG_WRITER_URL) naming a pgokf_writer-capable role\"",
+            "type": "text"
+          }
+        ],
+        "isError": true
+      }
+    }
+  }
+]

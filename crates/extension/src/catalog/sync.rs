@@ -2,14 +2,14 @@
 //! The shared register/refresh engine.
 //!
 //! `pgokf.register_bundle`, `pgokf.refresh_bundle`, and
-//! `pgokf.register_bundle_content` all funnel into [`run_bundle_sync`], which is
-//! a single-transaction, set-based diff generic over the [`ByteSource`] seam so
+//! `pgokf.register_bundle_content` all funnel into `run_bundle_sync`, which is
+//! a single-transaction, set-based diff generic over the `ByteSource` seam so
 //! the identical downstream pipeline serves both the on-disk
-//! [`FilesystemSource`] and the mountless in-memory [`ContentSource`]:
+//! `FilesystemSource` and the mountless in-memory `ContentSource`:
 //!
 //! 1. serialize on a bundle-scoped advisory lock ([`advisory_lock_key`]);
 //! 2. load the stored `path -> file_hash` projection for the bundle;
-//! 3. take the current `{path, blake3_hash}` snapshot from the [`ByteSource`]
+//! 3. take the current `{path, blake3_hash}` snapshot from the `ByteSource`
 //!    (the filesystem source uses [`okf_sync::discover`] - symlink-escape safe,
 //!    size/count limited from the `pgokf.*` GUCs; the content source hashes the
 //!    caller-supplied bytes in memory);
@@ -51,7 +51,7 @@
 //! Bundle roots are validated with [`crate::security::validate_path_syntax`]
 //! (absolute, no NUL, no `..`) and canonicalized before use, and
 //! [`okf_sync::discover`] rejects symlinks that escape the canonical root.
-//! Allowed-roots containment is enforced at registration: [`register_bundle_impl`]
+//! Allowed-roots containment is enforced at registration: `register_bundle_impl`
 //! calls [`crate::catalog::config::enforce_allowed_roots`], so when an
 //! administrator has configured `allowed_roots` a candidate path must resolve
 //! inside one of them (symlink-escape-safe containment via

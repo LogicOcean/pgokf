@@ -15,10 +15,10 @@
 //! # Shared pipeline, in-memory source
 //!
 //! Ingestion reuses the exact classify/parse/upsert/project pipeline the
-//! filesystem path uses, through the [`crate::catalog::sync::ByteSource`] seam:
+//! filesystem path uses, through the `crate::catalog::sync::ByteSource` seam:
 //! this function validates and wraps the caller-supplied arrays in a
-//! [`crate::catalog::sync::ContentSource`] and calls
-//! [`crate::catalog::sync::run_bundle_sync`]. A content bundle is therefore
+//! `crate::catalog::sync::ContentSource` and calls
+//! `crate::catalog::sync::run_bundle_sync`. A content bundle is therefore
 //! diffed against its stored projection exactly like a filesystem bundle - a
 //! second call with changed content upserts the changed concepts and deletes the
 //! ones no longer present - so `register_bundle_content` is a create-or-resync.

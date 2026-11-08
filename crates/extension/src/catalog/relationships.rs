@@ -48,7 +48,7 @@
 //!   catalog (an absent source concept is `22023`).
 //! - `expected = G + 1` (the rows describe a refresh that has not run yet):
 //!   the publication is **staged** - invisible to every reader - until
-//!   [`crate::catalog::sync::run_bundle_sync`] accepts exactly that
+//!   `crate::catalog::sync::run_bundle_sync` accepts exactly that
 //!   generation, at which point the sync transaction itself activates it.
 //!   Concept endpoints cannot be validated against a future concept set, so
 //!   endpoint resolution is deferred: activation re-resolves every declared
@@ -61,7 +61,7 @@
 //!   becomes visible.
 //!
 //! Inside a refresh, activation happens **in the sync transaction after the
-//! new catalog generation is established** ([`activate_staged`]): every active
+//! new catalog generation is established** (`activate_staged`): every active
 //! publication of the bundle is generation-bound to the pre-refresh concepts
 //! and is superseded, staged publications expecting the accepted generation
 //! activate, and staged publications expecting an older generation (their

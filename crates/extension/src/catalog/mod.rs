@@ -58,7 +58,7 @@
 //!   projection (`pgokf.bundle_log`, `pgokf.list_bundle_log`); the sync engine
 //!   reads each `log.md` through the `ByteSource` and projects it without ever
 //!   staging it as a concept.
-//! - [`iso8601`] - shared defensive ISO 8601 timestamp parsing used by the
+//! - `iso8601` - shared defensive ISO 8601 timestamp parsing used by the
 //!   provenance and bundle-log projections.
 //! - [`source`] - opt-in verbatim source-byte storage (`pgokf.concept_source`)
 //!   and retrieval, gated by the `store_source` configuration key.

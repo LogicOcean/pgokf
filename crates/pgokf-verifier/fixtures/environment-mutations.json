@@ -1,0 +1,125 @@
+{
+  "mutations": [
+    {
+      "name": "literal-temporary-root",
+      "path": "crates/pgokf-verifier/src/scratch.rs",
+      "before": ".tempdir_in(root)",
+      "after": ".tempdir_in(\"/tmp\")",
+      "test": "verifier_has_no_literal_host_temporary_root",
+      "target": {
+        "integration": "environment_portability"
+      },
+      "failure_contains": "PGOKF_ASSERT: literal host scratch root"
+    },
+    {
+      "name": "ignore-caller-temporary-root",
+      "path": "crates/pgokf-verifier/src/scratch.rs",
+      "before": ".tempdir_in(root)",
+      "after": ".tempdir_in(std::env::current_dir().map_err(|e| e.to_string())?)",
+      "test": "caller_scratch_and_failure_cleanup",
+      "target": {
+        "integration": "environment_portability"
+      },
+      "failure_contains": "PGOKF_ASSERT: caller scratch ignored"
+    },
+    {
+      "name": "live-tap-write",
+      "path": "crates/pgokf-verifier/src/release_runtime.rs",
+      "before": "let work = crate::scratch::directory(\"pgokf-formula-\")?;",
+      "after": "let (work, _) = tap(root, \"policy\")?;",
+      "test": "real_homebrew_uses_owned_formula_without_live_tap_writes",
+      "target": {
+        "integration": "environment_portability"
+      },
+      "failure_contains": "PGOKF_ASSERT: live tap write or API failure"
+    },
+    {
+      "name": "omit-scratch-cleanup",
+      "path": "crates/pgokf-verifier/src/artifact_checks.rs",
+      "before": "work.close().map_err(|e| e.to_string())",
+      "after": "{ let _ = work.keep(); Ok::<(), String>(()) }",
+      "test": "caller_scratch_and_failure_cleanup",
+      "target": {
+        "integration": "environment_portability"
+      },
+      "failure_contains": "PGOKF_ASSERT: scratch cleanup omitted"
+    },
+    {
+      "name": "bypass-formula-api",
+      "path": "crates/pgokf-verifier/src/release_runtime.rs",
+      "before": "let result = output(&spec)?;\n        validate_homebrew_cases(&result)?;",
+      "after": "let result = String::new();",
+      "test": "real_homebrew_uses_owned_formula_without_live_tap_writes",
+      "target": {
+        "integration": "environment_portability"
+      },
+      "failure_contains": "PGOKF_ASSERT: real Formula API bypassed"
+    },
+    {
+      "name": "accept-redirected-root",
+      "path": "crates/pgokf-verifier/src/scratch.rs",
+      "before": "metadata.file_type().is_symlink() || !metadata.is_dir()",
+      "after": "!root.is_dir()",
+      "test": "redirected_scratch_is_refused",
+      "target": {
+        "integration": "environment_portability"
+      },
+      "failure_contains": "PGOKF_ASSERT: redirected scratch accepted"
+    },
+    {
+      "name": "decorated-symlink-root",
+      "path": "crates/pgokf-verifier/src/scratch.rs",
+      "before": "let root: std::path::PathBuf = std::env::temp_dir().components().collect();",
+      "after": "let root = std::env::temp_dir();",
+      "test": "redirected_scratch_is_refused",
+      "target": {
+        "integration": "environment_portability"
+      },
+      "failure_contains": "PGOKF_ASSERT: redirected scratch accepted"
+    },
+    {
+      "name": "receipt-root-bypass",
+      "path": "crates/pgokf-verifier/src/upgrade.rs",
+      "before": "let receipts = crate::scratch::directory(\"pgokf-parity-receipts-\")?.keep();",
+      "after": "let receipts = std::env::temp_dir().join(format!(\"pgokf-parity-receipts-{}\", uuid::Uuid::new_v4())); std::fs::create_dir(&receipts).map_err(|e| e.to_string())?;",
+      "test": "redirected_scratch_is_refused",
+      "target": {
+        "integration": "environment_portability"
+      },
+      "failure_contains": "PGOKF_ASSERT: receipt escaped refused scratch"
+    },
+    {
+      "name": "exhaust-native-socket-budget",
+      "path": "crates/pgokf-verifier/src/artifact_checks.rs",
+      "before": "crate::scratch::directory(\"d\")?",
+      "after": "crate::scratch::directory(\"pgokf-deb-\")?",
+      "test": "caller_scratch_and_failure_cleanup",
+      "target": {
+        "integration": "environment_portability"
+      },
+      "failure_contains": "PGOKF_ASSERT: native socket basename budget"
+    },
+    {
+      "name": "package-evidence-before-validation",
+      "path": "crates/pgokf-verifier/src/artifact_checks.rs",
+      "before": "    let work = crate::scratch::directory(\"d\")?;\n    fs::create_dir(evidence).map_err(|e| e.to_string())?;",
+      "after": "    fs::create_dir(evidence).map_err(|e| e.to_string())?;\n    let work = crate::scratch::directory(\"d\")?;",
+      "test": "package_output_requires_valid_scratch",
+      "target": {
+        "integration": "environment_portability"
+      },
+      "failure_contains": "PGOKF_ASSERT: no output before scratch validation"
+    },
+    {
+      "name": "reconciliation-evidence-before-validation",
+      "path": "crates/pgokf-verifier/src/reconciliation_mutations.rs",
+      "before": "    let work = crate::scratch::directory(\"pgokf-mutations-\")?;\n    fs::create_dir(&evidence).map_err(|e| e.to_string())?;",
+      "after": "    fs::create_dir(&evidence).map_err(|e| e.to_string())?;\n    let work = crate::scratch::directory(\"pgokf-mutations-\")?;",
+      "test": "reconciliation_output_requires_valid_scratch",
+      "target": {
+        "integration": "environment_portability"
+      },
+      "failure_contains": "PGOKF_ASSERT: no output before scratch validation"
+    }
+  ]
+}

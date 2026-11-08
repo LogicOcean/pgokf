@@ -399,7 +399,7 @@ fn insert_attestation_edges(bundle_id: i64, edges: &[AttestationEdge]) -> Result
 /// and readers can SELECT the relation. Internal edges are marked `resolved`
 /// when their target concept already exists in the bundle; unresolved internal
 /// and external edges are still retained. All phases are set-based and chunked
-/// at [`BATCH_SIZE`].
+/// at `BATCH_SIZE`.
 ///
 /// # Errors
 ///
@@ -429,7 +429,7 @@ pub fn project(bundle_id: i64, staged: &[StagedConcept]) -> Result<(), CatalogEr
 ///   dangling `target_id` can no longer produce a phantom graph edge).
 ///
 /// External edges (`is_external`) and edges without a `target_id` are always
-/// left `false`, matching the per-insert rule in [`insert_link`].
+/// left `false`, matching the per-insert rule in `insert_link`.
 ///
 /// # Errors
 ///

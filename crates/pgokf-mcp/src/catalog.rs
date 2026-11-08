@@ -39,16 +39,10 @@ const WRITER_STATEMENT_MS: i32 = 50_000;
 /// it the caller is told to narrow the selection.
 const INLINE_PLUGIN_BYTES: usize = 1_048_576;
 
-/// The schema keyword marking an argument that acts on the host this server
-/// runs on rather than on the caller's. A transport that carries requests
-/// from somewhere else refuses every argument marked with it, and derives
-/// that set from the schemas below rather than keeping its own list, so a
-/// new host-only argument is refused the day it is added.
-pub const HOST_ONLY: &str = "x-okf-host-only";
-
 /// A live catalog connection, optionally scoped to one tenant.
 pub struct Catalog {
     client: Client,
+    cursor: crate::cursor::CursorCodec,
     /// A second reader connection `build_workspace_plugin` holds for the
     /// whole build: the build runs inside one repeatable-read transaction,
     /// and the shared `client` pipelines requests from concurrent callers,
@@ -109,6 +103,7 @@ impl Catalog {
             .try_get(0)?;
 
         Ok(Self {
+            cursor: cursor_codec()?,
             client,
             build: Mutex::new(build_client),
             build_driver: Some(build_driver),
@@ -133,6 +128,17 @@ impl Catalog {
             .context("connecting to PostgreSQL as the writer")?;
         if let Some(tenant) = &self.tenant {
             pgokf_pgconn::set_tenant(&client, tenant).await?;
+        }
+        let permitted: bool = client
+            .query_one(
+                "SELECT pg_has_role(current_user, 'pgokf_writer', 'USAGE')",
+                &[],
+            )
+            .await
+            .context("checking writer capability")?
+            .try_get(0)?;
+        if !permitted {
+            bail!("writer connection does not hold the required pgokf_writer privilege");
         }
         let writer = WriterConn::new(client);
         // Bounded on every transport, stdio included: the lock a write takes
@@ -233,179 +239,243 @@ impl Catalog {
         Ok(())
     }
 
-    /// The MCP `tools/list` payload: the catalog tools this server exposes,
-    /// each with a JSON-Schema description of its arguments.
-    #[must_use]
+    /// Registry projection used by inventory tests.
+    #[cfg(test)]
     pub fn tool_definitions() -> Value {
-        let mut tools = Self::catalog_tool_definitions();
-        if let Value::Array(items) = &mut tools {
-            for more in [Self::plugin_tool_definitions(), write::tool_definitions()] {
-                if let Value::Array(more) = more {
-                    items.extend(more);
-                }
-            }
-        }
-        tools
+        Value::Array(
+            crate::registry::all()
+                .iter()
+                .map(|spec| spec.definition(false))
+                .collect(),
+        )
     }
 
-    /// The search, graph, and retrieval tools.
-    fn catalog_tool_definitions() -> Value {
-        json!([
-            {
-                "name": "concept_search",
-                "description": "Rank catalog concepts by a full-text query. Optional structured filters narrow by concept type, tags (all-of), status, and trust tier.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "The search query (websearch syntax)."},
-                        "bundle_id": {"type": "integer", "description": "Restrict to one bundle id."},
-                        "limit": {"type": "integer", "description": "Maximum hits (1..=500, default 20)."},
-                        "type": {"type": "string", "description": "Exact concept type filter."},
-                        "tags": {"type": "array", "items": {"type": "string"}, "description": "All-of tag containment filter."},
-                        "status": {"type": "string", "description": "Provenance status filter."},
-                        "trust_tier": {"type": "string", "description": "Provenance trust-tier filter."}
-                    },
-                    "required": ["query"]
-                }
-            },
-            {
-                "name": "find_similar",
-                "description": "Content more-like-this: rank concepts by similarity to a seed concept's salient terms, excluding the seed.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "concept_id": {"type": "string", "description": "The seed concept id."},
-                        "bundle_id": {"type": "integer", "description": "Bundle id (required if the concept id is ambiguous across bundles)."},
-                        "limit": {"type": "integer", "description": "Maximum hits (1..=500, default 10)."}
-                    },
-                    "required": ["concept_id"]
-                }
-            },
-            {
-                "name": "concept_neighbors",
-                "description": "Traverse resolved internal links out from a concept, returning reachable concepts with their shortest hop count and path.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "concept_id": {"type": "string", "description": "The start concept id."},
-                        "max_hops": {"type": "integer", "description": "Traversal depth (>= 1, default 2; capped by pgokf.max_graph_hops)."},
-                        "bundle_id": {"type": "integer", "description": "Bundle id (required if the concept id is ambiguous across bundles)."}
-                    },
-                    "required": ["concept_id"]
-                }
-            },
-            {
-                "name": "get_concept",
-                "description": "Fetch a concept's stored core fields (path, type, title, description, tags, resource, body text) by id.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "concept_id": {"type": "string", "description": "The concept id."},
-                        "bundle_id": {"type": "integer", "description": "Restrict to one bundle id."}
-                    },
-                    "required": ["concept_id"]
-                }
-            },
-            {
-                "name": "get_skill",
-                "description": "Fetch an Agent Skills package stored in the catalog: its name, description, package directory and hash, the complete SKILL.md frontmatter, the exact SKILL.md text, and the list of scripts, references, and assets it owns (build_workspace_plugin materializes the whole package byte for byte).",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "bundle_id": {"type": "integer", "description": "The bundle id."},
-                        "concept_id": {"type": "string", "description": "The skill's concept id (its SKILL.md path without .md, e.g. skills/deploy/SKILL)."}
-                    },
-                    "required": ["bundle_id", "concept_id"]
-                }
+    pub(crate) async fn read_method(
+        &self,
+        principal: &crate::service::PrincipalContext,
+        method: &str,
+        params: &Value,
+    ) -> Result<Value, crate::service::DomainError> {
+        use crate::service::DomainError;
+        self.policy().authorize_read(principal)?;
+        let mut client = self.build.lock().await;
+        let tx = client
+            .build_transaction()
+            .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+            .start()
+            .await
+            .map_err(|_| DomainError::internal())?;
+        let value = if matches!(method, "resources/list" | "skills/list") {
+            let generation = crate::resources::generation(&tx).await?;
+            let role = principal.role.to_string();
+            let filter = filter_digest(params);
+            let binding = crate::cursor::CursorBinding {
+                method,
+                tenant: self.tenant.as_deref().unwrap_or(""),
+                principal: &principal.principal_id,
+                role: &role,
+                filter: &filter,
+                generation: &generation,
+            };
+            let now = epoch_seconds()?;
+            let after = match params.get("cursor") {
+                None => Value::Null,
+                Some(Value::String(token)) => self
+                    .cursor
+                    .validate(token, &binding, now)
+                    .map_err(cursor_error)?,
+                Some(_) => return Err(DomainError::InvalidCursor("invalid_cursor".into())),
+            };
+            let page = crate::resources::list(&tx, method, &after).await?;
+            let mut result = page.result;
+            if let Some(next) = page.next {
+                result["nextCursor"] = json!(
+                    self.cursor
+                        .issue(&binding, next, now)
+                        .map_err(cursor_error)?
+                );
             }
-        ])
+            result
+        } else {
+            crate::resources::call(&tx, method, params).await?
+        };
+        tx.commit().await.map_err(|_| DomainError::internal())?;
+        Ok(value)
     }
 
-    /// The plugin-building tools.
-    fn plugin_tool_definitions() -> Value {
-        json!([
-            {
-                "name": "list_plugin_targets",
-                "description": "List the targets a workspace plugin can be built for: agent-plugin (a portable Agent Plugins 1.0.0 directory with plugin.json, skills/, and mcp.json) and the per-harness layouts (claude-code, codex, copilot, hermes-agent, kimi, gemini-cli, cursor, agents, agents-md, ollama, generic), each with its kind (agent-plugin, skills, instruction-file, prompt-bundle, generic) and the documented directory it reads. An agent not listed is built with target 'custom' plus a harness description.",
-                "inputSchema": {"type": "object", "properties": {}}
-            },
-            {
-                "name": "build_workspace_plugin",
-                "description": "Build an agent plugin from a catalog selection: an Agent Skills package (SKILL.md plus one reference file per concept), an AGENTS.md instruction file, an Ollama prompt bundle, or a generic index-plus-files tree, always with okf-workspace.yaml (the selection) and okf-workspace.lock (catalog snapshot and content hashes). Pass output_dir to write the tree into a workspace; otherwise the files come back inline.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "target": {"type": "string", "description": "A target id from list_plugin_targets, or 'custom' with a harness description for an agent the registry does not know."},
-                        "harness": {"type": "object", "description": "With target 'custom': the agent's display name, the kind of tree (agent-plugin, skills, instruction-file, prompt-bundle, generic; default skills), and for a skills package the directory the agent reads skills from, relative to the workspace root (for example .acme/skills).", "properties": {"label": {"type": "string"}, "kind": {"type": "string", "enum": ["agent-plugin", "skills", "instruction-file", "prompt-bundle", "generic"]}, "skills_dir": {"type": "string"}}, "required": ["label"]},
-                        "all": {"type": "boolean", "description": "Start from every visible concept (bounded by the limit) instead of nothing, so a selection narrowed only by types, tags, or a query - or by nothing at all - is expressible without naming a bundle."},
-                        "name": {"type": "string", "description": "Package name (lowercase letters, digits, hyphens; default okf-knowledge)."},
-                        "title": {"type": "string", "description": "Display title for the index (defaults to the name)."},
-                        "bundle_ids": {"type": "array", "items": {"type": "integer"}, "description": "Restrict to these bundle ids."},
-                        "concept_ids": {"type": "array", "items": {"type": "string"}, "description": "Include exactly these concept ids (within the selected bundles)."},
-                        "picks": {"type": "array", "items": {"type": "string"}, "description": "Specific files by identity, as 'bundle_id:concept_id' strings (a skill's SKILL.md id copies the whole package; a script or reference id copies that file). Picks are added to whatever the other selectors match and are never cut by the limit."},
-                        "stale_policy": {"type": "string", "enum": ["warn", "exclude"], "description": "What to do with concepts the catalog reports as not fresh (default warn): warn keeps them, labelled - a banner on each reconstructed document, a generated <name>.stale-warning.md beside every exact-bytes file, which is never modified, and a top-level FRESHNESS.md - with states and reasons in the manifests; exclude drops them and refuses the build, enumerating the stale ids and reasons, when an exact pick, a seed, or a required closure node is stale, or nothing fresh remains."},
-                        "seeds": {"type": "array", "items": {"type": "string"}, "description": "Closure seeds, as 'bundle_id:concept_id' strings: the build includes each seed and expands it through the catalog's typed relationships (requires the catalog's typed_relationships capability)."},
-                        "relation_types": {"type": "array", "items": {"type": "string"}, "description": "With seeds: follow only these namespaced relationship types (for example 'docs:references'); empty follows every type. The names are the publisher's; the builder holds no vocabulary of its own."},
-                        "direction": {"type": "string", "enum": ["outbound", "inbound", "both"], "description": "With seeds: which way the closure walks relationships (default outbound)."},
-                        "hops": {"type": "integer", "description": "With seeds: how many relationship hops the closure walks (1..=8, default 2)."},
-                        "require_closure": {"type": "boolean", "description": "With seeds: refuse the build when the closure cannot be completed - a traversed relationship whose target is unresolved, or a closure node the stale policy would drop."},
-                        "tags": {"type": "array", "items": {"type": "string"}, "description": "All-of tag containment filter."},
-                        "types": {"type": "array", "items": {"type": "string"}, "description": "Any-of concept type filter."},
-                        "query": {"type": "string", "description": "Full-text query (websearch syntax); results are ranked."},
-                        "verified_only": {"type": "boolean", "description": "Only human-reviewed or machine-confirmed concepts."},
-                        "limit": {"type": "integer", "description": "Maximum concepts (1..=500, default 100)."},
-                        "base_model": {"type": "string", "description": "Ollama only: the Modelfile FROM line (default llama3.1)."},
-                        "components": {"type": "array", "items": {"type": "string", "enum": ["mcp", "guide", "tools"]}, "description": "Extra parts: mcp (the harness's MCP server config for pgokf-mcp; the connection string is never written), guide (how to use the catalog: identities, trust tiers, MCP tools, JSON API), tools (okf.sh helper over the JSON API). Default: all three."},
-                        "mcp_command": {"type": "string", "description": "How the harness starts the MCP server (default pgokf-mcp). Alternative to mcp_url."},
-                        "mcp_url": {"type": "string", "description": "Point the harness at a pgokf-mcp --http endpoint (for example https://catalog.example/mcp) instead of a local stdio server. The bearer token is referenced, never written: the entry expands OKF_MCP_TOKEN where the harness documents an expansion form, names that variable where it documents one, and otherwise becomes a fragment to merge with a placeholder in it."},
-                        "web_url": {"type": "string", "description": "Base URL of the pgokf web UI, for the guide and the helper script."},
-                        "output_dir": {"type": "string", HOST_ONLY: true, "description": "Write the tree under this workspace directory instead of returning contents. Local transports only: over HTTP the tree would be written on the server, so it is refused."},
-                        "overwrite": {"type": "boolean", HOST_ONLY: true, "description": "With output_dir: replace files that already exist, including an existing AGENTS.md (default false; symbolic links are never followed)."}
-                    },
-                    "required": ["target"]
-                }
-            },
-            {
-                "name": "check_workspace_plugin_freshness",
-                "description": "Compare a built plugin's okf-workspace.lock with the live catalog: the pinned bundle generations, sync hashes, and freshness states against what the catalog reports now. Answers current, stale, retired, or unknown, with reasons per bundle. A downloaded plugin cannot update itself; rebuild it with build_workspace_plugin when this says stale.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "lock": {"type": "string", "description": "The full content of the plugin's okf-workspace.lock file."}
-                    },
-                    "required": ["lock"]
-                }
+    pub(crate) async fn search_page(
+        &self,
+        principal: &crate::service::PrincipalContext,
+        args: &Value,
+    ) -> Result<(Value, Option<String>), crate::service::DomainError> {
+        use crate::service::DomainError;
+        let mut client = self.build.lock().await;
+        let tx = client
+            .build_transaction()
+            .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+            .start()
+            .await
+            .map_err(|_| DomainError::internal())?;
+        let generation = crate::resources::generation(&tx).await?;
+        let role = principal.role.to_string();
+        let filter = filter_digest(args);
+        let binding = crate::cursor::CursorBinding {
+            method: "concept_search",
+            tenant: self.tenant.as_deref().unwrap_or(""),
+            principal: &principal.principal_id,
+            role: &role,
+            filter: &filter,
+            generation: &generation,
+        };
+        let now = epoch_seconds()?;
+        let after = args
+            .get("cursor")
+            .map(|token| {
+                token
+                    .as_str()
+                    .ok_or_else(|| DomainError::InvalidCursor("invalid_cursor".into()))
+                    .and_then(|token| {
+                        self.cursor
+                            .validate(token, &binding, now)
+                            .map_err(cursor_error)
+                    })
+            })
+            .transpose()?;
+        let limit = i32::try_from(args.get("limit").and_then(Value::as_i64).unwrap_or(20))
+            .map_err(|_| DomainError::InvalidArgument("invalid limit".into()))?;
+        let after = after.map(|key| search_position(&key)).transpose()?;
+        let rows = search_rows(&tx, args, limit, after.as_ref()).await?;
+        let next = if rows
+            .as_array()
+            .is_some_and(|rows| i32::try_from(rows.len()).ok() == Some(limit))
+        {
+            let last = rows
+                .as_array()
+                .and_then(|rows| rows.last())
+                .ok_or_else(DomainError::internal)?;
+            let key = json!({"rank":last["rank"],"bundle_id":last["bundle_id"],"concept_id":last["concept_id"]});
+            let more = search_rows(&tx, args, 1, Some(&key)).await?;
+            if more.as_array().is_some_and(|rows| !rows.is_empty()) {
+                Some(
+                    self.cursor
+                        .issue(
+                            &binding,
+                            json!([key["rank"], key["bundle_id"], key["concept_id"]]),
+                            now,
+                        )
+                        .map_err(cursor_error)?,
+                )
+            } else {
+                None
             }
-        ])
+        } else {
+            None
+        };
+        tx.commit().await.map_err(|_| DomainError::internal())?;
+        Ok((rows, next))
     }
 
-    /// Dispatch one `tools/call` to the matching catalog query, returning the
-    /// tool's JSON result data (a JSON array of rows).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for an unknown tool, an argument that is missing or the
-    /// wrong type, or a database failure. The caller renders the error as an
-    /// MCP `isError` tool result.
-    pub async fn call_tool(&self, name: &str, arguments: &Value, actor: &str) -> Result<Value> {
-        if write::is_write_tool(name) {
-            return write::call(self.writer()?, name, arguments, actor).await;
-        }
-        match name {
-            // A read, so it answers on an endpoint that holds no writer.
-            "list_bundles" => write::list_bundles(&self.client, arguments).await,
-            "concept_search" => self.concept_search(arguments).await,
-            "find_similar" => self.find_similar(arguments).await,
-            "concept_neighbors" => self.concept_neighbors(arguments).await,
-            "get_concept" => self.get_concept(arguments).await,
-            "get_skill" => self.get_skill(arguments).await,
-            "list_plugin_targets" => Ok(Self::list_plugin_targets()),
-            "build_workspace_plugin" => self.build_workspace_plugin(arguments).await,
-            "check_workspace_plugin_freshness" => {
+    /// A separate, explicitly generation-stamped observation of the returned
+    /// identities. Never infer freshness from a Tool's bytes or cache TTL.
+    pub(crate) async fn tool_evidence(
+        &self,
+        value: &Value,
+        args: &Value,
+    ) -> Result<Value, crate::service::DomainError> {
+        let rows = value
+            .as_array()
+            .map_or_else(|| vec![value], |rows| rows.iter().collect());
+        let identities: Vec<Value> = rows
+            .into_iter()
+            .map(|row| {
+                json!({
+                    "bundle_id": row.get("bundle_id").or_else(|| args.get("bundle_id")),
+                    "concept_id": row.get("concept_id").or_else(|| row.get("neighbor_id"))
+                })
+            })
+            .collect();
+        crate::resources::tool_evidence(&self.client, &json!(identities)).await
+    }
+
+    pub(crate) fn policy(&self) -> crate::policy::PolicyService {
+        crate::policy::PolicyService::new(true, self.writer.is_some())
+    }
+
+    pub(crate) async fn call_handler(
+        &self,
+        handler: crate::registry::Handler,
+        arguments: &Value,
+        actor: &str,
+    ) -> Result<Value> {
+        use crate::registry::Handler;
+        match handler {
+            Handler::ListBundles => write::list_bundles(&self.client, arguments).await,
+            Handler::ConceptSearch => self.concept_search(arguments).await,
+            Handler::FindSimilar => self.find_similar(arguments).await,
+            Handler::ConceptNeighbors => self.concept_neighbors(arguments).await,
+            Handler::TraverseConcepts => self.traverse_concepts(arguments).await,
+            Handler::GetConcept => self.get_concept(arguments).await,
+            Handler::GetSkill => self.get_skill(arguments).await,
+            Handler::ListPluginTargets => Ok(Self::list_plugin_targets()),
+            Handler::BuildWorkspacePlugin => self.build_workspace_plugin(arguments).await,
+            Handler::CheckWorkspacePluginFreshness => {
                 self.check_workspace_plugin_freshness(arguments).await
             }
-            other => bail!("unknown tool '{other}'"),
+            Handler::PutDocument => {
+                write::call(self.writer()?, "put_document", arguments, actor).await
+            }
+            Handler::DeleteDocument => {
+                write::call(self.writer()?, "delete_document", arguments, actor).await
+            }
+            Handler::CreateContentBundle => {
+                write::call(self.writer()?, "create_content_bundle", arguments, actor).await
+            }
+            Handler::RefreshBundle => {
+                write::call(self.writer()?, "refresh_bundle", arguments, actor).await
+            }
+            Handler::SetBundleState => {
+                write::call(self.writer()?, "set_bundle_state", arguments, actor).await
+            }
         }
+    }
+
+    async fn traverse_concepts(&self, args: &Value) -> Result<Value> {
+        let bundle = opt_i64(args, "bundle_id")?.ok_or_else(|| anyhow!("bundle_id is required"))?;
+        let concept = require_str(args, "concept_id")?;
+        let hops = opt_i32(args, "max_hops")?.unwrap_or(2);
+        let limit = opt_i32(args, "limit")?.unwrap_or(500);
+        if opt_str(args, "graph") == Some("links") {
+            let rows = self.fetch_json(
+                "SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) FROM (
+                 SELECT n.*, b.catalog_generation, COALESCE(fc.state, fp.state, fb.state, 'unknown') AS freshness_state,
+                 COALESCE(fc.reasons, fp.reasons, fb.reasons, ARRAY[]::text[]) AS freshness_reasons
+                 FROM pgokf.concept_neighbors($1, $2, $3) n
+                 JOIN pgokf.concepts c ON c.bundle_id = $3 AND c.id = n.neighbor_id
+                 JOIN pgokf.bundles b ON b.id=c.bundle_id AND b.enabled AND b.retired_at IS NULL
+                 LEFT JOIN pgokf.effective_freshness fc ON fc.bundle_id=$3 AND fc.scope_kind='concept' AND fc.scope_key=n.neighbor_id
+                 LEFT JOIN pgokf.effective_freshness fp ON fp.bundle_id=$3 AND fp.scope_kind='path' AND fp.scope_key=c.path
+                 LEFT JOIN pgokf.effective_freshness fb ON fb.bundle_id=$3 AND fb.scope_kind='bundle'
+                 ORDER BY n.hops, n.neighbor_id LIMIT $4::integer) t",
+                &[&concept, &hops, &bundle, &limit],
+            ).await?;
+            return crate::service::map_link_rows(&rows, bundle).map_err(Into::into);
+        }
+        let direction = opt_str(args, "direction").unwrap_or("outbound");
+        let types = opt_string_vec(args, "relation_types")?;
+        let rows = self
+            .fetch_json(
+                "SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb)
+             FROM pgokf.concept_relationship_neighbors($1,$2,$3,$4,$5,$6) t",
+                &[&bundle, &concept, &hops, &direction, &types, &limit],
+            )
+            .await?;
+        let mut nodes = crate::service::map_relationship_rows(&rows)?;
+        if let Some(nodes) = nodes.as_array_mut() {
+            for node in nodes {
+                node["direction"] = json!(direction);
+            }
+        }
+        Ok(nodes)
     }
 
     async fn concept_search(&self, args: &Value) -> Result<Value> {
@@ -466,10 +536,13 @@ impl Catalog {
         self.fetch_json(
             "SELECT coalesce(jsonb_agg(to_jsonb(c) ORDER BY c.bundle_id), '[]'::jsonb)
              FROM (
-                 SELECT bundle_id, id AS concept_id, path, type, title, description,
-                        tags, resource, body_text, modified_at
-                 FROM pgokf.concepts
-                 WHERE id = $1 AND ($2::bigint IS NULL OR bundle_id = $2)
+                 SELECT c.bundle_id, c.id AS concept_id, c.path, c.type, c.title, c.description,
+                        c.tags, c.resource, c.body_text, c.modified_at
+                 FROM pgokf.concepts c JOIN pgokf.bundles b ON b.id=c.bundle_id
+                 WHERE c.id = $1 AND ($2::bigint IS NULL OR c.bundle_id = $2)
+                   AND b.enabled AND b.retired_at IS NULL
+                   AND ((nullif(current_setting('pgokf.tenant',true),'') IS NULL AND NOT pgokf.tenant_required())
+                        OR b.tenant_id=current_setting('pgokf.tenant',true))
              ) c",
             &[&concept_id, &bundle_id],
         )
@@ -483,6 +556,14 @@ impl Catalog {
         let bundle_id = opt_i64(args, "bundle_id")?
             .ok_or_else(|| anyhow!("missing required integer argument 'bundle_id'"))?;
         let concept_id = require_str(args, "concept_id")?;
+        let visible: bool = self.client.query_one(
+            "SELECT EXISTS(SELECT 1 FROM pgokf.bundles b WHERE b.id=$1 AND b.enabled AND b.retired_at IS NULL
+             AND ((nullif(current_setting('pgokf.tenant',true),'') IS NULL AND NOT pgokf.tenant_required())
+                  OR b.tenant_id=current_setting('pgokf.tenant',true)))", &[&bundle_id],
+        ).await?.try_get(0)?;
+        if !visible {
+            return Err(crate::service::DomainError::NotFound("object not found".into()).into());
+        }
         self.fetch_json(
             "SELECT (to_jsonb(s) - 'skill_md')
                     || jsonb_build_object('skill_md', convert_from(s.skill_md, 'UTF8'))
@@ -750,6 +831,90 @@ impl Catalog {
 
 /// The custom harness a `target: custom` build describes (`None` for a
 /// registry target, whose layout is documented and needs no description).
+fn cursor_codec() -> Result<crate::cursor::CursorCodec> {
+    use base64::Engine as _;
+    let mut key = [0; 32];
+    if let Some(value) = std::env::var_os("OKF_MCP_CURSOR_KEY") {
+        let value = value
+            .to_str()
+            .ok_or_else(|| anyhow!("invalid cursor key encoding"))?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(value)
+            .map_err(|_| anyhow!("cursor key must be 32 base64-encoded bytes"))?;
+        key = bytes
+            .try_into()
+            .map_err(|_| anyhow!("cursor key must be 32 base64-encoded bytes"))?;
+    } else {
+        getrandom::fill(&mut key).map_err(|_| anyhow!("cursor key entropy unavailable"))?;
+    }
+    Ok(crate::cursor::CursorCodec::new(key))
+}
+
+fn epoch_seconds() -> Result<u64, crate::service::DomainError> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .map_err(|_| crate::service::DomainError::internal())
+}
+
+fn filter_digest(params: &Value) -> String {
+    use sha2::{Digest as _, Sha256};
+    let mut normalized = params.clone();
+    if let Some(object) = normalized.as_object_mut() {
+        object.remove("cursor");
+        object.remove("_meta");
+    }
+    format!("{:x}", Sha256::digest(normalized.to_string().as_bytes()))
+}
+
+fn cursor_error(error: crate::cursor::CursorError) -> crate::service::DomainError {
+    match error {
+        crate::cursor::CursorError::Invalid => {
+            crate::service::DomainError::InvalidCursor("invalid_cursor".into())
+        }
+        crate::cursor::CursorError::Stale => {
+            crate::service::DomainError::StaleCursor("stale_cursor".into())
+        }
+    }
+}
+
+fn search_position(key: &Value) -> Result<Value, crate::service::DomainError> {
+    let invalid = || crate::service::DomainError::InvalidCursor("invalid_cursor".into());
+    let key = key
+        .as_array()
+        .filter(|key| key.len() == 3)
+        .ok_or_else(invalid)?;
+    if !key[0].is_number() || key[1].as_i64().is_none_or(|id| id < 1) || !key[2].is_string() {
+        return Err(invalid());
+    }
+    Ok(json!({"rank":key[0],"bundle_id":key[1],"concept_id":key[2]}))
+}
+
+async fn search_rows(
+    client: &(impl tokio_postgres::GenericClient + Sync),
+    args: &Value,
+    limit: i32,
+    after: Option<&Value>,
+) -> Result<Value, crate::service::DomainError> {
+    let query = args["query"].as_str().unwrap_or_default();
+    let bundle = args.get("bundle_id").and_then(Value::as_i64);
+    let concept_type = args.get("type").and_then(Value::as_str);
+    let tags: Option<Vec<String>> = args.get("tags").and_then(Value::as_array).map(|values| {
+        values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect()
+    });
+    let status = args.get("status").and_then(Value::as_str);
+    let trust = args.get("trust_tier").and_then(Value::as_str);
+    client.query_one("SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY t.rank DESC,t.bundle_id,t.concept_id),'[]'::jsonb)
+        FROM pgokf.concept_search($1,$2,$3,$4,$5,$6,$7,$8) t",
+        &[&query,&bundle,&limit,&concept_type,&tags,&status,&trust,&after]).await
+        .map_err(|error| crate::service::fail("concept_search", &error.into()))?
+        .try_get(0).map_err(|_| crate::service::DomainError::internal())
+}
+
 fn harness_from_args(args: &Value, target: Target) -> Result<Option<CustomHarness>> {
     if target != Target::Custom {
         return Ok(None);
@@ -1066,6 +1231,7 @@ mod tests {
                 "create_content_bundle",
                 "refresh_bundle",
                 "set_bundle_state",
+                "traverse_concepts",
             ],
         );
     }

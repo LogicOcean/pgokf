@@ -11,7 +11,7 @@
 //!   seam persists them into `pgokf.concept_source`, so the *original* files
 //!   live inside Postgres. Such an install needs no external object store - the
 //!   catalog is the source of truth and the bundle can be reconstructed on disk
-//!   byte-for-byte with [`export_sources`].
+//!   byte-for-byte with `export_sources`.
 //! - **Enterprise data-lake tier** (`store_source = false`, the default): the
 //!   verbatim files stay in a mounted object store / data lake and Postgres
 //!   holds only the metadata-and-search projection. No `concept_source` row is
@@ -30,12 +30,12 @@
 //!
 //! # Retrieval surface
 //!
-//! - [`get_concept_source`](pgokf::get_concept_source) returns the exact stored
+//! - `get_concept_source` returns the exact stored
 //!   bytes to the client (reader-level; no filesystem write, so no path-security
 //!   surface). It is `SECURITY DEFINER` and tenant-scoped so each successful read
 //!   appends one `get_concept_source` row to the exfiltration access log
 //!   ([`crate::catalog::access`]).
-//! - [`export_sources`](pgokf::export_sources) reconstructs the bundle on disk
+//! - `export_sources` reconstructs the bundle on disk
 //!   (admin-only), reusing the same destination-directory validation and
 //!   `O_NOFOLLOW` file creation as [`crate::catalog::export`] and verifying every
 //!   written file against the concept's recorded BLAKE3 `file_hash`.
@@ -153,7 +153,7 @@ fn composite_error(error: impl std::fmt::Display) -> CatalogError {
 /// staged concept carries `None`, so this writes nothing and current behavior
 /// is unchanged. Each contributing concept is upserted with an array-unnest
 /// `INSERT ... ON CONFLICT (bundle_id, concept_id) DO UPDATE` in bounded
-/// [`BATCH_SIZE`] chunks, so re-syncing a changed file replaces its stored
+/// `BATCH_SIZE` chunks, so re-syncing a changed file replaces its stored
 /// bytes and a very large bundle never builds one unbounded statement. The
 /// `bytea[]` payload binds the source bytes exactly, byte for byte.
 ///

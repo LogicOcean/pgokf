@@ -22,10 +22,19 @@
 #![allow(clippy::doc_markdown)]
 
 mod catalog;
+mod cursor;
 mod dispatch;
+mod domain;
 mod http;
+mod modern;
+mod policy;
+mod registry;
+mod resources;
 mod rpc;
+mod schemas;
+mod service;
 mod tokens;
+mod uri;
 mod write;
 
 use std::collections::BTreeMap;
@@ -33,7 +42,7 @@ use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Stdout};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Stdout};
 
 use crate::catalog::Catalog;
 use crate::dispatch::Caller;
@@ -222,15 +231,50 @@ async fn main() -> Result<()> {
 /// Read newline-delimited JSON-RPC from stdin, dispatch each message, and write
 /// each response as one line to stdout. Returns when stdin reaches EOF.
 async fn serve(catalog: Catalog) -> Result<()> {
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
+    const MAX_FRAME: u64 = 1024 * 1024;
+    let mut input = BufReader::new(tokio::io::stdin());
     let mut stdout = tokio::io::stdout();
-
-    while let Some(line) = lines.next_line().await.context("reading from stdin")? {
+    let mut lifecycle = modern::LegacyLifecycle::default();
+    // Limit each newline frame before allocating its full contents. An oversized
+    // frame ends this stream rather than allowing its remainder to become RPCs.
+    loop {
+        let mut frame = Vec::new();
+        let read = (&mut input)
+            .take(MAX_FRAME + 1)
+            .read_until(b'\n', &mut frame)
+            .await
+            .context("reading from stdin")?;
+        if read == 0 {
+            break;
+        }
+        if frame.len() as u64 > MAX_FRAME {
+            write_response(
+                &mut stdout,
+                &Response::error(
+                    serde_json::Value::Null,
+                    rpc::INVALID_REQUEST,
+                    "stdio frame exceeds the size limit",
+                ),
+            )
+            .await?;
+            break;
+        }
+        let Ok(line) = std::str::from_utf8(&frame) else {
+            write_response(
+                &mut stdout,
+                &Response::error(
+                    serde_json::Value::Null,
+                    rpc::PARSE_ERROR,
+                    "invalid UTF-8 JSON",
+                ),
+            )
+            .await?;
+            continue;
+        };
         if line.trim().is_empty() {
             continue;
         }
-
-        if let Some(response) = handle_line(&catalog, &line).await {
+        if let Some(response) = handle_line(&catalog, line, &mut lifecycle).await {
             write_response(&mut stdout, &response).await?;
         }
     }
@@ -240,11 +284,26 @@ async fn serve(catalog: Catalog) -> Result<()> {
 
 /// Parse and dispatch one input line, returning the response to send, or `None`
 /// for a notification (which is never answered).
-async fn handle_line(catalog: &Catalog, line: &str) -> Option<Response> {
+async fn handle_line(
+    catalog: &Catalog,
+    line: &str,
+    lifecycle: &mut modern::LegacyLifecycle,
+) -> Option<Response> {
     let request = match rpc::parse_request(line) {
         Ok(request) => request,
-        Err(response) => return Some(response),
+        Err(mut response) => {
+            if serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .is_some_and(|value| modern::is_modern_value(&value))
+            {
+                modern::normalize_error_id(&mut response);
+            }
+            return Some(response);
+        }
     };
+    if let Err(response) = lifecycle.admit(&request) {
+        return (!request.is_notification()).then_some(response);
+    }
     if request.is_notification() {
         // Notifications (for example notifications/initialized) get no reply.
         return None;
@@ -252,7 +311,11 @@ async fn handle_line(catalog: &Catalog, line: &str) -> Option<Response> {
     let id = request.reply_id();
     // The client started this process and holds the connection string:
     // there is nobody to authenticate and nothing to withhold.
-    Some(dispatch::handle(catalog, &Caller::Local, &request, id).await)
+    let mut response = dispatch::handle(catalog, &Caller::Local, &request, id).await;
+    if modern::is_modern(&request) {
+        modern::normalize_error_id(&mut response);
+    }
+    Some(response)
 }
 
 /// Serialize a response to a single line and flush it to stdout.

@@ -4,6 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export LC_ALL=C
+cargo run --locked -p pgokf-verifier -- source-guard .
 if [[ "$(uname -s)" == Darwin ]]; then
   # PostgreSQL supplies these symbols when loading the extension. Darwin's
   # linker otherwise rejects the extension cdylib during host cargo tests.

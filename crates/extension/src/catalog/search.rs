@@ -20,7 +20,7 @@
 //!
 //! Since 0.3.0 the module also hosts the additive freshness-aware variant
 //! `pgokf.concept_search_fresh` (same contract plus a `freshness` filter and a
-//! per-hit freshness annotation; see [`concept_search_fresh_impl`]); the
+//! per-hit freshness annotation; see `concept_search_fresh_impl`); the
 //! original signature and result type are unchanged.
 //!
 //! # Security model

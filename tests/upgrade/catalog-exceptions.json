@@ -1,0 +1,23 @@
+{
+  "comment": "The only differences a reconciled pgokf catalog may show against a fresh install of the same version (scripts/catalog_parity.py; docs/api-stability.md, Declared catalog exceptions). tests/test_release_integrity.py pins this file exactly: widening it is a reviewed change, never a silent one.",
+  "column_order": {
+    "pgokf_web.users": {
+      "fresh": ["name", "role", "password_hash", "display_name", "provider", "created_at", "updated_at"],
+      "declared": ["name", "role", "password_hash", "created_at", "updated_at", "display_name", "provider"],
+      "reason": "display_name and provider appended by hand to a table an early unpublished development build had created"
+    },
+    "pgokf_web.sessions": {
+      "fresh": ["nonce", "subject", "mode", "provider", "expires_at", "created_at"],
+      "declared": ["nonce", "subject", "mode", "expires_at", "created_at", "provider"],
+      "reason": "provider appended by hand to a table an early unpublished development build had created"
+    }
+  },
+  "runtime_indexes": {
+    "pgokf.concepts_bm25_idx": {"table": "pgokf.concepts", "access_method": "bm25", "created_by": "pgokf.rebuild_search_index()"},
+    "pgokf.concept_embedding_hnsw_idx": {"table": "pgokf.concept_embedding", "access_method": "hnsw", "created_by": "pgokf.rebuild_embedding_index()"}
+  },
+  "positional_access": {
+    "scan_roots": ["crates", "deploy", "packaging", "skills", "templates", "examples"],
+    "dynamic_statements": ["SELECT 1 FROM {table} LIMIT 0"]
+  }
+}

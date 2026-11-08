@@ -1,0 +1,1447 @@
+{
+  "protocol": "2026-07-28",
+  "official_referee": "@modelcontextprotocol/conformance@0.2.0-alpha.11",
+  "gitHead": "c321dd32035556e6769d3724a8ee97d87c3faaac",
+  "requirement_set": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/requirements/2026-07-28.yaml",
+  "requirement_identity": "53 qualified frozen core check IDs plus 36 qualified Final Skills check IDs from the separately pinned official extension source. Repeated runtime instances share a normative identity. All required native tests and per-item events are additionally mandatory.",
+  "requirements": [
+    {
+      "scenario": "caching",
+      "id": "sep-2549-tools-list-caching-hints",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/caching.ts",
+      "assertions": [
+        "semantic:caching:sep-2549-tools-list-caching-hints:tools/list:positive",
+        "semantic:caching:sep-2549-tools-list-caching-hints:tools/list:scope",
+        "semantic:caching:sep-2549-tools-list-caching-hints:tools/list:ttl"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:caching:sep-2549-tools-list-caching-hints:tools/list:positive": 1,
+        "semantic:caching:sep-2549-tools-list-caching-hints:tools/list:scope": 1,
+        "semantic:caching:sep-2549-tools-list-caching-hints:tools/list:ttl": 1
+      }
+    },
+    {
+      "scenario": "caching",
+      "id": "sep-2549-resources-list-caching-hints",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/caching.ts",
+      "assertions": [
+        "semantic:caching:sep-2549-resources-list-caching-hints:resources/list:positive",
+        "semantic:caching:sep-2549-resources-list-caching-hints:resources/list:scope",
+        "semantic:caching:sep-2549-resources-list-caching-hints:resources/list:ttl"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:caching:sep-2549-resources-list-caching-hints:resources/list:positive": 1,
+        "semantic:caching:sep-2549-resources-list-caching-hints:resources/list:scope": 1,
+        "semantic:caching:sep-2549-resources-list-caching-hints:resources/list:ttl": 1
+      }
+    },
+    {
+      "scenario": "caching",
+      "id": "sep-2549-resources-templates-list-caching-hints",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/caching.ts",
+      "assertions": [
+        "semantic:caching:sep-2549-resources-templates-list-caching-hints:resources/templates/list:positive",
+        "semantic:caching:sep-2549-resources-templates-list-caching-hints:resources/templates/list:scope",
+        "semantic:caching:sep-2549-resources-templates-list-caching-hints:resources/templates/list:ttl"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:caching:sep-2549-resources-templates-list-caching-hints:resources/templates/list:positive": 1,
+        "semantic:caching:sep-2549-resources-templates-list-caching-hints:resources/templates/list:scope": 1,
+        "semantic:caching:sep-2549-resources-templates-list-caching-hints:resources/templates/list:ttl": 1
+      }
+    },
+    {
+      "scenario": "caching",
+      "id": "sep-2549-resources-read-caching-hints",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/caching.ts",
+      "assertions": [
+        "semantic:caching:sep-2549-resources-read-caching-hints:resources/read:positive",
+        "semantic:caching:sep-2549-resources-read-caching-hints:resources/read:scope",
+        "semantic:caching:sep-2549-resources-read-caching-hints:resources/read:ttl"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:caching:sep-2549-resources-read-caching-hints:resources/read:positive": 1,
+        "semantic:caching:sep-2549-resources-read-caching-hints:resources/read:scope": 1,
+        "semantic:caching:sep-2549-resources-read-caching-hints:resources/read:ttl": 1
+      }
+    },
+    {
+      "scenario": "caching",
+      "id": "sep-2549-ttl-non-negative",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/caching.ts",
+      "assertions": [
+        "semantic:caching:sep-2549-ttl-non-negative:resources/list",
+        "semantic:caching:sep-2549-ttl-non-negative:resources/read",
+        "semantic:caching:sep-2549-ttl-non-negative:resources/templates/list",
+        "semantic:caching:sep-2549-ttl-non-negative:server/discover",
+        "semantic:caching:sep-2549-ttl-non-negative:skills/get",
+        "semantic:caching:sep-2549-ttl-non-negative:skills/list",
+        "semantic:caching:sep-2549-ttl-non-negative:tools/list"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:caching:sep-2549-ttl-non-negative:resources/list": 1,
+        "semantic:caching:sep-2549-ttl-non-negative:resources/read": 1,
+        "semantic:caching:sep-2549-ttl-non-negative:resources/templates/list": 1,
+        "semantic:caching:sep-2549-ttl-non-negative:server/discover": 1,
+        "semantic:caching:sep-2549-ttl-non-negative:skills/get": 1,
+        "semantic:caching:sep-2549-ttl-non-negative:skills/list": 1,
+        "semantic:caching:sep-2549-ttl-non-negative:tools/list": 1
+      }
+    },
+    {
+      "scenario": "caching",
+      "id": "sep-2549-cache-scope-valid",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/caching.ts",
+      "assertions": [
+        "semantic:caching:sep-2549-cache-scope-valid:resources/list",
+        "semantic:caching:sep-2549-cache-scope-valid:resources/read",
+        "semantic:caching:sep-2549-cache-scope-valid:resources/templates/list",
+        "semantic:caching:sep-2549-cache-scope-valid:server/discover",
+        "semantic:caching:sep-2549-cache-scope-valid:skills/get",
+        "semantic:caching:sep-2549-cache-scope-valid:skills/list",
+        "semantic:caching:sep-2549-cache-scope-valid:tools/list"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:caching:sep-2549-cache-scope-valid:resources/list": 1,
+        "semantic:caching:sep-2549-cache-scope-valid:resources/read": 1,
+        "semantic:caching:sep-2549-cache-scope-valid:resources/templates/list": 1,
+        "semantic:caching:sep-2549-cache-scope-valid:server/discover": 1,
+        "semantic:caching:sep-2549-cache-scope-valid:skills/get": 1,
+        "semantic:caching:sep-2549-cache-scope-valid:skills/list": 1,
+        "semantic:caching:sep-2549-cache-scope-valid:tools/list": 1
+      }
+    },
+    {
+      "scenario": "caching",
+      "id": "wire-schema-valid",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/caching.ts",
+      "assertions": [
+        "semantic:caching:wire-schema-valid:resources/list",
+        "semantic:caching:wire-schema-valid:resources/read",
+        "semantic:caching:wire-schema-valid:resources/templates/list",
+        "semantic:caching:wire-schema-valid:tools/list"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:caching:wire-schema-valid:resources/list": 1,
+        "semantic:caching:wire-schema-valid:resources/read": 1,
+        "semantic:caching:wire-schema-valid:resources/templates/list": 1,
+        "semantic:caching:wire-schema-valid:tools/list": 1
+      }
+    },
+    {
+      "scenario": "dns-rebinding-protection",
+      "id": "localhost-host-rebinding-rejected",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/dns-rebinding.ts",
+      "assertions": [
+        "semantic:dns-rebinding-protection:localhost-host-rebinding-rejected:server/discover"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:dns-rebinding-protection:localhost-host-rebinding-rejected:server/discover": 1
+      }
+    },
+    {
+      "scenario": "dns-rebinding-protection",
+      "id": "localhost-host-valid-accepted",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/dns-rebinding.ts",
+      "assertions": [
+        "semantic:dns-rebinding-protection:localhost-host-valid-accepted:server/discover"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:dns-rebinding-protection:localhost-host-valid-accepted:server/discover": 1
+      }
+    },
+    {
+      "scenario": "http-header-validation",
+      "id": "sep-2243-server-reject-invalid-headers",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/http-standard-headers.ts",
+      "assertions": [
+        "semantic:http-header-validation:sep-2243-server-reject-invalid-headers:Accept",
+        "semantic:http-header-validation:sep-2243-server-reject-invalid-headers:MCP-Protocol-Version",
+        "semantic:http-header-validation:sep-2243-server-reject-invalid-headers:Mcp-Method"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:http-header-validation:sep-2243-server-reject-invalid-headers:Accept": 1,
+        "semantic:http-header-validation:sep-2243-server-reject-invalid-headers:MCP-Protocol-Version": 1,
+        "semantic:http-header-validation:sep-2243-server-reject-invalid-headers:Mcp-Method": 1
+      }
+    },
+    {
+      "scenario": "http-header-validation",
+      "id": "sep-2243-server-reject-error-code",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/http-standard-headers.ts",
+      "assertions": [
+        "semantic:http-header-validation:sep-2243-server-reject-error-code:Accept",
+        "semantic:http-header-validation:sep-2243-server-reject-error-code:MCP-Protocol-Version",
+        "semantic:http-header-validation:sep-2243-server-reject-error-code:Mcp-Method"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:http-header-validation:sep-2243-server-reject-error-code:Accept": 1,
+        "semantic:http-header-validation:sep-2243-server-reject-error-code:MCP-Protocol-Version": 1,
+        "semantic:http-header-validation:sep-2243-server-reject-error-code:Mcp-Method": 1
+      }
+    },
+    {
+      "scenario": "http-header-validation",
+      "id": "sep-2243-server-accepts-whitespace-header-value",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/http-standard-headers.ts",
+      "assertions": [
+        "semantic:http-header-validation:sep-2243-server-accepts-whitespace-header-value:tools/list"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:http-header-validation:sep-2243-server-accepts-whitespace-header-value:tools/list": 1
+      }
+    },
+    {
+      "scenario": "http-header-validation",
+      "id": "sep-2243-header-name-case-insensitive",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/http-standard-headers.ts",
+      "assertions": [
+        "semantic:http-header-validation:sep-2243-header-name-case-insensitive:tools/list"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:http-header-validation:sep-2243-header-name-case-insensitive:tools/list": 1
+      }
+    },
+    {
+      "scenario": "http-header-validation",
+      "id": "wire-schema-valid",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/http-standard-headers.ts",
+      "assertions": [
+        "semantic:http-header-validation:wire-schema-valid:tools/list"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:http-header-validation:wire-schema-valid:tools/list": 1
+      }
+    },
+    {
+      "scenario": "json-schema-2020-12",
+      "id": "json-schema-2020-12-tool-found",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/json-schema-2020-12.ts",
+      "assertions": [
+        "semantic:json-schema-2020-12:json-schema-2020-12-tool-found:build_workspace_plugin",
+        "semantic:json-schema-2020-12:json-schema-2020-12-tool-found:check_workspace_plugin_freshness",
+        "semantic:json-schema-2020-12:json-schema-2020-12-tool-found:concept_neighbors",
+        "semantic:json-schema-2020-12:json-schema-2020-12-tool-found:concept_search",
+        "semantic:json-schema-2020-12:json-schema-2020-12-tool-found:create_content_bundle",
+        "semantic:json-schema-2020-12:json-schema-2020-12-tool-found:delete_document",
+        "semantic:json-schema-2020-12:json-schema-2020-12-tool-found:find_similar",
+        "semantic:json-schema-2020-12:json-schema-2020-12-tool-found:get_concept",
+        "semantic:json-schema-2020-12:json-schema-2020-12-tool-found:get_skill",
+        "semantic:json-schema-2020-12:json-schema-2020-12-tool-found:list_bundles",
+        "semantic:json-schema-2020-12:json-schema-2020-12-tool-found:list_plugin_targets",
+        "semantic:json-schema-2020-12:json-schema-2020-12-tool-found:put_document",
+        "semantic:json-schema-2020-12:json-schema-2020-12-tool-found:refresh_bundle",
+        "semantic:json-schema-2020-12:json-schema-2020-12-tool-found:set_bundle_state",
+        "semantic:json-schema-2020-12:json-schema-2020-12-tool-found:traverse_concepts"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:json-schema-2020-12:json-schema-2020-12-tool-found:build_workspace_plugin": 1,
+        "semantic:json-schema-2020-12:json-schema-2020-12-tool-found:check_workspace_plugin_freshness": 1,
+        "semantic:json-schema-2020-12:json-schema-2020-12-tool-found:concept_neighbors": 1,
+        "semantic:json-schema-2020-12:json-schema-2020-12-tool-found:concept_search": 1,
+        "semantic:json-schema-2020-12:json-schema-2020-12-tool-found:create_content_bundle": 1,
+        "semantic:json-schema-2020-12:json-schema-2020-12-tool-found:delete_document": 1,
+        "semantic:json-schema-2020-12:json-schema-2020-12-tool-found:find_similar": 1,
+        "semantic:json-schema-2020-12:json-schema-2020-12-tool-found:get_concept": 1,
+        "semantic:json-schema-2020-12:json-schema-2020-12-tool-found:get_skill": 1,
+        "semantic:json-schema-2020-12:json-schema-2020-12-tool-found:list_bundles": 1,
+        "semantic:json-schema-2020-12:json-schema-2020-12-tool-found:list_plugin_targets": 1,
+        "semantic:json-schema-2020-12:json-schema-2020-12-tool-found:put_document": 1,
+        "semantic:json-schema-2020-12:json-schema-2020-12-tool-found:refresh_bundle": 1,
+        "semantic:json-schema-2020-12:json-schema-2020-12-tool-found:set_bundle_state": 1,
+        "semantic:json-schema-2020-12:json-schema-2020-12-tool-found:traverse_concepts": 1
+      }
+    },
+    {
+      "scenario": "json-schema-2020-12",
+      "id": "wire-schema-valid",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/json-schema-2020-12.ts",
+      "assertions": [
+        "semantic:json-schema-2020-12:wire-schema-valid:tools/list"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:json-schema-2020-12:wire-schema-valid:tools/list": 1
+      }
+    },
+    {
+      "scenario": "resources-list",
+      "id": "resources-list",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/resources.ts",
+      "assertions": [
+        "semantic:resources-list:resources-list:resources/list"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:resources-list:resources-list:resources/list": 1
+      }
+    },
+    {
+      "scenario": "resources-list",
+      "id": "wire-schema-valid",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/resources.ts",
+      "assertions": [
+        "semantic:resources-list:wire-schema-valid:resources/list"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:resources-list:wire-schema-valid:resources/list": 1
+      }
+    },
+    {
+      "scenario": "resources-read-binary",
+      "id": "resources-read-binary",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/resources.ts",
+      "assertions": [
+        "semantic:resources-read-binary:resources-read-binary:member"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:resources-read-binary:resources-read-binary:member": 1
+      }
+    },
+    {
+      "scenario": "resources-read-binary",
+      "id": "wire-schema-valid",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/resources.ts",
+      "assertions": [
+        "semantic:resources-read-binary:wire-schema-valid:resources/read"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:resources-read-binary:wire-schema-valid:resources/read": 1
+      }
+    },
+    {
+      "scenario": "resources-read-text",
+      "id": "resources-read-text",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/resources.ts",
+      "assertions": [
+        "semantic:resources-read-text:resources-read-text:document"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:resources-read-text:resources-read-text:document": 1
+      }
+    },
+    {
+      "scenario": "resources-read-text",
+      "id": "wire-schema-valid",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/resources.ts",
+      "assertions": [
+        "semantic:resources-read-text:wire-schema-valid:resources/read"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:resources-read-text:wire-schema-valid:resources/read": 1
+      }
+    },
+    {
+      "scenario": "resources-templates-read",
+      "id": "resources-templates-read",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/resources.ts",
+      "assertions": [
+        "semantic:resources-templates-read:resources-templates-read:okf://catalog/bundles/{bundle_id}",
+        "semantic:resources-templates-read:resources-templates-read:okf://catalog/bundles/{bundle_id}/concepts/{concept_key}",
+        "semantic:resources-templates-read:resources-templates-read:okf://catalog/bundles/{bundle_id}/documents/{path_key}",
+        "semantic:resources-templates-read:resources-templates-read:skill://pgokf/b/{bundle_id}/c/{concept_key}/{skill_name}/SKILL.md",
+        "semantic:resources-templates-read:resources-templates-read:skill://pgokf/b/{bundle_id}/c/{concept_key}/{skill_name}/{+member_path}"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:resources-templates-read:resources-templates-read:okf://catalog/bundles/{bundle_id}": 1,
+        "semantic:resources-templates-read:resources-templates-read:okf://catalog/bundles/{bundle_id}/concepts/{concept_key}": 1,
+        "semantic:resources-templates-read:resources-templates-read:okf://catalog/bundles/{bundle_id}/documents/{path_key}": 1,
+        "semantic:resources-templates-read:resources-templates-read:skill://pgokf/b/{bundle_id}/c/{concept_key}/{skill_name}/SKILL.md": 1,
+        "semantic:resources-templates-read:resources-templates-read:skill://pgokf/b/{bundle_id}/c/{concept_key}/{skill_name}/{+member_path}": 1
+      }
+    },
+    {
+      "scenario": "resources-templates-read",
+      "id": "wire-schema-valid",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/resources.ts",
+      "assertions": [
+        "semantic:resources-templates-read:wire-schema-valid:resources/read",
+        "semantic:resources-templates-read:wire-schema-valid:resources/templates/list"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:resources-templates-read:wire-schema-valid:resources/read": 1,
+        "semantic:resources-templates-read:wire-schema-valid:resources/templates/list": 1
+      }
+    },
+    {
+      "scenario": "sep-2164-resource-not-found",
+      "id": "sep-2164-no-empty-contents",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/resources.ts",
+      "assertions": [
+        "semantic:sep-2164-resource-not-found:sep-2164-no-empty-contents:resources/read"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2164-resource-not-found:sep-2164-no-empty-contents:resources/read": 1
+      }
+    },
+    {
+      "scenario": "sep-2164-resource-not-found",
+      "id": "sep-2164-error-code",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/resources.ts",
+      "assertions": [
+        "semantic:sep-2164-resource-not-found:sep-2164-error-code:resources/read"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2164-resource-not-found:sep-2164-error-code:resources/read": 1
+      }
+    },
+    {
+      "scenario": "sep-2164-resource-not-found",
+      "id": "wire-schema-valid",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/resources.ts",
+      "assertions": [
+        "semantic:sep-2164-resource-not-found:wire-schema-valid:resources/read"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2164-resource-not-found:wire-schema-valid:resources/read": 1
+      }
+    },
+    {
+      "scenario": "server-stateless",
+      "id": "sep-2575-request-meta-invalid-missing-meta",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/stateless.ts",
+      "assertions": [
+        "semantic:server-stateless:sep-2575-request-meta-invalid-missing-meta:server/discover"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:server-stateless:sep-2575-request-meta-invalid-missing-meta:server/discover": 1
+      }
+    },
+    {
+      "scenario": "server-stateless",
+      "id": "sep-2575-http-server-meta-invalid-400",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/stateless.ts",
+      "assertions": [
+        "semantic:server-stateless:sep-2575-http-server-meta-invalid-400:server/discover"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:server-stateless:sep-2575-http-server-meta-invalid-400:server/discover": 1
+      }
+    },
+    {
+      "scenario": "server-stateless",
+      "id": "sep-2575-request-meta-invalid-missing-protocol-version",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/stateless.ts",
+      "assertions": [
+        "semantic:server-stateless:sep-2575-request-meta-invalid-missing-protocol-version:server/discover"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:server-stateless:sep-2575-request-meta-invalid-missing-protocol-version:server/discover": 1
+      }
+    },
+    {
+      "scenario": "server-stateless",
+      "id": "sep-2575-request-meta-invalid-missing-client-capabilities",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/stateless.ts",
+      "assertions": [
+        "semantic:server-stateless:sep-2575-request-meta-invalid-missing-client-capabilities:server/discover"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:server-stateless:sep-2575-request-meta-invalid-missing-client-capabilities:server/discover": 1
+      }
+    },
+    {
+      "scenario": "server-stateless",
+      "id": "sep-2575-request-meta-client-info-optional",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/stateless.ts",
+      "assertions": [
+        "semantic:server-stateless:sep-2575-request-meta-client-info-optional:server/discover"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:server-stateless:sep-2575-request-meta-client-info-optional:server/discover": 1
+      }
+    },
+    {
+      "scenario": "server-stateless",
+      "id": "sep-2575-server-implements-discover",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/stateless.ts",
+      "assertions": [
+        "semantic:server-stateless:sep-2575-server-implements-discover:server/discover"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:server-stateless:sep-2575-server-implements-discover:server/discover": 1
+      }
+    },
+    {
+      "scenario": "server-stateless",
+      "id": "sep-2575-server-identifies-in-result-meta",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/stateless.ts",
+      "assertions": [
+        "semantic:server-stateless:sep-2575-server-identifies-in-result-meta:server/discover"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:server-stateless:sep-2575-server-identifies-in-result-meta:server/discover": 1
+      }
+    },
+    {
+      "scenario": "server-stateless",
+      "id": "sep-2575-server-declares-prompts-in-discover",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/stateless.ts",
+      "assertions": [
+        "semantic:server-stateless:sep-2575-server-declares-prompts-in-discover:server/discover"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:server-stateless:sep-2575-server-declares-prompts-in-discover:server/discover": 1
+      }
+    },
+    {
+      "scenario": "server-stateless",
+      "id": "sep-2575-discover-capabilities-match-handlers",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/stateless.ts",
+      "assertions": [
+        "semantic:server-stateless:sep-2575-discover-capabilities-match-handlers:server/discover"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:server-stateless:sep-2575-discover-capabilities-match-handlers:server/discover": 1
+      }
+    },
+    {
+      "scenario": "server-stateless",
+      "id": "sep-2575-server-unsupported-version-error",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/stateless.ts",
+      "assertions": [
+        "semantic:server-stateless:sep-2575-server-unsupported-version-error:server/discover"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:server-stateless:sep-2575-server-unsupported-version-error:server/discover": 1
+      }
+    },
+    {
+      "scenario": "server-stateless",
+      "id": "sep-2575-http-server-unsupported-version-400",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/stateless.ts",
+      "assertions": [
+        "semantic:server-stateless:sep-2575-http-server-unsupported-version-400:server/discover"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:server-stateless:sep-2575-http-server-unsupported-version-400:server/discover": 1
+      }
+    },
+    {
+      "scenario": "server-stateless",
+      "id": "sep-2575-http-server-header-mismatch-400",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/stateless.ts",
+      "assertions": [
+        "semantic:server-stateless:sep-2575-http-server-header-mismatch-400:server/discover"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:server-stateless:sep-2575-http-server-header-mismatch-400:server/discover": 1
+      }
+    },
+    {
+      "scenario": "server-stateless",
+      "id": "sep-2575-http-server-method-not-found-404-initialize",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/stateless.ts",
+      "assertions": [
+        "semantic:server-stateless:sep-2575-http-server-method-not-found-404-initialize:initialize"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:server-stateless:sep-2575-http-server-method-not-found-404-initialize:initialize": 1
+      }
+    },
+    {
+      "scenario": "server-stateless",
+      "id": "sep-2575-http-server-method-not-found-404-ping",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/stateless.ts",
+      "assertions": [
+        "semantic:server-stateless:sep-2575-http-server-method-not-found-404-ping:ping"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:server-stateless:sep-2575-http-server-method-not-found-404-ping:ping": 1
+      }
+    },
+    {
+      "scenario": "server-stateless",
+      "id": "sep-2575-http-server-method-not-found-404-logging-setlevel",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/stateless.ts",
+      "assertions": [
+        "semantic:server-stateless:sep-2575-http-server-method-not-found-404-logging-setlevel:logging/setLevel"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:server-stateless:sep-2575-http-server-method-not-found-404-logging-setlevel:logging/setLevel": 1
+      }
+    },
+    {
+      "scenario": "server-stateless",
+      "id": "sep-2575-http-server-method-not-found-404-resources-subscribe",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/stateless.ts",
+      "assertions": [
+        "semantic:server-stateless:sep-2575-http-server-method-not-found-404-resources-subscribe:resources/subscribe"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:server-stateless:sep-2575-http-server-method-not-found-404-resources-subscribe:resources/subscribe": 1
+      }
+    },
+    {
+      "scenario": "server-stateless",
+      "id": "sep-2575-http-server-method-not-found-404-resources-unsubscribe",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/stateless.ts",
+      "assertions": [
+        "semantic:server-stateless:sep-2575-http-server-method-not-found-404-resources-unsubscribe:resources/unsubscribe"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:server-stateless:sep-2575-http-server-method-not-found-404-resources-unsubscribe:resources/unsubscribe": 1
+      }
+    },
+    {
+      "scenario": "server-stateless",
+      "id": "sep-2575-http-server-method-not-found-404",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/stateless.ts",
+      "assertions": [
+        "semantic:server-stateless:sep-2575-http-server-method-not-found-404:unknown/method"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:server-stateless:sep-2575-http-server-method-not-found-404:unknown/method": 1
+      }
+    },
+    {
+      "scenario": "server-stateless",
+      "id": "sep-2575-http-server-error-jsonrpc-id",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/stateless.ts",
+      "assertions": [
+        "semantic:server-stateless:sep-2575-http-server-error-jsonrpc-id:initialize",
+        "semantic:server-stateless:sep-2575-http-server-error-jsonrpc-id:logging/setLevel",
+        "semantic:server-stateless:sep-2575-http-server-error-jsonrpc-id:ping",
+        "semantic:server-stateless:sep-2575-http-server-error-jsonrpc-id:resources/subscribe",
+        "semantic:server-stateless:sep-2575-http-server-error-jsonrpc-id:resources/unsubscribe",
+        "semantic:server-stateless:sep-2575-http-server-error-jsonrpc-id:unknown/method"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:server-stateless:sep-2575-http-server-error-jsonrpc-id:initialize": 1,
+        "semantic:server-stateless:sep-2575-http-server-error-jsonrpc-id:logging/setLevel": 1,
+        "semantic:server-stateless:sep-2575-http-server-error-jsonrpc-id:ping": 1,
+        "semantic:server-stateless:sep-2575-http-server-error-jsonrpc-id:resources/subscribe": 1,
+        "semantic:server-stateless:sep-2575-http-server-error-jsonrpc-id:resources/unsubscribe": 1,
+        "semantic:server-stateless:sep-2575-http-server-error-jsonrpc-id:unknown/method": 1
+      }
+    },
+    {
+      "scenario": "tools-call-error",
+      "id": "tools-call-error",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/tools.ts",
+      "assertions": [
+        "semantic:tools-call-error:tools-call-error:get_concept"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:tools-call-error:tools-call-error:get_concept": 1
+      }
+    },
+    {
+      "scenario": "tools-call-error",
+      "id": "wire-schema-valid",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/tools.ts",
+      "assertions": [
+        "semantic:tools-call-error:wire-schema-valid:tools/call"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:tools-call-error:wire-schema-valid:tools/call": 1
+      }
+    },
+    {
+      "scenario": "tools-call-simple-text",
+      "id": "tools-call-simple-text",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/tools.ts",
+      "assertions": [
+        "semantic:tools-call-simple-text:tools-call-simple-text:get_concept"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:tools-call-simple-text:tools-call-simple-text:get_concept": 1
+      }
+    },
+    {
+      "scenario": "tools-call-simple-text",
+      "id": "wire-schema-valid",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/tools.ts",
+      "assertions": [
+        "semantic:tools-call-simple-text:wire-schema-valid:tools/call"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:tools-call-simple-text:wire-schema-valid:tools/call": 1
+      }
+    },
+    {
+      "scenario": "tools-list",
+      "id": "tools-list",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/tools.ts",
+      "assertions": [
+        "semantic:tools-list:tools-list:tools/list"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:tools-list:tools-list:tools/list": 1
+      }
+    },
+    {
+      "scenario": "tools-list",
+      "id": "tools-name-format",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/tools.ts",
+      "assertions": [
+        "semantic:tools-list:tools-name-format:build_workspace_plugin",
+        "semantic:tools-list:tools-name-format:check_workspace_plugin_freshness",
+        "semantic:tools-list:tools-name-format:concept_neighbors",
+        "semantic:tools-list:tools-name-format:concept_search",
+        "semantic:tools-list:tools-name-format:create_content_bundle",
+        "semantic:tools-list:tools-name-format:delete_document",
+        "semantic:tools-list:tools-name-format:find_similar",
+        "semantic:tools-list:tools-name-format:get_concept",
+        "semantic:tools-list:tools-name-format:get_skill",
+        "semantic:tools-list:tools-name-format:list_bundles",
+        "semantic:tools-list:tools-name-format:list_plugin_targets",
+        "semantic:tools-list:tools-name-format:put_document",
+        "semantic:tools-list:tools-name-format:refresh_bundle",
+        "semantic:tools-list:tools-name-format:set_bundle_state",
+        "semantic:tools-list:tools-name-format:traverse_concepts"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:tools-list:tools-name-format:build_workspace_plugin": 1,
+        "semantic:tools-list:tools-name-format:check_workspace_plugin_freshness": 1,
+        "semantic:tools-list:tools-name-format:concept_neighbors": 1,
+        "semantic:tools-list:tools-name-format:concept_search": 1,
+        "semantic:tools-list:tools-name-format:create_content_bundle": 1,
+        "semantic:tools-list:tools-name-format:delete_document": 1,
+        "semantic:tools-list:tools-name-format:find_similar": 1,
+        "semantic:tools-list:tools-name-format:get_concept": 1,
+        "semantic:tools-list:tools-name-format:get_skill": 1,
+        "semantic:tools-list:tools-name-format:list_bundles": 1,
+        "semantic:tools-list:tools-name-format:list_plugin_targets": 1,
+        "semantic:tools-list:tools-name-format:put_document": 1,
+        "semantic:tools-list:tools-name-format:refresh_bundle": 1,
+        "semantic:tools-list:tools-name-format:set_bundle_state": 1,
+        "semantic:tools-list:tools-name-format:traverse_concepts": 1
+      }
+    },
+    {
+      "scenario": "tools-list",
+      "id": "wire-schema-valid",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/tools.ts",
+      "assertions": [
+        "semantic:tools-list:wire-schema-valid:tools/list"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:tools-list:wire-schema-valid:tools/list": 1
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-capability-empty-object",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-enumeration:sep-2640-capability-empty-object:server/discover"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-enumeration:sep-2640-capability-empty-object:server/discover": 1
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-capability-declaration-inline",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-enumeration:sep-2640-capability-declaration-inline:server/discover"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-enumeration:sep-2640-capability-declaration-inline:server/discover": 1
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-capability-requires-resources",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-enumeration:sep-2640-capability-requires-resources:server/discover"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-enumeration:sep-2640-capability-requires-resources:server/discover": 1
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-skills-list-implemented",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-enumeration:sep-2640-skills-list-implemented:skills/list"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-enumeration:sep-2640-skills-list-implemented:skills/list": 1
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-skills-list-pagination",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-enumeration:sep-2640-skills-list-pagination:skills/list"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-enumeration:sep-2640-skills-list-pagination:skills/list": 1
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-skills-list-entry-atomic",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-enumeration:sep-2640-skills-list-entry-atomic:skills/list"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-enumeration:sep-2640-skills-list-entry-atomic:skills/list": 55
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-skills-list-cache-attributes",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-enumeration:sep-2640-skills-list-cache-attributes:skills/list:positive",
+        "semantic:sep-2640-skills-enumeration:sep-2640-skills-list-cache-attributes:skills/list:scope",
+        "semantic:sep-2640-skills-enumeration:sep-2640-skills-list-cache-attributes:skills/list:ttl"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-enumeration:sep-2640-skills-list-cache-attributes:skills/list:positive": 1,
+        "semantic:sep-2640-skills-enumeration:sep-2640-skills-list-cache-attributes:skills/list:scope": 1,
+        "semantic:sep-2640-skills-enumeration:sep-2640-skills-list-cache-attributes:skills/list:ttl": 1
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-entry-uri-required",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-enumeration:sep-2640-entry-uri-required:skills/list"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-enumeration:sep-2640-entry-uri-required:skills/list": 55
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-entry-frontmatter-required",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-enumeration:sep-2640-entry-frontmatter-required:skills/list"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-enumeration:sep-2640-entry-frontmatter-required:skills/list": 55
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-entry-uri-matches-frontmatter-name",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-enumeration:sep-2640-entry-uri-matches-frontmatter-name:skills/list"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-enumeration:sep-2640-entry-uri-matches-frontmatter-name:skills/list": 55
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-skill-uri-scheme",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-enumeration:sep-2640-skill-uri-scheme:skills/list"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-enumeration:sep-2640-skill-uri-scheme:skills/list": 55
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-entry-resources-required",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-enumeration:sep-2640-entry-resources-required:skills/list"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-enumeration:sep-2640-entry-resources-required:skills/list": 55
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-resources-complete",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-enumeration:sep-2640-resources-complete:skills/list"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-enumeration:sep-2640-resources-complete:skills/list": 55
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-resources-uri-within-skill",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-enumeration:sep-2640-resources-uri-within-skill:skills/list"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-enumeration:sep-2640-resources-uri-within-skill:skills/list": 55
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-resources-digest-format",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-enumeration:sep-2640-resources-digest-format:skills/list"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-enumeration:sep-2640-resources-digest-format:skills/list": 55
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-resources-size-required",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-enumeration:sep-2640-resources-size-required:skills/list"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-enumeration:sep-2640-resources-size-required:skills/list": 55
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-limit-resources-per-skill",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-enumeration:sep-2640-limit-resources-per-skill:skills/list"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-enumeration:sep-2640-limit-resources-per-skill:skills/list": 55
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-limit-total-size",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-enumeration:sep-2640-limit-total-size:skills/list"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-enumeration:sep-2640-limit-total-size:skills/list": 55
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-metadata-reserved-prefix",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-enumeration:sep-2640-metadata-reserved-prefix:skills/list"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-enumeration:sep-2640-metadata-reserved-prefix:skills/list": 55
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-name-naming-rules",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-enumeration:sep-2640-name-naming-rules:skills/list"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-enumeration:sep-2640-name-naming-rules:skills/list": 55
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-authority-reg-name",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-enumeration:sep-2640-authority-reg-name:skills/list"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-enumeration:sep-2640-authority-reg-name:skills/list": 55
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-capability-commits-to-methods",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-enumeration:sep-2640-capability-commits-to-methods:skills/get"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-enumeration:sep-2640-capability-commits-to-methods:skills/get": 55
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-skills-get-implemented",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-enumeration:sep-2640-skills-get-implemented:skills/get"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-enumeration:sep-2640-skills-get-implemented:skills/get": 55
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-skills-get-entry-shape",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-enumeration:sep-2640-skills-get-entry-shape:skills/get"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-enumeration:sep-2640-skills-get-entry-shape:skills/get": 55
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-skills-get-no-cursor",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-enumeration:sep-2640-skills-get-no-cursor:skills/get"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-enumeration:sep-2640-skills-get-no-cursor:skills/get": 55
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-skills-get-cache-attributes",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-enumeration:sep-2640-skills-get-cache-attributes:skills/get:positive",
+        "semantic:sep-2640-skills-enumeration:sep-2640-skills-get-cache-attributes:skills/get:scope",
+        "semantic:sep-2640-skills-enumeration:sep-2640-skills-get-cache-attributes:skills/get:ttl"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-enumeration:sep-2640-skills-get-cache-attributes:skills/get:positive": 1,
+        "semantic:sep-2640-skills-enumeration:sep-2640-skills-get-cache-attributes:skills/get:scope": 1,
+        "semantic:sep-2640-skills-enumeration:sep-2640-skills-get-cache-attributes:skills/get:ttl": 1
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-skills-get-unknown-uri-invalid-params",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-enumeration:sep-2640-skills-get-unknown-uri-invalid-params:skills/get"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-enumeration:sep-2640-skills-get-unknown-uri-invalid-params:skills/get": 1
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-skillmd-required",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-enumeration:sep-2640-skillmd-required:skills/list"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-enumeration:sep-2640-skillmd-required:skills/list": 55
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-skillmd-frontmatter",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-enumeration:sep-2640-skillmd-frontmatter:resources/read"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-enumeration:sep-2640-skillmd-frontmatter:resources/read": 55
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-entry-frontmatter-identical",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-enumeration:sep-2640-entry-frontmatter-identical:resources/read"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-enumeration:sep-2640-entry-frontmatter-identical:resources/read": 55
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "wire-schema-valid",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-enumeration:wire-schema-valid:skills/get",
+        "semantic:sep-2640-skills-enumeration:wire-schema-valid:skills/list"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-enumeration:wire-schema-valid:skills/get": 1,
+        "semantic:sep-2640-skills-enumeration:wire-schema-valid:skills/list": 1
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-manifest",
+      "id": "sep-2640-skillmd-mimetype",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/manifest.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-manifest:sep-2640-skillmd-mimetype:resources/read"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-manifest:sep-2640-skillmd-mimetype:resources/read": 55
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-manifest",
+      "id": "sep-2640-final-segment-equals-name",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/manifest.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-manifest:sep-2640-final-segment-equals-name:resources/read"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-manifest:sep-2640-final-segment-equals-name:resources/read": 55
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-manifest",
+      "id": "sep-2640-meta-prefix",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/manifest.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-manifest:sep-2640-meta-prefix:resources/read"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-manifest:sep-2640-meta-prefix:resources/read": 55
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-manifest",
+      "id": "wire-schema-valid",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/manifest.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-manifest:wire-schema-valid:resources/read"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-manifest:wire-schema-valid:resources/read": 1
+      }
+    },
+    {
+      "scenario": "sep-2640-skills-directory",
+      "id": "wire-schema-valid",
+      "source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/directory.ts",
+      "assertions": [
+        "semantic:sep-2640-skills-directory:wire-schema-valid:resources/directory/read"
+      ],
+      "meaning": "Named semantic predicate executed successfully for this requirement and operation; no enclosing-test assertion credit.",
+      "minimum_receipts": {
+        "semantic:sep-2640-skills-directory:wire-schema-valid:resources/directory/read": 1
+      }
+    }
+  ],
+  "required_tests": [
+    "test_both_graph_surfaces_return_typed_nodes",
+    "test_cache_corruption_controls",
+    "test_complete_cursor_bindings",
+    "test_complete_lifecycle",
+    "test_complete_resources",
+    "test_complete_tools",
+    "test_complete_uri_and_tenant",
+    "test_cross_tenant_and_missing_are_indistinguishable",
+    "test_cursor_tamper_cross_method_role_and_generation",
+    "test_discovery_and_role_availability_matrix",
+    "test_document_exact_bytes_and_resource_pointer_non_dereference",
+    "test_exact_reads_leave_real_audit_events",
+    "test_freshness_catalog_and_build",
+    "test_freshness_evidence_across_tool_projections",
+    "test_hidden_bundle_and_skill_integrity_fail_closed",
+    "test_metadata_version_and_removed_methods",
+    "test_modern_tool_results_link_canonical_resources",
+    "test_notifications_auth_before_body_and_non_ascii_name",
+    "test_opaque_catalog_percent_identifiers",
+    "test_real_database_errors_are_classified_and_redacted",
+    "test_relationship_direction_filter_generation_and_freshness",
+    "test_required_headers_and_mismatch",
+    "test_requirement_header_semantics",
+    "test_requirement_resource_semantics",
+    "test_requirement_skills_semantics",
+    "test_requirement_stateless_semantics",
+    "test_requirement_tool_semantics",
+    "test_requirement_wire_semantics",
+    "test_resource_pages_templates_and_manifest",
+    "test_schema_and_role_refusals",
+    "test_search_cursor_filters_and_graph_results",
+    "test_skill_pages_get_and_every_file_digest",
+    "test_skills_extension_is_modern_only_with_legacy_tool_fallback",
+    "test_token_role_change_and_revocation_are_immediate",
+    "test_wire_corruption_controls"
+  ],
+  "advisories": [
+    {
+      "scenario": "sep-2164-resource-not-found",
+      "id": "sep-2164-data-uri",
+      "level": "SHOULD",
+      "disposition": "Disclosed official warning: uniform invalid/missing/unauthorized error omits data.uri; not claimed passed."
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-names-should-be-unique",
+      "level": "SHOULD",
+      "disposition": "SHOULD: Skills are not globally resource-listed; duplicate display names remain distinct by canonical URI in the native pagination fixture."
+    },
+    {
+      "scenario": "sep-2640-skills-manifest",
+      "id": "sep-2640-skillmd-metadata-name",
+      "level": "SHOULD",
+      "disposition": "SHOULD: Skills are not globally resource-listed; duplicate display names remain distinct by canonical URI in the native pagination fixture."
+    },
+    {
+      "scenario": "sep-2640-skills-manifest",
+      "id": "sep-2640-skillmd-metadata-description",
+      "level": "SHOULD",
+      "disposition": "SHOULD: Skills are not globally resource-listed; duplicate display names remain distinct by canonical URI in the native pagination fixture."
+    }
+  ],
+  "mutation_controls": {
+    "join": 18,
+    "real_probe_removals": [
+      "tool-calls",
+      "resource-reads",
+      "lifecycle",
+      "headers",
+      "schemas",
+      "role-tenant"
+    ]
+  },
+  "schema_dependency": "jsonschema==4.26.0",
+  "resource_classes": [
+    "bundle",
+    "catalog",
+    "concept",
+    "document",
+    "skill_manifest",
+    "skill_member"
+  ],
+  "receipt_contract": {
+    "version": 1,
+    "kind": "requirement-and-operation-scoped semantic predicates",
+    "source_files": [
+      "tests/mcp_semantics.py",
+      "tests/mcp_surface.py",
+      "tests/mcp_wire.py"
+    ],
+    "count_policy": "Each label has an explicit floor. Skill per-entry predicates require all 55 baseline entries. Runtime totals and test events are diagnostics only, never requirement evidence."
+  },
+  "control_labels": [
+    "control:wire:content-audio-data",
+    "control:wire:content-audio-meta",
+    "control:wire:content-audio-mimeType",
+    "control:wire:content-audio-type",
+    "control:wire:content-image-data",
+    "control:wire:content-image-meta",
+    "control:wire:content-image-mimeType",
+    "control:wire:content-image-type",
+    "control:wire:content-resource-blob-meta",
+    "control:wire:content-resource-blob-resource",
+    "control:wire:content-resource-blob-type",
+    "control:wire:content-resource-text-meta",
+    "control:wire:content-resource-text-resource",
+    "control:wire:content-resource-text-type",
+    "control:wire:content-resource_link-meta",
+    "control:wire:content-resource_link-name",
+    "control:wire:content-resource_link-type",
+    "control:wire:content-resource_link-uri",
+    "control:wire:content-text-meta",
+    "control:wire:content-text-text",
+    "control:wire:content-text-type",
+    "control:wire:descriptor-_meta",
+    "control:wire:descriptor-annotations",
+    "control:wire:descriptor-description",
+    "control:wire:descriptor-icons",
+    "control:wire:descriptor-inputSchema",
+    "control:wire:descriptor-missing-inputSchema",
+    "control:wire:descriptor-missing-name",
+    "control:wire:descriptor-name",
+    "control:wire:descriptor-outputSchema",
+    "control:wire:embedded-resource-blob-blob",
+    "control:wire:embedded-resource-blob-uri",
+    "control:wire:embedded-resource-text-text",
+    "control:wire:embedded-resource-text-uri",
+    "control:wire:envelope-id-True",
+    "control:wire:envelope-id-[]",
+    "control:wire:envelope-id-wrong",
+    "control:wire:envelope-jsonrpc-1.0",
+    "control:wire:envelope-missing-id",
+    "control:wire:envelope-missing-jsonrpc",
+    "control:wire:envelope-missing-result",
+    "control:wire:error-code",
+    "control:wire:error-extra-result",
+    "control:wire:error-id",
+    "control:wire:error-id-type",
+    "control:wire:error-message",
+    "control:wire:error-missing-code",
+    "control:wire:error-missing-message",
+    "control:wire:input-schema-root",
+    "control:wire:output-schema-invalid",
+    "control:wire:resource-_meta",
+    "control:wire:resource-descriptor-_meta",
+    "control:wire:resource-descriptor-description",
+    "control:wire:resource-descriptor-name",
+    "control:wire:resource-descriptor-uri",
+    "control:wire:resource-mimeType",
+    "control:wire:resource-missing-text",
+    "control:wire:resource-missing-uri",
+    "control:wire:resource-text",
+    "control:wire:resource-uri",
+    "control:wire:result-meta",
+    "control:wire:result-missing-tools",
+    "control:wire:result-missing-type",
+    "control:wire:result-type",
+    "control:wire:server-info",
+    "control:wire:skill-_meta",
+    "control:wire:skill-frontmatter",
+    "control:wire:skill-frontmatter-name",
+    "control:wire:skill-member-digest",
+    "control:wire:skill-resources",
+    "control:wire:skill-uri",
+    "control:wire:template-_meta",
+    "control:wire:template-name",
+    "control:wire:template-uriTemplate",
+    "control:wire:tool-error-content",
+    "control:wire:tool-error-flag",
+    "control:wire:tool-error-missing-text",
+    "control:wire:tool-error-text",
+    "control:wire:tool-missing-content",
+    "control:wire:valid-audio",
+    "control:wire:valid-image",
+    "control:wire:valid-resource-blob",
+    "control:wire:valid-resource-text",
+    "control:wire:valid-resource_link",
+    "control:wire:valid-text",
+    "control:cache:server/discover:scope",
+    "control:cache:server/discover:public-private",
+    "control:cache:server/discover:negative",
+    "control:cache:server/discover:zero",
+    "control:cache:server/discover:type",
+    "control:cache:server/discover:boolean",
+    "control:cache:server/discover:ttl",
+    "control:cache:tools/list:scope",
+    "control:cache:tools/list:public-private",
+    "control:cache:tools/list:negative",
+    "control:cache:tools/list:zero",
+    "control:cache:tools/list:type",
+    "control:cache:tools/list:boolean",
+    "control:cache:tools/list:ttl",
+    "control:cache:resources/list:scope",
+    "control:cache:resources/list:public-private",
+    "control:cache:resources/list:negative",
+    "control:cache:resources/list:zero",
+    "control:cache:resources/list:type",
+    "control:cache:resources/list:boolean",
+    "control:cache:resources/list:ttl",
+    "control:cache:resources/templates/list:scope",
+    "control:cache:resources/templates/list:public-private",
+    "control:cache:resources/templates/list:negative",
+    "control:cache:resources/templates/list:zero",
+    "control:cache:resources/templates/list:type",
+    "control:cache:resources/templates/list:boolean",
+    "control:cache:resources/templates/list:ttl",
+    "control:cache:resources/read:scope",
+    "control:cache:resources/read:public-private",
+    "control:cache:resources/read:negative",
+    "control:cache:resources/read:zero",
+    "control:cache:resources/read:type",
+    "control:cache:resources/read:boolean",
+    "control:cache:resources/read:ttl",
+    "control:cache:skills/list:scope",
+    "control:cache:skills/list:public-private",
+    "control:cache:skills/list:negative",
+    "control:cache:skills/list:zero",
+    "control:cache:skills/list:type",
+    "control:cache:skills/list:boolean",
+    "control:cache:skills/list:ttl",
+    "control:cache:skills/get:scope",
+    "control:cache:skills/get:public-private",
+    "control:cache:skills/get:negative",
+    "control:cache:skills/get:zero",
+    "control:cache:skills/get:type",
+    "control:cache:skills/get:boolean",
+    "control:cache:skills/get:ttl",
+    "control:wire:metadata-key"
+  ]
+}

@@ -1,0 +1,31 @@
+[
+  {
+    "auth": "reader",
+    "request": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "limit": 10,
+          "query": "failover"
+        },
+        "name": "concept_search"
+      }
+    },
+    "response": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "result": {
+        "content": [
+          {
+            "text": "[\n  {\n    \"bundle_id\": 1,\n    \"concept_id\": \"runbooks/failover-appendix\",\n    \"headline\": \"<b>failover</b> appendix Supporting reference material for the widget <b>failover</b> runbook. Widget <b>failover</b> appendix\\nSupporting material\",\n    \"path\": \"runbooks/failover-appendix.md\",\n    \"rank\": 1.6,\n    \"title\": \"Widget failover appendix\",\n    \"type\": \"Runbook\"\n  },\n  {\n    \"bundle_id\": 1,\n    \"concept_id\": \"runbooks/failover\",\n    \"headline\": \"<b>failover</b> Promote the standby when the primary widget node is lost. Widget <b>failover</b>\\nRun this\",\n    \"path\": \"runbooks/failover.md\",\n    \"rank\": 1.2,\n    \"title\": \"Widget failover\",\n    \"type\": \"Runbook\"\n  },\n  {\n    \"bundle_id\": 1,\n    \"concept_id\": \"services/widget\",\n    \"headline\": \"keeps a hot standby\\nready for <b>failover</b>.\\nOperational entry points:\\n<b>Failover</b> procedure: widget <b>failover</b> runbook\",\n    \"path\": \"services/widget.md\",\n    \"rank\": 0.3,\n    \"title\": \"Widget service\",\n    \"type\": \"Service\"\n  }\n]",
+            "type": "text"
+          }
+        ],
+        "isError": false
+      }
+    },
+    "status": 200
+  }
+]

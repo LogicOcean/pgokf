@@ -1,0 +1,2887 @@
+{
+  "protocol": "2026-07-28",
+  "package": "@modelcontextprotocol/conformance@0.2.0-alpha.11",
+  "gitHead": "c321dd32035556e6769d3724a8ee97d87c3faaac",
+  "capabilities": {
+    "tools": {
+      "listChanged": false
+    },
+    "resources": {},
+    "extensions": {
+      "io.modelcontextprotocol/skills": {}
+    }
+  },
+  "methods": [
+    "server/discover",
+    "tools/list",
+    "tools/call",
+    "resources/list",
+    "resources/templates/list",
+    "resources/read",
+    "skills/list",
+    "skills/get"
+  ],
+  "legacy_methods": [
+    "initialize",
+    "notifications/initialized",
+    "ping"
+  ],
+  "coverage_complete": false,
+  "selection_policy": "Gate A selects the five listed unmodified whole core scenarios before execution from negotiated capabilities and frozen source metadata. Each must exit zero with zero failed checks. Fixture-coupled and mixed-scope scenarios remain unmeasured official evidence; their applicable protocol requirements are mandatory in Gate B. The retained full alpha.11 exit-1 diagnostic is external historical research, never a release gate, expected-failure baseline or certification.",
+  "selected_core_scenarios": [
+    "tools-list",
+    "resources-list",
+    "sep-2164-resource-not-found",
+    "dns-rebinding-protection",
+    "http-header-validation"
+  ],
+  "skills_scenarios": [
+    "sep-2640-skills-enumeration",
+    "sep-2640-skills-manifest",
+    "sep-2640-skills-directory"
+  ],
+  "scenarios": [
+    {
+      "scenario": "caching",
+      "applicability": "mixed_scope_blocker",
+      "reason": "Advertised Tools/Resources caching is applicable; the same indivisible scenario unconditionally calls prompts/list although capabilities.prompts is absent. CLI has no check-selection option.",
+      "frozen_source": "src/scenarios/server/caching.ts",
+      "checks": [
+        {
+          "id": "sep-2549-tools-list-caching-hints",
+          "applicability": "applicable",
+          "reason": "Caching for advertised Tools/Resources is required.",
+          "spec_references": [
+            {
+              "id": "MCP-Caching",
+              "url": "https://modelcontextprotocol.io/specification/draft/server/utilities/caching"
+            },
+            {
+              "id": "SEP-2549",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2549"
+            }
+          ]
+        },
+        {
+          "id": "sep-2549-prompts-list-caching-hints",
+          "applicability": "not_applicable",
+          "reason": "capabilities.prompts absent.",
+          "spec_references": [
+            {
+              "id": "MCP-Caching",
+              "url": "https://modelcontextprotocol.io/specification/draft/server/utilities/caching"
+            },
+            {
+              "id": "SEP-2549",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2549"
+            }
+          ]
+        },
+        {
+          "id": "sep-2549-resources-list-caching-hints",
+          "applicability": "applicable",
+          "reason": "Caching for advertised Tools/Resources is required.",
+          "spec_references": [
+            {
+              "id": "MCP-Caching",
+              "url": "https://modelcontextprotocol.io/specification/draft/server/utilities/caching"
+            },
+            {
+              "id": "SEP-2549",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2549"
+            }
+          ]
+        },
+        {
+          "id": "sep-2549-resources-templates-list-caching-hints",
+          "applicability": "applicable",
+          "reason": "Caching for advertised Tools/Resources is required.",
+          "spec_references": [
+            {
+              "id": "MCP-Caching",
+              "url": "https://modelcontextprotocol.io/specification/draft/server/utilities/caching"
+            },
+            {
+              "id": "SEP-2549",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2549"
+            }
+          ]
+        },
+        {
+          "id": "sep-2549-resources-read-caching-hints",
+          "applicability": "applicable",
+          "reason": "Caching for advertised Tools/Resources is required.",
+          "spec_references": [
+            {
+              "id": "MCP-Caching",
+              "url": "https://modelcontextprotocol.io/specification/draft/server/utilities/caching"
+            },
+            {
+              "id": "SEP-2549",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2549"
+            }
+          ]
+        },
+        {
+          "id": "sep-2549-ttl-non-negative",
+          "applicability": "applicable",
+          "reason": "Caching for advertised Tools/Resources is required.",
+          "spec_references": [
+            {
+              "id": "MCP-Caching",
+              "url": "https://modelcontextprotocol.io/specification/draft/server/utilities/caching"
+            },
+            {
+              "id": "SEP-2549",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2549"
+            }
+          ]
+        },
+        {
+          "id": "sep-2549-cache-scope-valid",
+          "applicability": "applicable",
+          "reason": "Caching for advertised Tools/Resources is required.",
+          "spec_references": [
+            {
+              "id": "MCP-Caching",
+              "url": "https://modelcontextprotocol.io/specification/draft/server/utilities/caching"
+            },
+            {
+              "id": "SEP-2549",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2549"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "applicable",
+          "reason": "Caching for advertised Tools/Resources is required.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "completion-complete",
+      "applicability": "not_applicable",
+      "reason": "capabilities.completions absent; completion/complete unimplemented.",
+      "frozen_source": "src/scenarios/server/utils.ts",
+      "checks": [
+        {
+          "id": "completion-complete",
+          "applicability": "not_applicable",
+          "reason": "capabilities.completions absent; completion/complete unimplemented.",
+          "spec_references": [
+            {
+              "id": "MCP-Completion",
+              "url": "https://modelcontextprotocol.io/specification/2025-06-18/server/utilities/completion"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "capabilities.completions absent; completion/complete unimplemented.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "dns-rebinding-protection",
+      "applicability": "applicable",
+      "reason": "Applies to HTTP. Configure the disposable endpoint origin in its exact allowlist before execution; preserve hostile-origin refusal.",
+      "frozen_source": "src/scenarios/server/dns-rebinding.ts",
+      "checks": [
+        {
+          "id": "localhost-host-rebinding-rejected",
+          "applicability": "applicable",
+          "reason": "Applies to HTTP. Configure the disposable endpoint origin in its exact allowlist before execution; preserve hostile-origin refusal.",
+          "spec_references": [
+            {
+              "id": "MCP-DNS-Rebinding-Protection",
+              "url": "https://modelcontextprotocol.io/specification/2025-11-25/basic/security_best_practices#local-mcp-server-compromise"
+            },
+            {
+              "id": "MCP-Transport-Security",
+              "url": "https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#security-warning"
+            }
+          ]
+        },
+        {
+          "id": "localhost-host-valid-accepted",
+          "applicability": "applicable",
+          "reason": "Applies to HTTP. Configure the disposable endpoint origin in its exact allowlist before execution; preserve hostile-origin refusal.",
+          "spec_references": [
+            {
+              "id": "MCP-DNS-Rebinding-Protection",
+              "url": "https://modelcontextprotocol.io/specification/2025-11-25/basic/security_best_practices#local-mcp-server-compromise"
+            },
+            {
+              "id": "MCP-Transport-Security",
+              "url": "https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#security-warning"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "http-custom-header-server-validation",
+      "applicability": "not_applicable",
+      "reason": "No Tool input property declares x-mcp-header; no custom parameter headers.",
+      "frozen_source": "src/scenarios/server/http-standard-headers.ts",
+      "checks": [
+        {
+          "id": "sep-2243-server-no-xmcp-tool",
+          "applicability": "not_applicable",
+          "reason": "No Tool input property declares x-mcp-header; no custom parameter headers.",
+          "spec_references": [
+            {
+              "id": "SEP-2243-Custom-Headers",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/transports#server-behavior-for-custom-headers"
+            }
+          ]
+        },
+        {
+          "id": "sep-2243-server-decode-base64",
+          "applicability": "not_applicable",
+          "reason": "No Tool input property declares x-mcp-header; no custom parameter headers.",
+          "spec_references": [
+            {
+              "id": "SEP-2243-Custom-Headers",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/transports#server-behavior-for-custom-headers"
+            }
+          ]
+        },
+        {
+          "id": "sep-2243-server-validate-param-match",
+          "applicability": "not_applicable",
+          "reason": "No Tool input property declares x-mcp-header; no custom parameter headers.",
+          "spec_references": [
+            {
+              "id": "SEP-2243-Custom-Headers",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/transports#server-behavior-for-custom-headers"
+            }
+          ]
+        },
+        {
+          "id": "sep-2243-server-reject-invalid-param-chars",
+          "applicability": "not_applicable",
+          "reason": "No Tool input property declares x-mcp-header; no custom parameter headers.",
+          "spec_references": [
+            {
+              "id": "SEP-2243-Custom-Headers",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/transports#server-behavior-for-custom-headers"
+            }
+          ]
+        },
+        {
+          "id": "sep-2243-server-reject-param-mismatch",
+          "applicability": "not_applicable",
+          "reason": "No Tool input property declares x-mcp-header; no custom parameter headers.",
+          "spec_references": [
+            {
+              "id": "SEP-2243-Custom-Headers",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/transports#server-behavior-for-custom-headers"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "No Tool input property declares x-mcp-header; no custom parameter headers.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "http-header-validation",
+      "applicability": "applicable",
+      "reason": "Advertised method or required base transport behavior.",
+      "frozen_source": "src/scenarios/server/http-standard-headers.ts",
+      "checks": [
+        {
+          "id": "sep-2243-server-reject-invalid-headers",
+          "applicability": "applicable",
+          "reason": "Advertised method or required base transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2243-Server-Validation",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/transports#server-validation"
+            }
+          ]
+        },
+        {
+          "id": "sep-2243-server-reject-error-code",
+          "applicability": "applicable",
+          "reason": "Advertised method or required base transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2243-Server-Validation",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/transports#server-validation"
+            }
+          ]
+        },
+        {
+          "id": "sep-2243-server-reject-invalid-headers",
+          "applicability": "applicable",
+          "reason": "Advertised method or required base transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2243-Server-Validation",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/transports#server-validation"
+            }
+          ]
+        },
+        {
+          "id": "sep-2243-server-reject-error-code",
+          "applicability": "applicable",
+          "reason": "Advertised method or required base transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2243-Server-Validation",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/transports#server-validation"
+            }
+          ]
+        },
+        {
+          "id": "sep-2243-server-reject-invalid-headers",
+          "applicability": "applicable",
+          "reason": "Advertised method or required base transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2243-Server-Validation",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/transports#server-validation"
+            }
+          ]
+        },
+        {
+          "id": "sep-2243-server-reject-error-code",
+          "applicability": "applicable",
+          "reason": "Advertised method or required base transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2243-Server-Validation",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/transports#server-validation"
+            }
+          ]
+        },
+        {
+          "id": "sep-2243-server-accepts-whitespace-header-value",
+          "applicability": "applicable",
+          "reason": "Advertised method or required base transport behavior.",
+          "spec_references": [
+            {
+              "id": "RFC-9110-5.5-Field-Values",
+              "url": "https://www.rfc-editor.org/rfc/rfc9110#section-5.5"
+            }
+          ]
+        },
+        {
+          "id": "sep-2243-server-reject-invalid-headers",
+          "applicability": "applicable",
+          "reason": "Advertised method or required base transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2243-Server-Validation",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/transports#server-validation"
+            }
+          ]
+        },
+        {
+          "id": "sep-2243-server-reject-error-code",
+          "applicability": "applicable",
+          "reason": "Advertised method or required base transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2243-Server-Validation",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/transports#server-validation"
+            }
+          ]
+        },
+        {
+          "id": "sep-2243-header-name-case-insensitive",
+          "applicability": "applicable",
+          "reason": "Advertised method or required base transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2243-Case-Sensitivity",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/transports#case-sensitivity"
+            }
+          ]
+        },
+        {
+          "id": "sep-2243-header-name-case-insensitive",
+          "applicability": "applicable",
+          "reason": "Advertised method or required base transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2243-Case-Sensitivity",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/transports#case-sensitivity"
+            }
+          ]
+        },
+        {
+          "id": "sep-2243-server-reject-invalid-headers",
+          "applicability": "applicable",
+          "reason": "Advertised method or required base transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2243-Case-Sensitivity",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/transports#case-sensitivity"
+            }
+          ]
+        },
+        {
+          "id": "sep-2243-server-reject-error-code",
+          "applicability": "applicable",
+          "reason": "Advertised method or required base transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2243-Case-Sensitivity",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/transports#case-sensitivity"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "applicable",
+          "reason": "Advertised method or required base transport behavior.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "input-required-result-basic-elicitation",
+      "applicability": "not_applicable",
+      "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+      "frozen_source": "src/scenarios/server/input-required-result.ts",
+      "checks": [
+        {
+          "id": "sep-2322-elicitation-incomplete",
+          "applicability": "not_applicable",
+          "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+          "spec_references": [
+            {
+              "id": "SEP-2322",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/utilities/mrtr"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "input-required-result-basic-list-roots",
+      "applicability": "not_applicable",
+      "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+      "frozen_source": "src/scenarios/server/input-required-result.ts",
+      "checks": [
+        {
+          "id": "sep-2322-list-roots-incomplete",
+          "applicability": "not_applicable",
+          "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+          "spec_references": [
+            {
+              "id": "SEP-2322",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/utilities/mrtr"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "input-required-result-basic-sampling",
+      "applicability": "not_applicable",
+      "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+      "frozen_source": "src/scenarios/server/input-required-result.ts",
+      "checks": [
+        {
+          "id": "sep-2322-sampling-incomplete",
+          "applicability": "not_applicable",
+          "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+          "spec_references": [
+            {
+              "id": "SEP-2322",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/utilities/mrtr"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "input-required-result-capability-check",
+      "applicability": "not_applicable",
+      "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+      "frozen_source": "src/scenarios/server/input-required-result.ts",
+      "checks": [
+        {
+          "id": "sep-2322-respect-client-capabilities",
+          "applicability": "not_applicable",
+          "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+          "spec_references": [
+            {
+              "id": "SEP-2322",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/utilities/mrtr"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "input-required-result-ignore-extra-params",
+      "applicability": "not_applicable",
+      "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+      "frozen_source": "src/scenarios/server/input-required-result.ts",
+      "checks": [
+        {
+          "id": "sep-2322-ignore-unexpected-params",
+          "applicability": "not_applicable",
+          "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+          "spec_references": [
+            {
+              "id": "SEP-2322",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/utilities/mrtr"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "input-required-result-missing-input-response",
+      "applicability": "not_applicable",
+      "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+      "frozen_source": "src/scenarios/server/input-required-result.ts",
+      "checks": [
+        {
+          "id": "sep-2322-missing-response-rerequests",
+          "applicability": "not_applicable",
+          "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+          "spec_references": [
+            {
+              "id": "SEP-2322",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/utilities/mrtr"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "input-required-result-multi-round",
+      "applicability": "not_applicable",
+      "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+      "frozen_source": "src/scenarios/server/input-required-result.ts",
+      "checks": [
+        {
+          "id": "sep-2322-multi-round-r1",
+          "applicability": "not_applicable",
+          "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+          "spec_references": [
+            {
+              "id": "SEP-2322",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/utilities/mrtr"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "input-required-result-multiple-input-requests",
+      "applicability": "not_applicable",
+      "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+      "frozen_source": "src/scenarios/server/input-required-result.ts",
+      "checks": [
+        {
+          "id": "sep-2322-multiple-inputs-incomplete",
+          "applicability": "not_applicable",
+          "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+          "spec_references": [
+            {
+              "id": "SEP-2322",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/utilities/mrtr"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "input-required-result-non-tool-request",
+      "applicability": "not_applicable",
+      "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+      "frozen_source": "src/scenarios/server/input-required-result.ts",
+      "checks": [
+        {
+          "id": "sep-2322-non-tool-incomplete",
+          "applicability": "not_applicable",
+          "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+          "spec_references": [
+            {
+              "id": "SEP-2322",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/utilities/mrtr"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "input-required-result-request-state",
+      "applicability": "not_applicable",
+      "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+      "frozen_source": "src/scenarios/server/input-required-result.ts",
+      "checks": [
+        {
+          "id": "sep-2322-request-state-incomplete",
+          "applicability": "not_applicable",
+          "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+          "spec_references": [
+            {
+              "id": "SEP-2322",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/utilities/mrtr"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "input-required-result-result-type",
+      "applicability": "not_applicable",
+      "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+      "frozen_source": "src/scenarios/server/input-required-result.ts",
+      "checks": [
+        {
+          "id": "sep-2322-result-type-included",
+          "applicability": "not_applicable",
+          "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+          "spec_references": [
+            {
+              "id": "SEP-2322",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/utilities/mrtr"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "input-required-result-tampered-state",
+      "applicability": "not_applicable",
+      "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+      "frozen_source": "src/scenarios/server/input-required-result.ts",
+      "checks": [
+        {
+          "id": "sep-2322-reject-tampered-state",
+          "applicability": "not_applicable",
+          "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+          "spec_references": [
+            {
+              "id": "SEP-2322",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/utilities/mrtr"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "input-required-result-unsupported-methods",
+      "applicability": "not_applicable",
+      "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+      "frozen_source": "src/scenarios/server/input-required-result.ts",
+      "checks": [
+        {
+          "id": "sep-2322-not-on-unsupported-requests",
+          "applicability": "not_applicable",
+          "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+          "spec_references": [
+            {
+              "id": "SEP-2322",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/utilities/mrtr"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "input-required-result-validate-input",
+      "applicability": "not_applicable",
+      "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+      "frozen_source": "src/scenarios/server/input-required-result.ts",
+      "checks": [
+        {
+          "id": "sep-2322-validate-input-responses",
+          "applicability": "not_applicable",
+          "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+          "spec_references": [
+            {
+              "id": "SEP-2322",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/utilities/mrtr"
+            }
+          ]
+        },
+        {
+          "id": "sep-2322-error-on-protocol-error",
+          "applicability": "not_applicable",
+          "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+          "spec_references": [
+            {
+              "id": "SEP-2322",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/utilities/mrtr"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "No method returns input_required or requests client sampling, roots or elicitation; no MRTR handlers or requestState.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "json-schema-2020-12",
+      "applicability": "applicable_fixture_blocker",
+      "reason": "Tools/text/errors/output schemas are implemented. Frozen scenario requires a named diagnostic Tool instead of selecting an advertised business Tool. Absence of that fixture does NOT remove the underlying requirement.",
+      "frozen_source": "src/scenarios/server/json-schema-2020-12.ts",
+      "checks": [
+        {
+          "id": "json-schema-2020-12-tool-found",
+          "applicability": "applicable_fixture_blocker",
+          "reason": "Tools/text/errors/output schemas are implemented. Frozen scenario requires a named diagnostic Tool instead of selecting an advertised business Tool. Absence of that fixture does NOT remove the underlying requirement.",
+          "spec_references": [
+            {
+              "id": "SEP-1613",
+              "url": "https://github.com/modelcontextprotocol/specification/pull/655"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "applicable_fixture_blocker",
+          "reason": "Tools/text/errors/output schemas are implemented. Frozen scenario requires a named diagnostic Tool instead of selecting an advertised business Tool. Absence of that fixture does NOT remove the underlying requirement.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "prompts-get-embedded-resource",
+      "applicability": "not_applicable",
+      "reason": "capabilities.prompts absent; prompts/list and prompts/get unimplemented.",
+      "frozen_source": "src/scenarios/server/prompts.ts",
+      "checks": [
+        {
+          "id": "prompts-get-embedded-resource",
+          "applicability": "not_applicable",
+          "reason": "capabilities.prompts absent; prompts/list and prompts/get unimplemented.",
+          "spec_references": [
+            {
+              "id": "MCP-Prompts-Embedded-Resources",
+              "url": "https://modelcontextprotocol.io/specification/2025-06-18/server/prompts#embedded-resources"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "capabilities.prompts absent; prompts/list and prompts/get unimplemented.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "prompts-get-simple",
+      "applicability": "not_applicable",
+      "reason": "capabilities.prompts absent; prompts/list and prompts/get unimplemented.",
+      "frozen_source": "src/scenarios/server/prompts.ts",
+      "checks": [
+        {
+          "id": "prompts-get-simple",
+          "applicability": "not_applicable",
+          "reason": "capabilities.prompts absent; prompts/list and prompts/get unimplemented.",
+          "spec_references": [
+            {
+              "id": "MCP-Prompts-Get",
+              "url": "https://modelcontextprotocol.io/specification/2025-06-18/server/prompts#getting-prompts"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "capabilities.prompts absent; prompts/list and prompts/get unimplemented.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "prompts-get-with-args",
+      "applicability": "not_applicable",
+      "reason": "capabilities.prompts absent; prompts/list and prompts/get unimplemented.",
+      "frozen_source": "src/scenarios/server/prompts.ts",
+      "checks": [
+        {
+          "id": "prompts-get-with-args",
+          "applicability": "not_applicable",
+          "reason": "capabilities.prompts absent; prompts/list and prompts/get unimplemented.",
+          "spec_references": [
+            {
+              "id": "MCP-Prompts-Get",
+              "url": "https://modelcontextprotocol.io/specification/2025-06-18/server/prompts#getting-prompts"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "capabilities.prompts absent; prompts/list and prompts/get unimplemented.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "prompts-get-with-image",
+      "applicability": "not_applicable",
+      "reason": "capabilities.prompts absent; prompts/list and prompts/get unimplemented.",
+      "frozen_source": "src/scenarios/server/prompts.ts",
+      "checks": [
+        {
+          "id": "prompts-get-with-image",
+          "applicability": "not_applicable",
+          "reason": "capabilities.prompts absent; prompts/list and prompts/get unimplemented.",
+          "spec_references": [
+            {
+              "id": "MCP-Prompts-Image",
+              "url": "https://modelcontextprotocol.io/specification/2025-06-18/server/prompts#image-content"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "capabilities.prompts absent; prompts/list and prompts/get unimplemented.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "prompts-list",
+      "applicability": "not_applicable",
+      "reason": "capabilities.prompts absent; prompts/list and prompts/get unimplemented.",
+      "frozen_source": "src/scenarios/server/prompts.ts",
+      "checks": [
+        {
+          "id": "prompts-list",
+          "applicability": "not_applicable",
+          "reason": "capabilities.prompts absent; prompts/list and prompts/get unimplemented.",
+          "spec_references": [
+            {
+              "id": "MCP-Prompts-List",
+              "url": "https://modelcontextprotocol.io/specification/2025-06-18/server/prompts#listing-prompts"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "capabilities.prompts absent; prompts/list and prompts/get unimplemented.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "resources-list",
+      "applicability": "applicable",
+      "reason": "Advertised method or required base transport behavior.",
+      "frozen_source": "src/scenarios/server/resources.ts",
+      "checks": [
+        {
+          "id": "resources-list",
+          "applicability": "applicable",
+          "reason": "Advertised method or required base transport behavior.",
+          "spec_references": [
+            {
+              "id": "MCP-Resources-List",
+              "url": "https://modelcontextprotocol.io/specification/2025-06-18/server/resources#listing-resources"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "applicable",
+          "reason": "Advertised method or required base transport behavior.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "resources-read-binary",
+      "applicability": "applicable_fixture_blocker",
+      "reason": "Resources reads/templates are implemented. Frozen scenario hardcodes test:// URIs outside the advertised canonical URI grammar. The read requirement remains applicable.",
+      "frozen_source": "src/scenarios/server/resources.ts",
+      "checks": [
+        {
+          "id": "resources-read-binary",
+          "applicability": "applicable_fixture_blocker",
+          "reason": "Resources reads/templates are implemented. Frozen scenario hardcodes test:// URIs outside the advertised canonical URI grammar. The read requirement remains applicable.",
+          "spec_references": [
+            {
+              "id": "MCP-Resources-Read",
+              "url": "https://modelcontextprotocol.io/specification/2025-06-18/server/resources#reading-resources"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "applicable_fixture_blocker",
+          "reason": "Resources reads/templates are implemented. Frozen scenario hardcodes test:// URIs outside the advertised canonical URI grammar. The read requirement remains applicable.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "resources-read-text",
+      "applicability": "applicable_fixture_blocker",
+      "reason": "Resources reads/templates are implemented. Frozen scenario hardcodes test:// URIs outside the advertised canonical URI grammar. The read requirement remains applicable.",
+      "frozen_source": "src/scenarios/server/resources.ts",
+      "checks": [
+        {
+          "id": "resources-read-text",
+          "applicability": "applicable_fixture_blocker",
+          "reason": "Resources reads/templates are implemented. Frozen scenario hardcodes test:// URIs outside the advertised canonical URI grammar. The read requirement remains applicable.",
+          "spec_references": [
+            {
+              "id": "MCP-Resources-Read",
+              "url": "https://modelcontextprotocol.io/specification/2025-06-18/server/resources#reading-resources"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "applicable_fixture_blocker",
+          "reason": "Resources reads/templates are implemented. Frozen scenario hardcodes test:// URIs outside the advertised canonical URI grammar. The read requirement remains applicable.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "resources-templates-read",
+      "applicability": "applicable_fixture_blocker",
+      "reason": "Resources reads/templates are implemented. Frozen scenario hardcodes test:// URIs outside the advertised canonical URI grammar. The read requirement remains applicable.",
+      "frozen_source": "src/scenarios/server/resources.ts",
+      "checks": [
+        {
+          "id": "resources-templates-read",
+          "applicability": "applicable_fixture_blocker",
+          "reason": "Resources reads/templates are implemented. Frozen scenario hardcodes test:// URIs outside the advertised canonical URI grammar. The read requirement remains applicable.",
+          "spec_references": [
+            {
+              "id": "MCP-Resources-Templates",
+              "url": "https://modelcontextprotocol.io/specification/2025-06-18/server/resources#resource-templates"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "applicable_fixture_blocker",
+          "reason": "Resources reads/templates are implemented. Frozen scenario hardcodes test:// URIs outside the advertised canonical URI grammar. The read requirement remains applicable.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "sep-2164-resource-not-found",
+      "applicability": "applicable",
+      "reason": "Advertised method or required base transport behavior.",
+      "frozen_source": "src/scenarios/server/resources.ts",
+      "checks": [
+        {
+          "id": "sep-2164-no-empty-contents",
+          "applicability": "applicable",
+          "reason": "Advertised method or required base transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2164",
+              "url": "https://modelcontextprotocol.io/specification/draft/server/resources#error-handling"
+            }
+          ]
+        },
+        {
+          "id": "sep-2164-error-code",
+          "applicability": "applicable",
+          "reason": "Advertised method or required base transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2164",
+              "url": "https://modelcontextprotocol.io/specification/draft/server/resources#error-handling"
+            }
+          ]
+        },
+        {
+          "id": "sep-2164-data-uri",
+          "applicability": "applicable",
+          "reason": "Advertised method or required base transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2164",
+              "url": "https://modelcontextprotocol.io/specification/draft/server/resources#error-handling"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "applicable",
+          "reason": "Advertised method or required base transport behavior.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "server-sse-multiple-streams",
+      "applicability": "not_applicable",
+      "reason": "Tool outputs are synchronous text/structuredContent/resource_link only; no image, audio, embedded-resource or progress/SSE output.",
+      "frozen_source": "src/scenarios/server/sse-multiple-streams.ts",
+      "checks": [
+        {
+          "id": "server-accepts-multiple-post-streams",
+          "applicability": "not_applicable",
+          "reason": "Tool outputs are synchronous text/structuredContent/resource_link only; no image, audio, embedded-resource or progress/SSE output.",
+          "spec_references": [
+            {
+              "id": "SEP-1699",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/issues/1699"
+            }
+          ]
+        },
+        {
+          "id": "server-sse-streams-functional",
+          "applicability": "not_applicable",
+          "reason": "Tool outputs are synchronous text/structuredContent/resource_link only; no image, audio, embedded-resource or progress/SSE output.",
+          "spec_references": [
+            {
+              "id": "SEP-1699",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/issues/1699"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "server-stateless",
+      "applicability": "mixed_scope_blocker",
+      "reason": "Base lifecycle applies. Four checks require optional diagnostic Tools despite absent client-capability requirements, MRTR/SSE and logging. CLI has no check-selection option; excluding the whole scenario would lose required lifecycle coverage.",
+      "frozen_source": "src/scenarios/server/stateless.ts",
+      "checks": [
+        {
+          "id": "sep-2575-request-meta-invalid-missing-meta",
+          "applicability": "applicable",
+          "reason": "Mandatory modern discovery/lifecycle/transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2575",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2575"
+            }
+          ]
+        },
+        {
+          "id": "sep-2575-http-server-meta-invalid-400",
+          "applicability": "applicable",
+          "reason": "Mandatory modern discovery/lifecycle/transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2575",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2575"
+            }
+          ]
+        },
+        {
+          "id": "sep-2575-request-meta-invalid-missing-protocol-version",
+          "applicability": "applicable",
+          "reason": "Mandatory modern discovery/lifecycle/transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2575",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2575"
+            }
+          ]
+        },
+        {
+          "id": "sep-2575-http-server-meta-invalid-400",
+          "applicability": "applicable",
+          "reason": "Mandatory modern discovery/lifecycle/transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2575",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2575"
+            }
+          ]
+        },
+        {
+          "id": "sep-2575-request-meta-invalid-missing-client-capabilities",
+          "applicability": "applicable",
+          "reason": "Mandatory modern discovery/lifecycle/transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2575",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2575"
+            }
+          ]
+        },
+        {
+          "id": "sep-2575-http-server-meta-invalid-400",
+          "applicability": "applicable",
+          "reason": "Mandatory modern discovery/lifecycle/transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2575",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2575"
+            }
+          ]
+        },
+        {
+          "id": "sep-2575-request-meta-client-info-optional",
+          "applicability": "applicable",
+          "reason": "Mandatory modern discovery/lifecycle/transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2575",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2575"
+            }
+          ]
+        },
+        {
+          "id": "sep-2575-server-implements-discover",
+          "applicability": "applicable",
+          "reason": "Mandatory modern discovery/lifecycle/transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2575",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2575"
+            }
+          ]
+        },
+        {
+          "id": "sep-2575-server-identifies-in-result-meta",
+          "applicability": "applicable",
+          "reason": "Mandatory modern discovery/lifecycle/transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2575",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2575"
+            }
+          ]
+        },
+        {
+          "id": "sep-2575-server-declares-prompts-in-discover",
+          "applicability": "applicable",
+          "reason": "Mandatory modern discovery/lifecycle/transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2575",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2575"
+            }
+          ]
+        },
+        {
+          "id": "sep-2575-discover-capabilities-match-handlers",
+          "applicability": "applicable",
+          "reason": "Mandatory modern discovery/lifecycle/transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2575",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2575"
+            }
+          ]
+        },
+        {
+          "id": "sep-2575-server-unsupported-version-error",
+          "applicability": "applicable",
+          "reason": "Mandatory modern discovery/lifecycle/transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2575",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2575"
+            }
+          ]
+        },
+        {
+          "id": "sep-2575-http-server-unsupported-version-400",
+          "applicability": "applicable",
+          "reason": "Mandatory modern discovery/lifecycle/transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2575",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2575"
+            }
+          ]
+        },
+        {
+          "id": "sep-2575-http-server-header-mismatch-400",
+          "applicability": "applicable",
+          "reason": "Mandatory modern discovery/lifecycle/transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2575",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2575"
+            }
+          ]
+        },
+        {
+          "id": "sep-2575-server-rejects-undeclared-capability",
+          "applicability": "not_applicable",
+          "reason": "No Tool requires any client capability; test_missing_capability specifically requires sampling (frozen stateless.ts:706-799).",
+          "spec_references": [
+            {
+              "id": "SEP-2575",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2575"
+            }
+          ]
+        },
+        {
+          "id": "sep-2575-missing-capability-http-400",
+          "applicability": "not_applicable",
+          "reason": "No Tool requires any client capability; test_missing_capability specifically requires sampling (frozen stateless.ts:706-799).",
+          "spec_references": [
+            {
+              "id": "SEP-2575",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2575"
+            }
+          ]
+        },
+        {
+          "id": "sep-2575-http-server-method-not-found-404-initialize",
+          "applicability": "applicable",
+          "reason": "Mandatory modern discovery/lifecycle/transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2575",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2575"
+            }
+          ]
+        },
+        {
+          "id": "sep-2575-http-server-method-not-found-404-ping",
+          "applicability": "applicable",
+          "reason": "Mandatory modern discovery/lifecycle/transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2575",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2575"
+            }
+          ]
+        },
+        {
+          "id": "sep-2575-http-server-method-not-found-404-logging-setlevel",
+          "applicability": "applicable",
+          "reason": "Mandatory modern discovery/lifecycle/transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2575",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2575"
+            }
+          ]
+        },
+        {
+          "id": "sep-2575-http-server-method-not-found-404-resources-subscribe",
+          "applicability": "applicable",
+          "reason": "Mandatory modern discovery/lifecycle/transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2575",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2575"
+            }
+          ]
+        },
+        {
+          "id": "sep-2575-http-server-method-not-found-404-resources-unsubscribe",
+          "applicability": "applicable",
+          "reason": "Mandatory modern discovery/lifecycle/transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2575",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2575"
+            }
+          ]
+        },
+        {
+          "id": "sep-2575-http-server-method-not-found-404",
+          "applicability": "applicable",
+          "reason": "Mandatory modern discovery/lifecycle/transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2575",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2575"
+            }
+          ]
+        },
+        {
+          "id": "sep-2575-http-server-no-independent-requests-on-stream",
+          "applicability": "not_applicable",
+          "reason": "No SSE/MRTR response streams or elicitation requests; diagnostic test_streaming_elicitation absent (stateless.ts:882-928). JSON-only lifecycle still requires coverage.",
+          "spec_references": [
+            {
+              "id": "SEP-2575",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2575"
+            }
+          ]
+        },
+        {
+          "id": "sep-2575-server-no-log-without-loglevel",
+          "applicability": "not_applicable",
+          "reason": "capabilities.logging absent; no protocol logging output; diagnostic test_logging_tool absent (stateless.ts:934-975).",
+          "spec_references": [
+            {
+              "id": "SEP-2575",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2575"
+            }
+          ]
+        },
+        {
+          "id": "sep-2575-server-sends-subscription-ack",
+          "applicability": "not_applicable",
+          "reason": "No subscriptions/listen, resources.subscribe, prompts.listChanged or tools.listChanged=true.",
+          "spec_references": [
+            {
+              "id": "SEP-2575",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2575"
+            }
+          ]
+        },
+        {
+          "id": "sep-2575-server-tags-subscription-id",
+          "applicability": "not_applicable",
+          "reason": "No subscriptions/listen, resources.subscribe, prompts.listChanged or tools.listChanged=true.",
+          "spec_references": [
+            {
+              "id": "SEP-2575",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2575"
+            }
+          ]
+        },
+        {
+          "id": "sep-2575-server-honors-notification-filter",
+          "applicability": "not_applicable",
+          "reason": "No subscriptions/listen, resources.subscribe, prompts.listChanged or tools.listChanged=true.",
+          "spec_references": [
+            {
+              "id": "SEP-2575",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2575"
+            }
+          ]
+        },
+        {
+          "id": "sep-2575-server-sends-prompts-list-changed-on-subscription",
+          "applicability": "not_applicable",
+          "reason": "No subscriptions/listen, resources.subscribe, prompts.listChanged or tools.listChanged=true.",
+          "spec_references": [
+            {
+              "id": "SEP-2575",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2575"
+            }
+          ]
+        },
+        {
+          "id": "sep-2575-server-sends-tools-list-changed-on-subscription",
+          "applicability": "not_applicable",
+          "reason": "No subscriptions/listen, resources.subscribe, prompts.listChanged or tools.listChanged=true.",
+          "spec_references": [
+            {
+              "id": "SEP-2575",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2575"
+            }
+          ]
+        },
+        {
+          "id": "sep-2575-http-server-error-jsonrpc-id",
+          "applicability": "applicable",
+          "reason": "Mandatory modern discovery/lifecycle/transport behavior.",
+          "spec_references": [
+            {
+              "id": "SEP-2575",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2575"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "tasks-capability-negotiation",
+      "applicability": "not_applicable",
+      "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+      "frozen_source": "src/scenarios/server/tasks/",
+      "checks": [
+        {
+          "id": "tasks-extension-advertised",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2663",
+              "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+            }
+          ]
+        },
+        {
+          "id": "sep-2663-tasks-methods-non-declaring",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2575",
+              "url": "https://modelcontextprotocol.io/seps/2575-stateless-mcp"
+            },
+            {
+              "id": "SEP-2663",
+              "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+            }
+          ]
+        },
+        {
+          "id": "sep-2663-server-rejects-undeclared-client",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2663",
+              "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+            }
+          ]
+        },
+        {
+          "id": "tasks-per-request-meta-opt-in",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2575",
+              "url": "https://modelcontextprotocol.io/seps/2575-stateless-mcp"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "tasks-dispatch-and-envelope",
+      "applicability": "not_applicable",
+      "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+      "frozen_source": "src/scenarios/server/tasks/",
+      "checks": [
+        {
+          "id": "sep-2663-tasks-result-removed-method-not-found",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2663",
+              "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+            }
+          ]
+        },
+        {
+          "id": "tasks-removed-tasks-list",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2663",
+              "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+            }
+          ]
+        },
+        {
+          "id": "tasks-server-directed-creation-no-hint",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2663",
+              "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+            }
+          ]
+        },
+        {
+          "id": "sep-2663-legacy-task-param-ignored",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2663",
+              "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+            }
+          ]
+        },
+        {
+          "id": "tasks-immediate-result-shortcut",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2663",
+              "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+            }
+          ]
+        },
+        {
+          "id": "tasks-result-type-complete-on-non-task-responses",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2322",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/utilities/mrtr"
+            }
+          ]
+        },
+        {
+          "id": "sep-2663-durable-create-strong-consistency",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2663",
+              "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+            }
+          ]
+        },
+        {
+          "id": "sep-2663-tasks-get-invalid-task-id-32602",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2663",
+              "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "tasks-lifecycle",
+      "applicability": "not_applicable",
+      "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+      "frozen_source": "src/scenarios/server/tasks/",
+      "checks": [
+        {
+          "id": "tasks-sync-tool-call",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2663",
+              "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+            }
+          ]
+        },
+        {
+          "id": "sep-2663-result-type-task-on-create",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2663",
+              "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+            }
+          ]
+        },
+        {
+          "id": "sep-2663-tasks-get-status-working",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2663",
+              "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+            }
+          ]
+        },
+        {
+          "id": "sep-2663-tasks-get-status-completed",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2663",
+              "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+            }
+          ]
+        },
+        {
+          "id": "sep-2663-tool-error-uses-completed-status",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2663",
+              "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+            }
+          ]
+        },
+        {
+          "id": "sep-2663-tasks-get-status-failed",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2663",
+              "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+            }
+          ]
+        },
+        {
+          "id": "sep-2663-cancel-ack-empty-result",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2663",
+              "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+            }
+          ]
+        },
+        {
+          "id": "tasks-cancel-terminal-idempotent-ack",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2663",
+              "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "tasks-mrtr-composition",
+      "applicability": "not_applicable",
+      "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+      "frozen_source": "src/scenarios/server/tasks/",
+      "checks": [
+        {
+          "id": "sep-2663-mrtr-synchronous-before-task-creation",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2322",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/utilities/mrtr"
+            },
+            {
+              "id": "SEP-2663",
+              "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "tasks-mrtr-input",
+      "applicability": "not_applicable",
+      "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+      "frozen_source": "src/scenarios/server/tasks/",
+      "checks": [
+        {
+          "id": "sep-2663-tasks-get-status-input-required",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2322",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/utilities/mrtr"
+            }
+          ]
+        },
+        {
+          "id": "tasks-mrtr-tasks-update-resumes",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2322",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/utilities/mrtr"
+            },
+            {
+              "id": "SEP-2663",
+              "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+            }
+          ]
+        },
+        {
+          "id": "tasks-mrtr-partial-fulfillment",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2322",
+              "url": "https://modelcontextprotocol.io/specification/draft/basic/utilities/mrtr"
+            },
+            {
+              "id": "SEP-2663",
+              "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "tasks-request-headers",
+      "applicability": "not_applicable",
+      "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+      "frozen_source": "src/scenarios/server/tasks/",
+      "checks": [
+        {
+          "id": "tasks-headers-tolerate-mcp-method-on-tools-call",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2243",
+              "url": "https://modelcontextprotocol.io/seps/2243-http-standardization"
+            }
+          ]
+        },
+        {
+          "id": "sep-2663-routing-headers-accepted-on-tasks-get",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2243",
+              "url": "https://modelcontextprotocol.io/seps/2243-http-standardization"
+            }
+          ]
+        },
+        {
+          "id": "tasks-headers-reject-mismatched-method",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2243",
+              "url": "https://modelcontextprotocol.io/seps/2243-http-standardization"
+            }
+          ]
+        },
+        {
+          "id": "sep-2663-server-rejects-mismatched-mcp-name-on-tasks-get",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2243",
+              "url": "https://modelcontextprotocol.io/seps/2243-http-standardization"
+            },
+            {
+              "id": "SEP-2663",
+              "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "tasks-request-state-removal",
+      "applicability": "not_applicable",
+      "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+      "frozen_source": "src/scenarios/server/tasks/",
+      "checks": [
+        {
+          "id": "tasks-request-state-removal-setup",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2663",
+              "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "tasks-required-task-error",
+      "applicability": "not_applicable",
+      "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+      "frozen_source": "src/scenarios/server/tasks/",
+      "checks": [
+        {
+          "id": "sep-2663-server-returns-missing-capability-when-required",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2575",
+              "url": "https://modelcontextprotocol.io/seps/2575-stateless-mcp"
+            },
+            {
+              "id": "SEP-2663",
+              "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "tasks-status-notifications",
+      "applicability": "not_applicable",
+      "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+      "frozen_source": "src/scenarios/server/tasks/",
+      "checks": [
+        {
+          "id": "tasks-status-notifications",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2663",
+              "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "tasks-wire-fields",
+      "applicability": "not_applicable",
+      "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+      "frozen_source": "src/scenarios/server/tasks/",
+      "checks": [
+        {
+          "id": "tasks-wire-field-renames",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2663",
+              "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+            }
+          ]
+        },
+        {
+          "id": "tasks-no-early-ttl-expiry",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2663",
+              "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+            }
+          ]
+        },
+        {
+          "id": "tasks-no-related-task-meta-on-inlined-result",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "SEP-2663",
+              "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "capabilities.extensions has no io.modelcontextprotocol/tasks; no Tool declares task support.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "tools-call-audio",
+      "applicability": "not_applicable",
+      "reason": "Tool outputs are synchronous text/structuredContent/resource_link only; no image, audio, embedded-resource or progress/SSE output.",
+      "frozen_source": "src/scenarios/server/tools.ts",
+      "checks": [
+        {
+          "id": "tools-call-audio",
+          "applicability": "not_applicable",
+          "reason": "Tool outputs are synchronous text/structuredContent/resource_link only; no image, audio, embedded-resource or progress/SSE output.",
+          "spec_references": [
+            {
+              "id": "MCP-Tools-Call",
+              "url": "https://modelcontextprotocol.io/specification/2025-06-18/server/tools#calling-tools"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "Tool outputs are synchronous text/structuredContent/resource_link only; no image, audio, embedded-resource or progress/SSE output.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "tools-call-embedded-resource",
+      "applicability": "not_applicable",
+      "reason": "Tool outputs are synchronous text/structuredContent/resource_link only; no image, audio, embedded-resource or progress/SSE output.",
+      "frozen_source": "src/scenarios/server/tools.ts",
+      "checks": [
+        {
+          "id": "tools-call-embedded-resource",
+          "applicability": "not_applicable",
+          "reason": "Tool outputs are synchronous text/structuredContent/resource_link only; no image, audio, embedded-resource or progress/SSE output.",
+          "spec_references": [
+            {
+              "id": "MCP-Tools-Call",
+              "url": "https://modelcontextprotocol.io/specification/2025-06-18/server/tools#calling-tools"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "Tool outputs are synchronous text/structuredContent/resource_link only; no image, audio, embedded-resource or progress/SSE output.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "tools-call-error",
+      "applicability": "applicable_fixture_blocker",
+      "reason": "Tools/text/errors/output schemas are implemented. Frozen scenario requires a named diagnostic Tool instead of selecting an advertised business Tool. Absence of that fixture does NOT remove the underlying requirement.",
+      "frozen_source": "src/scenarios/server/tools.ts",
+      "checks": [
+        {
+          "id": "tools-call-error",
+          "applicability": "applicable_fixture_blocker",
+          "reason": "Tools/text/errors/output schemas are implemented. Frozen scenario requires a named diagnostic Tool instead of selecting an advertised business Tool. Absence of that fixture does NOT remove the underlying requirement.",
+          "spec_references": [
+            {
+              "id": "MCP-Error-Handling",
+              "url": "https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "applicable_fixture_blocker",
+          "reason": "Tools/text/errors/output schemas are implemented. Frozen scenario requires a named diagnostic Tool instead of selecting an advertised business Tool. Absence of that fixture does NOT remove the underlying requirement.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "tools-call-image",
+      "applicability": "not_applicable",
+      "reason": "Tool outputs are synchronous text/structuredContent/resource_link only; no image, audio, embedded-resource or progress/SSE output.",
+      "frozen_source": "src/scenarios/server/tools.ts",
+      "checks": [
+        {
+          "id": "tools-call-image",
+          "applicability": "not_applicable",
+          "reason": "Tool outputs are synchronous text/structuredContent/resource_link only; no image, audio, embedded-resource or progress/SSE output.",
+          "spec_references": [
+            {
+              "id": "MCP-Tools-Call",
+              "url": "https://modelcontextprotocol.io/specification/2025-06-18/server/tools#calling-tools"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "Tool outputs are synchronous text/structuredContent/resource_link only; no image, audio, embedded-resource or progress/SSE output.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "tools-call-mixed-content",
+      "applicability": "not_applicable",
+      "reason": "Tool outputs are synchronous text/structuredContent/resource_link only; no image, audio, embedded-resource or progress/SSE output.",
+      "frozen_source": "src/scenarios/server/tools.ts",
+      "checks": [
+        {
+          "id": "tools-call-mixed-content",
+          "applicability": "not_applicable",
+          "reason": "Tool outputs are synchronous text/structuredContent/resource_link only; no image, audio, embedded-resource or progress/SSE output.",
+          "spec_references": [
+            {
+              "id": "MCP-Tools-Call",
+              "url": "https://modelcontextprotocol.io/specification/2025-06-18/server/tools#calling-tools"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "Tool outputs are synchronous text/structuredContent/resource_link only; no image, audio, embedded-resource or progress/SSE output.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "tools-call-simple-text",
+      "applicability": "applicable_fixture_blocker",
+      "reason": "Tools/text/errors/output schemas are implemented. Frozen scenario requires a named diagnostic Tool instead of selecting an advertised business Tool. Absence of that fixture does NOT remove the underlying requirement.",
+      "frozen_source": "src/scenarios/server/tools.ts",
+      "checks": [
+        {
+          "id": "tools-call-simple-text",
+          "applicability": "applicable_fixture_blocker",
+          "reason": "Tools/text/errors/output schemas are implemented. Frozen scenario requires a named diagnostic Tool instead of selecting an advertised business Tool. Absence of that fixture does NOT remove the underlying requirement.",
+          "spec_references": [
+            {
+              "id": "MCP-Tools-Call",
+              "url": "https://modelcontextprotocol.io/specification/2025-06-18/server/tools#calling-tools"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "applicable_fixture_blocker",
+          "reason": "Tools/text/errors/output schemas are implemented. Frozen scenario requires a named diagnostic Tool instead of selecting an advertised business Tool. Absence of that fixture does NOT remove the underlying requirement.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "tools-call-with-progress",
+      "applicability": "not_applicable",
+      "reason": "Tool outputs are synchronous text/structuredContent/resource_link only; no image, audio, embedded-resource or progress/SSE output.",
+      "frozen_source": "src/scenarios/server/tools.ts",
+      "checks": [
+        {
+          "id": "tools-call-with-progress",
+          "applicability": "not_applicable",
+          "reason": "Tool outputs are synchronous text/structuredContent/resource_link only; no image, audio, embedded-resource or progress/SSE output.",
+          "spec_references": [
+            {
+              "id": "MCP-Progress",
+              "url": "https://modelcontextprotocol.io/specification/2025-06-18/server/utilities/progress"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "not_applicable",
+          "reason": "Tool outputs are synchronous text/structuredContent/resource_link only; no image, audio, embedded-resource or progress/SSE output.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "tools-list",
+      "applicability": "applicable",
+      "reason": "Advertised method or required base transport behavior.",
+      "frozen_source": "src/scenarios/server/tools.ts",
+      "checks": [
+        {
+          "id": "tools-list",
+          "applicability": "applicable",
+          "reason": "Advertised method or required base transport behavior.",
+          "spec_references": [
+            {
+              "id": "MCP-Tools-List",
+              "url": "https://modelcontextprotocol.io/specification/2025-06-18/server/tools#listing-tools"
+            }
+          ]
+        },
+        {
+          "id": "tools-name-format",
+          "applicability": "applicable",
+          "reason": "Advertised method or required base transport behavior.",
+          "spec_references": [
+            {
+              "id": "MCP-Tools-List",
+              "url": "https://modelcontextprotocol.io/specification/2025-11-25/server/tools#listing-tools"
+            },
+            {
+              "id": "SEP-986",
+              "url": "https://modelcontextprotocol.io/specification/2025-11-25/server/tools#tool-names"
+            }
+          ]
+        },
+        {
+          "id": "wire-schema-valid",
+          "applicability": "applicable",
+          "reason": "Advertised method or required base transport behavior.",
+          "spec_references": [
+            {
+              "id": "MCP-Schema",
+              "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "method_coverage": {
+    "server/discover": {
+      "official_scenarios": [
+        "server-stateless"
+      ],
+      "complete": false,
+      "official_limitation": "Required lifecycle checks share an indivisible scenario with optional diagnostic fixtures.",
+      "gate_b_required": true
+    },
+    "tools/list": {
+      "official_scenarios": [
+        "tools-list",
+        "caching"
+      ],
+      "complete": false,
+      "official_limitation": "Structural listing passes; caching scenario also unconditionally invokes unadvertised prompts/list.",
+      "gate_b_required": true
+    },
+    "tools/call": {
+      "official_scenarios": [
+        "tools-call-simple-text",
+        "tools-call-error"
+      ],
+      "complete": false,
+      "official_limitation": "Hardcoded diagnostic Tool names cannot exercise the advertised business Tools.",
+      "gate_b_required": true
+    },
+    "resources/list": {
+      "official_scenarios": [
+        "resources-list",
+        "caching"
+      ],
+      "complete": false,
+      "official_limitation": "Structural listing passes; caching is mixed-scope.",
+      "gate_b_required": true
+    },
+    "resources/templates/list": {
+      "official_scenarios": [
+        "resources-templates-read",
+        "caching"
+      ],
+      "complete": false,
+      "official_limitation": "Hardcoded test URI and mixed-scope caching.",
+      "gate_b_required": true
+    },
+    "resources/read": {
+      "official_scenarios": [
+        "resources-read-text",
+        "resources-read-binary",
+        "sep-2164-resource-not-found",
+        "caching"
+      ],
+      "complete": false,
+      "official_limitation": "Not-found passes; successful frozen reads hardcode diagnostic URIs. Skills reads provide additional extension evidence.",
+      "gate_b_required": true
+    },
+    "skills/list": {
+      "official_scenarios": [
+        "sep-2640-skills-enumeration"
+      ],
+      "complete": true,
+      "gate_b_required": true
+    },
+    "skills/get": {
+      "official_scenarios": [
+        "sep-2640-skills-enumeration"
+      ],
+      "complete": true,
+      "gate_b_required": true
+    },
+    "http_transport_and_lifecycle": {
+      "official_scenarios": [
+        "server-stateless",
+        "http-header-validation",
+        "dns-rebinding-protection"
+      ],
+      "complete": false,
+      "official_limitation": "Headers and configured-origin behavior pass; full required lifecycle still lacks a runnable official capability-scoped scenario.",
+      "gate_b_required": true
+    }
+  },
+  "integrity": "sha512-imPK9tx5gQsL6ZKQq4MrsyDYfSaIwpRmX6+ogjbeAXs9LGvxkBxWcY7KcS7TvwaBk/ZiVWl6b/naF4q83UwDRA==",
+  "coverage_complete_meaning": "Gate A is limited selected-scenario evidence. Gate B requires the live bidirectional inventory joins and every requirement-specific semantic receipt/floor in mcp-native-coverage.json. Whole-test counters are diagnostics, never requirement evidence. Protocol wire and Tool domain schemas have separate validation. Neither gate grants blanket official certification.",
+  "gate_b": {
+    "command": "cargo run --locked -p pgokf-verifier -- mcp-native ROOT PG_CONFIG MCP_BINARY NEW_EVIDENCE_DIR",
+    "ledger": "spec/mcp-native-coverage.json",
+    "required": true,
+    "authority": "project-owned native advertised-surface verification",
+    "no_skips": true,
+    "no_zero_assertion_selectors": true
+  },
+  "diagnostic_policy": {
+    "required_gate": false,
+    "historical_result": {
+      "scenarios": 50,
+      "success": 100,
+      "failure": 67,
+      "warning": 3,
+      "info": 1,
+      "skipped": 6,
+      "exit": 1
+    },
+    "retention": "External evidence with original check-by-check classification; never rerun as a required final gate."
+  },
+  "policy_sources": [
+    "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/index.ts",
+    "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/requirements.ts",
+    "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/tools.ts",
+    "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/resources.ts",
+    "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/src/scenarios/server/stateless.ts",
+    "https://github.com/modelcontextprotocol/conformance/blob/c321dd32035556e6769d3724a8ee97d87c3faaac/SDK_INTEGRATION.md",
+    "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/a99bdd15ea9ff96bf4d758aac907bbb27e9329dc/docs/community/sdk-tiers.mdx"
+  ],
+  "skills_gitHead": "7169291ec0b68eb370fddcd9947313ab0d5e4156",
+  "skills_checks": [
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-capability-empty-object",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-capability-declaration-inline",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-capability-requires-resources",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-skills-list-implemented",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-skills-list-pagination",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-skills-list-entry-atomic",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-skills-list-cache-attributes",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-entry-uri-required",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-entry-frontmatter-required",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-entry-uri-matches-frontmatter-name",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-skill-uri-scheme",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-entry-resources-required",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-resources-complete",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-resources-uri-within-skill",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-resources-digest-format",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-resources-size-required",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-limit-resources-per-skill",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-limit-total-size",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-metadata-reserved-prefix",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-name-naming-rules",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-authority-reg-name",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-names-should-be-unique",
+      "applicability": "advisory",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "reason": "SHOULD: Skills are not globally resource-listed; duplicate display names remain distinct by canonical URI in the native pagination fixture."
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-capability-commits-to-methods",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-skills-get-implemented",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-skills-get-entry-shape",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-skills-get-no-cursor",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-skills-get-cache-attributes",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-skills-get-unknown-uri-invalid-params",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-skillmd-required",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-skillmd-frontmatter",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "sep-2640-entry-frontmatter-identical",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-enumeration",
+      "id": "wire-schema-valid",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/enumeration.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-manifest",
+      "id": "sep-2640-skillmd-mimetype",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/manifest.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-manifest",
+      "id": "sep-2640-final-segment-equals-name",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/manifest.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-manifest",
+      "id": "sep-2640-skillmd-metadata-name",
+      "applicability": "advisory",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/manifest.ts",
+      "reason": "SHOULD: Skills are not globally resource-listed; duplicate display names remain distinct by canonical URI in the native pagination fixture."
+    },
+    {
+      "scenario": "sep-2640-skills-manifest",
+      "id": "sep-2640-skillmd-metadata-description",
+      "applicability": "advisory",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/manifest.ts",
+      "reason": "SHOULD: Skills are not globally resource-listed; duplicate display names remain distinct by canonical URI in the native pagination fixture."
+    },
+    {
+      "scenario": "sep-2640-skills-manifest",
+      "id": "sep-2640-meta-prefix",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/manifest.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-manifest",
+      "id": "wire-schema-valid",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/manifest.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    },
+    {
+      "scenario": "sep-2640-skills-directory",
+      "id": "sep-2640-capability-directory-read-flag",
+      "applicability": "not_applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/directory.ts",
+      "reason": "Unadvertised directoryRead; native gate requires rejection."
+    },
+    {
+      "scenario": "sep-2640-skills-directory",
+      "id": "sep-2640-directory-read-method-registered",
+      "applicability": "not_applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/directory.ts",
+      "reason": "Unadvertised directoryRead; native gate requires rejection."
+    },
+    {
+      "scenario": "sep-2640-skills-directory",
+      "id": "sep-2640-directory-read-result-resources-shape",
+      "applicability": "not_applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/directory.ts",
+      "reason": "Unadvertised directoryRead; native gate requires rejection."
+    },
+    {
+      "scenario": "sep-2640-skills-directory",
+      "id": "sep-2640-directory-read-subdir-mimetype",
+      "applicability": "not_applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/directory.ts",
+      "reason": "Unadvertised directoryRead; native gate requires rejection."
+    },
+    {
+      "scenario": "sep-2640-skills-directory",
+      "id": "sep-2640-directory-read-invalid-params",
+      "applicability": "not_applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/directory.ts",
+      "reason": "Unadvertised directoryRead; native gate requires rejection."
+    },
+    {
+      "scenario": "sep-2640-skills-directory",
+      "id": "sep-2640-directory-read-pagination",
+      "applicability": "not_applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/directory.ts",
+      "reason": "Unadvertised directoryRead; native gate requires rejection."
+    },
+    {
+      "scenario": "sep-2640-skills-directory",
+      "id": "wire-schema-valid",
+      "applicability": "applicable",
+      "frozen_source": "https://github.com/modelcontextprotocol/conformance/blob/7169291ec0b68eb370fddcd9947313ab0d5e4156/src/scenarios/server/skills/directory.ts",
+      "reason": "Required native Skills extension contract; official scenario is separately executed unchanged."
+    }
+  ]
+}

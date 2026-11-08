@@ -394,7 +394,7 @@ fn validate_options(options: &BuildOptions, profile: &Profile) -> Result<()> {
 /// # Errors
 ///
 /// No records, a record without content, or a request
-/// [`validate_options`] refuses.
+/// `validate_options` refuses.
 pub fn assemble(
     options: &BuildOptions,
     selection: &Selection,
@@ -417,7 +417,7 @@ pub fn assemble(
 /// # Errors
 ///
 /// No records, a record without content, or a request
-/// [`validate_options`] refuses.
+/// `validate_options` refuses.
 #[allow(clippy::too_many_lines)]
 pub fn assemble_with_report(
     options: &BuildOptions,

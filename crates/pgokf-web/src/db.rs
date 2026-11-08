@@ -1654,7 +1654,7 @@ impl Db {
             .await
     }
 
-    /// One [`SearchQuery::search`] stream: a single exact type (or none).
+    /// One [`Self::search`] stream: a single exact type (or none).
     async fn search_one_type(
         &self,
         q: &SearchQuery,
@@ -1732,7 +1732,7 @@ impl Db {
 
     /// `pgokf.search_facets` for one facet name (`type`, `bundle`, `tag`,
     /// `status`, `trust_tier`) over the query's matches. A multi-type query
-    /// sums one bucket list per type, as [`SearchQuery::search`] does.
+    /// sums one bucket list per type, as [`Self::search`] does.
     pub(crate) async fn facets(&self, q: &SearchQuery, facet: &str) -> Result<Vec<Facet>> {
         if q.type_filter_impossible() {
             return Ok(Vec::new());
@@ -1750,7 +1750,7 @@ impl Db {
         Ok(merge_facets(streams))
     }
 
-    /// One [`SearchQuery::facets`] stream: a single exact type (or none).
+    /// One [`Self::facets`] stream: a single exact type (or none).
     async fn facets_one_type(
         &self,
         q: &SearchQuery,

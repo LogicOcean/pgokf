@@ -1,0 +1,55 @@
+[
+  {
+    "auth": "builder",
+    "request": {
+      "id": 1,
+      "jsonrpc": "2.0",
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "bundle": "golden-content",
+          "path": "runbooks/refused.md",
+          "text": "---\ntype: Runbook\ntitle: Golden HTTP write\n---\n\n# Golden HTTP write\n\nWritten over HTTP by the golden MCP harness, then deleted again.\n"
+        },
+        "name": "put_document"
+      }
+    },
+    "response": {
+      "error": {
+        "code": -32001,
+        "message": "the builder role may not call \"put_document\"; a token with the writer role can"
+      },
+      "id": 1,
+      "jsonrpc": "2.0"
+    },
+    "status": 200
+  },
+  {
+    "auth": "builder",
+    "request": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "bundle_ids": [
+            1
+          ],
+          "limit": 10,
+          "output_dir": "/tmp/golden-refused",
+          "target": "claude-code"
+        },
+        "name": "build_workspace_plugin"
+      }
+    },
+    "response": {
+      "error": {
+        "code": -32602,
+        "message": "'output_dir' acts on this server's own filesystem, not yours, and is refused over HTTP; leave it out and the files come back in the result"
+      },
+      "id": 2,
+      "jsonrpc": "2.0"
+    },
+    "status": 200
+  }
+]

@@ -1,0 +1,56 @@
+[
+  {
+    "request": {
+      "id": 10,
+      "jsonrpc": "2.0",
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "bundle": "golden-content",
+          "state": "disabled"
+        },
+        "name": "set_bundle_state"
+      }
+    },
+    "response": {
+      "id": 10,
+      "jsonrpc": "2.0",
+      "result": {
+        "content": [
+          {
+            "text": "{\n  \"bundle\": \"golden-content\",\n  \"bundle_id\": 2,\n  \"state\": \"disabled\"\n}",
+            "type": "text"
+          }
+        ],
+        "isError": false
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 11,
+      "jsonrpc": "2.0",
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "bundle": "golden-content",
+          "state": "enabled"
+        },
+        "name": "set_bundle_state"
+      }
+    },
+    "response": {
+      "id": 11,
+      "jsonrpc": "2.0",
+      "result": {
+        "content": [
+          {
+            "text": "{\n  \"bundle\": \"golden-content\",\n  \"bundle_id\": 2,\n  \"state\": \"enabled\"\n}",
+            "type": "text"
+          }
+        ],
+        "isError": false
+      }
+    }
+  }
+]

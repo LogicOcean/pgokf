@@ -22,20 +22,20 @@
 //!
 //! # The three surfaces
 //!
-//! - [`set_concept_embedding`](pgokf::set_concept_embedding) - writer-tier
+//! - `set_concept_embedding` - writer-tier
 //!   ingest. A companion embedder (never this extension - it performs no model
 //!   inference and no network I/O) streams caller-computed embeddings in as
 //!   `real[]`; the row is validated (the concept must exist, the length must
 //!   equal the durable `embedding_dim`) and upserted. This is the 0.2.0
 //!   compatibility signature: it carries no provenance, so the row it writes
 //!   is a legacy row that never ranks semantically.
-//! - [`set_concept_embedding_cas`](pgokf::set_concept_embedding_cas) - the
+//! - `set_concept_embedding_cas` - the
 //!   provenance-carrying writer-tier ingest: compare-and-set against the
 //!   concept's current `file_hash` (a mismatch is a retryable `false`, never
 //!   an error), recording the source file hash, the caller-computed input
 //!   hash, the model, and the render-contract identity. Only rows written
 //!   through it are eligible for semantic ranking.
-//! - [`concept_search_semantic`](pgokf::concept_search_semantic) - reader-tier
+//! - `concept_search_semantic` - reader-tier
 //!   nearest-neighbor search by `pgvector` cosine distance (`<=>`) over
 //!   **eligible** embeddings only: the row's `source_file_hash` must equal the
 //!   concept's current `file_hash`, its model/dimension/contract must match
@@ -45,18 +45,18 @@
 //!   them. Semantic search has no lexical equivalent, so when `pgvector` is
 //!   absent it raises a clear `22023` naming the missing dependency rather
 //!   than silently returning nothing.
-//! - [`concept_search_hybrid`](pgokf::concept_search_hybrid) - reader-tier
+//! - `concept_search_hybrid` - reader-tier
 //!   Reciprocal Rank Fusion (RRF, k = 60) of the lexical result (through the
 //!   configured `search_backend`) and the eligible-only semantic result, fused
 //!   entirely in SQL. RRF needs no model, so when `pgvector` is absent this
 //!   **sensibly** degrades to lexical-only with a `WARNING`.
 //!
 //! A sync that re-stages a concept deletes its embedding row in the same
-//! transaction ([`invalidate_synced_concepts`]), so no old vector coexists
+//! transaction (`invalidate_synced_concepts`), so no old vector coexists
 //! with new concept text past commit; the embedder's missing-row poll then
 //! re-embeds it.
 //!
-//! Plus [`rebuild_embedding_index`](pgokf::rebuild_embedding_index) - admin-tier,
+//! Plus `rebuild_embedding_index` - admin-tier,
 //! mirroring `rebuild_search_index`: it builds a `pgvector` HNSW (cosine) index
 //! over the embeddings for the configured dimension, and is a logged no-op when
 //! `pgvector` is absent.

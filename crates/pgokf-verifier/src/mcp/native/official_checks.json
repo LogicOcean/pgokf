@@ -1,0 +1,368 @@
+{
+  "dns-rebinding-protection": [
+    {
+      "id": "localhost-host-rebinding-rejected",
+      "name": "DNSRebindingRejected",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "localhost-host-valid-accepted",
+      "name": "LocalhostHostAccepted",
+      "status": "SUCCESS"
+    }
+  ],
+  "http-header-validation": [
+    {
+      "id": "sep-2243-server-reject-invalid-headers",
+      "name": "ServerRejectsMismatchedMethodHeader",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2243-server-reject-error-code",
+      "name": "ServerRejectsMismatchedMethodHeaderErrorCode",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2243-server-reject-invalid-headers",
+      "name": "ServerRejectsMissingMethodHeader",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2243-server-reject-error-code",
+      "name": "ServerRejectsMissingMethodHeaderErrorCode",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2243-server-reject-invalid-headers",
+      "name": "ServerRejectsMismatchedNameHeader",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2243-server-reject-error-code",
+      "name": "ServerRejectsMismatchedNameHeaderErrorCode",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2243-server-accepts-whitespace-header-value",
+      "name": "ServerAcceptsWhitespaceHeaderValue",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2243-server-reject-invalid-headers",
+      "name": "ServerRejectsMissingNameHeader",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2243-server-reject-error-code",
+      "name": "ServerRejectsMissingNameHeaderErrorCode",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2243-header-name-case-insensitive",
+      "name": "ServerAcceptsLowercaseHeaderName",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2243-header-name-case-insensitive",
+      "name": "ServerAcceptsUppercaseHeaderName",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2243-server-reject-invalid-headers",
+      "name": "ServerRejectsCaseMismatchValue",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2243-server-reject-error-code",
+      "name": "ServerRejectsCaseMismatchValueErrorCode",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "wire-schema-valid",
+      "name": "WireSchemaValid",
+      "status": "SUCCESS"
+    }
+  ],
+  "resources-list": [
+    {
+      "id": "resources-list",
+      "name": "ResourcesList",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "wire-schema-valid",
+      "name": "WireSchemaValid",
+      "status": "SUCCESS"
+    }
+  ],
+  "sep-2164-resource-not-found": [
+    {
+      "id": "sep-2164-no-empty-contents",
+      "name": "ResourcesNotFoundNoEmptyContents",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2164-error-code",
+      "name": "ResourcesNotFoundErrorCode",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2164-data-uri",
+      "name": "ResourcesNotFoundDataUri",
+      "status": "WARNING"
+    },
+    {
+      "id": "wire-schema-valid",
+      "name": "WireSchemaValid",
+      "status": "SUCCESS"
+    }
+  ],
+  "sep-2640-skills-directory": [
+    {
+      "id": "sep-2640-capability-directory-read-flag",
+      "name": "sep-2640-capability-directory-read-flag",
+      "status": "SKIPPED"
+    },
+    {
+      "id": "sep-2640-directory-read-method-registered",
+      "name": "sep-2640-directory-read-method-registered",
+      "status": "SKIPPED"
+    },
+    {
+      "id": "sep-2640-directory-read-result-resources-shape",
+      "name": "sep-2640-directory-read-result-resources-shape",
+      "status": "SKIPPED"
+    },
+    {
+      "id": "sep-2640-directory-read-subdir-mimetype",
+      "name": "sep-2640-directory-read-subdir-mimetype",
+      "status": "SKIPPED"
+    },
+    {
+      "id": "sep-2640-directory-read-invalid-params",
+      "name": "sep-2640-directory-read-invalid-params",
+      "status": "SKIPPED"
+    },
+    {
+      "id": "sep-2640-directory-read-pagination",
+      "name": "sep-2640-directory-read-pagination",
+      "status": "SKIPPED"
+    },
+    {
+      "id": "wire-schema-valid",
+      "name": "WireSchemaValid",
+      "status": "SUCCESS"
+    }
+  ],
+  "sep-2640-skills-enumeration": [
+    {
+      "id": "sep-2640-capability-empty-object",
+      "name": "sep-2640-capability-empty-object",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2640-capability-declaration-inline",
+      "name": "sep-2640-capability-declaration-inline",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2640-capability-requires-resources",
+      "name": "sep-2640-capability-requires-resources",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2640-skills-list-implemented",
+      "name": "sep-2640-skills-list-implemented",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2640-skills-list-pagination",
+      "name": "sep-2640-skills-list-pagination",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2640-skills-list-entry-atomic",
+      "name": "sep-2640-skills-list-entry-atomic",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2640-skills-list-cache-attributes",
+      "name": "sep-2640-skills-list-cache-attributes",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2640-entry-uri-required",
+      "name": "sep-2640-entry-uri-required",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2640-entry-frontmatter-required",
+      "name": "sep-2640-entry-frontmatter-required",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2640-entry-uri-matches-frontmatter-name",
+      "name": "sep-2640-entry-uri-matches-frontmatter-name",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2640-skill-uri-scheme",
+      "name": "sep-2640-skill-uri-scheme",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2640-entry-resources-required",
+      "name": "sep-2640-entry-resources-required",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2640-resources-complete",
+      "name": "sep-2640-resources-complete",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2640-resources-uri-within-skill",
+      "name": "sep-2640-resources-uri-within-skill",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2640-resources-digest-format",
+      "name": "sep-2640-resources-digest-format",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2640-resources-size-required",
+      "name": "sep-2640-resources-size-required",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2640-limit-resources-per-skill",
+      "name": "sep-2640-limit-resources-per-skill",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2640-limit-total-size",
+      "name": "sep-2640-limit-total-size",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2640-metadata-reserved-prefix",
+      "name": "sep-2640-metadata-reserved-prefix",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2640-name-naming-rules",
+      "name": "sep-2640-name-naming-rules",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2640-authority-reg-name",
+      "name": "sep-2640-authority-reg-name",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2640-names-should-be-unique",
+      "name": "sep-2640-names-should-be-unique",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2640-capability-commits-to-methods",
+      "name": "sep-2640-capability-commits-to-methods",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2640-skills-get-implemented",
+      "name": "sep-2640-skills-get-implemented",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2640-skills-get-entry-shape",
+      "name": "sep-2640-skills-get-entry-shape",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2640-skills-get-no-cursor",
+      "name": "sep-2640-skills-get-no-cursor",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2640-skills-get-cache-attributes",
+      "name": "sep-2640-skills-get-cache-attributes",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2640-skills-get-unknown-uri-invalid-params",
+      "name": "sep-2640-skills-get-unknown-uri-invalid-params",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2640-skillmd-required",
+      "name": "sep-2640-skillmd-required",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2640-skillmd-frontmatter",
+      "name": "sep-2640-skillmd-frontmatter",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2640-entry-frontmatter-identical",
+      "name": "sep-2640-entry-frontmatter-identical",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "wire-schema-valid",
+      "name": "WireSchemaValid",
+      "status": "SUCCESS"
+    }
+  ],
+  "sep-2640-skills-manifest": [
+    {
+      "id": "sep-2640-skillmd-mimetype",
+      "name": "sep-2640-skillmd-mimetype",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2640-final-segment-equals-name",
+      "name": "sep-2640-final-segment-equals-name",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "sep-2640-skillmd-metadata-name",
+      "name": "sep-2640-skillmd-metadata-name",
+      "status": "WARNING"
+    },
+    {
+      "id": "sep-2640-skillmd-metadata-description",
+      "name": "sep-2640-skillmd-metadata-description",
+      "status": "WARNING"
+    },
+    {
+      "id": "sep-2640-meta-prefix",
+      "name": "sep-2640-meta-prefix",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "wire-schema-valid",
+      "name": "WireSchemaValid",
+      "status": "SUCCESS"
+    }
+  ],
+  "tools-list": [
+    {
+      "id": "tools-list",
+      "name": "ToolsList",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "tools-name-format",
+      "name": "ToolsNameFormat",
+      "status": "SUCCESS"
+    },
+    {
+      "id": "wire-schema-valid",
+      "name": "WireSchemaValid",
+      "status": "SUCCESS"
+    }
+  ]
+}

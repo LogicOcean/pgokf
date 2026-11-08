@@ -58,6 +58,7 @@ nav:
   - API Stability: api-stability.md
   - Benchmarks: benchmarks.md
   - Packaging: packaging.md
+  - Rust Verification: rust-verification.md
   - Release Checklist: release-checklist.md
   - FAQ: faq.md
   - Glossary: glossary.md

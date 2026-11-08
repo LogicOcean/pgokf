@@ -16,9 +16,9 @@
 //! the extension is compiled and installed with no build-time reference to it, so
 //! `CREATE EXTENSION pgokf` succeeds where `pg_cron` is absent, and every
 //! `cron.*` object is reached solely through dynamic SPI. When `pg_cron` is not
-//! installed, [`schedule_refresh`] raises a clear SQLSTATE `22023` naming the
+//! installed, `schedule_refresh` raises a clear SQLSTATE `22023` naming the
 //! missing dependency - mirroring `concept_search_semantic`'s pgvector error,
-//! never a silent success - and [`unschedule_refresh`] is a clean no-op.
+//! never a silent success - and `unschedule_refresh` is a clean no-op.
 //!
 //! # Injection safety
 //!

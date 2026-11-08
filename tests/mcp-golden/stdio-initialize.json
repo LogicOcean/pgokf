@@ -1,0 +1,135 @@
+[
+  {
+    "request": {
+      "id": 1,
+      "jsonrpc": "2.0",
+      "method": "initialize",
+      "params": {
+        "capabilities": {},
+        "clientInfo": {
+          "name": "golden",
+          "version": "1"
+        },
+        "protocolVersion": "2024-11-05"
+      }
+    },
+    "response": {
+      "id": 1,
+      "jsonrpc": "2.0",
+      "result": {
+        "capabilities": {
+          "tools": {}
+        },
+        "protocolVersion": "2024-11-05",
+        "serverInfo": {
+          "name": "pgokf-mcp",
+          "version": "<VERSION>"
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "jsonrpc": "2.0",
+      "method": "initialize",
+      "params": {
+        "capabilities": {},
+        "clientInfo": {
+          "name": "golden",
+          "version": "1"
+        },
+        "protocolVersion": "2025-03-26"
+      }
+    },
+    "response": {
+      "id": 1,
+      "jsonrpc": "2.0",
+      "result": {
+        "capabilities": {
+          "tools": {}
+        },
+        "protocolVersion": "2025-03-26",
+        "serverInfo": {
+          "name": "pgokf-mcp",
+          "version": "<VERSION>"
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "jsonrpc": "2.0",
+      "method": "initialize",
+      "params": {
+        "capabilities": {},
+        "clientInfo": {
+          "name": "golden",
+          "version": "1"
+        },
+        "protocolVersion": "2025-06-18"
+      }
+    },
+    "response": {
+      "id": 1,
+      "jsonrpc": "2.0",
+      "result": {
+        "capabilities": {
+          "tools": {}
+        },
+        "protocolVersion": "2025-06-18",
+        "serverInfo": {
+          "name": "pgokf-mcp",
+          "version": "<VERSION>"
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "method": "initialize",
+      "params": {
+        "protocolVersion": "2099-01-01"
+      }
+    },
+    "response": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "result": {
+        "capabilities": {
+          "tools": {}
+        },
+        "protocolVersion": "2025-06-18",
+        "serverInfo": {
+          "name": "pgokf-mcp",
+          "version": "<VERSION>"
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 3,
+      "jsonrpc": "2.0",
+      "method": "initialize",
+      "params": {}
+    },
+    "response": {
+      "id": 3,
+      "jsonrpc": "2.0",
+      "result": {
+        "capabilities": {
+          "tools": {}
+        },
+        "protocolVersion": "2025-06-18",
+        "serverInfo": {
+          "name": "pgokf-mcp",
+          "version": "<VERSION>"
+        }
+      }
+    }
+  }
+]

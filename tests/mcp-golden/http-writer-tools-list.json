@@ -1,0 +1,408 @@
+[
+  {
+    "auth": "writer",
+    "request": {
+      "id": 1,
+      "jsonrpc": "2.0",
+      "method": "tools/list"
+    },
+    "response": {
+      "id": 1,
+      "jsonrpc": "2.0",
+      "result": {
+        "tools": [
+          {
+            "description": "Rank catalog concepts by a full-text query. Optional structured filters narrow by concept type, tags (all-of), status, and trust tier.",
+            "inputSchema": {
+              "properties": {
+                "bundle_id": {
+                  "description": "Restrict to one bundle id.",
+                  "type": "integer"
+                },
+                "limit": {
+                  "description": "Maximum hits (1..=500, default 20).",
+                  "type": "integer"
+                },
+                "query": {
+                  "description": "The search query (websearch syntax).",
+                  "type": "string"
+                },
+                "status": {
+                  "description": "Provenance status filter.",
+                  "type": "string"
+                },
+                "tags": {
+                  "description": "All-of tag containment filter.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "trust_tier": {
+                  "description": "Provenance trust-tier filter.",
+                  "type": "string"
+                },
+                "type": {
+                  "description": "Exact concept type filter.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "query"
+              ],
+              "type": "object"
+            },
+            "name": "concept_search"
+          },
+          {
+            "description": "Content more-like-this: rank concepts by similarity to a seed concept's salient terms, excluding the seed.",
+            "inputSchema": {
+              "properties": {
+                "bundle_id": {
+                  "description": "Bundle id (required if the concept id is ambiguous across bundles).",
+                  "type": "integer"
+                },
+                "concept_id": {
+                  "description": "The seed concept id.",
+                  "type": "string"
+                },
+                "limit": {
+                  "description": "Maximum hits (1..=500, default 10).",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "concept_id"
+              ],
+              "type": "object"
+            },
+            "name": "find_similar"
+          },
+          {
+            "description": "Traverse resolved internal links out from a concept, returning reachable concepts with their shortest hop count and path.",
+            "inputSchema": {
+              "properties": {
+                "bundle_id": {
+                  "description": "Bundle id (required if the concept id is ambiguous across bundles).",
+                  "type": "integer"
+                },
+                "concept_id": {
+                  "description": "The start concept id.",
+                  "type": "string"
+                },
+                "max_hops": {
+                  "description": "Traversal depth (>= 1, default 2; capped by pgokf.max_graph_hops).",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "concept_id"
+              ],
+              "type": "object"
+            },
+            "name": "concept_neighbors"
+          },
+          {
+            "description": "Fetch a concept's stored core fields (path, type, title, description, tags, resource, body text) by id.",
+            "inputSchema": {
+              "properties": {
+                "bundle_id": {
+                  "description": "Restrict to one bundle id.",
+                  "type": "integer"
+                },
+                "concept_id": {
+                  "description": "The concept id.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "concept_id"
+              ],
+              "type": "object"
+            },
+            "name": "get_concept"
+          },
+          {
+            "description": "Fetch an Agent Skills package stored in the catalog: its name, description, package directory and hash, the complete SKILL.md frontmatter, the exact SKILL.md text, and the list of scripts, references, and assets it owns (build_workspace_plugin materializes the whole package byte for byte).",
+            "inputSchema": {
+              "properties": {
+                "bundle_id": {
+                  "description": "The bundle id.",
+                  "type": "integer"
+                },
+                "concept_id": {
+                  "description": "The skill's concept id (its SKILL.md path without .md, e.g. skills/deploy/SKILL).",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "bundle_id",
+                "concept_id"
+              ],
+              "type": "object"
+            },
+            "name": "get_skill"
+          },
+          {
+            "description": "List the targets a workspace plugin can be built for: agent-plugin (a portable Agent Plugins 1.0.0 directory with plugin.json, skills/, and mcp.json) and the per-harness layouts (claude-code, codex, copilot, hermes-agent, kimi, gemini-cli, cursor, agents, agents-md, ollama, generic), each with its kind (agent-plugin, skills, instruction-file, prompt-bundle, generic) and the documented directory it reads. An agent not listed is built with target 'custom' plus a harness description.",
+            "inputSchema": {
+              "properties": {},
+              "type": "object"
+            },
+            "name": "list_plugin_targets"
+          },
+          {
+            "description": "Build an agent plugin from a catalog selection: an Agent Skills package (SKILL.md plus one reference file per concept), an AGENTS.md instruction file, an Ollama prompt bundle, or a generic index-plus-files tree, always with okf-workspace.yaml (the selection) and okf-workspace.lock (catalog snapshot and content hashes). Pass output_dir to write the tree into a workspace; otherwise the files come back inline.",
+            "inputSchema": {
+              "properties": {
+                "all": {
+                  "description": "Start from every visible concept (bounded by the limit) instead of nothing, so a selection narrowed only by types, tags, or a query - or by nothing at all - is expressible without naming a bundle.",
+                  "type": "boolean"
+                },
+                "base_model": {
+                  "description": "Ollama only: the Modelfile FROM line (default llama3.1).",
+                  "type": "string"
+                },
+                "bundle_ids": {
+                  "description": "Restrict to these bundle ids.",
+                  "items": {
+                    "type": "integer"
+                  },
+                  "type": "array"
+                },
+                "components": {
+                  "description": "Extra parts: mcp (the harness's MCP server config for pgokf-mcp; the connection string is never written), guide (how to use the catalog: identities, trust tiers, MCP tools, JSON API), tools (okf.sh helper over the JSON API). Default: all three.",
+                  "items": {
+                    "enum": [
+                      "mcp",
+                      "guide",
+                      "tools"
+                    ],
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "concept_ids": {
+                  "description": "Include exactly these concept ids (within the selected bundles).",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "direction": {
+                  "description": "With seeds: which way the closure walks relationships (default outbound).",
+                  "enum": [
+                    "outbound",
+                    "inbound",
+                    "both"
+                  ],
+                  "type": "string"
+                },
+                "harness": {
+                  "description": "With target 'custom': the agent's display name, the kind of tree (agent-plugin, skills, instruction-file, prompt-bundle, generic; default skills), and for a skills package the directory the agent reads skills from, relative to the workspace root (for example .acme/skills).",
+                  "properties": {
+                    "kind": {
+                      "enum": [
+                        "agent-plugin",
+                        "skills",
+                        "instruction-file",
+                        "prompt-bundle",
+                        "generic"
+                      ],
+                      "type": "string"
+                    },
+                    "label": {
+                      "type": "string"
+                    },
+                    "skills_dir": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "label"
+                  ],
+                  "type": "object"
+                },
+                "hops": {
+                  "description": "With seeds: how many relationship hops the closure walks (1..=8, default 2).",
+                  "type": "integer"
+                },
+                "limit": {
+                  "description": "Maximum concepts (1..=500, default 100).",
+                  "type": "integer"
+                },
+                "mcp_command": {
+                  "description": "How the harness starts the MCP server (default pgokf-mcp). Alternative to mcp_url.",
+                  "type": "string"
+                },
+                "mcp_url": {
+                  "description": "Point the harness at a pgokf-mcp --http endpoint (for example https://catalog.example/mcp) instead of a local stdio server. The bearer token is referenced, never written: the entry expands OKF_MCP_TOKEN where the harness documents an expansion form, names that variable where it documents one, and otherwise becomes a fragment to merge with a placeholder in it.",
+                  "type": "string"
+                },
+                "name": {
+                  "description": "Package name (lowercase letters, digits, hyphens; default okf-knowledge).",
+                  "type": "string"
+                },
+                "picks": {
+                  "description": "Specific files by identity, as 'bundle_id:concept_id' strings (a skill's SKILL.md id copies the whole package; a script or reference id copies that file). Picks are added to whatever the other selectors match and are never cut by the limit.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "query": {
+                  "description": "Full-text query (websearch syntax); results are ranked.",
+                  "type": "string"
+                },
+                "relation_types": {
+                  "description": "With seeds: follow only these namespaced relationship types (for example 'docs:references'); empty follows every type. The names are the publisher's; the builder holds no vocabulary of its own.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "require_closure": {
+                  "description": "With seeds: refuse the build when the closure cannot be completed - a traversed relationship whose target is unresolved, or a closure node the stale policy would drop.",
+                  "type": "boolean"
+                },
+                "seeds": {
+                  "description": "Closure seeds, as 'bundle_id:concept_id' strings: the build includes each seed and expands it through the catalog's typed relationships (requires the catalog's typed_relationships capability).",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "stale_policy": {
+                  "description": "What to do with concepts the catalog reports as not fresh (default warn): warn keeps them, labelled - a banner on each reconstructed document, a generated <name>.stale-warning.md beside every exact-bytes file, which is never modified, and a top-level FRESHNESS.md - with states and reasons in the manifests; exclude drops them and refuses the build, enumerating the stale ids and reasons, when an exact pick, a seed, or a required closure node is stale, or nothing fresh remains.",
+                  "enum": [
+                    "warn",
+                    "exclude"
+                  ],
+                  "type": "string"
+                },
+                "tags": {
+                  "description": "All-of tag containment filter.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "target": {
+                  "description": "A target id from list_plugin_targets, or 'custom' with a harness description for an agent the registry does not know.",
+                  "type": "string"
+                },
+                "title": {
+                  "description": "Display title for the index (defaults to the name).",
+                  "type": "string"
+                },
+                "types": {
+                  "description": "Any-of concept type filter.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "verified_only": {
+                  "description": "Only human-reviewed or machine-confirmed concepts.",
+                  "type": "boolean"
+                },
+                "web_url": {
+                  "description": "Base URL of the pgokf web UI, for the guide and the helper script.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "target"
+              ],
+              "type": "object"
+            },
+            "name": "build_workspace_plugin"
+          },
+          {
+            "description": "Compare a built plugin's okf-workspace.lock with the live catalog: the pinned bundle generations, sync hashes, and freshness states against what the catalog reports now. Answers current, stale, retired, or unknown, with reasons per bundle. A downloaded plugin cannot update itself; rebuild it with build_workspace_plugin when this says stale.",
+            "inputSchema": {
+              "properties": {
+                "lock": {
+                  "description": "The full content of the plugin's okf-workspace.lock file.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "lock"
+              ],
+              "type": "object"
+            },
+            "name": "check_workspace_plugin_freshness"
+          },
+          {
+            "description": "List the bundles in the catalog with their id, name, kind (content: written through this API; filesystem: synced from a directory the database server reads), state, and file count. Use it to find the bundle name that put_document writes into.",
+            "inputSchema": {
+              "properties": {
+                "include_retired": {
+                  "description": "Include retired bundles (default false).",
+                  "type": "boolean"
+                }
+              },
+              "type": "object"
+            },
+            "name": "list_bundles"
+          },
+          {
+            "description": "Write one Markdown document into a content bundle, creating it or replacing the one at that path. The text is a complete OKF document: YAML frontmatter (type and title are required) then the body. Any 'verified' the document claims is set aside rather than believed - a verification is granted by a human approver reviewing it - and 'generated' is stamped with this token, so what you write is machine-generated until a person reviews it. The whole bundle is rewritten from the catalog's stored sources, so the catalog must keep them (store_source).",
+            "inputSchema": {
+              "properties": {
+                "bundle": {
+                  "description": "The content bundle's name (see list_bundles). Alternative to bundle_id.",
+                  "type": "string"
+                },
+                "bundle_id": {
+                  "description": "The content bundle's id. Alternative to bundle.",
+                  "type": "integer"
+                },
+                "path": {
+                  "description": "Path within the bundle, ending in .md (for example runbooks/failover.md). It becomes the concept id without the extension.",
+                  "type": "string"
+                },
+                "text": {
+                  "description": "The complete document: '---', YAML frontmatter, '---', then the Markdown body.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "text"
+              ],
+              "type": "object"
+            },
+            "name": "put_document"
+          },
+          {
+            "description": "Remove one document from a content bundle. The rest of the bundle is rewritten unchanged; the document's history is not recoverable through this API.",
+            "inputSchema": {
+              "properties": {
+                "bundle": {
+                  "description": "The content bundle's name. Alternative to bundle_id.",
+                  "type": "string"
+                },
+                "bundle_id": {
+                  "description": "The content bundle's id. Alternative to bundle.",
+                  "type": "integer"
+                },
+                "path": {
+                  "description": "The path to remove, as list_bundles' concepts and get_concept report it.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "type": "object"
+            },
+            "name": "delete_document"
+          }
+        ]
+      }
+    },
+    "status": 200
+  }
+]

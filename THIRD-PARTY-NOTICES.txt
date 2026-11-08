@@ -17,32 +17,34 @@ Regenerate it with:
 
     cargo about generate --workspace --all-features -o THIRD-PARTY-NOTICES.txt about.hbs
 
-  Apache License 2.0: 330 crate(s)
-  MIT License: 102 crate(s)
+  Apache License 2.0: 347 crate(s)
+  MIT License: 117 crate(s)
   ISC License: 23 crate(s)
   Unicode License v3: 19 crate(s)
-  GNU Affero General Public License v3.0 only: 10 crate(s)
+  GNU Affero General Public License v3.0 only: 11 crate(s)
   BSD 3-Clause "New" or "Revised" License: 7 crate(s)
+  zlib License: 3 crate(s)
   Mozilla Public License 2.0: 2 crate(s)
-  zlib License: 2 crate(s)
   Creative Commons Zero v1.0 Universal: 1 crate(s)
   Community Data License Agreement Permissive 2.0: 1 crate(s)
+  MIT No Attribution: 1 crate(s)
 
 ================================================================================
 GNU Affero General Public License v3.0 only
 ================================================================================
 
 Used by:
-  - pgokf 0.3.1  (https://github.com/LogicOcean/pgokf)
-  - okf-parser 0.3.1  (https://github.com/LogicOcean/pgokf)
-  - okf-sync 0.3.1  (https://github.com/LogicOcean/pgokf)
-  - pgokf-companion 0.3.1  (https://github.com/LogicOcean/pgokf)
-  - pgokf-embed 0.3.1  (https://github.com/LogicOcean/pgokf)
-  - pgokf-ingest 0.3.1  (https://github.com/LogicOcean/pgokf)
-  - pgokf-mcp 0.3.1  (https://github.com/LogicOcean/pgokf)
-  - pgokf-pgconn 0.3.1  (https://github.com/LogicOcean/pgokf)
-  - pgokf-web 0.3.1  (https://github.com/LogicOcean/pgokf)
-  - pgokf-workspace 0.3.1  (https://github.com/LogicOcean/pgokf)
+  - pgokf 0.4.0-dev3  (https://github.com/LogicOcean/pgokf)
+  - okf-parser 0.4.0-dev3  (https://github.com/LogicOcean/pgokf)
+  - okf-sync 0.4.0-dev3  (https://github.com/LogicOcean/pgokf)
+  - pgokf-companion 0.4.0-dev3  (https://github.com/LogicOcean/pgokf)
+  - pgokf-embed 0.4.0-dev3  (https://github.com/LogicOcean/pgokf)
+  - pgokf-ingest 0.4.0-dev3  (https://github.com/LogicOcean/pgokf)
+  - pgokf-mcp 0.4.0-dev3  (https://github.com/LogicOcean/pgokf)
+  - pgokf-pgconn 0.4.0-dev3  (https://github.com/LogicOcean/pgokf)
+  - pgokf-verifier 0.4.0-dev3  (https://github.com/LogicOcean/pgokf)
+  - pgokf-web 0.4.0-dev3  (https://github.com/LogicOcean/pgokf)
+  - pgokf-workspace 0.4.0-dev3  (https://github.com/LogicOcean/pgokf)
 
 GNU AFFERO GENERAL PUBLIC LICENSE
 Version 3, 19 November 2007
@@ -3798,6 +3800,8 @@ Apache License 2.0
 ================================================================================
 
 Used by:
+  - bytecount 0.6.9  (https://github.com/llogiq/bytecount)
+  - unicode-general-category 1.1.0  (https://github.com/yeslogic/unicode-general-category)
   - winapi 0.3.9  (https://github.com/retep998/winapi-rs)
 
                                  Apache License
@@ -5966,6 +5970,7 @@ Used by:
   - flate2 1.1.10  (https://github.com/rust-lang/flate2-rs)
   - fnv 1.0.7  (https://github.com/servo/rust-fnv)
   - form_urlencoded 1.2.2  (https://github.com/servo/rust-url)
+  - fraction 0.17.0  (https://github.com/dnsl48/fraction.git)
   - getopts 0.2.24  (https://github.com/rust-lang/getopts)
   - glob 0.3.4  (https://github.com/rust-lang/glob)
   - hashbrown 0.15.5  (https://github.com/rust-lang/hashbrown)
@@ -5988,10 +5993,14 @@ Used by:
   - maplit 1.0.2  (https://github.com/bluss/maplit)
   - markup5ever 0.39.0  (https://github.com/servo/html5ever)
   - mime 0.3.17  (https://github.com/hyperium/mime)
+  - num-bigint 0.4.8  (https://github.com/rust-num/num-bigint)
   - num-bigint 0.5.1  (https://github.com/rust-num/num-bigint)
   - num-complex 0.4.6  (https://github.com/rust-num/num-complex)
   - num-integer 0.1.47  (https://github.com/rust-num/num-integer)
+  - num-iter 0.1.46  (https://github.com/rust-num/num-iter)
+  - num-rational 0.4.2  (https://github.com/rust-num/num-rational)
   - num-traits 0.2.19  (https://github.com/rust-num/num-traits)
+  - num 0.4.3  (https://github.com/rust-num/num)
   - once_cell 1.21.4  (https://github.com/matklad/once_cell)
   - openssl-probe 0.2.1  (https://github.com/rustls/openssl-probe)
   - parking_lot 0.12.5  (https://github.com/Amanieu/parking_lot)
@@ -6254,6 +6263,8 @@ Apache License 2.0
 ================================================================================
 
 Used by:
+  - bit-set 0.8.0  (https://github.com/contain-rs/bit-set)
+  - bit-vec 0.8.0  (https://github.com/contain-rs/bit-vec)
   - lexical-core 1.0.6  (https://github.com/Alexhuszagh/rust-lexical)
   - lexical-parse-float 1.0.6  (https://github.com/Alexhuszagh/rust-lexical)
   - lexical-parse-integer 1.0.6  (https://github.com/Alexhuszagh/rust-lexical)
@@ -6473,10 +6484,12 @@ Used by:
   - argon2 0.6.0  (https://github.com/RustCrypto/password-hashes)
   - base64ct 1.8.3  (https://github.com/RustCrypto/formats)
   - blake2 0.11.0  (https://github.com/RustCrypto/hashes)
+  - block-buffer 0.10.4  (https://github.com/RustCrypto/utils)
   - block-buffer 0.12.1  (https://github.com/RustCrypto/utils)
   - chacha20 0.10.2  (https://github.com/RustCrypto/stream-ciphers)
   - const-oid 0.10.2  (https://github.com/RustCrypto/formats)
   - const-oid 0.9.6  (https://github.com/RustCrypto/formats/tree/master/const-oid)
+  - cpufeatures 0.2.17  (https://github.com/RustCrypto/utils)
   - cpufeatures 0.3.0  (https://github.com/RustCrypto/utils)
   - crypto-common 0.1.7  (https://github.com/RustCrypto/traits)
   - crypto-common 0.2.2  (https://github.com/RustCrypto/traits)
@@ -6484,11 +6497,13 @@ Used by:
   - der_derive 0.7.3  (https://github.com/RustCrypto/formats/tree/master/der/derive)
   - digest 0.10.7  (https://github.com/RustCrypto/traits)
   - digest 0.11.3  (https://github.com/RustCrypto/traits)
+  - hmac 0.12.1  (https://github.com/RustCrypto/MACs)
   - hmac 0.13.0  (https://github.com/RustCrypto/MACs)
   - hybrid-array 0.4.14  (https://github.com/RustCrypto/hybrid-array)
   - md-5 0.11.0  (https://github.com/RustCrypto/hashes)
   - password-hash 0.6.1  (https://github.com/RustCrypto/traits)
   - phc 0.6.1  (https://github.com/RustCrypto/formats)
+  - sha2 0.10.9  (https://github.com/RustCrypto/hashes)
   - sha2 0.11.0  (https://github.com/RustCrypto/hashes)
   - signature 2.2.0  (https://github.com/RustCrypto/traits/tree/master/signature)
   - spki 0.7.3  (https://github.com/RustCrypto/formats/tree/master/spki)
@@ -7767,6 +7782,7 @@ Apache License 2.0
 ================================================================================
 
 Used by:
+  - allocator-api2 0.2.21  (https://github.com/zakarumych/allocator-api2)
   - android_system_properties 0.1.6  (https://github.com/nical/android_system_properties)
   - anyhow 1.0.104  (https://github.com/dtolnay/anyhow)
   - async-trait 0.1.92  (https://github.com/dtolnay/async-trait)
@@ -7788,6 +7804,7 @@ Used by:
   - jni-sys-macros 0.4.1  (https://github.com/jni-rs/jni-sys)
   - jni 0.22.4  (https://github.com/jni-rs/jni-rs)
   - libc 0.2.189  (https://github.com/rust-lang/libc)
+  - num-cmp 0.1.0  (https://github.com/lifthrasiir/num-cmp)
   - num-conv 0.2.2  (https://github.com/jhpratt/num-conv)
   - objc2-core-foundation 0.3.2  (https://github.com/madsmtm/objc2)
   - objc2-io-kit 0.3.2  (https://github.com/madsmtm/objc2)
@@ -7799,6 +7816,8 @@ Used by:
   - r-efi 5.3.0  (https://github.com/r-efi/r-efi)
   - r-efi 6.0.0  (https://github.com/r-efi/r-efi)
   - rand 0.10.2  (https://github.com/rust-random/rand)
+  - ref-cast-impl 1.0.27  (https://github.com/dtolnay/ref-cast)
+  - ref-cast 1.0.27  (https://github.com/dtolnay/ref-cast)
   - rustc-hash 2.1.3  (https://github.com/rust-lang/rustc-hash)
   - rustls-platform-verifier-android 0.1.1  (https://github.com/rustls/rustls-platform-verifier)
   - rustversion 1.0.23  (https://github.com/dtolnay/rustversion)
@@ -9937,6 +9956,35 @@ MIT License
 ================================================================================
 
 Used by:
+  - micromap 0.3.0  (https://github.com/yegor256/micromap)
+  - micromap 0.3.0  (https://github.com/yegor256/micromap)
+
+Copyright (c) 2023-2026 Yegor Bugayenko
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included
+in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+================================================================================
+MIT License
+================================================================================
+
+Used by:
   - synstructure 0.13.2  (https://github.com/mystor/synstructure)
 
 Copyright 2016 Nika Layzell
@@ -10109,6 +10157,67 @@ Used by:
 MIT License
 
 Copyright (c) 2019 Jasper Hugo
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+================================================================================
+MIT License
+================================================================================
+
+Used by:
+  - strum 0.28.0  (https://github.com/Peternator7/strum)
+  - strum_macros 0.28.0  (https://github.com/Peternator7/strum)
+
+MIT License
+
+Copyright (c) 2019 Peter Glotfelty
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+================================================================================
+MIT License
+================================================================================
+
+Used by:
+  - email_address 0.2.9  (https://github.com/johnstonskj/rust-email_address.git)
+
+MIT License
+
+Copyright (c) 2019 Simon Johnston
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -10368,6 +10477,37 @@ MIT License
 ================================================================================
 
 Used by:
+  - jsonschema 0.57.0  (https://github.com/Stranger6667/jsonschema)
+  - referencing 0.57.0  (https://github.com/Stranger6667/jsonschema)
+
+MIT License
+
+Copyright (c) 2020-2026 Dmitry Dygalo
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+================================================================================
+MIT License
+================================================================================
+
+Used by:
   - matchit 0.8.4  (https://github.com/ibraheemdev/matchit)
 
 MIT License
@@ -10398,6 +10538,35 @@ MIT License
 ================================================================================
 
 Used by:
+  - outref 0.5.2  (https://github.com/Nugine/outref)
+
+MIT License
+
+Copyright (c) 2022 Nugine
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+================================================================================
+MIT License
+================================================================================
+
+Used by:
   - libredox 0.1.20  (https://gitlab.redox-os.org/redox-os/libredox.git)
 
 MIT License
@@ -10422,6 +10591,35 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+
+================================================================================
+MIT License
+================================================================================
+
+Used by:
+  - fluent-uri 0.4.1  (https://github.com/yescallop/fluent-uri-rs)
+
+MIT License
+
+Copyright (c) 2024 Scallop Ye
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 ================================================================================
 MIT License
@@ -10487,6 +10685,8 @@ MIT License
 ================================================================================
 
 Used by:
+  - jsonschema-regex 0.57.0  (https://github.com/Stranger6667/jsonschema)
+  - jsonschema-value 0.57.0  (https://github.com/Stranger6667/jsonschema)
   - libm 0.2.16  (https://github.com/rust-lang/compiler-builtins)
   - objc2-encode 4.1.0  (https://github.com/madsmtm/objc2)
   - objc2-foundation 0.3.2  (https://github.com/madsmtm/objc2)
@@ -10499,6 +10699,8 @@ Used by:
   - pgrx-sql-entity-graph 0.19.2  (https://github.com/pgcentralfoundation/pgrx/)
   - pgrx-tests 0.19.2  (https://github.com/pgcentralfoundation/pgrx/)
   - seahash 4.1.0  (https://gitlab.redox-os.org/redox-os/seahash)
+  - uuid-simd 0.8.0  (https://github.com/Nugine/simd)
+  - vsimd 0.8.0  (https://github.com/Nugine/simd)
 
 MIT License
 
@@ -10689,6 +10891,36 @@ Used by:
 The MIT License
 
 Copyright 2015 Google Inc. All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+
+================================================================================
+MIT License
+================================================================================
+
+Used by:
+  - fancy-regex 0.19.2  (https://github.com/fancy-regex/fancy-regex)
+
+The MIT License
+
+Copyright 2015 The Fancy Regex Authors.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -11025,6 +11257,37 @@ MIT License
 ================================================================================
 
 Used by:
+  - data-encoding 2.11.1  (https://github.com/ia0/data-encoding)
+
+The MIT License (MIT)
+
+Copyright (c) 2015-2020 Julien Cretin
+Copyright (c) 2017-2020 Google Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+================================================================================
+MIT License
+================================================================================
+
+Used by:
   - aws-lc-sys 0.44.0  (https://github.com/aws/aws-lc-rs)
 
 The MIT License (MIT)
@@ -11250,6 +11513,32 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
+
+================================================================================
+MIT No Attribution
+================================================================================
+
+Used by:
+  - borrow-or-share 0.2.4  (https://github.com/yescallop/borrow-or-share)
+
+MIT No Attribution
+
+Copyright 2024 Scallop Ye
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 ================================================================================
 Mozilla Public License 2.0
@@ -12169,6 +12458,7 @@ zlib License
 
 Used by:
   - foldhash 0.1.5  (https://github.com/orlp/foldhash)
+  - foldhash 0.2.0  (https://github.com/orlp/foldhash)
 
 Copyright (c) 2024 Orson Peters
 

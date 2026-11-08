@@ -1,0 +1,346 @@
+{
+  "comment": "Every statement the product runs against pgokf_web.users/sessions (scripts/catalog_parity.py product_statements; tests/test_release_integrity.py keeps this list equal to the source), with the arguments (and, where not 00000, the SQLSTATE) scripts/upgrade-parity.py executes them with, in order, as pgokf_writer, against a fresh catalog and against each reconciled catalog that keeps the declared column order. The transcripts must be identical.",
+  "statements": [
+    {
+      "sql": "SELECT 1 FROM pgokf_web.users LIMIT 0",
+      "runs": [
+        {
+          "args": []
+        }
+      ]
+    },
+    {
+      "sql": "SELECT 1 FROM pgokf_web.sessions LIMIT 0",
+      "runs": [
+        {
+          "args": []
+        }
+      ]
+    },
+    {
+      "sql": "SELECT count(*) FROM pgokf_web.users",
+      "runs": [
+        {
+          "args": []
+        }
+      ]
+    },
+    {
+      "sql": "SELECT role, password_hash, display_name, provider FROM pgokf_web.users WHERE name = $1",
+      "runs": [
+        {
+          "args": [
+            "upgrade-local"
+          ]
+        },
+        {
+          "args": [
+            "upgrade-sso"
+          ]
+        },
+        {
+          "args": [
+            "nobody"
+          ]
+        }
+      ]
+    },
+    {
+      "sql": "SELECT name, role, display_name, provider, count(*) OVER () FROM pgokf_web.users WHERE $1 = '' OR name ILIKE $2 ESCAPE '\\' OR display_name ILIKE $2 ESCAPE '\\' ORDER BY name LIMIT $3 OFFSET $4",
+      "runs": [
+        {
+          "args": [
+            "",
+            "%",
+            25,
+            0
+          ]
+        },
+        {
+          "args": [
+            "octo",
+            "%octo%",
+            25,
+            0
+          ]
+        },
+        {
+          "args": [
+            "",
+            "%",
+            1,
+            1
+          ]
+        },
+        {
+          "args": [
+            "",
+            "%",
+            25,
+            50
+          ]
+        }
+      ]
+    },
+    {
+      "sql": "SELECT count(*) FROM pgokf_web.users WHERE $1 = '' OR name ILIKE $2 ESCAPE '\\' OR display_name ILIKE $2 ESCAPE '\\'",
+      "runs": [
+        {
+          "args": [
+            "",
+            "%"
+          ]
+        },
+        {
+          "args": [
+            "octo",
+            "%octo%"
+          ]
+        }
+      ]
+    },
+    {
+      "sql": "SELECT EXISTS (SELECT 1 FROM pgokf_web.users WHERE name = $1)",
+      "runs": [
+        {
+          "args": [
+            "upgrade-sso"
+          ]
+        },
+        {
+          "args": [
+            "nobody"
+          ]
+        }
+      ]
+    },
+    {
+      "sql": "SELECT EXISTS ( SELECT 1 FROM pgokf_web.sessions WHERE nonce = $1 AND subject = $2 AND mode = $3 AND expires_at > now() )",
+      "runs": [
+        {
+          "args": [
+            "nonce-local",
+            "upgrade-local",
+            "users"
+          ]
+        },
+        {
+          "args": [
+            "nonce-sso",
+            "upgrade-sso",
+            "oidc"
+          ]
+        },
+        {
+          "args": [
+            "nonce-expired",
+            "upgrade-local",
+            "users"
+          ]
+        },
+        {
+          "args": [
+            "nonce-sso",
+            "upgrade-sso",
+            "users"
+          ]
+        }
+      ]
+    },
+    {
+      "sql": "SELECT count(*) FROM pgokf_web.sessions WHERE subject = $1 AND expires_at > now()",
+      "runs": [
+        {
+          "args": [
+            "upgrade-local"
+          ]
+        },
+        {
+          "args": [
+            "upgrade-sso"
+          ]
+        }
+      ]
+    },
+    {
+      "sql": "SELECT subject, count(*) FROM pgokf_web.sessions WHERE expires_at > now() GROUP BY subject ORDER BY subject",
+      "runs": [
+        {
+          "args": []
+        }
+      ]
+    },
+    {
+      "sql": "INSERT INTO pgokf_web.users (name, role, password_hash, display_name) VALUES ($1, $2, $3, $4)",
+      "runs": [
+        {
+          "args": [
+            "upgrade-new",
+            "editor",
+            "$argon2id$v=19$m=19456,t=2,p=1$bmV3$bmV3aGFzaA",
+            "New Person"
+          ]
+        },
+        {
+          "args": [
+            "upgrade-local",
+            "viewer",
+            "$argon2id$v=19$m=19456,t=2,p=1$ZHVw$ZHVw",
+            null
+          ],
+          "sqlstate": "23505"
+        }
+      ]
+    },
+    {
+      "sql": "INSERT INTO pgokf_web.users (name, role, password_hash, display_name, provider) VALUES ($1, $2, NULL, $3, $4) ON CONFLICT (name) DO NOTHING",
+      "runs": [
+        {
+          "args": [
+            "upgrade-sso-2",
+            "viewer",
+            "Second Octo",
+            "gh"
+          ]
+        },
+        {
+          "args": [
+            "upgrade-local",
+            "viewer",
+            "Taken",
+            "gh"
+          ]
+        }
+      ]
+    },
+    {
+      "sql": "UPDATE pgokf_web.users SET display_name = $3, updated_at = now() WHERE name = $1 AND provider = $2 AND display_name IS DISTINCT FROM $3",
+      "runs": [
+        {
+          "args": [
+            "upgrade-sso",
+            "gh",
+            "Octo Renamed"
+          ]
+        },
+        {
+          "args": [
+            "upgrade-local",
+            "gh",
+            "Not Mine"
+          ]
+        }
+      ]
+    },
+    {
+      "sql": "UPDATE pgokf_web.users SET role = $2, updated_at = now() WHERE provider = $1 AND role <> $2",
+      "runs": [
+        {
+          "args": [
+            "gh",
+            "viewer"
+          ]
+        }
+      ]
+    },
+    {
+      "sql": "UPDATE pgokf_web.users SET role = $2, updated_at = now() WHERE name = $1",
+      "runs": [
+        {
+          "args": [
+            "upgrade-sso",
+            "approver"
+          ]
+        }
+      ]
+    },
+    {
+      "sql": "UPDATE pgokf_web.users SET password_hash = $2, updated_at = now() WHERE name = $1 AND password_hash IS NOT NULL",
+      "runs": [
+        {
+          "args": [
+            "upgrade-local",
+            "$argon2id$v=19$m=19456,t=2,p=1$bmV3$Y2hhbmdlZA"
+          ]
+        },
+        {
+          "args": [
+            "upgrade-sso",
+            "$argon2id$v=19$m=19456,t=2,p=1$bmV3$c3Nv"
+          ]
+        }
+      ]
+    },
+    {
+      "sql": "INSERT INTO pgokf_web.sessions (nonce, subject, mode, provider, expires_at) VALUES ($1, $2, $3, $4, to_timestamp($5::bigint))",
+      "runs": [
+        {
+          "args": [
+            "nonce-new-local",
+            "upgrade-new",
+            "users",
+            null,
+            4102444800
+          ]
+        },
+        {
+          "args": [
+            "nonce-new-sso",
+            "upgrade-sso-2",
+            "oidc",
+            "gh",
+            4102444800
+          ]
+        }
+      ]
+    },
+    {
+      "sql": "DELETE FROM pgokf_web.sessions WHERE expires_at < now()",
+      "runs": [
+        {
+          "args": []
+        }
+      ]
+    },
+    {
+      "sql": "DELETE FROM pgokf_web.sessions WHERE nonce = $1",
+      "runs": [
+        {
+          "args": [
+            "nonce-new-local"
+          ]
+        }
+      ]
+    },
+    {
+      "sql": "DELETE FROM pgokf_web.sessions WHERE subject = $1",
+      "runs": [
+        {
+          "args": [
+            "upgrade-sso-2"
+          ]
+        }
+      ]
+    },
+    {
+      "sql": "DELETE FROM pgokf_web.sessions WHERE provider = $1",
+      "runs": [
+        {
+          "args": [
+            "gh"
+          ]
+        }
+      ]
+    },
+    {
+      "sql": "DELETE FROM pgokf_web.users WHERE name = $1 AND (SELECT count(*) FROM pgokf_web.users) > 1",
+      "runs": [
+        {
+          "args": [
+            "upgrade-new"
+          ]
+        }
+      ]
+    }
+  ]
+}

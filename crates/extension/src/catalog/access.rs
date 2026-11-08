@@ -8,12 +8,12 @@
 //! content out of the database - each append exactly one row to the
 //! administrator-only `pgokf_private.access_log`:
 //!
-//! - [`crate::catalog::export::export_parquet`] (`export_parquet`) - the
+//! - `crate::catalog::export::export_parquet` (`export_parquet`) - the
 //!   Parquet snapshot of a bundle's catalog tables written to a server
 //!   directory;
-//! - [`crate::catalog::source::export_sources`] (`export_sources`) - the
+//! - `crate::catalog::source::export_sources` (`export_sources`) - the
 //!   verbatim source files of a bundle reconstructed on disk;
-//! - [`crate::catalog::source::get_concept_source`] (`get_concept_source`) -
+//! - `crate::catalog::source::get_concept_source` (`get_concept_source`) -
 //!   the single-concept verbatim source-byte read delivered to the client.
 //!
 //! Each row is stamped with `pgokf_private.effective_tenant()` so a tenant's
@@ -23,7 +23,7 @@
 //! # Retention
 //!
 //! The access log shares the durable `sync_log_retention_days` policy (keeping
-//! the operator surface to one retention knob): after each append, [`record`]
+//! the operator surface to one retention knob): after each append, `record`
 //! prunes rows older than the window in the same transaction, exactly as the
 //! sync-log audit does. A retention of `0` (or no older rows) keeps history
 //! indefinitely.
@@ -31,10 +31,10 @@
 //! # Security model
 //!
 //! Because the append target lives in the administrator-only `pgokf_private`
-//! schema, [`record`] must run under owner rights - every caller is therefore a
+//! schema, `record` must run under owner rights - every caller is therefore a
 //! `SECURITY DEFINER` function (the two exports already were; `get_concept_source`
 //! is `SECURITY DEFINER` for exactly this reason, applying the tenant predicate
-//! explicitly). The reader surface, [`list_access_log`](pgokf::list_access_log),
+//! explicitly). The reader surface, `list_access_log`,
 //! is deliberately **admin-tier** (an exfiltration audit is sensitive): it is
 //! `SECURITY DEFINER`, granted only to `pgokf_admin`, and tenant-scoped.
 

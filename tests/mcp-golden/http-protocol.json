@@ -1,0 +1,98 @@
+[
+  {
+    "auth": "none",
+    "request": {
+      "id": 1,
+      "jsonrpc": "2.0",
+      "method": "ping"
+    },
+    "response": {
+      "error": "this endpoint needs a bearer token minted on the catalog's Admin page (pgokf-web), sent as an Authorization header"
+    },
+    "status": 401
+  },
+  {
+    "auth": "unknown",
+    "request": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "method": "ping"
+    },
+    "response": {
+      "error": "this endpoint needs a bearer token minted on the catalog's Admin page (pgokf-web), sent as an Authorization header"
+    },
+    "status": 401
+  },
+  {
+    "auth": "reader",
+    "request": "this is not json",
+    "response": {
+      "error": {
+        "code": -32700,
+        "message": "invalid JSON: expected ident at line 1 column 2"
+      },
+      "id": null,
+      "jsonrpc": "2.0"
+    },
+    "status": 200
+  },
+  {
+    "auth": "reader",
+    "request": "[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}]",
+    "response": {
+      "error": {
+        "code": -32600,
+        "message": "this server answers one request at a time; JSON-RPC batches are not supported"
+      },
+      "id": null,
+      "jsonrpc": "2.0"
+    },
+    "status": 200
+  },
+  {
+    "auth": "reader",
+    "request": {
+      "id": 3,
+      "jsonrpc": "2.0",
+      "method": "bogus/method"
+    },
+    "response": {
+      "error": {
+        "code": -32601,
+        "message": "unknown method \"bogus/method\""
+      },
+      "id": 3,
+      "jsonrpc": "2.0"
+    },
+    "status": 200
+  },
+  {
+    "auth": "reader",
+    "request": {
+      "jsonrpc": "2.0",
+      "method": "notifications/initialized"
+    },
+    "response": "",
+    "status": 202
+  },
+  {
+    "auth": "reader",
+    "request": {
+      "method": "GET"
+    },
+    "response": {
+      "error": "this server sends nothing unsolicited; POST JSON-RPC to /mcp"
+    },
+    "status": 405
+  },
+  {
+    "auth": "reader",
+    "request": {
+      "method": "DELETE"
+    },
+    "response": {
+      "error": "this server sends nothing unsolicited; POST JSON-RPC to /mcp"
+    },
+    "status": 405
+  }
+]

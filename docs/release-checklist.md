@@ -35,6 +35,14 @@ The in-database plain and provider-preloaded runs remain separate required gates
 `cargo test` includes `tests/api_stability.rs`, which fails if any public
 object lacks a `COMMENT ON` or if the locked public-function count drifts.
 
+For the 0.4 development surface, also require the two MCP gates in
+[the implementation specification](https://github.com/LogicOcean/pgokf/blob/main/spec/pgokf-0.4.0-mcp.md#11-acceptance-criteria):
+the preselected unmodified official scenarios (Gate A), and the native
+PG18/HTTP coverage ledger plus mutation controls (Gate B). Official Skills,
+Inspector, both SDKs and legacy golden tests remain mandatory. All designated
+commands must pass. The retained full alpha.11 fixture diagnostic is external
+research, not a release gate or a certification claim.
+
 ## 2. Supply-chain gates
 
 ```bash
@@ -59,7 +67,7 @@ failed provisioning or absent base images fail the workflow; there is no
 advisory success or skipped-coverage green. PG19 coverage is not established
 until its pinned **19 Beta 3**, nonpublishing actual clippy and in-database test steps complete. A provisioning
 failure blocks the support/release gate, even when other majors pass.
-`python3 tests/test_ci_coverage.py` (requires PyYAML) executes the missing-package
+`cargo test --locked -p pgokf-verifier` executes the missing-package
 failed-install and missing-image branches with local stubs and requires nonzero exits.
 
 ## 4. Per-major live smoke (repeat for PGVER = 15, 16, 17, 18)
@@ -193,7 +201,7 @@ version):
 docker run --rm --entrypoint cat ghcr.io/logicocean/pgokf:0.2.0-pg18 \
   /usr/share/postgresql/18/extension/pgokf--0.2.0.sql > /tmp/pgokf--0.2.0.sql
 install -m 644 /tmp/pgokf--0.2.0.sql "$("$PG_CONFIG" --sharedir)/extension/pgokf--0.2.0.sql"
-python3 scripts/upgrade-parity.py --pg-config "$PG_CONFIG"
+cargo run --locked -p pgokf-verifier -- parity --pg-config "$PG_CONFIG"
 ```
 
 The harness starts and removes its own local scratch cluster; it accepts no
@@ -331,9 +339,8 @@ these steps in order (these are publication instructions, not local gates):
 3. On **main after the tag**, update `packaging/homebrew/pgokf.rb` URL,
    SHA256, both `test do` version assertions, and its release-state comment
    together. Add the authenticated `0.3.1` digest to `KNOWN_RELEASE_DIGESTS`
-   in `tests/test_release_integrity.py` in the same commit. No placeholder is
-   allowed. Run `python3 tests/test_release_integrity.py` and
-   `python3 tests/test_release_tools.py`. This commit consumes the earlier
+   in the Rust release-integrity tests in `pgokf-verifier` in the same commit. No placeholder is
+   allowed. Run `cargo test --locked -p pgokf-verifier`. This commit consumes the earlier
    immutable tag; do not retag it.
 4. Copy that exact formula to `Formula/pgokf.rb` in a local checkout of
    `LogicOcean/homebrew-pgokf`. Verify `cmp` against the main formula, run
@@ -393,8 +400,8 @@ gh release create v0.3.1 --verify-tag --title 'pgokf 0.3.1' \
 | Release | version bump, tag, PGXN | tag == control == crate version |
 
 Before tagging, run the clean-commit arm64 macOS source-mechanics gate
-`scripts/test-homebrew-packaging.py NEW_EVIDENCE_DIRECTORY`, plus the portable
-`tests/test_homebrew_packaging.py` and `tests/test_cleanup_ownership.py` guards.
+`cargo run --locked -p pgokf-verifier -- homebrew-packaging . NEW_EVIDENCE_DIRECTORY`, plus the portable
+`cargo test --locked -p pgokf-verifier` guards.
 Retain the permanent cleanup evidence limitation in
 [the recovery record](releases/0.3.1-recovery.md#permanent-historical-cleanup-evidence-limitation).
 
@@ -408,7 +415,7 @@ use `/bin/bash` on x64 and arm64, and its
 uses `/bin/bash -e -o pipefail`. The current surfaces are `ubuntu-latest`,
 `ubuntu-24.04`, `ubuntu-24.04-arm` and `macos-15`; no Windows shell is covered.
 
-`tests/workflow_policy.py` validates parsed YAML and rejects PATH env overrides,
+`cargo run --locked -p pgokf-verifier -- workflow-check .` validates parsed YAML and rejects PATH env overrides,
 GITHUB_PATH/environment-file manipulation and shell overrides. It also compares
 workflow env and every job's parsed definition with the reviewed digests in
 `tests/workflow-contexts.json`. This closed execution contract catches inserted
@@ -416,9 +423,10 @@ setup steps, changed action inputs/outputs, computed environment-file names and
 YAML aliases without pretending to interpret arbitrary programs. Pinned toolchain
 and Docker setup actions retain their reviewed PATH setup. A legitimate job,
 action or command change requires reviewing that context and updating its digest
-using `execution_context()` in the same change, then rerunning the complete
-Python suite, `scripts/test-policy-mutations.py NEW_EVIDENCE_DIRECTORY` and
-actionlint. Do not regenerate the contract merely to silence a failing check.
+using `workflow::execution_context()` in the same change, then rerunning
+`cargo test --locked -p pgokf-verifier`, `policy-campaign . NEW_EVIDENCE_DIRECTORY`,
+the implementation campaign described in
+[Rust verification](rust-verification.md), and actionlint. Do not regenerate the contract merely to silence a failing check.
 This is a validated workflow execution contract, not a runner sandbox: runner
 binaries, the pinned action implementations and called source scripts remain
 trusted. The regression executes actual provisioning/Beta bodies with failing

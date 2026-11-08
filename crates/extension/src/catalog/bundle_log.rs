@@ -7,7 +7,7 @@
 //! (which may carry the bundle `okf_version`) and `log.md`, a per-directory
 //! **activity log**. Discovery has always skipped both. This module projects
 //! the second: during a sync the engine reads every `log.md` in the snapshot
-//! through the existing [`crate::catalog::sync::ByteSource`] - without ever
+//! through the existing `crate::catalog::sync::ByteSource` - without ever
 //! staging it as a concept - parses it defensively into ordered entries, and
 //! writes them into `pgokf.bundle_log`, keyed by the containing directory and a
 //! zero-based ordinal. `index.md` is unchanged; only `log.md` is now projected.
@@ -24,7 +24,7 @@
 //!
 //! # Refresh semantics
 //!
-//! [`project`] replaces the whole bundle's log rows (delete-then-insert inside
+//! `project` replaces the whole bundle's log rows (delete-then-insert inside
 //! the sync transaction), so editing, adding, or removing a `log.md` is
 //! reflected on the next sync and a bundle with no `log.md` simply has no rows.
 //! The table cascades from `pgokf.bundles`, so unregistering a bundle drops its
@@ -34,7 +34,7 @@
 //!
 //! `pgokf.bundle_log` is a public projection table with the same opt-in
 //! multi-tenant row-level security as `pgokf.links`; the reader-granted
-//! [`list_bundle_log`](pgokf::list_bundle_log) is an INVOKER function (so the
+//! `list_bundle_log` is an INVOKER function (so the
 //! caller's RLS applies) returning `pgokf.bundle_log_entry` ordered by
 //! directory then ordinal.
 

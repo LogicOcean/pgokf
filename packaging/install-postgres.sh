@@ -4,11 +4,13 @@ set -euo pipefail
 major=${1:?PostgreSQL major required}
 component=main
 image_tag=$major
-case "$major" in
-    15|16|17|18) ;;
-    19) component='main 19'; image_tag=19beta3 ;;
-    *) echo "Unreviewed PostgreSQL major: $major" >&2; exit 1 ;;
-esac
+if [[ "$major" == 19 ]]; then component='main 19'; image_tag=19beta3; fi
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+verifier() {
+    if [[ -n "${PGOKF_VERIFIER:-}" ]]; then "$PGOKF_VERIFIER" "$@";
+    else cargo run --locked --manifest-path "$ROOT/Cargo.toml" -p pgokf-verifier -- "$@"; fi
+}
+verifier postgres-target "$major" "$image_tag"
 # shellcheck source=/dev/null
 . /etc/os-release
 install -d /usr/share/postgresql-common/pgdg
@@ -19,10 +21,7 @@ apt-get update
 packages=()
 for package in "postgresql-$major" "postgresql-server-dev-$major"; do
     candidate=$(apt-cache policy "$package" | sed -n 's/^  Candidate: //p')
-    if [[ "$major" == 19 && "$candidate" != 19~beta3-* ]]; then
-        echo "Pinned 19 Beta 3 missing or changed: $package=$candidate" >&2; exit 1
-    fi
-    [[ -n "$candidate" && "$candidate" != '(none)' ]] || exit 1
+    verifier postgres-candidate "$major" "$image_tag" "$candidate"
     packages+=("$package=$candidate")
 done
 apt-get install -y "${packages[@]}" libclang-dev

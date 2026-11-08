@@ -1,0 +1,31 @@
+[
+  {
+    "auth": "writer",
+    "request": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "bundle_id": 1,
+          "concept_id": "skills/deploy/SKILL"
+        },
+        "name": "get_skill"
+      }
+    },
+    "response": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "result": {
+        "content": [
+          {
+            "text": "{\n  \"agent_skill\": {\n    \"description\": \"Deploy the widget service safely with the bundled preflight checks.\",\n    \"license\": \"Apache-2.0\",\n    \"metadata\": {\n      \"portable\": \"true\"\n    },\n    \"name\": \"deploy\",\n    \"tags\": [\n      \"deploy\",\n      \"widget\"\n    ]\n  },\n  \"bundle_id\": 1,\n  \"concept_id\": \"skills/deploy/SKILL\",\n  \"description\": \"Deploy the widget service safely with the bundled preflight checks.\",\n  \"file_hash\": \"2051e47073eb8e80e940cea9fb213a42dc991a45b856529ae57bd51435869b0b\",\n  \"name\": \"deploy\",\n  \"package_hash\": \"3bc74071c5e1b98ede6de8e372244db583fd0a4dd4e36a41df661d3611f9077f\",\n  \"package_root\": \"skills/deploy\",\n  \"resources\": [\n    {\n      \"byte_size\": 125,\n      \"class\": \"reference\",\n      \"concept_id\": \"skills/deploy/references/guide.md\",\n      \"file_hash\": \"b397582b64393c8d0d116752f083df2cdc07da4a12328efb656791d6452135ba\",\n      \"media_type\": \"text/markdown\",\n      \"path\": \"references/guide.md\",\n      \"sha256\": \"d015c85b6d3ae0905fe1ba457e94742889cd084f74fa9812254a421a83398616\"\n    },\n    {\n      \"byte_size\": 87,\n      \"class\": \"script\",\n      \"concept_id\": \"skills/deploy/scripts/check.sh\",\n      \"file_hash\": \"d25b04cd391faae954b7333a6b1e3dc67be6a3d15df7ae36b5fb8ad86fc07dbb\",\n      \"language\": \"bash\",\n      \"path\": \"scripts/check.sh\",\n      \"sha256\": \"d17363648b85a0dd048ef62131b2b71bdd21535ffa23376d7ea57af442a88ebc\"\n    }\n  ],\n  \"skill_md\": \"---\\nname: deploy\\ndescription: Deploy the widget service safely with the bundled preflight checks.\\nlicense: Apache-2.0\\nmetadata:\\n  portable: \\\"true\\\"\\ntags: [deploy, widget]\\n---\\n\\n# When to Use\\n\\nRun [the preflight check](scripts/check.sh) before reading [the guide](references/guide.md).\\n\",\n  \"visibility\": \"internal\"\n}",
+            "type": "text"
+          }
+        ],
+        "isError": false
+      }
+    },
+    "status": 200
+  }
+]

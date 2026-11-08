@@ -1,0 +1,28 @@
+[
+  {
+    "request": {
+      "id": 6,
+      "jsonrpc": "2.0",
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "name": "golden-scratch"
+        },
+        "name": "create_content_bundle"
+      }
+    },
+    "response": {
+      "id": 6,
+      "jsonrpc": "2.0",
+      "result": {
+        "content": [
+          {
+            "text": "{\n  \"created\": \"golden-scratch\",\n  \"sync\": {\n    \"added\": 0,\n    \"bundle_id\": 3,\n    \"path\": \"content:golden-scratch\",\n    \"removed\": 0,\n    \"total\": 0,\n    \"unchanged\": 0,\n    \"updated\": 0\n  }\n}",
+            "type": "text"
+          }
+        ],
+        "isError": false
+      }
+    }
+  }
+]

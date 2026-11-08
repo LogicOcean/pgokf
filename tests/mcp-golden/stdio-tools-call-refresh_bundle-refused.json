@@ -1,0 +1,28 @@
+[
+  {
+    "request": {
+      "id": 9,
+      "jsonrpc": "2.0",
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "bundle_id": 2
+        },
+        "name": "refresh_bundle"
+      }
+    },
+    "response": {
+      "id": 9,
+      "jsonrpc": "2.0",
+      "result": {
+        "content": [
+          {
+            "text": "\"bundle 2 (golden-content) is a content bundle: it has no source to re-read, and its documents are written with put_document\"",
+            "type": "text"
+          }
+        ],
+        "isError": true
+      }
+    }
+  }
+]

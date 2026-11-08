@@ -5918,7 +5918,7 @@ The anchor concept never changes across the runbook's revisions.\n";
         // (proving the search really ran through it, not through a fallback).
         let helper_hit = Spi::get_one_with_args::<String>(
             "SELECT concept_id FROM pgokf.bm25_hits('peregrine', $1, 5, 'pg_catalog.english',
-                                                   NULL, NULL, NULL, NULL, NULL, NULL, NULL)",
+                                                   NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)",
             &[bundle_id.into()],
         )
         .expect("bm25_hits executes for a non-superuser reader");
@@ -6984,6 +6984,63 @@ Use the solo skill on its own.\n";
             "the manifest is re-projected, not judged unchanged"
         );
         assert!(restored, "the refresh restores the skill row");
+    }
+
+    #[pg_test]
+    fn skill_manifest_digest_upgrade_backfills_and_is_idempotent() {
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_package_bundle(&bundle);
+        // Reproduce the pre-upgrade metadata gap without altering stored bytes.
+        Spi::run(
+            "ALTER TABLE pgokf.skills ALTER COLUMN skill_md_sha256 DROP NOT NULL;
+             ALTER TABLE pgokf.skills ALTER COLUMN skill_md_byte_size DROP NOT NULL;
+             UPDATE pgokf.skills SET skill_md_sha256 = NULL, skill_md_byte_size = NULL;",
+        )
+        .expect("metadata gap fixture succeeds");
+        // The dump receipt requires CREATE/ALTER EXTENSION context; the
+        // separate real upgrade-parity gate exercises that final statement.
+        let upgrade = include_str!("../sql/pgokf--0.3.1--0.4.0-dev1.sql")
+            .strip_suffix("SELECT pgokf_private.register_dump_relations();\n")
+            .expect("upgrade ends with the extension-only dump receipt");
+        for _ in 0..2 {
+            Spi::run(upgrade).expect("upgrade edge can be reapplied");
+            assert_eq!(
+                Spi::get_one_with_args::<bool>(
+                    "SELECT skill_md_sha256 = encode(sha256(skill_md), 'hex')
+                        AND skill_md_byte_size = octet_length(skill_md)
+                     FROM pgokf.skills WHERE bundle_id = $1 AND concept_id = $2",
+                    &[bundle_id.into(), SKILL_ID.into()],
+                )
+                .expect("backfill query executes"),
+                Some(true),
+            );
+        }
+    }
+
+    #[pg_test]
+    fn skill_manifest_digest_tracks_exact_bytes_on_ingest_and_refresh() {
+        let bundle = FixtureBundle::create();
+        let bundle_id = register_package_bundle(&bundle);
+        for source in [
+            PACKAGE_MANIFEST.to_owned(),
+            format!("{PACKAGE_MANIFEST}\r\nUnicode café 🦀\r\n"),
+        ] {
+            fs::write(bundle.root.join(PACKAGE_ROOT).join("SKILL.md"), &source)
+                .expect("manifest is writable");
+            Spi::run_with_args("SELECT pgokf.refresh_bundle($1)", &[bundle_id.into()])
+                .expect("refresh succeeds");
+            let valid = Spi::get_one_with_args::<bool>(
+                "SELECT skill_md = $3::bytea
+                    AND skill_md_sha256 = encode(sha256($3::bytea), 'hex')
+                    AND skill_md_byte_size = octet_length($3::bytea)
+                    AND skill_md_sha256 <> source_file_hash
+                    AND skill_md_sha256 <> package_hash
+                 FROM pgokf.skills WHERE bundle_id = $1 AND concept_id = $2",
+                &[bundle_id.into(), SKILL_ID.into(), source.as_bytes().into()],
+            )
+            .expect("digest metadata query executes");
+            assert_eq!(valid, Some(true), "digest and size describe exact bytes");
+        }
     }
 
     // Keep the setup and successive assertions of this database scenario together.
@@ -8948,6 +9005,30 @@ Use the solo skill on its own.\n";
         assert_eq!(tail, "stale{dependency_source_changed}");
     }
 
+    fn register_unrelated_skipcap_target() {
+        // An unrelated registered target shows whether escalation fired.
+        Spi::run(
+            "INSERT INTO pgokf.bundles (path, name)
+             VALUES ('/tmp/pgokf-test-skipfree-source', 'skipfree-source'),
+                    ('/tmp/pgokf-test-skipfree-target', 'skipfree-target')",
+        )
+        .expect("unrelated bundles insert");
+        Spi::run(
+            "INSERT INTO pgokf.bundle_freshness (bundle_id)
+             SELECT id FROM pgokf.bundles WHERE name LIKE 'skipfree-%'",
+        )
+        .expect("unrelated freshness rows insert");
+        Spi::run(
+            "INSERT INTO pgokf.freshness_dependency
+                 (producer, source_bundle_id, selector_kind, target_bundle_id)
+             SELECT 'producer-a', s.id, 'bundle', t.id
+             FROM pgokf.bundles s
+             JOIN pgokf.bundles t ON t.name = 'skipfree-target'
+             WHERE s.name = 'skipfree-source'",
+        )
+        .expect("unrelated edge inserts");
+    }
+
     #[pg_test]
     fn a_skip_consumed_edge_budget_still_invalidates_the_remainder() {
         // The edge-fetch truncation probe: at the walk's boundary node the
@@ -8993,27 +9074,7 @@ Use the solo skill on its own.\n";
              WHERE s.name LIKE 'skipcap-%' AND s.name <> 'skipcap-1026'",
         )
         .expect("chain edges insert");
-        // An unrelated registered target shows whether escalation fired.
-        Spi::run(
-            "INSERT INTO pgokf.bundles (path, name)
-             VALUES ('/tmp/pgokf-test-skipfree-source', 'skipfree-source'),
-                    ('/tmp/pgokf-test-skipfree-target', 'skipfree-target')",
-        )
-        .expect("unrelated bundles insert");
-        Spi::run(
-            "INSERT INTO pgokf.bundle_freshness (bundle_id)
-             SELECT id FROM pgokf.bundles WHERE name LIKE 'skipfree-%'",
-        )
-        .expect("unrelated freshness rows insert");
-        Spi::run(
-            "INSERT INTO pgokf.freshness_dependency
-                 (producer, source_bundle_id, selector_kind, target_bundle_id)
-             SELECT 'producer-a', s.id, 'bundle', t.id
-             FROM pgokf.bundles s
-             JOIN pgokf.bundles t ON t.name = 'skipfree-target'
-             WHERE s.name = 'skipfree-source'",
-        )
-        .expect("unrelated edge inserts");
+        register_unrelated_skipcap_target();
 
         // Arrange: one real source bundle feeding the chain head.
         let source = FixtureBundle::create();

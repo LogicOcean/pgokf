@@ -9,13 +9,15 @@
 //! over HTTP the caller is a bearer token whose role decides which tools it
 //! may reach, and whose requests must never act on this host's filesystem.
 
-use std::sync::OnceLock;
-
 use serde_json::{Value, json};
 
-use crate::catalog::{self, Catalog};
+use crate::catalog::Catalog;
+use crate::registry::{self, Availability};
 use crate::rpc::{INVALID_PARAMS, METHOD_NOT_FOUND, Request, Response};
-use crate::tokens::{Bearer, Role, ToolAccess as _};
+use crate::service::{AuthMode, CatalogCommandService, CatalogReadService, PrincipalContext};
+use crate::tokens::Bearer;
+#[cfg(test)]
+use crate::tokens::{Role, ToolAccess as _};
 
 /// The MCP protocol revisions this server implements, oldest first. The
 /// messages are the same across all three for the tools surface; the last
@@ -24,11 +26,13 @@ pub(crate) const PROTOCOL_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26", "202
 
 /// JSON-RPC error code for a call the caller's role does not allow. The
 /// specification reserves -32000 to -32099 for the server's own errors.
-pub(crate) const NOT_PERMITTED: i64 = -32001;
+#[cfg(test)]
+pub(crate) const NOT_PERMITTED: i64 = crate::policy::NOT_PERMITTED;
 
 /// How much of a caller-supplied name is quoted back into a log line or an
 /// error message. The rest is the caller's to choose, so it is bounded and
 /// escaped rather than echoed.
+#[cfg(test)]
 const ECHO_MAX: usize = 64;
 
 /// Who is asking, and what that lets them reach.
@@ -43,72 +47,41 @@ pub(crate) enum Caller {
 }
 
 impl Caller {
-    /// The tools this caller may call, from the one list both transports
-    /// serve. A remote caller is never shown a tool its role cannot call,
-    /// nor an argument that would act on this host.
-    fn tools(&self) -> Value {
-        let Value::Array(tools) = Catalog::tool_definitions() else {
-            return json!([]);
-        };
-        let Caller::Remote(bearer) = self else {
-            return Value::Array(tools);
-        };
+    fn principal(&self) -> PrincipalContext {
+        match self {
+            Self::Local => PrincipalContext::local(),
+            Self::Remote(bearer) => PrincipalContext {
+                principal_id: bearer.principal_id.clone(),
+                token_name: Some(bearer.name.clone()),
+                tenant: bearer.tenant.clone(),
+                role: bearer.role,
+                auth_mode: AuthMode::BearerToken,
+            },
+        }
+    }
+
+    fn tools_with_policy(&self, policy: &crate::policy::PolicyService) -> Value {
+        let principal = self.principal();
         Value::Array(
-            tools
+            policy
+                .visible_tools(&principal)
                 .into_iter()
-                .filter(|tool| {
-                    tool["name"]
-                        .as_str()
-                        .is_some_and(|name| bearer.role.allows_tool(name))
-                })
-                .map(without_host_only_arguments)
+                .map(|spec| spec.definition(principal.is_remote()))
                 .collect(),
         )
     }
 
-    /// Why this caller may not make this call, if it may not: the JSON-RPC
-    /// code and the message to send back.
-    fn refuse(&self, tool: &str, arguments: &Value) -> Option<(i64, String)> {
-        let Caller::Remote(bearer) = self else {
-            return None;
-        };
-        // A tool no role names is unknown rather than forbidden; the
-        // catalog reports it, exactly as it does over stdio.
-        if Role::any_allows(tool) && !bearer.role.allows_tool(tool) {
-            let least = Role::all()
-                .iter()
-                .find(|role| role.allows_tool(tool))
-                .map_or_else(|| "another".to_owned(), ToString::to_string);
-            return Some((
-                NOT_PERMITTED,
-                format!(
-                    "the {} role may not call {}; a token with the {least} role can",
-                    bearer.role,
-                    echo(tool)
-                ),
-            ));
-        }
-        let refused = host_only_arguments()
-            .iter()
-            .find(|name| arguments.get(name.as_str()).is_some_and(|v| !v.is_null()))?;
-        Some((
-            INVALID_PARAMS,
-            format!(
-                "'{refused}' acts on this server's own filesystem, not yours, and is refused \
-                 over HTTP; leave it out and the files come back in the result"
-            ),
-        ))
+    #[cfg(test)]
+    fn tools(&self) -> Value {
+        self.tools_with_policy(&crate::policy::PolicyService::new(true, true))
     }
 
-    /// The OKF actor a write by this caller is recorded under: the token
-    /// that made it, so the catalog names what wrote a document as plainly
-    /// as the log does. A local caller launched this process and is not
-    /// named by a token, so it is the server itself.
-    fn actor(&self) -> String {
-        match self {
-            Caller::Local => "agent:pgokf-mcp".to_owned(),
-            Caller::Remote(bearer) => format!("agent:{}", bearer.name),
-        }
+    fn refuse(&self, tool: &str, arguments: &Value) -> Option<(i64, String)> {
+        crate::policy::PolicyService::new(true, true).legacy_refusal(
+            &self.principal(),
+            tool,
+            arguments,
+        )
     }
 
     /// How this caller is named in the log. Stdio is silent — its output is
@@ -132,17 +105,67 @@ pub(crate) async fn handle(
     request: &Request,
     id: Value,
 ) -> Response {
-    match request.method.as_str() {
+    let modern = crate::modern::is_modern(request);
+    if modern && let Err(response) = crate::modern::validate(request) {
+        return response;
+    }
+    if !modern && request.method.starts_with("skills/") {
+        return Response::error(
+            id,
+            METHOD_NOT_FOUND,
+            "Skills extension requires MCP 2026-07-28",
+        );
+    }
+    let mut response = match request.method.as_str() {
+        "server/discover" => Response::success(id, crate::modern::discover(true, true)),
         "initialize" => Response::success(id, initialize_result(&request.params)),
-        "tools/list" => Response::success(id, json!({ "tools": caller.tools() })),
-        "tools/call" => tools_call(catalog, caller, &request.params, id).await,
+        "tools/list" => Response::success(
+            id,
+            json!({ "tools": tool_definitions(catalog, caller, modern) }),
+        ),
+        "tools/call" => tools_call(catalog, caller, &request.params, id, modern).await,
+        "resources/list"
+        | "resources/templates/list"
+        | "resources/read"
+        | "skills/list"
+        | "skills/get" => {
+            let principal = caller.principal();
+            match CatalogReadService::new(catalog, &principal)
+                .method(&request.method, &request.params)
+                .await
+            {
+                Ok(value) => Response::success(id, value),
+                Err(error) => Response::error_data(
+                    id,
+                    INVALID_PARAMS,
+                    error.message(),
+                    json!({"code":error.code()}),
+                ),
+            }
+        }
         "ping" => Response::success(id, json!({})),
         other => Response::error(
             id,
             METHOD_NOT_FOUND,
             format!("unknown method {}", echo(other)),
         ),
+    };
+    if modern {
+        crate::modern::decorate(&request.method, &mut response);
     }
+    response
+}
+
+fn tool_definitions(catalog: &Catalog, caller: &Caller, modern: bool) -> Value {
+    let mut tools = caller.tools_with_policy(&catalog.policy());
+    if !modern && let Some(tools) = tools.as_array_mut() {
+        for tool in tools {
+            let schema = tool["outputSchema"].take();
+            tool["outputSchema"] = json!({"$schema":"https://json-schema.org/draft/2020-12/schema",
+                "type":"object","properties":{"value":schema},"required":["value"],"additionalProperties":false});
+        }
+    }
+    tools
 }
 
 /// The `initialize` result: protocol version, capabilities, and server info.
@@ -156,9 +179,14 @@ pub(crate) fn initialize_result(params: &Value) -> Value {
         .filter(|asked| PROTOCOL_VERSIONS.contains(asked))
         .or_else(|| PROTOCOL_VERSIONS.last().copied())
         .unwrap_or_default();
+    let capabilities = if version == "2025-06-18" {
+        json!({"tools":{},"resources":{}})
+    } else {
+        json!({"tools":{}})
+    };
     json!({
         "protocolVersion": version,
-        "capabilities": { "tools": {} },
+        "capabilities": capabilities,
         "serverInfo": {
             "name": "pgokf-mcp",
             "version": env!("CARGO_PKG_VERSION"),
@@ -170,22 +198,127 @@ pub(crate) fn initialize_result(params: &Value) -> Value {
 /// tool, and wrap the outcome as an MCP tool result. A tool-execution
 /// failure is reported in-band as an `isError` result (not a JSON-RPC
 /// protocol error), per MCP.
-async fn tools_call(catalog: &Catalog, caller: &Caller, params: &Value, id: Value) -> Response {
+async fn tools_call(
+    catalog: &Catalog,
+    caller: &Caller,
+    params: &Value,
+    id: Value,
+    modern: bool,
+) -> Response {
     let Some(name) = params.get("name").and_then(Value::as_str) else {
         return Response::error(id, INVALID_PARAMS, "tools/call requires a string 'name'");
     };
     let empty = json!({});
     let arguments = params.get("arguments").unwrap_or(&empty);
+    if !arguments.is_object() {
+        return Response::error(id, INVALID_PARAMS, "tool arguments must be an object");
+    }
 
     if let Some((code, message)) = caller.refuse(name, arguments) {
         caller.note("was refused", name);
-        return Response::error(id, code, message);
+        return Response::error(id, if modern { INVALID_PARAMS } else { code }, message);
     }
     caller.note("called", name);
 
-    match catalog.call_tool(name, arguments, &caller.actor()).await {
-        Ok(data) => Response::success(id, tool_result(&data, false)),
-        Err(error) => Response::success(id, tool_result(&json!(format!("{error:#}")), true)),
+    let Some(spec) = registry::by_name(name) else {
+        if modern {
+            return Response::error(id, INVALID_PARAMS, "unknown tool");
+        }
+        let message = format!("unknown tool '{name}'");
+        let mut result = tool_result(&json!(message), true);
+        result["structuredContent"] =
+            json!({"value":{"code":"invalid_argument", "message":message}});
+        return Response::success(id, result);
+    };
+    let principal = caller.principal();
+    let outcome = if spec.availability == Availability::Reader {
+        CatalogReadService::new(catalog, &principal)
+            .call(spec, arguments)
+            .await
+    } else {
+        CatalogCommandService::new(catalog, &principal)
+            .call(spec, arguments)
+            .await
+    };
+    let mut result = tool_result(&outcome.value, outcome.is_error);
+    if let Some(legacy) = outcome.legacy_value {
+        result["content"][0]["text"] =
+            json!(serde_json::to_string_pretty(&legacy).unwrap_or_default());
+    }
+    if modern && !outcome.is_error {
+        add_resource_links(&mut result, name, arguments);
+    }
+    if let Some(cursor) = outcome.next_cursor {
+        result["_meta"] = json!({"io.logicocean.pgokf/nextCursor":cursor});
+    }
+    if let Some(evidence) = outcome.evidence {
+        if result.get("_meta").is_none() {
+            result["_meta"] = json!({});
+        }
+        result["_meta"]["io.logicocean.pgokf/catalogEvidence"] = evidence;
+    }
+    if !modern {
+        result["structuredContent"] = json!({"value":result["structuredContent"].take()});
+    }
+    Response::success(id, result)
+}
+
+fn add_resource_links(result: &mut Value, tool: &str, arguments: &Value) {
+    let mut links = Vec::new();
+    if matches!(
+        tool,
+        "concept_search"
+            | "find_similar"
+            | "get_concept"
+            | "concept_neighbors"
+            | "traverse_concepts"
+    ) {
+        if let Some(rows) = result["structuredContent"].as_array_mut() {
+            for row in rows {
+                let bundle = row
+                    .get("bundle_id")
+                    .and_then(Value::as_i64)
+                    .or_else(|| arguments.get("bundle_id").and_then(Value::as_i64));
+                let key = row
+                    .get("concept_id")
+                    .or_else(|| row.get("neighbor_id"))
+                    .and_then(Value::as_str);
+                if let (Some(bundle), Some(key)) = (bundle, key) {
+                    let uri = crate::uri::ResourceUri::Concept {
+                        bundle_id: bundle,
+                        concept_id: key.into(),
+                    }
+                    .render();
+                    if let Ok(uri) = uri {
+                        links.push(json!({"type":"resource_link","uri":uri,"name":key,
+                            "mimeType":"application/vnd.pgokf.concept+json"}));
+                        row["uri"] = json!(uri);
+                    }
+                }
+            }
+        }
+    } else if tool == "get_skill" {
+        let data = &result["structuredContent"];
+        if let (Some(bundle), Some(key), Some(name)) = (
+            data["bundle_id"].as_i64(),
+            data["concept_id"].as_str(),
+            data["name"].as_str(),
+        ) {
+            let uri = crate::uri::ResourceUri::SkillFile {
+                bundle_id: bundle,
+                concept_id: key.into(),
+                skill_name: name.into(),
+                member_path: "SKILL.md".into(),
+            }
+            .render();
+            if let Ok(uri) = uri {
+                links.push(json!({"type":"resource_link","uri":uri,"name":name,"mimeType":"text/markdown"}));
+                result["structuredContent"]["uri"] = json!(uri);
+            }
+        }
+    }
+    if let Some(contents) = result["content"].as_array_mut() {
+        contents.extend(links);
     }
 }
 
@@ -196,62 +329,17 @@ pub(crate) fn tool_result(data: &Value, is_error: bool) -> Value {
     json!({
         "content": [ { "type": "text", "text": text } ],
         "isError": is_error,
+        "structuredContent": data,
     })
 }
 
-/// The arguments the tool schemas mark as acting on the host this server
-/// runs on. Reading them from the schemas rather than keeping a list here
-/// means the next such argument is refused over the network the day it is
-/// added, not the day someone remembers this file.
+#[cfg(test)]
 fn host_only_arguments() -> &'static [String] {
-    static NAMES: OnceLock<Vec<String>> = OnceLock::new();
-    NAMES.get_or_init(|| {
-        let mut names: Vec<String> = Vec::new();
-        let Value::Array(tools) = Catalog::tool_definitions() else {
-            return names;
-        };
-        for tool in tools {
-            let Some(properties) = tool
-                .pointer("/inputSchema/properties")
-                .and_then(Value::as_object)
-            else {
-                continue;
-            };
-            for (name, schema) in properties {
-                if schema.get(catalog::HOST_ONLY).and_then(Value::as_bool) == Some(true)
-                    && !names.contains(name)
-                {
-                    names.push(name.clone());
-                }
-            }
-        }
-        names
-    })
+    registry::host_only_arguments()
 }
 
-/// A tool definition with the arguments that act on this host taken out, so
-/// a remote client is never offered one it will be refused for using.
-fn without_host_only_arguments(mut tool: Value) -> Value {
-    if let Some(properties) = tool
-        .pointer_mut("/inputSchema/properties")
-        .and_then(Value::as_object_mut)
-    {
-        properties.retain(|_, schema| {
-            schema.get(catalog::HOST_ONLY).and_then(Value::as_bool) != Some(true)
-        });
-    }
-    tool
-}
-
-/// Quote a caller-supplied name back, bounded and escaped. It reaches a log
-/// line and an error message, and everything in it was chosen by whoever
-/// sent the request.
 fn echo(text: &str) -> String {
-    let mut shown: String = text.chars().take(ECHO_MAX).collect();
-    if text.chars().nth(ECHO_MAX).is_some() {
-        shown.push('…');
-    }
-    format!("{shown:?}")
+    registry::echo(text)
 }
 
 #[cfg(test)]
@@ -269,6 +357,7 @@ mod tests {
 
     fn remote(role: Role) -> Caller {
         Caller::Remote(Bearer {
+            principal_id: "test-principal".into(),
             tenant: None,
             name: "fleet".to_owned(),
             role,

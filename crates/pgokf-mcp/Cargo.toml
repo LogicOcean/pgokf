@@ -21,18 +21,23 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0"
+base64 = "0.22"
+hmac = "0.12"
+sha2 = "0.10"
+getrandom = "0.3"
 axum = { version = "0.8", default-features = false, features = [
     "http1",
     "json",
     "tokio",
 ] }
 clap = { version = "4.5", features = ["derive", "env"] }
-pgokf-companion = { version = "=0.3.1", path = "../pgokf-companion", features = [
+jsonschema.workspace = true
+pgokf-companion = { version = "=0.4.0-dev3", path = "../pgokf-companion", features = [
     "documents",
     "mcp-token",
 ] }
-pgokf-pgconn = { version = "=0.3.1", path = "../pgokf-pgconn" }
-pgokf-workspace = { version = "=0.3.1", path = "../pgokf-workspace" }
+pgokf-pgconn = { version = "=0.4.0-dev3", path = "../pgokf-pgconn" }
+pgokf-workspace = { version = "=0.4.0-dev3", path = "../pgokf-workspace" }
 serde.workspace = true
 serde_json.workspace = true
 tokio = { version = "1.40", features = [

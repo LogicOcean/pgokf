@@ -1,0 +1,28 @@
+[
+  {
+    "request": {
+      "id": 7,
+      "jsonrpc": "2.0",
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "name": "golden-content"
+        },
+        "name": "create_content_bundle"
+      }
+    },
+    "response": {
+      "id": 7,
+      "jsonrpc": "2.0",
+      "result": {
+        "content": [
+          {
+            "text": "\"a bundle named 'golden-content' already exists\"",
+            "type": "text"
+          }
+        ],
+        "isError": true
+      }
+    }
+  }
+]

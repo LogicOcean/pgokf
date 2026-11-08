@@ -278,9 +278,9 @@ services:
     environment:
       OKF_PG_URL: "postgresql://${PGOKF_READER_ROLE:-okf_reader}:${PGOKF_READER_PASSWORD}@db:5432/${POSTGRES_DB:-okf}"
       # What the writer and admin token roles need. Leave it unset to serve a
-      # read-only endpoint: their tools are still listed, and say plainly that
-      # this endpoint does not write. Set it and a writer token may add or
-      # replace documents in a content bundle, an admin token may create,
+      # read-only endpoint: their tools are then not advertised, and a call to
+      # one is refused as writer_unavailable. Set it and a writer token may add
+      # or replace documents in a content bundle, an admin token may create,
       # refresh, enable, disable and retire bundles - and what an agent writes
       # arrives unverified whatever it claims, for a person to review.
       OKF_PG_WRITER_URL: ${OKF_MCP_WRITER:-}

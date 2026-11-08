@@ -65,8 +65,11 @@ mkdir -p "$WORK" "$SOCK"
 # --------------------------------------------------------------------------
 cleanup() {
     local status=$?
-    if [[ -d "$PGDATA" ]] && "$PG_CTL" -D "$PGDATA" status >/dev/null 2>&1; then
-        "$PG_CTL" -D "$PGDATA" -m immediate -w stop >/dev/null 2>&1 || true
+    if [[ -f "$PGDATA/postmaster.pid" ]]; then
+        if ! "$PG_CTL" -D "$PGDATA" -m immediate -w -t 30 stop; then
+            echo "Scratch PostgreSQL stop failed; preserving $WORK and $SOCK" >&2
+            exit 1
+        fi
     fi
     rm -rf "$WORK" "$SOCK"
     exit "$status"
@@ -144,18 +147,14 @@ note "repo HEAD        : $(cd "$REPO_ROOT" && git rev-parse --short HEAD 2>/dev/
 # Corpus generation
 # --------------------------------------------------------------------------
 log "Generating corpus"
-python3 "$SCRIPT_DIR/generate_corpus.py" \
+cargo run --quiet --locked --manifest-path "$REPO_ROOT/Cargo.toml" -p pgokf-verifier -- corpus \
     --count "$CORPUS_COUNT" --out "$CORPUS" --seed "$SEED" \
     --manifest "$MANIFEST" >/dev/null
-FILE_COUNT="$(find "$CORPUS" -name '*.md' -type f | wc -l | tr -d ' ')"
+FILE_COUNT="$(cargo run --quiet --locked --manifest-path "$REPO_ROOT/Cargo.toml" -p pgokf-verifier -- corpus-check "$CORPUS")"
 note "markdown files  : $FILE_COUNT"
-if (( FILE_COUNT < 10000 )); then
-    echo "ERROR: corpus has $FILE_COUNT files (< 10000)" >&2
-    exit 1
-fi
 
 # Read the query-driving facts from the manifest.
-json_get() { python3 -c "import json,sys;print(json.load(open('$MANIFEST'))['$1'])"; }
+json_get() { cargo run --quiet --locked --manifest-path "$REPO_ROOT/Cargo.toml" -p pgokf-verifier -- corpus-field "$MANIFEST" "$1"; }
 SEED_CONCEPT="$(json_get seed_concept_id)"
 TYPE_VALUE="$(json_get type_value)"
 TYPE_EXPECTED="$(json_get type_expected_count)"

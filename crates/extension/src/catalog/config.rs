@@ -37,7 +37,7 @@
 //! of them marks every bundle holding embedding rows stale
 //! (`embedding_contract_changed`) in the same transaction, before new vectors
 //! are queued. Every value is
-//! validated and coerced per key ([`coerce`]); an unknown key or a value of the
+//! validated and coerced per key (`coerce`); an unknown key or a value of the
 //! wrong shape or domain is rejected with SQLSTATE `22023`. `pgokf.get_config()`
 //! is a reader-level projection returning the effective policy as `jsonb`.
 //!

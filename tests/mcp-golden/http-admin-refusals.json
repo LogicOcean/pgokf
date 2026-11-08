@@ -1,0 +1,56 @@
+[
+  {
+    "auth": "admin",
+    "request": {
+      "id": 1,
+      "jsonrpc": "2.0",
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "bundle_ids": [
+            1
+          ],
+          "limit": 10,
+          "output_dir": "/tmp/golden-refused",
+          "target": "claude-code"
+        },
+        "name": "build_workspace_plugin"
+      }
+    },
+    "response": {
+      "error": {
+        "code": -32602,
+        "message": "'output_dir' acts on this server's own filesystem, not yours, and is refused over HTTP; leave it out and the files come back in the result"
+      },
+      "id": 1,
+      "jsonrpc": "2.0"
+    },
+    "status": 200
+  },
+  {
+    "auth": "admin",
+    "request": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "method": "tools/call",
+      "params": {
+        "arguments": {},
+        "name": "no_such_tool"
+      }
+    },
+    "response": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "result": {
+        "content": [
+          {
+            "text": "\"unknown tool 'no_such_tool'\"",
+            "type": "text"
+          }
+        ],
+        "isError": true
+      }
+    },
+    "status": 200
+  }
+]

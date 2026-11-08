@@ -3,7 +3,7 @@
 //! `list_bundles`.
 //!
 //! This module fills the admin seam described in
-//! [`crate::catalog`](crate::catalog): the SQL-facing administration surface,
+//! [`crate::catalog`]: the SQL-facing administration surface,
 //! attached without touching the sync engine.
 //!
 //! # Objects owned here

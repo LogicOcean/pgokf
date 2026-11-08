@@ -1,0 +1,638 @@
+{
+  "adopt": [
+    "pgokf.list_scheduled_refreshes()",
+    "pgokf.registry_set_status(uuid, text)",
+    "pgokf.registry_set_poll_interval(uuid, integer)"
+  ],
+  "retired": [
+    "pgokf.concept_search_semantic(real[], bigint, integer)",
+    "pgokf.concept_search_hybrid(text, real[], bigint, integer)",
+    "pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text)"
+  ],
+  "helper": "pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[])",
+  "semantic": "pgokf.concept_search_semantic(real[], bigint, integer, text[])",
+  "hybrid": "pgokf.concept_search_hybrid(text, real[], bigint, integer, text[])",
+  "reconciled": [
+    "pgokf.concept_search_semantic(real[], bigint, integer, text[])",
+    "pgokf.concept_search_hybrid(text, real[], bigint, integer, text[])",
+    "pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[])",
+    "pgokf.get_skill(bigint, text)",
+    "pgokf.get_script(bigint, text)",
+    "pgokf.get_reference(bigint, text, boolean)"
+  ],
+  "defaulted_calls": [
+    "pgokf.concept_search_semantic(ARRAY[0.1,0.2]::real[])",
+    "pgokf.concept_search_semantic(ARRAY[0.1,0.2]::real[], NULL::bigint, 10)",
+    "pgokf.concept_search_hybrid('refreshed', ARRAY[0.1,0.2]::real[])",
+    "pgokf.concept_search_hybrid('refreshed', ARRAY[0.1,0.2]::real[], NULL::bigint, 10)"
+  ],
+  "web_fingerprint": "\nSELECT 'user:' || row_to_json(u)::text FROM (SELECT name, role, password_hash, display_name, provider,\n    created_at, updated_at FROM pgokf_web.users) u\nUNION ALL SELECT 'session:' || row_to_json(s)::text FROM (SELECT nonce, subject, mode, provider, expires_at,\n    created_at FROM pgokf_web.sessions) s\nUNION ALL SELECT 'provider:' || row_to_json(p)::text FROM (SELECT id, enabled, kind, issuer, client_id,\n    client_secret, redirect_url, scopes, subject_claims, groups_claim, provider_name, role_map, default_role,\n    created_at, updated_at, updated_by FROM pgokf_web.identity_providers) p\nUNION ALL SELECT 'token:' || row_to_json(k)::text FROM (SELECT name, role, tenant, digest, created_by,\n    created_at FROM pgokf_web.mcp_tokens) k\nORDER BY 1;",
+  "web_snapshot": "SELECT 'user', name, role, password_hash, display_name, provider, created_at = now(), updated_at = now() FROM pgokf_web.users ORDER BY name;\nSELECT 'session', nonce, subject, mode, provider, expires_at, created_at = now() FROM pgokf_web.sessions ORDER BY nonce;",
+  "attempt": "CREATE FUNCTION pg_temp.attempt(statement text) RETURNS text LANGUAGE plpgsql AS $attempt$\nDECLARE v_state text; v_constraint text;\nBEGIN\n    EXECUTE statement;\n    RETURN 'ok';\nEXCEPTION WHEN OTHERS THEN\n    GET STACKED DIAGNOSTICS v_state = RETURNED_SQLSTATE, v_constraint = CONSTRAINT_NAME;\n    RETURN v_state || ':' || coalesce(v_constraint, '');\nEND\n$attempt$;",
+  "constraint_probes": [
+    [
+      "password and provider",
+      "INSERT INTO pgokf_web.users (name, role, password_hash, provider) VALUES ('probe-both', 'viewer', 'h', 'gh')"
+    ],
+    [
+      "neither password nor provider",
+      "INSERT INTO pgokf_web.users (name, role) VALUES ('probe-none', 'viewer')"
+    ],
+    [
+      "provider slug",
+      "INSERT INTO pgokf_web.users (name, role, provider) VALUES ('probe-slug', 'viewer', 'Not A Slug')"
+    ],
+    [
+      "display control character",
+      "INSERT INTO pgokf_web.users (name, role, password_hash, display_name) VALUES ('probe-display', 'viewer', 'h', E'bad\\x01')"
+    ],
+    [
+      "role ladder",
+      "INSERT INTO pgokf_web.users (name, role, password_hash) VALUES ('probe-role', 'owner', 'h')"
+    ],
+    [
+      "sign-in name",
+      "INSERT INTO pgokf_web.users (name, role, password_hash) VALUES ('a b', 'viewer', 'h')"
+    ],
+    [
+      "taken name",
+      "INSERT INTO pgokf_web.users (name, role, password_hash) VALUES ('upgrade-local', 'viewer', 'h')"
+    ],
+    [
+      "missing role",
+      "INSERT INTO pgokf_web.users (name, password_hash) VALUES ('probe-norole', 'h')"
+    ],
+    [
+      "provider onto a password person",
+      "UPDATE pgokf_web.users SET provider = 'gh' WHERE name = 'upgrade-local'"
+    ],
+    [
+      "password onto a provider person",
+      "UPDATE pgokf_web.users SET password_hash = 'h' WHERE name = 'upgrade-sso'"
+    ],
+    [
+      "provider session in users mode",
+      "INSERT INTO pgokf_web.sessions (nonce, subject, mode, provider, expires_at) VALUES ('probe-mode', 'x', 'users', 'gh', now())"
+    ],
+    [
+      "session provider slug",
+      "INSERT INTO pgokf_web.sessions (nonce, subject, mode, provider, expires_at) VALUES ('probe-slug', 'x', 'oidc', 'Bad!', now())"
+    ],
+    [
+      "session mode",
+      "INSERT INTO pgokf_web.sessions (nonce, subject, mode, expires_at) VALUES ('probe-saml', 'x', 'saml', now())"
+    ],
+    [
+      "taken nonce",
+      "INSERT INTO pgokf_web.sessions (nonce, subject, mode, expires_at) VALUES ('nonce-local', 'x', 'users', now())"
+    ],
+    [
+      "missing expiry",
+      "INSERT INTO pgokf_web.sessions (nonce, subject, mode) VALUES ('probe-noexpiry', 'x', 'users')"
+    ],
+    [
+      "named-column person",
+      "INSERT INTO pgokf_web.users (name, role, password_hash, display_name) VALUES ('probe-ok', 'viewer', 'h', 'Probe')"
+    ],
+    [
+      "named-column session",
+      "INSERT INTO pgokf_web.sessions (nonce, subject, mode, provider, expires_at) VALUES ('probe-ok', 'probe-ok', 'oidc', 'gh', '2100-01-01 00:00:00+00')"
+    ]
+  ],
+  "reader_probes": [
+    "SELECT name FROM pgokf_web.users",
+    "SELECT nonce FROM pgokf_web.sessions",
+    "DELETE FROM pgokf_web.sessions",
+    "UPDATE pgokf_web.users SET role = 'admin'"
+  ],
+  "live_drift_manifest": [
+    [
+      "function",
+      "pgokf.concept_search_semantic(real[],bigint,integer)"
+    ],
+    [
+      "function",
+      "pgokf.concept_search_hybrid(text,real[],bigint,integer)"
+    ],
+    [
+      "function",
+      "pgokf.bm25_hits(text,bigint,bigint,text,text,text[],text,text,real,bigint,text)"
+    ],
+    [
+      "function",
+      "pgokf.concept_search_semantic(real[],bigint,integer,text[])"
+    ],
+    [
+      "function",
+      "pgokf.concept_search_hybrid(text,real[],bigint,integer,text[])"
+    ],
+    [
+      "function",
+      "pgokf.bm25_hits(text,bigint,bigint,text,text,text[],text,text,real,bigint,text,text[])"
+    ],
+    [
+      "initial privileges",
+      "function pgokf.concept_search_semantic(real[],bigint,integer)"
+    ],
+    [
+      "initial privileges",
+      "function pgokf.concept_search_hybrid(text,real[],bigint,integer)"
+    ],
+    [
+      "initial privileges",
+      "function pgokf.bm25_hits(text,bigint,bigint,text,text,text[],text,text,real,bigint,text)"
+    ],
+    [
+      "initial privileges",
+      "function pgokf.concept_search_semantic(real[],bigint,integer,text[])"
+    ],
+    [
+      "initial privileges",
+      "function pgokf.concept_search_hybrid(text,real[],bigint,integer,text[])"
+    ],
+    [
+      "initial privileges",
+      "function pgokf.bm25_hits(text,bigint,bigint,text,text,text[],text,text,real,bigint,text,text[])"
+    ],
+    [
+      "membership",
+      "function pgokf.concept_search_semantic(real[],bigint,integer)"
+    ],
+    [
+      "membership",
+      "function pgokf.concept_search_hybrid(text,real[],bigint,integer)"
+    ],
+    [
+      "membership",
+      "function pgokf.bm25_hits(text,bigint,bigint,text,text,text[],text,text,real,bigint,text)"
+    ],
+    [
+      "membership",
+      "function pgokf.bm25_hits(text,bigint,bigint,text,text,text[],text,text,real,bigint,text,text[])"
+    ],
+    [
+      "function",
+      "pgokf.get_reference(bigint,text,boolean)"
+    ],
+    [
+      "function",
+      "pgokf.get_script(bigint,text)"
+    ],
+    [
+      "function",
+      "pgokf.get_skill(bigint,text)"
+    ],
+    [
+      "schema",
+      "pgokf_web"
+    ],
+    [
+      "relation",
+      "pgokf_web.users"
+    ],
+    [
+      "column",
+      "pgokf_web.users.name"
+    ],
+    [
+      "column",
+      "pgokf_web.users.role"
+    ],
+    [
+      "column",
+      "pgokf_web.users.password_hash"
+    ],
+    [
+      "column",
+      "pgokf_web.users.display_name"
+    ],
+    [
+      "column",
+      "pgokf_web.users.provider"
+    ],
+    [
+      "column",
+      "pgokf_web.users.created_at"
+    ],
+    [
+      "column",
+      "pgokf_web.users.updated_at"
+    ],
+    [
+      "column",
+      "pgokf_web.sessions.provider"
+    ],
+    [
+      "column",
+      "pgokf_web.sessions.expires_at"
+    ],
+    [
+      "column",
+      "pgokf_web.sessions.created_at"
+    ]
+  ],
+  "legacy_order": "\nALTER TABLE pgokf_web.users DROP COLUMN display_name, DROP COLUMN provider;\nALTER TABLE pgokf_web.users\n    ADD COLUMN display_name text CONSTRAINT users_display_name_check\n        CHECK (display_name ~ '^[^[:cntrl:]]+$' AND char_length(display_name) <= 256),\n    ADD COLUMN provider text CONSTRAINT users_provider_check CHECK (provider ~ '^[a-z0-9][a-z0-9-]{0,31}$'),\n    ADD CONSTRAINT users_sign_in_check CHECK ((password_hash IS NULL) <> (provider IS NULL));\nALTER TABLE pgokf_web.sessions DROP COLUMN provider;\nALTER TABLE pgokf_web.sessions\n    ADD COLUMN provider text CONSTRAINT sessions_provider_check CHECK (provider ~ '^[a-z0-9][a-z0-9-]{0,31}$'),\n    ADD CONSTRAINT sessions_provider_mode_check CHECK (provider IS NULL OR mode = 'oidc');\n",
+  "appended": [
+    [
+      "pgokf_web.users",
+      "display_name"
+    ],
+    [
+      "pgokf_web.users",
+      "provider"
+    ],
+    [
+      "pgokf_web.sessions",
+      "provider"
+    ]
+  ],
+  "exception_probes": {
+    "schema comment stale": "COMMENT ON SCHEMA pgokf_web IS 'The web UI''s identity state.';",
+    "schema acl": "GRANT USAGE ON SCHEMA pgokf_web TO pgokf_reader;",
+    "schema member missing": "ALTER EXTENSION pgokf DROP SCHEMA pgokf_web;",
+    "schema member extra": "CREATE SCHEMA pgokf_extra; ALTER EXTENSION pgokf ADD SCHEMA pgokf_extra;",
+    "table comment stale": "COMMENT ON TABLE pgokf_web.users IS 'People the web UI''s users identity mode signs in.';",
+    "table extra": "CREATE TABLE pgokf_web.extra (x integer);",
+    "table member missing": "ALTER EXTENSION pgokf DROP TABLE pgokf_web.mcp_tokens;",
+    "table acl": "GRANT SELECT ON pgokf_web.sessions TO pgokf_reader;",
+    "table owner": "ALTER TABLE pgokf_web.users OWNER TO pgokf_admin;",
+    "column comment stale": "COMMENT ON COLUMN pgokf_web.users.created_at IS 'When the person was added.';",
+    "column comment of an appended column": "COMMENT ON COLUMN pgokf_web.sessions.provider IS NULL;",
+    "column extra": "ALTER TABLE pgokf_web.users ADD COLUMN extra text;",
+    "column missing": "ALTER TABLE pgokf_web.users DROP COLUMN display_name;",
+    "column type": "ALTER TABLE pgokf_web.sessions ALTER COLUMN provider TYPE varchar(32);",
+    "column default": "ALTER TABLE pgokf_web.users ALTER COLUMN updated_at SET DEFAULT '2000-01-01';",
+    "column nullability": "ALTER TABLE pgokf_web.users ALTER COLUMN display_name SET NOT NULL;",
+    "column collation": "ALTER TABLE pgokf_web.users ALTER COLUMN provider TYPE text COLLATE \"C\";",
+    "column acl": "GRANT SELECT (name) ON pgokf_web.users TO pgokf_reader;",
+    "column storage": "ALTER TABLE pgokf_web.users ALTER COLUMN name SET STORAGE EXTERNAL;",
+    "column generated in the declared order": "{LEGACY}ALTER TABLE pgokf_web.users DROP COLUMN display_name, DROP COLUMN provider, ADD COLUMN display_name text GENERATED ALWAYS AS (name) STORED, ADD COLUMN provider text; ALTER TABLE pgokf_web.users ADD CONSTRAINT users_display_name_check CHECK (display_name ~ '^[^[:cntrl:]]+$'), ADD CONSTRAINT users_provider_check CHECK (provider ~ '^[a-z0-9][a-z0-9-]{0,31}$'), ADD CONSTRAINT users_sign_in_check CHECK ((password_hash IS NULL) <> (provider IS NULL));",
+    "declared order with a stale comment": "{LEGACY}COMMENT ON COLUMN pgokf_web.users.role IS 'stale';",
+    "declared order with a column acl": "{LEGACY}GRANT SELECT (provider) ON pgokf_web.sessions TO pgokf_reader;",
+    "declared order with a column default": "{LEGACY}ALTER TABLE pgokf_web.users ALTER COLUMN provider SET DEFAULT 'gh';",
+    "declared order with an extra column": "{LEGACY}ALTER TABLE pgokf_web.sessions ADD COLUMN extra text;",
+    "third users order": "CREATE TEMPORARY TABLE moved_note ON COMMIT DROP AS SELECT col_description('pgokf_web.users'::regclass, attnum) AS note FROM pg_attribute WHERE attrelid = 'pgokf_web.users'::regclass AND attname = 'role'; ALTER TABLE pgokf_web.users DROP COLUMN role CASCADE; ALTER TABLE pgokf_web.users ADD COLUMN role text NOT NULL CONSTRAINT users_role_check CHECK (role IN ('viewer', 'uploader', 'editor', 'approver', 'admin'));  DO $moved$ BEGIN EXECUTE format('COMMENT ON COLUMN pgokf_web.users.role IS %L', (SELECT note FROM moved_note)); END $moved$;",
+    "users display_name alone appended": "CREATE TEMPORARY TABLE moved_note ON COMMIT DROP AS SELECT col_description('pgokf_web.users'::regclass, attnum) AS note FROM pg_attribute WHERE attrelid = 'pgokf_web.users'::regclass AND attname = 'display_name'; ALTER TABLE pgokf_web.users DROP COLUMN display_name CASCADE; ALTER TABLE pgokf_web.users ADD COLUMN display_name text CONSTRAINT users_display_name_check CHECK (display_name ~ '^[^[:cntrl:]]+$' AND char_length(display_name) <= 256);  DO $moved$ BEGIN EXECUTE format('COMMENT ON COLUMN pgokf_web.users.display_name IS %L', (SELECT note FROM moved_note)); END $moved$;",
+    "sessions order third": "CREATE TEMPORARY TABLE moved_note ON COMMIT DROP AS SELECT col_description('pgokf_web.sessions'::regclass, attnum) AS note FROM pg_attribute WHERE attrelid = 'pgokf_web.sessions'::regclass AND attname = 'mode'; ALTER TABLE pgokf_web.sessions DROP COLUMN mode CASCADE; ALTER TABLE pgokf_web.sessions ADD COLUMN mode text NOT NULL CONSTRAINT sessions_mode_check CHECK (mode IN ('users', 'oidc')); ALTER TABLE pgokf_web.sessions ADD CONSTRAINT sessions_provider_mode_check CHECK (provider IS NULL OR mode = 'oidc'); DO $moved$ BEGIN EXECUTE format('COMMENT ON COLUMN pgokf_web.sessions.mode IS %L', (SELECT note FROM moved_note)); END $moved$;",
+    "other table order": "CREATE TEMPORARY TABLE moved_note ON COMMIT DROP AS SELECT col_description('pgokf_web.mcp_tokens'::regclass, attnum) AS note FROM pg_attribute WHERE attrelid = 'pgokf_web.mcp_tokens'::regclass AND attname = 'created_by'; ALTER TABLE pgokf_web.mcp_tokens DROP COLUMN created_by CASCADE; ALTER TABLE pgokf_web.mcp_tokens ADD COLUMN created_by text NOT NULL;  DO $moved$ BEGIN EXECUTE format('COMMENT ON COLUMN pgokf_web.mcp_tokens.created_by IS %L', (SELECT note FROM moved_note)); END $moved$;",
+    "composite type attribute order": "ALTER TYPE pgokf.concept_search_result DROP ATTRIBUTE rank; ALTER TYPE pgokf.concept_search_result ADD ATTRIBUTE rank real;",
+    "type comment": "COMMENT ON TYPE pgokf.concept_search_result IS 'stale';",
+    "type member extra": "CREATE TYPE pgokf.hostile AS (a integer); ALTER EXTENSION pgokf ADD TYPE pgokf.hostile;",
+    "type owner": "ALTER TYPE pgokf.concept_search_result OWNER TO pgokf_admin;",
+    "constraint missing": "ALTER TABLE pgokf_web.users DROP CONSTRAINT users_sign_in_check;",
+    "constraint changed": "ALTER TABLE pgokf_web.users DROP CONSTRAINT users_provider_check, ADD CONSTRAINT users_provider_check CHECK (provider ~ '^[a-z]+$');",
+    "constraint not valid": "ALTER TABLE pgokf_web.users DROP CONSTRAINT users_sign_in_check, ADD CONSTRAINT users_sign_in_check CHECK ((password_hash IS NULL) <> (provider IS NULL)) NOT VALID;",
+    "constraint extra": "ALTER TABLE pgokf_web.sessions ADD CONSTRAINT sessions_extra_check CHECK (true);",
+    "index missing": "DROP INDEX pgokf_web.sessions_subject_idx;",
+    "index extra": "CREATE INDEX users_role_idx ON pgokf_web.users (role);",
+    "undeclared runtime index": "CREATE INDEX concepts_hostile_idx ON pgokf.concepts (title);",
+    "declared runtime index of the wrong kind": "CREATE INDEX concepts_bm25_idx ON pgokf.concepts (title);",
+    "policy extra": "CREATE POLICY hostile ON pgokf_web.users USING (true);",
+    "policy changed": "ALTER POLICY concepts_tenant_isolation ON pgokf.concepts USING (true);",
+    "rls enabled": "ALTER TABLE pgokf_web.sessions ENABLE ROW LEVEL SECURITY;",
+    "rls forced": "ALTER TABLE pgokf_web.users FORCE ROW LEVEL SECURITY;",
+    "trigger extra": "CREATE FUNCTION pgokf.hostile_trigger() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'; CREATE TRIGGER hostile BEFORE INSERT ON pgokf_web.sessions FOR EACH ROW EXECUTE FUNCTION pgokf.hostile_trigger();",
+    "fk triggers disabled": "ALTER TABLE pgokf.concepts DISABLE TRIGGER ALL;",
+    "function member missing": "ALTER EXTENSION pgokf DROP FUNCTION pgokf.version();",
+    "function member extra": "CREATE FUNCTION pgokf.hostile() RETURNS integer LANGUAGE sql AS 'SELECT 1'; ALTER EXTENSION pgokf ADD FUNCTION pgokf.hostile();",
+    "function body": "CREATE OR REPLACE FUNCTION pgokf.tenant_required() RETURNS boolean LANGUAGE sql STABLE AS 'SELECT false';",
+    "function acl": "GRANT EXECUTE ON FUNCTION pgokf.mcp_token_bearer(text) TO PUBLIC;",
+    "function comment": "COMMENT ON FUNCTION pgokf.mcp_token_bearer(text) IS 'stale';",
+    "initial privileges": "GRANT SELECT ON pgokf_web.users TO pgokf_reader; ALTER EXTENSION pgokf DROP TABLE pgokf_web.users; ALTER EXTENSION pgokf ADD TABLE pgokf_web.users; REVOKE SELECT ON pgokf_web.users FROM pgokf_reader;",
+    "default acl in schema": "ALTER DEFAULT PRIVILEGES IN SCHEMA pgokf_web GRANT SELECT ON TABLES TO pgokf_reader;",
+    "default acl global": "ALTER DEFAULT PRIVILEGES GRANT ALL ON TABLES TO pgokf_reader;",
+    "dump configuration": "UPDATE pg_extension SET extconfig = extconfig[2:], extcondition = extcondition[2:] WHERE extname = 'pgokf';",
+    "extension comment": "COMMENT ON EXTENSION pgokf IS 'stale';",
+    "row-type function": "CREATE FUNCTION public.hostile_row(pgokf_web.users) RETURNS integer LANGUAGE sql AS 'SELECT 1';",
+    "row-type view": "CREATE VIEW public.hostile_view AS SELECT u.name FROM pgokf_web.users u;",
+    "row-type column": "CREATE TABLE public.hostile_rows (u pgokf_web.sessions);",
+    "row-type array function": "CREATE FUNCTION public.hostile_rows(pgokf_web.sessions[]) RETURNS integer LANGUAGE sql AS 'SELECT 1';"
+  },
+  "skill_hex": "2d2d2d0d0a6e616d653a20757067726164652d736b696c6c0d0a6465736372697074696f6e3a2045786163742062797465730d0a2d2d2d0d0a2320e8b387e6969920f09f99820d0a",
+  "refusals": [
+    [
+      "concept_search_semantic symbol",
+      "DO $m$ BEGIN EXECUTE regexp_replace(pg_get_functiondef('pgokf.concept_search_semantic(real[], bigint, integer)'::regprocedure), 'concept_search_semantic_wrapper', 'concept_search_hybrid_wrapper'); END $m$;",
+      "reconciliation refuses retired function pgokf.concept_search_semantic(real[], bigint, integer): unexpected C entry point",
+      null
+    ],
+    [
+      "concept_search_semantic language",
+      "DO $m$ BEGIN EXECUTE regexp_replace(pg_get_functiondef('pgokf.concept_search_semantic(real[], bigint, integer)'::regprocedure), 'LANGUAGE c(.*)AS ''\\$libdir/pgokf'', \\$function\\$[a-z_]+\\$function\\$', 'LANGUAGE sql\\1AS $function$SELECT NULL::pgokf.concept_search_result WHERE false$function$', 's'); END $m$;",
+      "reconciliation refuses retired function pgokf.concept_search_semantic(real[], bigint, integer): unexpected language",
+      null
+    ],
+    [
+      "concept_search_semantic defaults",
+      "DO $m$ BEGIN EXECUTE regexp_replace(pg_get_functiondef('pgokf.concept_search_semantic(real[], bigint, integer)'::regprocedure), 'DEFAULT 10', 'DEFAULT 20'); END $m$;",
+      "reconciliation refuses retired function pgokf.concept_search_semantic(real[], bigint, integer): unexpected argument names, defaults or result type",
+      null
+    ],
+    [
+      "concept_search_semantic security",
+      "ALTER FUNCTION pgokf.concept_search_semantic(real[], bigint, integer) SECURITY DEFINER;",
+      "reconciliation refuses retired function pgokf.concept_search_semantic(real[], bigint, integer): unexpected security",
+      "ALTER FUNCTION pgokf.concept_search_semantic(real[], bigint, integer) SECURITY INVOKER;"
+    ],
+    [
+      "concept_search_semantic config",
+      "ALTER FUNCTION pgokf.concept_search_semantic(real[], bigint, integer) SET search_path = pg_catalog;",
+      "reconciliation refuses retired function pgokf.concept_search_semantic(real[], bigint, integer): unexpected configuration",
+      "ALTER FUNCTION pgokf.concept_search_semantic(real[], bigint, integer) RESET search_path;"
+    ],
+    [
+      "concept_search_semantic volatility",
+      "ALTER FUNCTION pgokf.concept_search_semantic(real[], bigint, integer) VOLATILE;",
+      "reconciliation refuses retired function pgokf.concept_search_semantic(real[], bigint, integer): unexpected volatility",
+      "ALTER FUNCTION pgokf.concept_search_semantic(real[], bigint, integer) STABLE;"
+    ],
+    [
+      "concept_search_semantic owner",
+      "ALTER FUNCTION pgokf.concept_search_semantic(real[], bigint, integer) OWNER TO pgokf_admin;",
+      "reconciliation refuses retired function pgokf.concept_search_semantic(real[], bigint, integer): unexpected owner",
+      "ALTER FUNCTION pgokf.concept_search_semantic(real[], bigint, integer) OWNER TO postgres;"
+    ],
+    [
+      "concept_search_semantic acl writer",
+      "GRANT EXECUTE ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer) TO pgokf_writer;",
+      "reconciliation refuses retired function pgokf.concept_search_semantic(real[], bigint, integer): unexpected ACL",
+      "REVOKE EXECUTE ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer) FROM pgokf_writer;"
+    ],
+    [
+      "concept_search_semantic acl public",
+      "GRANT EXECUTE ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer) TO PUBLIC;",
+      "reconciliation refuses retired function pgokf.concept_search_semantic(real[], bigint, integer): unexpected ACL",
+      "REVOKE EXECUTE ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer) FROM PUBLIC;"
+    ],
+    [
+      "concept_search_semantic acl reader",
+      "REVOKE EXECUTE ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer) FROM pgokf_reader;",
+      "reconciliation refuses retired function pgokf.concept_search_semantic(real[], bigint, integer): unexpected ACL",
+      "GRANT EXECUTE ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer) TO pgokf_reader;"
+    ],
+    [
+      "concept_search_semantic membership",
+      "ALTER EXTENSION pgokf DROP FUNCTION pgokf.concept_search_semantic(real[], bigint, integer);",
+      "reconciliation refuses retired function pgokf.concept_search_semantic(real[], bigint, integer): unexpected extension membership",
+      "ALTER EXTENSION pgokf ADD FUNCTION pgokf.concept_search_semantic(real[], bigint, integer);"
+    ],
+    [
+      "concept_search_semantic dependent",
+      "ALTER EXTENSION pgokf DROP FUNCTION pgokf.concept_search_semantic(real[], bigint, integer, text[]); ALTER FUNCTION pgokf.concept_search_semantic(real[], bigint, integer, text[]) RENAME TO concept_search_semantic_aside; CREATE VIEW public.reconcile_dependent AS SELECT * FROM pgokf.concept_search_semantic(ARRAY[0.1]::real[], NULL::bigint, 10); ALTER FUNCTION pgokf.concept_search_semantic_aside(real[], bigint, integer, text[]) RENAME TO concept_search_semantic; ALTER EXTENSION pgokf ADD FUNCTION pgokf.concept_search_semantic(real[], bigint, integer, text[]);",
+      "reconciliation refuses retired function pgokf.concept_search_semantic(real[], bigint, integer): unexpected dependents (rule _RETURN on view reconcile_dependent)",
+      "DROP VIEW public.reconcile_dependent;"
+    ],
+    [
+      "concept_search_hybrid symbol",
+      "DO $m$ BEGIN EXECUTE regexp_replace(pg_get_functiondef('pgokf.concept_search_hybrid(text, real[], bigint, integer)'::regprocedure), 'concept_search_hybrid_wrapper', 'concept_search_semantic_wrapper'); END $m$;",
+      "reconciliation refuses retired function pgokf.concept_search_hybrid(text, real[], bigint, integer): unexpected C entry point",
+      null
+    ],
+    [
+      "concept_search_hybrid language",
+      "DO $m$ BEGIN EXECUTE regexp_replace(pg_get_functiondef('pgokf.concept_search_hybrid(text, real[], bigint, integer)'::regprocedure), 'LANGUAGE c(.*)AS ''\\$libdir/pgokf'', \\$function\\$[a-z_]+\\$function\\$', 'LANGUAGE sql\\1AS $function$SELECT NULL::pgokf.concept_search_result WHERE false$function$', 's'); END $m$;",
+      "reconciliation refuses retired function pgokf.concept_search_hybrid(text, real[], bigint, integer): unexpected language",
+      null
+    ],
+    [
+      "concept_search_hybrid defaults",
+      "DO $m$ BEGIN EXECUTE regexp_replace(pg_get_functiondef('pgokf.concept_search_hybrid(text, real[], bigint, integer)'::regprocedure), 'DEFAULT 10', 'DEFAULT 20'); END $m$;",
+      "reconciliation refuses retired function pgokf.concept_search_hybrid(text, real[], bigint, integer): unexpected argument names, defaults or result type",
+      null
+    ],
+    [
+      "concept_search_hybrid security",
+      "ALTER FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer) SECURITY DEFINER;",
+      "reconciliation refuses retired function pgokf.concept_search_hybrid(text, real[], bigint, integer): unexpected security",
+      "ALTER FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer) SECURITY INVOKER;"
+    ],
+    [
+      "concept_search_hybrid config",
+      "ALTER FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer) SET search_path = pg_catalog;",
+      "reconciliation refuses retired function pgokf.concept_search_hybrid(text, real[], bigint, integer): unexpected configuration",
+      "ALTER FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer) RESET search_path;"
+    ],
+    [
+      "concept_search_hybrid volatility",
+      "ALTER FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer) VOLATILE;",
+      "reconciliation refuses retired function pgokf.concept_search_hybrid(text, real[], bigint, integer): unexpected volatility",
+      "ALTER FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer) STABLE;"
+    ],
+    [
+      "concept_search_hybrid owner",
+      "ALTER FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer) OWNER TO pgokf_admin;",
+      "reconciliation refuses retired function pgokf.concept_search_hybrid(text, real[], bigint, integer): unexpected owner",
+      "ALTER FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer) OWNER TO postgres;"
+    ],
+    [
+      "concept_search_hybrid acl writer",
+      "GRANT EXECUTE ON FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer) TO pgokf_writer;",
+      "reconciliation refuses retired function pgokf.concept_search_hybrid(text, real[], bigint, integer): unexpected ACL",
+      "REVOKE EXECUTE ON FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer) FROM pgokf_writer;"
+    ],
+    [
+      "concept_search_hybrid acl public",
+      "GRANT EXECUTE ON FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer) TO PUBLIC;",
+      "reconciliation refuses retired function pgokf.concept_search_hybrid(text, real[], bigint, integer): unexpected ACL",
+      "REVOKE EXECUTE ON FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer) FROM PUBLIC;"
+    ],
+    [
+      "concept_search_hybrid acl reader",
+      "REVOKE EXECUTE ON FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer) FROM pgokf_reader;",
+      "reconciliation refuses retired function pgokf.concept_search_hybrid(text, real[], bigint, integer): unexpected ACL",
+      "GRANT EXECUTE ON FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer) TO pgokf_reader;"
+    ],
+    [
+      "concept_search_hybrid membership",
+      "ALTER EXTENSION pgokf DROP FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer);",
+      "reconciliation refuses retired function pgokf.concept_search_hybrid(text, real[], bigint, integer): unexpected extension membership",
+      "ALTER EXTENSION pgokf ADD FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer);"
+    ],
+    [
+      "concept_search_hybrid dependent",
+      "ALTER EXTENSION pgokf DROP FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer, text[]); ALTER FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer, text[]) RENAME TO concept_search_hybrid_aside; CREATE VIEW public.reconcile_dependent AS SELECT * FROM pgokf.concept_search_hybrid('x', ARRAY[0.1]::real[], NULL::bigint, 10); ALTER FUNCTION pgokf.concept_search_hybrid_aside(text, real[], bigint, integer, text[]) RENAME TO concept_search_hybrid; ALTER EXTENSION pgokf ADD FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer, text[]);",
+      "reconciliation refuses retired function pgokf.concept_search_hybrid(text, real[], bigint, integer): unexpected dependents (rule _RETURN on view reconcile_dependent)",
+      "DROP VIEW public.reconcile_dependent;"
+    ],
+    [
+      "bm25_hits body",
+      "DO $m$ BEGIN EXECUTE regexp_replace(pg_get_functiondef('pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text)'::regprocedure), 'BEGIN', 'BEGIN PERFORM 1;'); END $m$;",
+      "reconciliation refuses retired function pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text): unexpected body",
+      null
+    ],
+    [
+      "bm25_hits language",
+      "DO $m$ BEGIN EXECUTE regexp_replace(pg_get_functiondef('pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text)'::regprocedure), 'LANGUAGE plpgsql(.*)AS \\$function\\$.*\\$function\\$', 'LANGUAGE sql\\1AS $function$SELECT NULL::bigint, NULL, NULL, NULL, NULL, NULL::real, NULL WHERE false$function$', 's'); END $m$;",
+      "reconciliation refuses retired function pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text): unexpected language",
+      null
+    ],
+    [
+      "bm25_hits security",
+      "ALTER FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text) SECURITY INVOKER;",
+      "reconciliation refuses retired function pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text): unexpected security",
+      "ALTER FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text) SECURITY DEFINER;"
+    ],
+    [
+      "bm25_hits config",
+      "ALTER FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text) SET work_mem = '64kB';",
+      "reconciliation refuses retired function pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text): unexpected configuration",
+      "ALTER FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text) RESET work_mem;"
+    ],
+    [
+      "bm25_hits volatility",
+      "ALTER FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text) VOLATILE;",
+      "reconciliation refuses retired function pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text): unexpected volatility",
+      "ALTER FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text) STABLE;"
+    ],
+    [
+      "bm25_hits owner",
+      "ALTER FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text) OWNER TO pgokf_admin;",
+      "reconciliation refuses retired function pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text): unexpected owner",
+      "ALTER FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text) OWNER TO postgres;"
+    ],
+    [
+      "bm25_hits acl writer",
+      "GRANT EXECUTE ON FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text) TO pgokf_writer;",
+      "reconciliation refuses retired function pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text): unexpected ACL",
+      "REVOKE EXECUTE ON FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text) FROM pgokf_writer;"
+    ],
+    [
+      "bm25_hits acl public",
+      "GRANT EXECUTE ON FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text) TO PUBLIC;",
+      "reconciliation refuses retired function pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text): unexpected ACL",
+      "REVOKE EXECUTE ON FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text) FROM PUBLIC;"
+    ],
+    [
+      "bm25_hits acl reader",
+      "REVOKE EXECUTE ON FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text) FROM pgokf_reader;",
+      "reconciliation refuses retired function pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text): unexpected ACL",
+      "GRANT EXECUTE ON FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text) TO pgokf_reader;"
+    ],
+    [
+      "bm25_hits membership",
+      "ALTER EXTENSION pgokf DROP FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text);",
+      "reconciliation refuses retired function pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text): unexpected extension membership",
+      "ALTER EXTENSION pgokf ADD FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text);"
+    ],
+    [
+      "bm25_hits dependent",
+      "CREATE VIEW public.reconcile_dependent AS SELECT * FROM pgokf.bm25_hits('x', NULL, 1, 'english', NULL, NULL, NULL, NULL, NULL, NULL, NULL);",
+      "reconciliation refuses retired function pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text): unexpected dependents (rule _RETURN on view reconcile_dependent)",
+      "DROP VIEW public.reconcile_dependent;"
+    ],
+    [
+      "current acl",
+      "GRANT EXECUTE ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer, text[]) TO pgokf_writer;",
+      "reconciliation refuses current function pgokf.concept_search_semantic(real[], bigint, integer, text[]): unexpected owner or ACL",
+      "REVOKE ALL ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer, text[]) FROM PUBLIC, pgokf_writer; GRANT EXECUTE ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer, text[]) TO pgokf_reader;"
+    ],
+    [
+      "current owner",
+      "ALTER FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer, text[]) OWNER TO pgokf_admin;",
+      "reconciliation refuses current function pgokf.concept_search_hybrid(text, real[], bigint, integer, text[]): unexpected owner or ACL",
+      "ALTER FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer, text[]) OWNER TO postgres;"
+    ],
+    [
+      "current membership",
+      "ALTER EXTENSION pgokf DROP FUNCTION pgokf.concept_search_semantic(real[], bigint, integer, text[]);",
+      "reconciliation refuses current function pgokf.concept_search_semantic(real[], bigint, integer, text[]): unexpected extension membership",
+      "ALTER EXTENSION pgokf ADD FUNCTION pgokf.concept_search_semantic(real[], bigint, integer, text[]);"
+    ],
+    [
+      "helper not member",
+      "CREATE FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[]) RETURNS TABLE (bundle_id bigint, concept_id text, path text, title text, type text, rank real, headline text) LANGUAGE plpgsql AS 'BEGIN RETURN; END';",
+      "reconciliation refuses current function pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[]): unexpected extension membership",
+      "DROP FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[]);"
+    ],
+    [
+      "unknown overload",
+      "CREATE FUNCTION pgokf.concept_search_semantic(real[], text) RETURNS SETOF pgokf.concept_search_result LANGUAGE sql AS 'SELECT NULL::pgokf.concept_search_result WHERE false';",
+      "reconciliation refuses unknown search overloads: pgokf.concept_search_semantic(real[], text)",
+      "DROP FUNCTION pgokf.concept_search_semantic(real[], text);"
+    ],
+    [
+      "current missing",
+      "ALTER EXTENSION pgokf DROP FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer, text[]); DROP FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer, text[]);",
+      "reconciliation refuses a catalog without pgokf.concept_search_hybrid(text, real[], bigint, integer, text[])",
+      null
+    ]
+  ],
+  "function_metadata": "SELECT json_object_agg(signature, metadata ORDER BY signature) FROM (SELECT 'pgokf.concept_search_semantic(real[], bigint, integer, text[])' AS signature, (SELECT json_build_object('owner', p.proowner::regrole::text, 'acl', (SELECT array_agg(a::text ORDER BY a::text) FROM unnest(p.proacl) a), 'comment', obj_description(p.oid, 'pg_proc'), 'initial privileges', (SELECT array_agg(i.privtype::text || ':' || (SELECT array_agg(a::text ORDER BY a::text) FROM unnest(i.initprivs) a)::text ORDER BY i.privtype, i.initprivs::text) FROM pg_init_privs i WHERE i.classoid = 'pg_proc'::regclass AND i.objoid = p.oid), 'definition', pg_get_functiondef(p.oid)) FROM pg_proc p WHERE p.oid = to_regprocedure('pgokf.concept_search_semantic(real[], bigint, integer, text[])')) AS metadata UNION ALL SELECT 'pgokf.concept_search_hybrid(text, real[], bigint, integer, text[])' AS signature, (SELECT json_build_object('owner', p.proowner::regrole::text, 'acl', (SELECT array_agg(a::text ORDER BY a::text) FROM unnest(p.proacl) a), 'comment', obj_description(p.oid, 'pg_proc'), 'initial privileges', (SELECT array_agg(i.privtype::text || ':' || (SELECT array_agg(a::text ORDER BY a::text) FROM unnest(i.initprivs) a)::text ORDER BY i.privtype, i.initprivs::text) FROM pg_init_privs i WHERE i.classoid = 'pg_proc'::regclass AND i.objoid = p.oid), 'definition', pg_get_functiondef(p.oid)) FROM pg_proc p WHERE p.oid = to_regprocedure('pgokf.concept_search_hybrid(text, real[], bigint, integer, text[])')) AS metadata UNION ALL SELECT 'pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[])' AS signature, (SELECT json_build_object('owner', p.proowner::regrole::text, 'acl', (SELECT array_agg(a::text ORDER BY a::text) FROM unnest(p.proacl) a), 'comment', obj_description(p.oid, 'pg_proc'), 'initial privileges', (SELECT array_agg(i.privtype::text || ':' || (SELECT array_agg(a::text ORDER BY a::text) FROM unnest(i.initprivs) a)::text ORDER BY i.privtype, i.initprivs::text) FROM pg_init_privs i WHERE i.classoid = 'pg_proc'::regclass AND i.objoid = p.oid), 'definition', pg_get_functiondef(p.oid)) FROM pg_proc p WHERE p.oid = to_regprocedure('pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[])')) AS metadata UNION ALL SELECT 'pgokf.get_skill(bigint, text)' AS signature, (SELECT json_build_object('owner', p.proowner::regrole::text, 'acl', (SELECT array_agg(a::text ORDER BY a::text) FROM unnest(p.proacl) a), 'comment', obj_description(p.oid, 'pg_proc'), 'initial privileges', (SELECT array_agg(i.privtype::text || ':' || (SELECT array_agg(a::text ORDER BY a::text) FROM unnest(i.initprivs) a)::text ORDER BY i.privtype, i.initprivs::text) FROM pg_init_privs i WHERE i.classoid = 'pg_proc'::regclass AND i.objoid = p.oid), 'definition', pg_get_functiondef(p.oid)) FROM pg_proc p WHERE p.oid = to_regprocedure('pgokf.get_skill(bigint, text)')) AS metadata UNION ALL SELECT 'pgokf.get_script(bigint, text)' AS signature, (SELECT json_build_object('owner', p.proowner::regrole::text, 'acl', (SELECT array_agg(a::text ORDER BY a::text) FROM unnest(p.proacl) a), 'comment', obj_description(p.oid, 'pg_proc'), 'initial privileges', (SELECT array_agg(i.privtype::text || ':' || (SELECT array_agg(a::text ORDER BY a::text) FROM unnest(i.initprivs) a)::text ORDER BY i.privtype, i.initprivs::text) FROM pg_init_privs i WHERE i.classoid = 'pg_proc'::regclass AND i.objoid = p.oid), 'definition', pg_get_functiondef(p.oid)) FROM pg_proc p WHERE p.oid = to_regprocedure('pgokf.get_script(bigint, text)')) AS metadata UNION ALL SELECT 'pgokf.get_reference(bigint, text, boolean)' AS signature, (SELECT json_build_object('owner', p.proowner::regrole::text, 'acl', (SELECT array_agg(a::text ORDER BY a::text) FROM unnest(p.proacl) a), 'comment', obj_description(p.oid, 'pg_proc'), 'initial privileges', (SELECT array_agg(i.privtype::text || ':' || (SELECT array_agg(a::text ORDER BY a::text) FROM unnest(i.initprivs) a)::text ORDER BY i.privtype, i.initprivs::text) FROM pg_init_privs i WHERE i.classoid = 'pg_proc'::regclass AND i.objoid = p.oid), 'definition', pg_get_functiondef(p.oid)) FROM pg_proc p WHERE p.oid = to_regprocedure('pgokf.get_reference(bigint, text, boolean)')) AS metadata) m;",
+  "probes": {
+    "fk enforcement": "ALTER TABLE pgokf.concepts DISABLE TRIGGER ALL;",
+    "rule": "CREATE RULE hostile_no_insert AS ON INSERT TO pgokf.concept_metadata DO INSTEAD NOTHING;",
+    "constraint comment": "COMMENT ON CONSTRAINT bundles_pkey ON pgokf.bundles IS 'hostile';",
+    "default acl": "ALTER DEFAULT PRIVILEGES IN SCHEMA pgokf GRANT ALL ON TABLES TO pgokf_reader;",
+    "owner": "ALTER FUNCTION pgokf.version() OWNER TO pgokf_admin;",
+    "role": "GRANT pgokf_reader TO pgokf_dispatcher;",
+    "policy": "DROP POLICY concepts_tenant_isolation ON pgokf.concepts;",
+    "comment": "COMMENT ON FUNCTION pgokf.version() IS 'mutation';",
+    "acl": "GRANT EXECUTE ON FUNCTION pgokf.mark_stale(bigint,text[],text,text) TO pgokf_reader;",
+    "membership": "ALTER EXTENSION pgokf DROP FUNCTION pgokf.version();",
+    "column": "ALTER TABLE pgokf.bundles ALTER COLUMN enabled DROP NOT NULL;",
+    "security": "ALTER FUNCTION pgokf.mark_stale(bigint,text[],text,text) SECURITY INVOKER;",
+    "dump": "UPDATE pg_extension SET extconfig = '{}'::oid[], extcondition = '{}'::text[] WHERE extname = 'pgokf';"
+  },
+  "definition_probes": {
+    "external enum labels": [
+      "CREATE TYPE public.hostile_enum AS ENUM ('a'); ALTER EXTENSION pgokf ADD TYPE public.hostile_enum;",
+      "ALTER TYPE public.hostile_enum ADD VALUE 'b';"
+    ],
+    "external domain constraint": [
+      "CREATE DOMAIN public.hostile_domain AS integer; ALTER EXTENSION pgokf ADD TYPE public.hostile_domain;",
+      "ALTER DOMAIN public.hostile_domain ADD CONSTRAINT positive CHECK (VALUE > 0);"
+    ],
+    "domain base": [
+      "CREATE DOMAIN pgokf.hostile_domain AS integer; ALTER EXTENSION pgokf ADD TYPE pgokf.hostile_domain;",
+      "ALTER EXTENSION pgokf DROP TYPE pgokf.hostile_domain; DROP DOMAIN pgokf.hostile_domain; CREATE DOMAIN pgokf.hostile_domain AS bigint; ALTER EXTENSION pgokf ADD TYPE pgokf.hostile_domain;"
+    ],
+    "domain collation": [
+      "CREATE DOMAIN pgokf.hostile_domain AS text COLLATE \"C\"; ALTER EXTENSION pgokf ADD TYPE pgokf.hostile_domain;",
+      "ALTER EXTENSION pgokf DROP TYPE pgokf.hostile_domain; DROP DOMAIN pgokf.hostile_domain; CREATE DOMAIN pgokf.hostile_domain AS text COLLATE \"POSIX\"; ALTER EXTENSION pgokf ADD TYPE pgokf.hostile_domain;"
+    ],
+    "enum order": [
+      "CREATE TYPE pgokf.hostile_enum AS ENUM ('a','b'); ALTER EXTENSION pgokf ADD TYPE pgokf.hostile_enum;",
+      "ALTER EXTENSION pgokf DROP TYPE pgokf.hostile_enum; DROP TYPE pgokf.hostile_enum; CREATE TYPE pgokf.hostile_enum AS ENUM ('b','a'); ALTER EXTENSION pgokf ADD TYPE pgokf.hostile_enum;"
+    ],
+    "enum labels": [
+      "CREATE TYPE pgokf.hostile_enum AS ENUM ('a','b'); ALTER EXTENSION pgokf ADD TYPE pgokf.hostile_enum;",
+      "ALTER TYPE pgokf.hostile_enum ADD VALUE 'c' BEFORE 'b';"
+    ],
+    "domain default": [
+      "CREATE DOMAIN pgokf.hostile_domain AS integer DEFAULT 1; ALTER EXTENSION pgokf ADD TYPE pgokf.hostile_domain;",
+      "ALTER DOMAIN pgokf.hostile_domain SET DEFAULT 2;"
+    ],
+    "domain nullability": [
+      "CREATE DOMAIN pgokf.hostile_domain AS integer; ALTER EXTENSION pgokf ADD TYPE pgokf.hostile_domain;",
+      "ALTER DOMAIN pgokf.hostile_domain SET NOT NULL;"
+    ],
+    "domain constraint": [
+      "CREATE DOMAIN pgokf.hostile_domain AS integer; ALTER EXTENSION pgokf ADD TYPE pgokf.hostile_domain;",
+      "ALTER DOMAIN pgokf.hostile_domain ADD CONSTRAINT positive CHECK (VALUE > 0);"
+    ],
+    "domain constraint comment": [
+      "CREATE DOMAIN pgokf.hostile_domain AS integer CONSTRAINT positive CHECK (VALUE > 0); ALTER EXTENSION pgokf ADD TYPE pgokf.hostile_domain;",
+      "COMMENT ON CONSTRAINT positive ON DOMAIN pgokf.hostile_domain IS 'hostile';"
+    ],
+    "rule comment": [
+      "CREATE RULE hostile AS ON INSERT TO pgokf.concept_metadata DO INSTEAD NOTHING;",
+      "COMMENT ON RULE hostile ON pgokf.concept_metadata IS 'hostile';"
+    ],
+    "trigger comment": [
+      "CREATE FUNCTION pgokf.hostile_trigger() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'; CREATE TRIGGER hostile BEFORE INSERT ON pgokf.concept_metadata FOR EACH ROW EXECUTE FUNCTION pgokf.hostile_trigger();",
+      "COMMENT ON TRIGGER hostile ON pgokf.concept_metadata IS 'hostile';"
+    ],
+    "policy comment": [
+      "",
+      "COMMENT ON POLICY concepts_tenant_isolation ON pgokf.concepts IS 'hostile';"
+    ],
+    "extension comment": [
+      "",
+      "COMMENT ON EXTENSION pgokf IS 'hostile';"
+    ],
+    "global default acl": [
+      "",
+      "ALTER DEFAULT PRIVILEGES GRANT ALL ON TABLES TO pgokf_reader;"
+    ]
+  }
+}

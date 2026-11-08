@@ -510,13 +510,13 @@ pub fn authorize_dispatcher_current_user() -> Result<(), CatalogError> {
 /// this right after the `bundle_id` is known - and before any lock, filesystem,
 /// or catalog side effect - makes write confinement equal to read confinement.
 ///
-/// The rule mirrors [`tenant_permits`] exactly: when `pgokf.tenant` is unset or
+/// The rule mirrors `tenant_permits` exactly: when `pgokf.tenant` is unset or
 /// empty the caller is cross-tenant by design (backward compatible; the trusted
 /// operator/superuser path), so nothing is restricted - unless the catalog's
 /// `require_tenant` policy is on, which refuses the unscoped call with SQLSTATE
-/// `42501` ([`tenant_required_error`]); when a tenant is set, a
+/// `42501` (`tenant_required_error`); when a tenant is set, a
 /// bundle owned by any other tenant - or one that does not exist - is rejected
-/// with the same [`unknown_bundle_error`] (`22023`) the entry points already
+/// with the same `unknown_bundle_error` (`22023`) the entry points already
 /// raise for a bad id, so a cross-tenant id cannot be used to probe another
 /// tenant's catalog.
 ///

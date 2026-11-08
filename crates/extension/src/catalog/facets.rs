@@ -12,7 +12,7 @@
 //!
 //! The `facet` argument selects the grouping dimension from a fixed allow-list -
 //! `type`, `bundle`, `status`, `trust_tier`, `tag` - validated against
-//! [`Facet::parse`] (SQLSTATE `22023` otherwise). The facet is **dispatched on**,
+//! `Facet::parse` (SQLSTATE `22023` otherwise). The facet is **dispatched on**,
 //! never interpolated into SQL: each variant maps to one of a small set of
 //! compile-time-constant queries whose grouping column is fixed in source, so no
 //! caller string ever reaches the query text. Every value that *is* caller input

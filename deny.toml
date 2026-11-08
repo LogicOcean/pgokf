@@ -29,6 +29,8 @@ allow = [
   # are AGPL-3.0-only. MIT below remains for permissively-licensed dependencies.
   "AGPL-3.0-only",
   "MIT",
+    # borrow-or-share, via jsonschema: MIT without attribution requirement.
+    "MIT-0",
   "MPL-2.0",
   "Unicode-3.0",
   "Zlib",

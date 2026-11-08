@@ -1,0 +1,54 @@
+[
+  {
+    "auth": "writer",
+    "request": {
+      "id": 1,
+      "jsonrpc": "2.0",
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "bundle": "golden-content",
+          "state": "disabled"
+        },
+        "name": "set_bundle_state"
+      }
+    },
+    "response": {
+      "error": {
+        "code": -32001,
+        "message": "the writer role may not call \"set_bundle_state\"; a token with the admin role can"
+      },
+      "id": 1,
+      "jsonrpc": "2.0"
+    },
+    "status": 200
+  },
+  {
+    "auth": "writer",
+    "request": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "bundle_ids": [
+            1
+          ],
+          "limit": 10,
+          "overwrite": true,
+          "target": "claude-code"
+        },
+        "name": "build_workspace_plugin"
+      }
+    },
+    "response": {
+      "error": {
+        "code": -32602,
+        "message": "'overwrite' acts on this server's own filesystem, not yours, and is refused over HTTP; leave it out and the files come back in the result"
+      },
+      "id": 2,
+      "jsonrpc": "2.0"
+    },
+    "status": 200
+  }
+]

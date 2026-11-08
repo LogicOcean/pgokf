@@ -1,0 +1,29 @@
+[
+  {
+    "request": {
+      "id": 4,
+      "jsonrpc": "2.0",
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "bundle": "golden-content",
+          "path": "runbooks/golden-write.md"
+        },
+        "name": "delete_document"
+      }
+    },
+    "response": {
+      "id": 4,
+      "jsonrpc": "2.0",
+      "result": {
+        "content": [
+          {
+            "text": "{\n  \"bundle\": \"golden-content\",\n  \"bundle_id\": 2,\n  \"deleted\": true,\n  \"path\": \"runbooks/golden-write.md\",\n  \"sync\": {\n    \"added\": 0,\n    \"bundle_id\": 2,\n    \"path\": \"content:golden-content\",\n    \"removed\": 1,\n    \"total\": 2,\n    \"unchanged\": 1,\n    \"updated\": 0\n  }\n}",
+            "type": "text"
+          }
+        ],
+        "isError": false
+      }
+    }
+  }
+]

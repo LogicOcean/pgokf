@@ -27,6 +27,8 @@ pub const INVALID_PARAMS: i64 = -32602;
 /// client that sent one and is waiting for an answer gets it.
 #[derive(Debug, Deserialize)]
 pub struct Request {
+    #[serde(default)]
+    pub jsonrpc: Option<Value>,
     #[serde(default, deserialize_with = "read_id")]
     pub id: Id,
     pub method: String,
@@ -107,6 +109,13 @@ pub fn parse_request(text: &str) -> Result<Request, Response> {
             "this server answers one request at a time; JSON-RPC batches are not supported",
         ));
     }
+    if value.get("jsonrpc").is_some_and(|version| version != "2.0") {
+        return Err(Response::error(
+            Value::Null,
+            INVALID_REQUEST,
+            "jsonrpc must be 2.0",
+        ));
+    }
     let request: Request = serde_json::from_value(value).map_err(|error| {
         Response::error(
             Value::Null,
@@ -129,17 +138,20 @@ pub fn parse_request(text: &str) -> Result<Request, Response> {
 pub struct RpcError {
     pub code: i64,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
 }
 
 /// A JSON-RPC response. Exactly one of `result` / `error` is populated.
 #[derive(Debug, Serialize)]
 pub struct Response {
     pub jsonrpc: &'static str,
-    pub id: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<RpcError>,
+    pub error: Option<Box<RpcError>>,
 }
 
 impl Response {
@@ -148,10 +160,20 @@ impl Response {
     pub fn success(id: Value, result: Value) -> Self {
         Self {
             jsonrpc: "2.0",
-            id,
+            id: Some(id),
             result: Some(result),
             error: None,
         }
+    }
+
+    /// An error with structured protocol or stable domain details.
+    #[must_use]
+    pub fn error_data(id: Value, code: i64, message: impl Into<String>, data: Value) -> Self {
+        let mut response = Self::error(id, code, message);
+        if let Some(error) = response.error.as_mut() {
+            error.data = Some(data);
+        }
+        response
     }
 
     /// An error response echoing `id` with a code and message.
@@ -159,12 +181,13 @@ impl Response {
     pub fn error(id: Value, code: i64, message: impl Into<String>) -> Self {
         Self {
             jsonrpc: "2.0",
-            id,
+            id: Some(id),
             result: None,
-            error: Some(RpcError {
+            error: Some(Box::new(RpcError {
                 code,
                 message: message.into(),
-            }),
+                data: None,
+            })),
         }
     }
 }
@@ -240,6 +263,24 @@ mod tests {
             Some(INVALID_REQUEST),
             "a structured id"
         );
+    }
+
+    #[test]
+    fn legacy_error_keeps_explicit_null_reply_id() {
+        let response = Response::error(Value::Null, INVALID_REQUEST, "legacy malformed request");
+        let encoded = serde_json::to_value(response).unwrap();
+        assert_eq!(encoded.get("id"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn supplied_jsonrpc_revision_must_be_exact_even_for_legacy() {
+        for value in [json!(null), json!(2.0), json!("1.0"), json!({})] {
+            let wire = json!({"jsonrpc":value,"id":1,"method":"ping"}).to_string();
+            assert_eq!(
+                parse_request(&wire).unwrap_err().error.unwrap().code,
+                INVALID_REQUEST
+            );
+        }
     }
 
     #[test]

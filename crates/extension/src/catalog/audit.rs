@@ -7,7 +7,7 @@
 //! administrator-only `pgokf_private.sync_log`:
 //!
 //! - `register` / `refresh` / `content` rows are written at the successful tail
-//!   of [`crate::catalog::sync::run_bundle_sync`], carrying the per-bucket
+//!   of `crate::catalog::sync::run_bundle_sync`, carrying the per-bucket
 //!   change counts (`added`/`updated`/`removed`/`unchanged`/`total`) and the
 //!   aggregate `sync_hash` of the synced snapshot;
 //! - one `unregister` row is written by
@@ -34,13 +34,13 @@
 //!
 //! After the row is appended, history older than the durable
 //! `sync_log_retention_days` policy is pruned in the same transaction (see
-//! [`record`]). A retention of `0` (or simply no rows older than the window)
+//! `record`). A retention of `0` (or simply no rows older than the window)
 //! keeps history indefinitely. This is the mechanism that activates the
 //! `sync_log_retention_days` configuration key.
 //!
 //! # Reader surface
 //!
-//! [`list_sync_log`](pgokf::list_sync_log) is the reader-level projection over
+//! `list_sync_log` is the reader-level projection over
 //! the log. Because the table lives in the administrator-only `pgokf_private`
 //! schema, the function is `SECURITY DEFINER` (with a pinned `search_path`) and
 //! its `EXECUTE` is granted to `pgokf_reader`, so operators can audit sync

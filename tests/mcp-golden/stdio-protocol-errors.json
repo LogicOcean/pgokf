@@ -1,0 +1,73 @@
+[
+  {
+    "request": "this is not json",
+    "response": {
+      "error": {
+        "code": -32700,
+        "message": "invalid JSON: expected ident at line 1 column 2"
+      },
+      "id": null,
+      "jsonrpc": "2.0"
+    }
+  },
+  {
+    "request": "[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}]",
+    "response": {
+      "error": {
+        "code": -32600,
+        "message": "this server answers one request at a time; JSON-RPC batches are not supported"
+      },
+      "id": null,
+      "jsonrpc": "2.0"
+    }
+  },
+  {
+    "request": "{\"id\":1}",
+    "response": {
+      "error": {
+        "code": -32600,
+        "message": "not a JSON-RPC request: missing field `method`"
+      },
+      "id": null,
+      "jsonrpc": "2.0"
+    }
+  },
+  {
+    "request": "{\"id\":{\"a\":1},\"method\":\"ping\"}",
+    "response": {
+      "error": {
+        "code": -32600,
+        "message": "the id must be a string, a number, or null"
+      },
+      "id": null,
+      "jsonrpc": "2.0"
+    }
+  },
+  {
+    "request": {
+      "id": 24,
+      "jsonrpc": "2.0",
+      "method": "bogus/method"
+    },
+    "response": {
+      "error": {
+        "code": -32601,
+        "message": "unknown method \"bogus/method\""
+      },
+      "id": 24,
+      "jsonrpc": "2.0"
+    }
+  },
+  {
+    "request": {
+      "id": null,
+      "jsonrpc": "2.0",
+      "method": "ping"
+    },
+    "response": {
+      "id": null,
+      "jsonrpc": "2.0",
+      "result": {}
+    }
+  }
+]

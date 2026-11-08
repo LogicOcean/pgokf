@@ -27,6 +27,7 @@
 
 ARG PG_MAJOR=18
 ARG PG_IMAGE_TAG=${PG_MAJOR}
+ARG PG_BASE_IMAGE=postgres:${PG_IMAGE_TAG}
 ARG RUST_VERSION=1.96.0
 ARG CARGO_PGRX_VERSION=0.19.2
 
@@ -52,7 +53,7 @@ ARG PGOKF_VERSION="0.3.1"
 # --------------------------------------------------------------------------
 # Stage 1: build the extension against the matching PostgreSQL server-dev files
 # --------------------------------------------------------------------------
-FROM postgres:${PG_IMAGE_TAG} AS builder
+FROM ${PG_BASE_IMAGE} AS builder
 
 ARG PG_MAJOR
 ARG PG_IMAGE_TAG
@@ -69,10 +70,11 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # Toolchain + PostgreSQL headers. postgresql-server-dev-N comes from the same
 # PGDG apt repo the official postgres image is already configured with.
-COPY packaging/verify-postgres.sh /tmp/verify-postgres.sh
 RUN set -eux; \
+    dev_package="postgresql-server-dev-${PG_MAJOR}"; \
     if [ "$PG_MAJOR" = 19 ]; then \
-        test "$PG_IMAGE_TAG" = 19beta3; \
+        installed_version="$(dpkg-query -W -f='${Version}' postgresql-19)"; \
+        dev_package="postgresql-server-dev-19=${installed_version}"; \
         . /etc/os-release; \
         echo "deb [signed-by=/usr/local/share/keyrings/postgres.gpg.asc] http://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main 19" > /etc/apt/sources.list.d/pgdg.list; \
     fi; \
@@ -85,8 +87,7 @@ RUN set -eux; \
         curl \
         ca-certificates \
         git \
-        "postgresql-server-dev-${PG_MAJOR}"; \
-    /tmp/verify-postgres.sh "$PG_MAJOR" "$PG_IMAGE_TAG"; \
+        "$dev_package"; \
     rm -rf /var/lib/apt/lists/*
 
 # Pinned Rust toolchain, matching rust-toolchain.toml / CI.
@@ -96,6 +97,14 @@ RUN set -eux; \
 
 # Pinned cargo-pgrx, matching the workspace pgrx dependency.
 RUN cargo install cargo-pgrx --version "${CARGO_PGRX_VERSION}" --locked
+# Validate both installed package identities with the canonical Rust verifier.
+# Compatibility builds supply this directory from their current tooling archive.
+COPY . /verification
+RUN CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/verifier-target \
+    cargo run --locked --manifest-path /verification/Cargo.toml -p pgokf-verifier \
+    -- postgres-check "$PG_MAJOR" "$PG_IMAGE_TAG" \
+    && rm -rf /verification /tmp/verifier-target
+
 RUN cargo pgrx init "--pg${PG_MAJOR}=/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config"
 
 WORKDIR /src
@@ -111,7 +120,7 @@ RUN cargo pgrx package \
 # --------------------------------------------------------------------------
 # Stage 2: stock postgres image + pgokf + the optional extensions
 # --------------------------------------------------------------------------
-FROM postgres:${PG_IMAGE_TAG}
+FROM ${PG_BASE_IMAGE}
 
 ARG PG_MAJOR
 ARG PG_IMAGE_TAG

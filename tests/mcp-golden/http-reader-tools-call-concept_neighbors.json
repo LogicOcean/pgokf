@@ -1,0 +1,32 @@
+[
+  {
+    "auth": "reader",
+    "request": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "bundle_id": 1,
+          "concept_id": "runbooks/failover",
+          "max_hops": 2
+        },
+        "name": "concept_neighbors"
+      }
+    },
+    "response": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "result": {
+        "content": [
+          {
+            "text": "[\n  {\n    \"hops\": 1,\n    \"neighbor_id\": \"runbooks/failover-appendix\",\n    \"path\": [\n      \"runbooks/failover\",\n      \"runbooks/failover-appendix\"\n    ],\n    \"source_id\": \"runbooks/failover\",\n    \"title\": \"Widget failover appendix\"\n  },\n  {\n    \"hops\": 1,\n    \"neighbor_id\": \"services/widget\",\n    \"path\": [\n      \"runbooks/failover\",\n      \"services/widget\"\n    ],\n    \"source_id\": \"runbooks/failover\",\n    \"title\": \"Widget service\"\n  }\n]",
+            "type": "text"
+          }
+        ],
+        "isError": false
+      }
+    },
+    "status": 200
+  }
+]

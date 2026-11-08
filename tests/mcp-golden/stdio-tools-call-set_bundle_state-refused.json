@@ -1,0 +1,29 @@
+[
+  {
+    "request": {
+      "id": 12,
+      "jsonrpc": "2.0",
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "bundle": "golden-content",
+          "state": "bogus"
+        },
+        "name": "set_bundle_state"
+      }
+    },
+    "response": {
+      "id": 12,
+      "jsonrpc": "2.0",
+      "result": {
+        "content": [
+          {
+            "text": "\"'state' is enabled, disabled, retired, or active, not 'bogus'\"",
+            "type": "text"
+          }
+        ],
+        "isError": true
+      }
+    }
+  }
+]

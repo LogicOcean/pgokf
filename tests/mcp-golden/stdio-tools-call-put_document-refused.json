@@ -1,0 +1,30 @@
+[
+  {
+    "request": {
+      "id": 3,
+      "jsonrpc": "2.0",
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "bundle": "golden-fs",
+          "path": "runbooks/refused.md",
+          "text": "---\ntype: Runbook\ntitle: Golden stdio write\n---\n\n# Golden stdio write\n\nWritten over stdio by the golden MCP harness, then deleted again.\n"
+        },
+        "name": "put_document"
+      }
+    },
+    "response": {
+      "id": 3,
+      "jsonrpc": "2.0",
+      "result": {
+        "content": [
+          {
+            "text": "\"bundle 1 (golden-fs) is a filesystem bundle: its documents come from the directory the database server reads, so they are changed there and picked up by refresh_bundle, not written through this API\"",
+            "type": "text"
+          }
+        ],
+        "isError": true
+      }
+    }
+  }
+]

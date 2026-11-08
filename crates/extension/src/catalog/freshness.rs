@@ -23,11 +23,11 @@
 //! relationship-coverage evidence column. `pgokf.concept_freshness` holds
 //! sparse per-scope overrides keyed `(bundle_id, scope_kind, scope_key)` with
 //! generic scope kinds (`concept|path|group`); the reader surface
-//! ([`pgokf.effective_freshness`](pgokf)) combines bundle state with the
+//! (`pgokf.effective_freshness`) combines bundle state with the
 //! overrides so consumers never read the raw tables.
 //!
 //! State transitions are conservative: only registration and the
-//! compare-and-set [`mark_fresh`](pgokf::mark_fresh) establish `fresh`;
+//! compare-and-set `mark_fresh` establish `fresh`;
 //! retirement maps to `retired`; unretire and disable map to `stale` (currency
 //! must be re-established by the producer - no false clear).
 //!
@@ -38,7 +38,7 @@
 //! v1**) onto a target bundle/scope. For every catalog write, the same
 //! transaction that commits the change and its outbox event
 //! ([`crate::catalog::change_event`]) evaluates the enabled dependencies whose
-//! source bundle changed ([`evaluate_dependencies`]):
+//! source bundle changed (`evaluate_dependencies`):
 //!
 //! - a matching selector marks the target bundle (or target scope) `stale`
 //!   with reason `dependency_source_changed`, idempotently by generation
@@ -52,23 +52,23 @@
 //!   bundle-scope dependencies sourced at it mark their own targets in the
 //!   same transaction (A -> B -> C: changing A stales B and C). The walk
 //!   carries a visited set, so cycles (A -> B -> A) and self-loops terminate,
-//!   and it is bounded by [`TRANSITIVE_INVALIDATION_ROW_CAP`] - past the cap,
+//!   and it is bounded by `TRANSITIVE_INVALIDATION_ROW_CAP` - past the cap,
 //!   or when a node's bounded edge fetch cannot be proved exhaustive (skipped
 //!   rows can consume the fetch budget without advancing the walk), a
 //!   conservative blanket invalidation marks every bundle with an enabled
 //!   bundle-scope dependency edge stale, so an over-cap graph never commits
 //!   with a falsely fresh remainder;
 //! - every bundle-level dependency invalidation bumps the target row's
-//!   `dependency_invalidation_epoch`. [`mark_reconciling`](pgokf::mark_reconciling)
+//!   `dependency_invalidation_epoch`. `mark_reconciling`
 //!   claims the standing epoch and returns it to the attempt as its claim
-//!   token; the compare-and-set [`mark_fresh`](pgokf::mark_fresh) completes
+//!   token; the compare-and-set `mark_fresh` completes
 //!   only when the token the attempt presents covers the newest epoch, so a
 //!   completion prepared before an invalidation landed can never erase it -
 //!   the producer must re-claim (observing the invalidation) and present the
 //!   new token before completing, and a newer attempt's claim can never
 //!   validate an older attempt's evidence;
 //! - a content change whose change summary was truncated (see
-//!   [`crate::catalog::change_event::CHANGE_RECORD_CAP`]) cannot be proved
+//!   `crate::catalog::change_event::CHANGE_RECORD_CAP`) cannot be proved
 //!   against a narrowed selector, and a lifecycle event carries no concept
 //!   detail at all - in both cases the changed **source** bundle itself is
 //!   marked `stale` with reason `change_scope_unknown` ("unknown scope is
@@ -91,9 +91,9 @@
 //! The `relationship_coverage_missing` evidence is independent of the mutable
 //! state reasons: `mark_relationship_coverage_missing` records it on the
 //! dedicated `relationship_coverage_missing_since` column, which
-//! [`mark_reconciling`](pgokf::mark_reconciling) (or any other state
+//! `mark_reconciling` (or any other state
 //! transition) cannot erase, and the compare-and-set refuses while it stands.
-//! Only re-established coverage ([`clear_relationship_coverage_missing`]) or
+//! Only re-established coverage (`clear_relationship_coverage_missing`) or
 //! an explicit admin repair clears it.
 //!
 //! # Publication fences

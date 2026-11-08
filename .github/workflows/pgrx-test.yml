@@ -43,13 +43,13 @@ jobs:
           ref: ${{ github.sha }}
           path: release-tools
 
-      - name: Validate source compatibility identity
-        run: python3 release-tools/scripts/compatibility-source.py .
-
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: "1.96.0"
           components: clippy
+
+      - name: Validate source compatibility identity
+        run: cargo run --locked --manifest-path release-tools/Cargo.toml -p pgokf-verifier -- compatibility-source .
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
@@ -60,7 +60,7 @@ jobs:
       - name: Install PostgreSQL ${{ matrix.pg }} development files
         id: pgdg
         run: |
-          sudo release-tools/packaging/install-postgres.sh ${{ matrix.pg }}
+          sudo env PGOKF_VERIFIER="${{ github.workspace }}/release-tools/target/debug/pgokf-verifier" release-tools/packaging/install-postgres.sh ${{ matrix.pg }}
           echo "available=true" >> "$GITHUB_OUTPUT"
 
       # pg_textsearch (the default BM25 provider) ships for 17 and 18 only.
@@ -130,9 +130,23 @@ jobs:
           cargo pgrx install --no-default-features --features pg18 --pg-config "$PG_CONFIG"
           release-tools/scripts/compatibility-parity.sh "$PG_CONFIG"
 
+      # Golden legacy MCP wire fixtures (spec/pgokf-0.4.0-mcp.md §9): drive the
+      # pgokf-mcp binary over stdio and authenticated HTTP against a scratch
+      # cluster and compare with the committed transcripts. The suite requires
+      # PostgreSQL 18 with this checkout's extension installed - both hold on
+      # this leg after the parity step above.
+      - name: Legacy MCP golden wire fixtures
+        if: steps.pgdg.outputs.available == 'true' && matrix.pg == 18
+        env:
+          PGOKF_PG_CONFIG: /usr/lib/postgresql/18/bin/pg_config
+          PGOKF_MCP_BIN: ${{ github.workspace }}/target/debug/pgokf-mcp
+        run: |
+          cargo build --locked -p pgokf-mcp
+          cargo run --locked -p pgokf-verifier -- mcp-golden . "$PGOKF_PG_CONFIG" "$PGOKF_MCP_BIN" "$RUNNER_TEMP/mcp-golden-evidence"
+
       - name: Nonproduction PostgreSQL 19 Beta 3 image compatibility
         if: matrix.pg == 19
         run: |
-          python3 release-tools/scripts/compatibility-image.py
+          cargo run --locked --manifest-path release-tools/Cargo.toml -p pgokf-verifier -- compatibility-image . release-tools pgokf-beta-compat "$RUNNER_TEMP/beta-image.json"
           version=$(sed -n "s/^default_version *= *'\([^']*\)'.*/\1/p" crates/extension/pgokf.control)
           SMOKE_WITH_OPTIONAL=0 release-tools/packaging/docker/smoke-test.sh pgokf-beta-compat "$version"

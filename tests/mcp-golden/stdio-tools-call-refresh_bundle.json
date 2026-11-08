@@ -1,0 +1,28 @@
+[
+  {
+    "request": {
+      "id": 8,
+      "jsonrpc": "2.0",
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "bundle_id": 1
+        },
+        "name": "refresh_bundle"
+      }
+    },
+    "response": {
+      "id": 8,
+      "jsonrpc": "2.0",
+      "result": {
+        "content": [
+          {
+            "text": "{\n  \"bundle\": \"golden-fs\",\n  \"bundle_id\": 1,\n  \"sync\": {\n    \"added\": 0,\n    \"bundle_id\": 1,\n    \"path\": \"<BUNDLE>\",\n    \"removed\": 0,\n    \"total\": 6,\n    \"unchanged\": 6,\n    \"updated\": 0\n  }\n}",
+            "type": "text"
+          }
+        ],
+        "isError": false
+      }
+    }
+  }
+]

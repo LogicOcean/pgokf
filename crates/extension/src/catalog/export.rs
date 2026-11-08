@@ -42,8 +42,8 @@
 //! # Memory bounds
 //!
 //! The catalog is never materialized in memory. Each table is streamed with
-//! keyset pagination over its primary key ([`build_batch_query`]): a bounded
-//! [`EXPORT_BATCH_ROWS`]-row batch is read in its own short SPI session (so
+//! keyset pagination over its primary key (`build_batch_query`): a bounded
+//! `EXPORT_BATCH_ROWS`-row batch is read in its own short SPI session (so
 //! the previous batch's tuple table is freed before the next is read), packed
 //! into one Arrow [`RecordBatch`], written as a Parquet row group, and
 //! flushed. Peak memory is therefore one batch of rows plus one row group,
@@ -52,7 +52,7 @@
 //!
 //! # `PostgreSQL` type → Arrow type mapping
 //!
-//! [`arrow_data_type`] is the single source of truth, exercised directly by
+//! `arrow_data_type` is the single source of truth, exercised directly by
 //! the unit tests:
 //!
 //! | `PostgreSQL` column                | Arrow `DataType`                       |

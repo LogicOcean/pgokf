@@ -3,9 +3,9 @@
 //!
 //! They need a connection of their own - a `pgokf_writer`-capable role,
 //! given with `--writer-url` - because everything else this server does it
-//! does as a reader. Without one the tools are still declared, so an agent
-//! discovers them and is told plainly that this endpoint does not write,
-//! rather than finding a tool that silently is not there.
+//! does as a reader. Without one the tools are not advertised (discovery
+//! lists only what this process can execute; see `policy`), and a call to
+//! one is refused with the `writer_unavailable` code.
 //!
 //! Four rules hold whatever writes:
 //!
@@ -33,6 +33,7 @@
 //!   them. So is one too large to hold in memory, and one whose name does
 //!   not resolve to the row that was read.
 
+use crate::service::DomainError;
 use anyhow::{Context, Result, anyhow, bail};
 use pgokf_companion::documents::{Document, now_iso};
 use serde_json::{Value, json};
@@ -110,15 +111,10 @@ impl WriterConn {
 /// Whether `tool` is one of the tools that change the catalog. `list_bundles`
 /// is not among them: it only reads, so it is served by the reader and works
 /// on an endpoint with no writer connection at all.
+#[cfg(test)]
 pub(crate) fn is_write_tool(tool: &str) -> bool {
-    matches!(
-        tool,
-        "put_document"
-            | "delete_document"
-            | "create_content_bundle"
-            | "refresh_bundle"
-            | "set_bundle_state"
-    )
+    crate::registry::by_name(tool)
+        .is_some_and(|spec| spec.availability == crate::registry::Availability::Writer)
 }
 
 /// As much of a caller-supplied value as an error message repeats.
@@ -131,81 +127,18 @@ fn echo(value: &str) -> String {
 }
 
 /// The writing and administering tools, as `tools/list` declares them.
+#[cfg(test)]
 pub(crate) fn tool_definitions() -> Value {
-    json!([
-        {
-            "name": "list_bundles",
-            "description": "List the bundles in the catalog with their id, name, kind (content: written through this API; filesystem: synced from a directory the database server reads), state, and file count. Use it to find the bundle name that put_document writes into.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "include_retired": {"type": "boolean", "description": "Include retired bundles (default false)."}
-                }
-            }
-        },
-        {
-            "name": "put_document",
-            "description": "Write one Markdown document into a content bundle, creating it or replacing the one at that path. The text is a complete OKF document: YAML frontmatter (type and title are required) then the body. Any 'verified' the document claims is set aside rather than believed - a verification is granted by a human approver reviewing it - and 'generated' is stamped with this token, so what you write is machine-generated until a person reviews it. The whole bundle is rewritten from the catalog's stored sources, so the catalog must keep them (store_source).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "bundle": {"type": "string", "description": "The content bundle's name (see list_bundles). Alternative to bundle_id."},
-                    "bundle_id": {"type": "integer", "description": "The content bundle's id. Alternative to bundle."},
-                    "path": {"type": "string", "description": "Path within the bundle, ending in .md (for example runbooks/failover.md). It becomes the concept id without the extension."},
-                    "text": {"type": "string", "description": "The complete document: '---', YAML frontmatter, '---', then the Markdown body."}
-                },
-                "required": ["path", "text"]
-            }
-        },
-        {
-            "name": "delete_document",
-            "description": "Remove one document from a content bundle. The rest of the bundle is rewritten unchanged; the document's history is not recoverable through this API.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "bundle": {"type": "string", "description": "The content bundle's name. Alternative to bundle_id."},
-                    "bundle_id": {"type": "integer", "description": "The content bundle's id. Alternative to bundle."},
-                    "path": {"type": "string", "description": "The path to remove, as list_bundles' concepts and get_concept report it."}
-                },
-                "required": ["path"]
-            }
-        },
-        {
-            "name": "create_content_bundle",
-            "description": "Create an empty content bundle to write documents into. A content bundle lives entirely in the catalog: nothing on any filesystem backs it, and put_document is how its documents get there.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "The bundle's name, unique among bundles."}
-                },
-                "required": ["name"]
-            }
-        },
-        {
-            "name": "refresh_bundle",
-            "description": "Re-read a filesystem bundle from its directory and index what changed. Content bundles have no source to re-read and are refused; write to them with put_document instead.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "bundle": {"type": "string", "description": "The bundle's name. Alternative to bundle_id."},
-                    "bundle_id": {"type": "integer", "description": "The bundle's id. Alternative to bundle."}
-                }
-            }
-        },
-        {
-            "name": "set_bundle_state",
-            "description": "Enable, disable, retire, or bring back a bundle. Disabled and retired bundles leave search and browsing; both are reversible, and neither deletes anything.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "bundle": {"type": "string", "description": "The bundle's name. Alternative to bundle_id."},
-                    "bundle_id": {"type": "integer", "description": "The bundle's id. Alternative to bundle."},
-                    "state": {"type": "string", "enum": ["enabled", "disabled", "retired", "active"], "description": "enabled/disabled toggle whether it is searched; retired takes it out of the catalog reversibly, active brings a retired one back."}
-                },
-                "required": ["state"]
-            }
-        }
-    ])
+    Value::Array(
+        crate::registry::all()
+            .iter()
+            .filter(|spec| {
+                spec.availability == crate::registry::Availability::Writer
+                    || spec.name == "list_bundles"
+            })
+            .map(|spec| spec.definition(false))
+            .collect(),
+    )
 }
 
 /// One bundle, as the write tools resolve it.
@@ -224,14 +157,15 @@ impl Bundle {
         if self.source_type == "content" {
             return Ok(self);
         }
-        bail!(
+        Err(DomainError::InvalidArgument(format!(
             "bundle {} ({}) is a {} bundle: its documents come from the directory the database \
              server reads, so they are changed there and picked up by refresh_bundle, not \
              written through this API",
             self.id,
             echo(&self.name),
             self.source_type
-        )
+        ))
+        .into())
     }
 }
 
@@ -708,11 +642,12 @@ async fn delete_document(tx: &Transaction<'_>, args: &Value) -> Result<Value> {
     let before = files.len();
     files.retain(|(stored, _)| *stored != path);
     if files.len() == before {
-        bail!(
+        return Err(DomainError::NotFound(format!(
             "{} holds no document at {}",
             echo(&bundle.name),
             echo(&path)
-        );
+        ))
+        .into());
     }
     let outcome = resync(tx, &bundle, &files).await?;
 
@@ -745,7 +680,11 @@ async fn create_content_bundle(tx: &Transaction<'_>, args: &Value) -> Result<Val
         .context("checking the bundle name")?
         .try_get(0)?;
     if taken {
-        bail!("a bundle named '{}' already exists", echo(name));
+        return Err(DomainError::Conflict(format!(
+            "a bundle named '{}' already exists",
+            echo(name)
+        ))
+        .into());
     }
     let row = tx
         .query_one(
@@ -761,12 +700,13 @@ async fn create_content_bundle(tx: &Transaction<'_>, args: &Value) -> Result<Val
 async fn refresh_bundle(tx: &Transaction<'_>, args: &Value) -> Result<Value> {
     let bundle = resolve(tx, args).await?;
     if bundle.source_type == "content" {
-        bail!(
+        return Err(DomainError::InvalidArgument(format!(
             "bundle {} ({}) is a content bundle: it has no source to re-read, and its documents \
              are written with put_document",
             bundle.id,
             echo(&bundle.name)
-        );
+        ))
+        .into());
     }
     let row = tx
         .query_one(

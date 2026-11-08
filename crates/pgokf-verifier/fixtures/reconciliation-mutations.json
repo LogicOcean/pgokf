@@ -1,0 +1,1837 @@
+[
+  {
+    "name": "omit drop semantic",
+    "edits": [
+      {
+        "path": "pgokf--0.4.0-dev1--0.4.0-dev2.sql",
+        "before": "==================================\nDROP FUNCTION IF EXISTS pgokf.concept_search_semantic(real[], bigint, integer) RESTRICT;\nDROP FUNCTION IF EXISTS pgokf.concept_search_hybrid(text, real[], bigint, integer) RESTRICT;\nDROP FUNCTION IF EXISTS pgokf.bm",
+        "after": "==================================\nDROP FUNCTION IF EXISTS pgokf.concept_search_hybrid(text, real[], bigint, integer) RESTRICT;\nDROP FUNCTION IF EXISTS pgokf.bm"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "retired function pgokf.concept_search_semantic(real[], bigint, integer) survived",
+    "legacy_source_detector": null
+  },
+  {
+    "name": "omit drop hybrid",
+    "edits": [
+      {
+        "path": "pgokf--0.4.0-dev1--0.4.0-dev2.sql",
+        "before": "earch_semantic(real[], bigint, integer) RESTRICT;\nDROP FUNCTION IF EXISTS pgokf.concept_search_hybrid(text, real[], bigint, integer) RESTRICT;\nDROP FUNCTION IF EXISTS pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, te",
+        "after": "earch_semantic(real[], bigint, integer) RESTRICT;\nDROP FUNCTION IF EXISTS pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, te"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "retired function pgokf.concept_search_hybrid(text, real[], bigint, integer) survived",
+    "legacy_source_detector": null
+  },
+  {
+    "name": "omit drop bm25",
+    "edits": [
+      {
+        "path": "pgokf--0.4.0-dev1--0.4.0-dev2.sql",
+        "before": " IF EXISTS pgokf.concept_search_hybrid(text, real[], bigint, integer) RESTRICT;\nDROP FUNCTION IF EXISTS pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text) RESTRICT;\n\n-- ===========================================================================\n",
+        "after": " IF EXISTS pgokf.concept_search_hybrid(text, real[], bigint, integer) RESTRICT;\n\n-- ===========================================================================\n"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "retired function pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text) survived",
+    "legacy_source_detector": null
+  },
+  {
+    "name": "omit helper",
+    "edits": [
+      {
+        "path": "pgokf--0.4.0-dev1--0.4.0-dev2.sql",
+        "before": "\n-- ===========================================================================\nCREATE OR REPLACE FUNCTION pgokf.bm25_hits(\n    p_query text,\n    p_bundle_id bigint,\n    p_limit bigint,\n    p_text_search_config text,\n    p_concept_type text,\n    p_tags text[],\n    p_status text,\n    p_trust_tier text,\n    p_after_rank real,\n    p_after_bundle_id bigint,\n    p_after_concept_id text,\n    p_concept_types text[])\nRETURNS TABLE (\n    bundle_id bigint,\n    concept_id text,\n    path text,\n    title text,\n    type text,\n    rank real,\n    headline text)\nLANGUAGE plpgsql\nSTABLE PARALLEL SAFE\nSECURITY DEFINER\nSET search_path = pg_catalog, pg_temp\nAS $fn$\nDECLARE\n    -- Resolved once, up front, and bound into the query as a parameter: the\n    -- policies inline current_setting() directly, but pg_search 0.25 cannot\n    -- plan its scan under a predicate that calls a function (that inline\n    -- form is exactly what row-level security injects for non-owners, and\n    -- exactly what the Unsupported-query-shape error was about). Empty = unset.\n    v_tenant text := NULLIF(pg_catalog.current_setting('pgokf.tenant', true), '');\nBEGIN\n    -- The policies' rule, applied here because this body bypasses them: an\n    -- unscoped session sees nothing when the catalog requires a tenant.\n    IF v_tenant IS NULL AND pgokf.tenant_required() THEN\n        RETURN;\n    END IF;\n    RETURN QUERY\n    SELECT hits.bundle_id,\n           hits.concept_id,\n           hits.path,\n           hits.title,\n           hits.type,\n           hits.rank,\n           hits.headline\n    FROM (\n        SELECT c.bundle_id AS bundle_id,\n               c.id AS concept_id,\n               c.path AS path,\n               c.title AS title,\n               c.type AS type,\n               paradedb.score(c) AS rank,\n               pg_catalog.ts_headline(\n                   p_text_search_config::pg_catalog.regconfig,\n                   pg_catalog.concat_ws(' ', c.title, c.description, c.body_text),\n                   pg_catalog.websearch_to_tsquery(p_text_search_config::pg_catalog.regconfig, p_query)) AS headline\n        FROM pgokf.concepts c\n        JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled AND b.retired_at IS NULL\n        LEFT JOIN pgokf.concept_provenance cp\n               ON cp.bundle_id = c.bundle_id AND cp.concept_id = c.id\n        WHERE c.id @@@ paradedb.boolean(should => ARRAY[\n                  paradedb.match('title', p_query),\n                  paradedb.match('description', p_query),\n                  paradedb.match('body_text', p_query)])\n          AND (v_tenant IS NULL OR c.tenant_id = v_tenant)\n          AND (p_bundle_id IS NULL OR c.bundle_id = p_bundle_id)\n          AND (p_concept_type IS NULL OR c.type = p_concept_type)\n          AND (p_tags IS NULL OR c.tags @> p_tags)\n          AND (p_status IS NULL OR cp.status = p_status)\n          AND (p_trust_tier IS NULL OR cp.trust_tier = p_trust_tier)\n          AND (p_concept_types IS NULL OR c.type = ANY(p_concept_types))\n    ) AS hits\n    WHERE p_after_rank IS NULL\n       OR hits.rank < p_after_rank\n       OR (hits.rank = p_after_rank AND hits.bundle_id > p_after_bundle_id)\n       OR (hits.rank = p_after_rank AND hits.bundle_id = p_after_bundle_id AND hits.concept_id > p_after_concept_id)\n    ORDER BY hits.rank DESC, hits.bundle_id ASC, hits.concept_id ASC\n    LIMIT p_limit;\nEND\n$fn$;\n\nDO $dev2_helper_owner$\nDECLARE\n    v_owner pg_catalog.oid;\nBEGIN\n    SELECT extowner INTO STRICT v_owner FROM pg_catalog.pg_extension WHERE extname = 'pgokf';\n    IF (SELECT proowner FROM pg_catalog.pg_proc\n        WHERE oid = 'pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[])'::pg_catalog.regprocedure)\n       <> v_owner THEN\n        EXECUTE pg_catalog.format(\n            'ALTER FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[]) OWNER TO %s',\n            v_owner::pg_catalog.regrole);\n    END IF;\nEND\n$dev2_helper_owner$;\n\nREVOKE ALL ON FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[]) FROM PUBLIC;\nGRANT EXECUTE ON FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[]) TO pgokf_reader;\nCOMMENT ON FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[]) IS\n    'Internal helper behind concept_search when search_backend = bm25 resolves to the ParadeDB pg_search provider (the pg_textsearch provider runs inline with invoker rights and does not use it); not part of the stable API. Runs the ParadeDB pg_search BM25 hit query with the owner''s privileges (row-level security wraps the catalog tables in a shape pg_search cannot plan for non-owners) while applying the same pgokf.tenant scoping the policies enforce, over active bundles only, with concept_search''s filters (p_concept_types is the type-membership form concept_search_hybrid uses to constrain the lexical candidate list before truncation), keyset cursor, and limit. Reader-level; returns exactly the rows concept_search would.';\n\n-- ===========================================================================\n",
+        "after": "\n-- ===========================================================================\n\n-- ===========================================================================\n"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "required helper pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[]) is missing",
+    "legacy_source_detector": null
+  },
+  {
+    "name": "omit helper owner",
+    "edits": [
+      {
+        "path": "pgokf--0.4.0-dev1--0.4.0-dev2.sql",
+        "before": "ank DESC, hits.bundle_id ASC, hits.concept_id ASC\n    LIMIT p_limit;\nEND\n$fn$;\n\nDO $dev2_helper_owner$\nDECLARE\n    v_owner pg_catalog.oid;\nBEGIN\n    SELECT extowner INTO STRICT v_owner FROM pg_catalog.pg_extension WHERE extname = 'pgokf';\n    IF (SELECT proowner FROM pg_catalog.pg_proc\n        WHERE oid = 'pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[])'::pg_catalog.regprocedure)\n       <> v_owner THEN\n        EXECUTE pg_catalog.format(\n            'ALTER FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[]) OWNER TO %s',\n            v_owner::pg_catalog.regrole);\n    END IF;\nEND\n$dev2_helper_owner$;\n\nREVOKE ALL ON FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[]",
+        "after": "ank DESC, hits.bundle_id ASC, hits.concept_id ASC\n    LIMIT p_limit;\nEND\n$fn$;\n\n\nREVOKE ALL ON FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[]"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "owner drift on pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[])",
+    "legacy_source_detector": null
+  },
+  {
+    "name": "weaken search revoke",
+    "edits": [
+      {
+        "path": "pgokf--0.4.0-dev1--0.4.0-dev2.sql",
+        "before": "\n-- ===========================================================================\nREVOKE ALL ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer, text[]) FROM PUBLIC;\nREVOKE ALL ON FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer, text[]) FROM PUBLIC;\nGRANT EXECUTE ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer,",
+        "after": "\n-- ===========================================================================\nGRANT EXECUTE ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer,"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "acl drift on pgokf.concept_search_semantic(real[], bigint, integer, text[])",
+    "legacy_source_detector": null
+  },
+  {
+    "name": "weaken search grant",
+    "edits": [
+      {
+        "path": "pgokf--0.4.0-dev1--0.4.0-dev2.sql",
+        "before": "pgokf.concept_search_hybrid(text, real[], bigint, integer, text[]) FROM PUBLIC;\nGRANT EXECUTE ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer, text[]) TO pgokf_reader;\nGRANT EXECUTE ON FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer, text[]) TO pgokf_reader;\nCOMMENT ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer, text[",
+        "after": "pgokf.concept_search_hybrid(text, real[], bigint, integer, text[]) FROM PUBLIC;\nCOMMENT ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer, text["
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "acl drift on pgokf.concept_search_semantic(real[], bigint, integer, text[])",
+    "legacy_source_detector": null
+  },
+  {
+    "name": "weaken helper revoke",
+    "edits": [
+      {
+        "path": "pgokf--0.4.0-dev1--0.4.0-dev2.sql",
+        "before": "            v_owner::pg_catalog.regrole);\n    END IF;\nEND\n$dev2_helper_owner$;\n\nREVOKE ALL ON FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[]) FROM PUBLIC;\nGRANT EXECUTE ON FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text",
+        "after": "            v_owner::pg_catalog.regrole);\n    END IF;\nEND\n$dev2_helper_owner$;\n\nGRANT EXECUTE ON FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "acl drift on pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[])",
+    "legacy_source_detector": null
+  },
+  {
+    "name": "skip search comments",
+    "edits": [
+      {
+        "path": "pgokf--0.4.0-dev1--0.4.0-dev2.sql",
+        "before": "f.concept_search_hybrid(text, real[], bigint, integer, text[]) TO pgokf_reader;\nCOMMENT ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer, text[]) IS\n    'Semantic nearest-neighbor search: rank concepts by pgvector cosine distance to query_embedding (rank = normalized cosine similarity). Reader-level, invoker rights; active bundles only. query_embedding must have embedding_dim dimensions; limit_count in 1..=500. Requires pgvector: raises 22023 naming the missing dependency when it is not installed (no lexical fallback). Only ELIGIBLE embeddings rank: source_file_hash equal to the concept''s current file_hash, model/dimension/contract matching the embedding_model/embedding_dim/embedding_contract policy, and the concept effectively fresh (bundle freshness fresh, no covering concept/path override); a stale or legacy (NULL-provenance) row never ranks even while the HNSW index physically retains it. concept_types is an optional type-membership filter (a hit''s type must be one of the listed types; NULL or empty is no filter) applied inside the ranked query BEFORE the candidate list is truncated to limit_count, so a filtered call returns up to limit_count eligible hits of the selected types even when excluded types outrank them.';\nCOMMENT ON FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer, text[]) IS\n    'Hybrid search: Reciprocal Rank Fusion (RRF, k=60) of the lexical result of query (via the configured search_backend) and the semantic result of query_embedding, fused entirely in SQL (rank = fused RRF score). Reader-level, invoker rights; enabled bundles only; limit_count in 1..=500. The semantic component ranks eligible (current, fresh) embeddings only, so an ineligible vector never leaks into the fused result; the lexical component may still return a stale concept, labeled by pgokf.concept_search_fresh. Degrades to lexical-only with a WARNING when pgvector is not installed. concept_types is an optional type-membership filter (a hit''s type must be one of the listed types; NULL or empty is no filter) applied to BOTH ranked inputs before either is truncated to limit_count, so the fused page is exactly the type-filtered top-limit_count, never underfilled by higher-ranked excluded types.';\n\n-- ===========================================================================\n",
+        "after": "f.concept_search_hybrid(text, real[], bigint, integer, text[]) TO pgokf_reader;\n\n-- ===========================================================================\n"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "comment drift on pgokf.concept_search_semantic(real[], bigint, integer, text[])",
+    "legacy_source_detector": null
+  },
+  {
+    "name": "skip package comments",
+    "edits": [
+      {
+        "path": "pgokf--0.4.0-dev1--0.4.0-dev2.sql",
+        "before": "================================================\nCOMMENT ON FUNCTION pgokf.get_skill(bigint, text) IS\n    'Return one Agent Skills package as pgokf.skill_result: name, description, package directory and hash, visibility, the complete original frontmatter, the exact SKILL.md bytes, and the JSON listing of its scripts, references, and assets. Reader-level, tenant-scoped, and audited: each successful read appends a get_skill row to the access log. Raises 22023 for an unknown skill.';\nCOMMENT ON FUNCTION pgokf.get_script(bigint, text) IS\n    'Return one package script as pgokf.script_result: la",
+        "after": "================================================\nCOMMENT ON FUNCTION pgokf.get_script(bigint, text) IS\n    'Return one package script as pgokf.script_result: la"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "comment drift on pgokf.get_skill(bigint, text)",
+    "legacy_source_detector": null
+  },
+  {
+    "name": "skip initial privileges",
+    "edits": [
+      {
+        "path": "pgokf--0.4.0-dev1--0.4.0-dev2.sql",
+        "before": "\n-- ===========================================================================\nREVOKE ALL ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer, text[]) FROM PUBLIC;\nREVOKE ALL ON FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer, text[]) FROM PUBLIC;\nGRANT EXECUTE ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer, text[]) TO pgokf_reader;\nGRANT EXECUTE ON FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer, text[]) TO pgokf_reader;\nCOMMENT ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer, text[",
+        "after": "\n-- ===========================================================================\nCOMMENT ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer, text["
+      }
+    ],
+    "operator": "REVOKE ALL ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer, text[]) FROM PUBLIC;\nREVOKE ALL ON FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer, text[]) FROM PUBLIC;\nGRANT EXECUTE ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer, text[]) TO pgokf_reader;\nGRANT EXECUTE ON FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer, text[]) TO pgokf_reader;\n",
+    "legacy_diagnostic": "initial privileges drift on pgokf.concept_search_semantic(real[], bigint, integer, text[])",
+    "legacy_source_detector": null
+  },
+  {
+    "name": "bypass guards",
+    "edits": [
+      {
+        "path": "pgokf--0.4.0-dev1--0.4.0-dev2.sql",
+        "before": "\n-- ===========================================================================\nDO $dev2_reconciliation_guard$\nDECLARE\n    v_extension pg_catalog.oid;\n    v_owner pg_catalog.oid;\n    v_reader pg_catalog.oid := 'pgokf_reader'::pg_catalog.regrole::pg_catalog.oid;\n    v_function pg_catalog.oid;\n    v_problem text;\n    v_detail text;\n    v_retired record;\n    v_current record;\nBEGIN\n    SELECT oid, extowner INTO STRICT v_extension, v_owner\n    FROM pg_catalog.pg_extension WHERE extname = 'pgokf';\n\n    -- An overload of these names that is neither current nor a known retired\n    -- shape would stay ambiguous or unexplained; refuse it outright.\n    SELECT pg_catalog.string_agg(pg_catalog.format('pgokf.%s(%s)', p.proname,\n               pg_catalog.pg_get_function_identity_arguments(p.oid)), ', ' ORDER BY 1)\n    INTO v_detail\n    FROM pg_catalog.pg_proc AS p\n    WHERE p.pronamespace = 'pgokf'::pg_catalog.regnamespace\n      AND p.proname IN ('concept_search_semantic', 'concept_search_hybrid', 'bm25_hits')\n      AND NOT EXISTS (\n          SELECT 1 FROM pg_catalog.unnest(ARRAY[\n              'pgokf.concept_search_semantic(real[], bigint, integer, text[])',\n              'pgokf.concept_search_hybrid(text, real[], bigint, integer, text[])',\n              'pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[])',\n              'pgokf.concept_search_semantic(real[], bigint, integer)',\n              'pgokf.concept_search_hybrid(text, real[], bigint, integer)',\n              'pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text)'\n          ]) AS known(signature)\n          WHERE pg_catalog.to_regprocedure(known.signature) = p.oid);\n    IF v_detail IS NOT NULL THEN\n        RAISE EXCEPTION 'pgokf 0.4.0-dev2 reconciliation refuses unknown search overloads: %', v_detail\n            USING ERRCODE = 'object_not_in_prerequisite_state',\n                  HINT = 'Review and remove the unknown overloads deliberately, then retry ALTER EXTENSION pgokf UPDATE. Nothing was changed.';\n    END IF;\n\n    -- The retired 0.2.0 overloads: exact published shape or refuse.\n    FOR v_retired IN\n        SELECT * FROM (VALUES\n            ('pgokf.concept_search_semantic(real[], bigint, integer)',\n             'query_embedding real[], bundle_id bigint DEFAULT NULL::bigint, limit_count integer DEFAULT 10',\n             'SETOF pgokf.concept_search_result',\n             'c', 'concept_search_semantic_wrapper', NULL::text,\n             's', 's', false, NULL::text[]),\n            ('pgokf.concept_search_hybrid(text, real[], bigint, integer)',\n             'query text, query_embedding real[], bundle_id bigint DEFAULT NULL::bigint, limit_count integer DEFAULT 10',\n             'SETOF pgokf.concept_search_result',\n             'c', 'concept_search_hybrid_wrapper', NULL::text,\n             's', 'r', false, NULL::text[]),\n            ('pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text)',\n             'p_query text, p_bundle_id bigint, p_limit bigint, p_text_search_config text, p_concept_type text, p_tags text[], p_status text, p_trust_tier text, p_after_rank real, p_after_bundle_id bigint, p_after_concept_id text',\n             'TABLE(bundle_id bigint, concept_id text, path text, title text, type text, rank real, headline text)',\n             'plpgsql', NULL::text, '1b9dab9b527f30d0d3cd55c14a81e26d',\n             's', 's', true, ARRAY['search_path=pg_catalog, pg_temp'])\n        ) AS retired(signature, arguments, result, language, symbol, body_md5,\n                     volatility, parallel, security_definer, config)\n    LOOP\n        v_function := pg_catalog.to_regprocedure(v_retired.signature);\n        IF v_function IS NULL THEN\n            CONTINUE;\n        END IF;\n        v_problem := NULL;\n        v_detail := NULL;\n        IF NOT EXISTS (\n            SELECT 1 FROM pg_catalog.pg_depend AS d\n            WHERE d.classid = 'pg_catalog.pg_proc'::pg_catalog.regclass\n              AND d.objid = v_function\n              AND d.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass\n              AND d.refobjid = v_extension\n              AND d.deptype = 'e'\n        ) THEN\n            v_problem := 'extension membership (it is not a member of extension pgokf)';\n        ELSIF (SELECT l.lanname FROM pg_catalog.pg_proc AS p\n               JOIN pg_catalog.pg_language AS l ON l.oid = p.prolang\n               WHERE p.oid = v_function) IS DISTINCT FROM v_retired.language\n           OR (SELECT p.prokind FROM pg_catalog.pg_proc AS p WHERE p.oid = v_function) <> 'f' THEN\n            v_problem := pg_catalog.format('language (expected a %s function)', v_retired.language);\n        ELSIF pg_catalog.pg_get_function_arguments(v_function) IS DISTINCT FROM v_retired.arguments\n           OR pg_catalog.pg_get_function_result(v_function) IS DISTINCT FROM v_retired.result THEN\n            v_problem := 'argument names, defaults or result type';\n        ELSIF v_retired.symbol IS NOT NULL AND NOT EXISTS (\n                SELECT 1 FROM pg_catalog.pg_proc AS p\n                WHERE p.oid = v_function AND p.prosrc = v_retired.symbol\n                  AND p.probin = '$libdir/pgokf') THEN\n            v_problem := pg_catalog.format('C entry point (expected symbol %s in $libdir/pgokf)', v_retired.symbol);\n        ELSIF v_retired.body_md5 IS NOT NULL AND NOT EXISTS (\n                SELECT 1 FROM pg_catalog.pg_proc AS p\n                WHERE p.oid = v_function AND pg_catalog.md5(p.prosrc) = v_retired.body_md5\n                  AND p.probin IS NULL) THEN\n            v_problem := pg_catalog.format('body (expected the published 0.2.0 body, md5 %s)', v_retired.body_md5);\n        ELSIF NOT EXISTS (\n                SELECT 1 FROM pg_catalog.pg_proc AS p\n                WHERE p.oid = v_function AND p.provolatile = v_retired.volatility\n                  AND p.proparallel = v_retired.parallel\n                  AND NOT p.proisstrict AND NOT p.proleakproof) THEN\n            v_problem := 'volatility, parallel safety, strictness or leakproofness';\n        ELSIF (SELECT p.prosecdef FROM pg_catalog.pg_proc AS p WHERE p.oid = v_function)\n              IS DISTINCT FROM v_retired.security_definer THEN\n            v_problem := pg_catalog.format('security (expected SECURITY %s)',\n                CASE WHEN v_retired.security_definer THEN 'DEFINER' ELSE 'INVOKER' END);\n        ELSIF (SELECT p.proconfig FROM pg_catalog.pg_proc AS p WHERE p.oid = v_function)\n              IS DISTINCT FROM v_retired.config THEN\n            v_problem := pg_catalog.format('configuration (expected %s)', COALESCE(v_retired.config::text, 'none'));\n        ELSIF (SELECT p.proowner FROM pg_catalog.pg_proc AS p WHERE p.oid = v_function) <> v_owner THEN\n            v_problem := pg_catalog.format('owner (expected the extension owner %s)', v_owner::pg_catalog.regrole);\n        ELSIF (SELECT pg_catalog.array_agg(\n                   pg_catalog.format('%s:%s:%s:%s', a.grantor, a.grantee, a.privilege_type,\n                                     a.is_grantable::text) ORDER BY a.grantee)\n               FROM pg_catalog.pg_proc AS p, pg_catalog.aclexplode(p.proacl) AS a\n               WHERE p.oid = v_function)\n              IS DISTINCT FROM\n              (SELECT pg_catalog.array_agg(pg_catalog.format('%s:%s:EXECUTE:false', v_owner, g) ORDER BY g)\n               FROM (SELECT v_owner AS g UNION SELECT v_reader) AS expected) THEN\n            v_problem := pg_catalog.format('ACL (expected EXECUTE for exactly the owner %s and pgokf_reader, owner grantor, no grant options)',\n                v_owner::pg_catalog.regrole);\n        ELSE\n            SELECT pg_catalog.string_agg(pg_catalog.pg_describe_object(d.classid, d.objid, d.objsubid), ', ' ORDER BY 1)\n            INTO v_detail\n            FROM pg_catalog.pg_depend AS d\n            WHERE d.refclassid = 'pg_catalog.pg_proc'::pg_catalog.regclass\n              AND d.refobjid = v_function;\n            IF v_detail IS NOT NULL THEN\n                v_problem := pg_catalog.format('dependents (%s)', v_detail);\n            END IF;\n        END IF;\n        IF v_problem IS NOT NULL THEN\n            RAISE EXCEPTION 'pgokf 0.4.0-dev2 reconciliation refuses retired function %: unexpected %',\n                v_retired.signature, v_problem\n                USING ERRCODE = 'object_not_in_prerequisite_state',\n                      DETAIL = 'Only the exact published 0.2.0 definition, an extension member owned by the extension owner with owner plus pgokf_reader EXECUTE and no dependents, is dropped automatically.',\n                      HINT = 'Review the object and restore or remove it deliberately, then retry ALTER EXTENSION pgokf UPDATE. Nothing was changed.';\n        END IF;\n    END LOOP;\n\n    -- The current search functions: members owned by the extension owner,\n    -- with either PostgreSQL's default ACL (the recorded drift) or the\n    -- canonical one. Custom grants are never silently revoked.\n    FOR v_current IN\n        SELECT * FROM (VALUES\n            ('pgokf.concept_search_semantic(real[], bigint, integer, text[])', true),\n            ('pgokf.concept_search_hybrid(text, real[], bigint, integer, text[])', true),\n            ('pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[])', false)\n        ) AS current_functions(signature, required)\n    LOOP\n        v_function := pg_catalog.to_regprocedure(v_current.signature);\n        IF v_function IS NULL THEN\n            IF v_current.required THEN\n                RAISE EXCEPTION 'pgokf 0.4.0-dev2 reconciliation refuses a catalog without %', v_current.signature\n                    USING ERRCODE = 'object_not_in_prerequisite_state',\n                          HINT = 'The function is part of every 0.4.0-dev1 installation; restore it deliberately, then retry ALTER EXTENSION pgokf UPDATE. Nothing was changed.';\n            END IF;\n            CONTINUE;\n        END IF;\n        IF NOT EXISTS (\n            SELECT 1 FROM pg_catalog.pg_depend AS d\n            WHERE d.classid = 'pg_catalog.pg_proc'::pg_catalog.regclass\n              AND d.objid = v_function\n              AND d.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass\n              AND d.refobjid = v_extension\n              AND d.deptype = 'e'\n        ) THEN\n            RAISE EXCEPTION 'pgokf 0.4.0-dev2 reconciliation refuses current function %: unexpected extension membership (it is not a member of extension pgokf)',\n                v_current.signature\n                USING ERRCODE = 'object_not_in_prerequisite_state',\n                      HINT = 'Review the object and restore or remove it deliberately, then retry ALTER EXTENSION pgokf UPDATE. Nothing was changed.';\n        END IF;\n        IF NOT EXISTS (\n            SELECT 1 FROM pg_catalog.pg_proc AS p\n            WHERE p.oid = v_function AND p.proowner = v_owner\n              AND (p.proacl IS NULL\n                   OR (SELECT pg_catalog.array_agg(\n                              pg_catalog.format('%s:%s:%s:%s', a.grantor, a.grantee,\n                                                a.privilege_type, a.is_grantable::text) ORDER BY a.grantee)\n                       FROM pg_catalog.aclexplode(p.proacl) AS a)\n                      = (SELECT pg_catalog.array_agg(pg_catalog.format('%s:%s:EXECUTE:false', v_owner, g) ORDER BY g)\n                         FROM (SELECT v_owner AS g UNION SELECT v_reader) AS expected))\n        ) THEN\n            RAISE EXCEPTION 'pgokf 0.4.0-dev2 reconciliation refuses current function %: unexpected owner or ACL (expected owner % with either the default ACL or EXECUTE for exactly the owner and pgokf_reader)',\n                v_current.signature, v_owner::pg_catalog.regrole\n                USING ERRCODE = 'object_not_in_prerequisite_state',\n                      HINT = 'Custom grants are never silently revoked. Review ownership and explicit ACLs and restore canonical metadata deliberately, then retry ALTER EXTENSION pgokf UPDATE. Nothing was changed.';\n        END IF;\n    END LOOP;\nEND\n$dev2_reconciliation_guard$;\n\n-- ===========================================================================\n",
+        "after": "\n-- ===========================================================================\n\n-- ===========================================================================\n"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "Unsafe acceptances: refusal",
+    "legacy_source_detector": "retires functions without a preceding named identity guard"
+  },
+  {
+    "name": "weaken guard ACL",
+    "edits": [
+      {
+        "path": "pgokf--0.4.0-dev1--0.4.0-dev2.sql",
+        "before": "er (expected the extension owner %s)', v_owner::pg_catalog.regrole);\n        ELSIF (SELECT pg_catalog.array_agg(\n                   pg_catalog.format('%s:%s:%s:%s', a.grantor, a.grantee, a.privilege_type,\n                                     a.is_grantable::text) ORDER BY a.grantee)\n               FROM pg_catalog.pg_proc AS p, pg_catalog.aclexplode(p.proacl) AS a\n               WHERE p.oid = v_function)\n              IS DISTINCT FROM\n              (SELECT pg_catalog.array_agg(pg_catalog.format('%s:%s:EXECUTE:false', v_owner, g) ORDER BY g)\n               FROM (SELECT v_owner AS g UNION SELECT v_reader) AS expected) THEN\n            v_problem := pg_catalog.format('ACL (expected EXECUTE for exactly the owner %s and pgokf_reader, owner grantor, no grant options)',\n                v_owner::pg_catalog.regrole);\n        ELSE\n            SELECT pg_catalog.string_agg(pg_catalog.pg_describe_object(d.class",
+        "after": "er (expected the extension owner %s)', v_owner::pg_catalog.regrole);\n        ELSE\n            SELECT pg_catalog.string_agg(pg_catalog.pg_describe_object(d.class"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "Unsafe acceptances: refusal concept_search_semantic acl writer",
+    "legacy_source_detector": null
+  },
+  {
+    "name": "weaken guard dependents",
+    "edits": [
+      {
+        "path": "pgokf--0.4.0-dev1--0.4.0-dev2.sql",
+        "before": "refobjid = v_function;\n            IF v_detail IS NOT NULL THEN\n                v_problem := pg_catalog.format('dependents (%s)', v_detail);\n            END IF;\n        END IF;\n        IF v_problem IS NOT NULL THEN\n    ",
+        "after": "refobjid = v_function;\n            IF v_detail IS NOT NULL THEN\n                NULL;\n            END IF;\n        END IF;\n        IF v_problem IS NOT NULL THEN\n    "
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "refusal concept_search_semantic dependent: undiagnosed",
+    "legacy_source_detector": null
+  },
+  {
+    "name": "cascade",
+    "edits": [
+      {
+        "path": "pgokf--0.4.0-dev1--0.4.0-dev2.sql",
+        "before": "\nDROP FUNCTION IF EXISTS pgokf.concept_search_semantic(real[], bigint, integer) RESTRICT;\nDROP FUNCTION IF EXISTS pgokf.concept_search_hybrid(text, real[], bigint, integer) RESTRICT;\nDROP FUNCTION IF EXISTS pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text) RESTRICT;\n\n-- ==========================================================================",
+        "after": "\nDROP FUNCTION IF EXISTS pgokf.concept_search_semantic(real[], bigint, integer) CASCADE;\nDROP FUNCTION IF EXISTS pgokf.concept_search_hybrid(text, real[], bigint, integer) CASCADE;\nDROP FUNCTION IF EXISTS pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text) CASCADE;\n\n-- =========================================================================="
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": "development edge contains CASCADE"
+  },
+  {
+    "name": "keep version at dev1",
+    "edits": [
+      {
+        "path": "pgokf--0.4.0-dev1.sql",
+        "before": null,
+        "after": null,
+        "copy_from": "pgokf--0.4.0-dev3.sql"
+      },
+      {
+        "path": "pgokf--0.4.0-dev3.sql",
+        "before": null,
+        "after": null,
+        "delete": true
+      },
+      {
+        "path": "pgokf.control",
+        "before": "stgreSQL catalog for Open Knowledge Format bundles'\ndefault_version = '0.4.0-dev3'\nmodule_pathname = '$libdir/pgokf'\nrelocatable = false\nsuperuser = true\ntrusted",
+        "after": "stgreSQL catalog for Open Knowledge Format bundles'\ndefault_version = '0.4.0-dev1'\nmodule_pathname = '$libdir/pgokf'\nrelocatable = false\nsuperuser = true\ntrusted"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "retired function pgokf.concept_search_semantic(real[], bigint, integer) survived",
+    "legacy_source_detector": null
+  },
+  {
+    "name": "rewrite dev1 in place",
+    "edits": [
+      {
+        "path": "pgokf--0.3.1--0.4.0-dev1.sql",
+        "before": "_md, recorded so discovery can size the manifest without loading its content.';\nSELECT pgokf_private.register_dump_relations();\n",
+        "after": "_md, recorded so discovery can size the manifest without loading its content.';\n-- SPDX-License-Identifier: AGPL-3.0-only\n-- pgokf extension upgrade: 0.4.0-dev1 -> 0.4.0-dev2\n--\n-- Search-function catalog reconciliation. A field catalog that followed an\n-- unpublished early 0.3.0-dev build reached 0.3.0-dev2 (and so, through the\n-- ordinary receipt-only edges, 0.4.0-dev1) without section 13 of the\n-- 0.2.0 -> 0.3.0-dev script. Compared with a fresh install it carries:\n--\n--   * the retired 0.2.0 overloads\n--     pgokf.concept_search_semantic(real[], bigint, integer) and\n--     pgokf.concept_search_hybrid(text, real[], bigint, integer) next to the\n--     widened concept_types overloads. Their defaults overlap, so every call\n--     that omits concept_types - and even an explicitly typed old-arity\n--     call - is ambiguous (42725);\n--   * the retired 11-argument pgokf.bm25_hits helper instead of the\n--     12-argument one the concept_search BM25 path calls (p_concept_types);\n--   * NULL ACLs (PostgreSQL's default PUBLIC EXECUTE), no comment and no\n--     extension initial privileges on the two current search overloads;\n--   * superseded comments on pgokf.get_skill, get_script and get_reference.\n--\n-- No earlier edge can be edited in place (0.4.0-dev1 is already reviewed and\n-- may be installed), so this ordinary development step reconciles the\n-- catalog, and a catalog in either state - factory or drifted - ends\n-- object-for-object equal to a fresh 0.4.0-dev2 install.\n--\n-- Safety contract. Only supported extension DDL is used - DROP FUNCTION,\n-- CREATE OR REPLACE FUNCTION, ALTER FUNCTION OWNER, REVOKE/GRANT and\n-- COMMENT inside the extension update - never a direct system-catalog write;\n-- PostgreSQL itself records the extension initial privileges (pg_init_privs)\n-- for the REVOKE/GRANT statements it runs inside ALTER EXTENSION, and\n-- removes those of a dropped function. A retired object is dropped only in\n-- its exact published 0.2.0 shape (membership, language, argument names and\n-- defaults, result, C symbol and library or body digest, volatility and\n-- parallel safety, security, configuration, owner, ACL) and only when no\n-- catalog-recorded object depends on it; the drops are RESTRICT, never\n-- CASCADE. Any other shape, an unknown overload of these names, or a custom\n-- grant on a current search function aborts the whole update with a named\n-- diagnostic and changes nothing, so an ordinary ALTER EXTENSION pgokf UPDATE\n-- is retried after deliberate review - there is no force flag. Where the\n-- retired objects are absent and the current ones are canonical (every\n-- published and fresh route), every statement below is a no-op.\n--\n-- Never DROP, TRUNCATE, DELETE, or rewrite existing catalog data in an upgrade\n-- script: doing so would break the no-data-loss guarantee asserted by the\n-- api_stability upgrade tests. The functions dropped here carry no data.\n\n-- ===========================================================================\n-- 1. Refuse anything but the known shapes, before any change.\n-- ===========================================================================\nDO $dev2_reconciliation_guard$\nDECLARE\n    v_extension pg_catalog.oid;\n    v_owner pg_catalog.oid;\n    v_reader pg_catalog.oid := 'pgokf_reader'::pg_catalog.regrole::pg_catalog.oid;\n    v_function pg_catalog.oid;\n    v_problem text;\n    v_detail text;\n    v_retired record;\n    v_current record;\nBEGIN\n    SELECT oid, extowner INTO STRICT v_extension, v_owner\n    FROM pg_catalog.pg_extension WHERE extname = 'pgokf';\n\n    -- An overload of these names that is neither current nor a known retired\n    -- shape would stay ambiguous or unexplained; refuse it outright.\n    SELECT pg_catalog.string_agg(pg_catalog.format('pgokf.%s(%s)', p.proname,\n               pg_catalog.pg_get_function_identity_arguments(p.oid)), ', ' ORDER BY 1)\n    INTO v_detail\n    FROM pg_catalog.pg_proc AS p\n    WHERE p.pronamespace = 'pgokf'::pg_catalog.regnamespace\n      AND p.proname IN ('concept_search_semantic', 'concept_search_hybrid', 'bm25_hits')\n      AND NOT EXISTS (\n          SELECT 1 FROM pg_catalog.unnest(ARRAY[\n              'pgokf.concept_search_semantic(real[], bigint, integer, text[])',\n              'pgokf.concept_search_hybrid(text, real[], bigint, integer, text[])',\n              'pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[])',\n              'pgokf.concept_search_semantic(real[], bigint, integer)',\n              'pgokf.concept_search_hybrid(text, real[], bigint, integer)',\n              'pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text)'\n          ]) AS known(signature)\n          WHERE pg_catalog.to_regprocedure(known.signature) = p.oid);\n    IF v_detail IS NOT NULL THEN\n        RAISE EXCEPTION 'pgokf 0.4.0-dev2 reconciliation refuses unknown search overloads: %', v_detail\n            USING ERRCODE = 'object_not_in_prerequisite_state',\n                  HINT = 'Review and remove the unknown overloads deliberately, then retry ALTER EXTENSION pgokf UPDATE. Nothing was changed.';\n    END IF;\n\n    -- The retired 0.2.0 overloads: exact published shape or refuse.\n    FOR v_retired IN\n        SELECT * FROM (VALUES\n            ('pgokf.concept_search_semantic(real[], bigint, integer)',\n             'query_embedding real[], bundle_id bigint DEFAULT NULL::bigint, limit_count integer DEFAULT 10',\n             'SETOF pgokf.concept_search_result',\n             'c', 'concept_search_semantic_wrapper', NULL::text,\n             's', 's', false, NULL::text[]),\n            ('pgokf.concept_search_hybrid(text, real[], bigint, integer)',\n             'query text, query_embedding real[], bundle_id bigint DEFAULT NULL::bigint, limit_count integer DEFAULT 10',\n             'SETOF pgokf.concept_search_result',\n             'c', 'concept_search_hybrid_wrapper', NULL::text,\n             's', 'r', false, NULL::text[]),\n            ('pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text)',\n             'p_query text, p_bundle_id bigint, p_limit bigint, p_text_search_config text, p_concept_type text, p_tags text[], p_status text, p_trust_tier text, p_after_rank real, p_after_bundle_id bigint, p_after_concept_id text',\n             'TABLE(bundle_id bigint, concept_id text, path text, title text, type text, rank real, headline text)',\n             'plpgsql', NULL::text, '1b9dab9b527f30d0d3cd55c14a81e26d',\n             's', 's', true, ARRAY['search_path=pg_catalog, pg_temp'])\n        ) AS retired(signature, arguments, result, language, symbol, body_md5,\n                     volatility, parallel, security_definer, config)\n    LOOP\n        v_function := pg_catalog.to_regprocedure(v_retired.signature);\n        IF v_function IS NULL THEN\n            CONTINUE;\n        END IF;\n        v_problem := NULL;\n        v_detail := NULL;\n        IF NOT EXISTS (\n            SELECT 1 FROM pg_catalog.pg_depend AS d\n            WHERE d.classid = 'pg_catalog.pg_proc'::pg_catalog.regclass\n              AND d.objid = v_function\n              AND d.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass\n              AND d.refobjid = v_extension\n              AND d.deptype = 'e'\n        ) THEN\n            v_problem := 'extension membership (it is not a member of extension pgokf)';\n        ELSIF (SELECT l.lanname FROM pg_catalog.pg_proc AS p\n               JOIN pg_catalog.pg_language AS l ON l.oid = p.prolang\n               WHERE p.oid = v_function) IS DISTINCT FROM v_retired.language\n           OR (SELECT p.prokind FROM pg_catalog.pg_proc AS p WHERE p.oid = v_function) <> 'f' THEN\n            v_problem := pg_catalog.format('language (expected a %s function)', v_retired.language);\n        ELSIF pg_catalog.pg_get_function_arguments(v_function) IS DISTINCT FROM v_retired.arguments\n           OR pg_catalog.pg_get_function_result(v_function) IS DISTINCT FROM v_retired.result THEN\n            v_problem := 'argument names, defaults or result type';\n        ELSIF v_retired.symbol IS NOT NULL AND NOT EXISTS (\n                SELECT 1 FROM pg_catalog.pg_proc AS p\n                WHERE p.oid = v_function AND p.prosrc = v_retired.symbol\n                  AND p.probin = '$libdir/pgokf') THEN\n            v_problem := pg_catalog.format('C entry point (expected symbol %s in $libdir/pgokf)', v_retired.symbol);\n        ELSIF v_retired.body_md5 IS NOT NULL AND NOT EXISTS (\n                SELECT 1 FROM pg_catalog.pg_proc AS p\n                WHERE p.oid = v_function AND pg_catalog.md5(p.prosrc) = v_retired.body_md5\n                  AND p.probin IS NULL) THEN\n            v_problem := pg_catalog.format('body (expected the published 0.2.0 body, md5 %s)', v_retired.body_md5);\n        ELSIF NOT EXISTS (\n                SELECT 1 FROM pg_catalog.pg_proc AS p\n                WHERE p.oid = v_function AND p.provolatile = v_retired.volatility\n                  AND p.proparallel = v_retired.parallel\n                  AND NOT p.proisstrict AND NOT p.proleakproof) THEN\n            v_problem := 'volatility, parallel safety, strictness or leakproofness';\n        ELSIF (SELECT p.prosecdef FROM pg_catalog.pg_proc AS p WHERE p.oid = v_function)\n              IS DISTINCT FROM v_retired.security_definer THEN\n            v_problem := pg_catalog.format('security (expected SECURITY %s)',\n                CASE WHEN v_retired.security_definer THEN 'DEFINER' ELSE 'INVOKER' END);\n        ELSIF (SELECT p.proconfig FROM pg_catalog.pg_proc AS p WHERE p.oid = v_function)\n              IS DISTINCT FROM v_retired.config THEN\n            v_problem := pg_catalog.format('configuration (expected %s)', COALESCE(v_retired.config::text, 'none'));\n        ELSIF (SELECT p.proowner FROM pg_catalog.pg_proc AS p WHERE p.oid = v_function) <> v_owner THEN\n            v_problem := pg_catalog.format('owner (expected the extension owner %s)', v_owner::pg_catalog.regrole);\n        ELSIF (SELECT pg_catalog.array_agg(\n                   pg_catalog.format('%s:%s:%s:%s', a.grantor, a.grantee, a.privilege_type,\n                                     a.is_grantable::text) ORDER BY a.grantee)\n               FROM pg_catalog.pg_proc AS p, pg_catalog.aclexplode(p.proacl) AS a\n               WHERE p.oid = v_function)\n              IS DISTINCT FROM\n              (SELECT pg_catalog.array_agg(pg_catalog.format('%s:%s:EXECUTE:false', v_owner, g) ORDER BY g)\n               FROM (SELECT v_owner AS g UNION SELECT v_reader) AS expected) THEN\n            v_problem := pg_catalog.format('ACL (expected EXECUTE for exactly the owner %s and pgokf_reader, owner grantor, no grant options)',\n                v_owner::pg_catalog.regrole);\n        ELSE\n            SELECT pg_catalog.string_agg(pg_catalog.pg_describe_object(d.classid, d.objid, d.objsubid), ', ' ORDER BY 1)\n            INTO v_detail\n            FROM pg_catalog.pg_depend AS d\n            WHERE d.refclassid = 'pg_catalog.pg_proc'::pg_catalog.regclass\n              AND d.refobjid = v_function;\n            IF v_detail IS NOT NULL THEN\n                v_problem := pg_catalog.format('dependents (%s)', v_detail);\n            END IF;\n        END IF;\n        IF v_problem IS NOT NULL THEN\n            RAISE EXCEPTION 'pgokf 0.4.0-dev2 reconciliation refuses retired function %: unexpected %',\n                v_retired.signature, v_problem\n                USING ERRCODE = 'object_not_in_prerequisite_state',\n                      DETAIL = 'Only the exact published 0.2.0 definition, an extension member owned by the extension owner with owner plus pgokf_reader EXECUTE and no dependents, is dropped automatically.',\n                      HINT = 'Review the object and restore or remove it deliberately, then retry ALTER EXTENSION pgokf UPDATE. Nothing was changed.';\n        END IF;\n    END LOOP;\n\n    -- The current search functions: members owned by the extension owner,\n    -- with either PostgreSQL's default ACL (the recorded drift) or the\n    -- canonical one. Custom grants are never silently revoked.\n    FOR v_current IN\n        SELECT * FROM (VALUES\n            ('pgokf.concept_search_semantic(real[], bigint, integer, text[])', true),\n            ('pgokf.concept_search_hybrid(text, real[], bigint, integer, text[])', true),\n            ('pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[])', false)\n        ) AS current_functions(signature, required)\n    LOOP\n        v_function := pg_catalog.to_regprocedure(v_current.signature);\n        IF v_function IS NULL THEN\n            IF v_current.required THEN\n                RAISE EXCEPTION 'pgokf 0.4.0-dev2 reconciliation refuses a catalog without %', v_current.signature\n                    USING ERRCODE = 'object_not_in_prerequisite_state',\n                          HINT = 'The function is part of every 0.4.0-dev1 installation; restore it deliberately, then retry ALTER EXTENSION pgokf UPDATE. Nothing was changed.';\n            END IF;\n            CONTINUE;\n        END IF;\n        IF NOT EXISTS (\n            SELECT 1 FROM pg_catalog.pg_depend AS d\n            WHERE d.classid = 'pg_catalog.pg_proc'::pg_catalog.regclass\n              AND d.objid = v_function\n              AND d.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass\n              AND d.refobjid = v_extension\n              AND d.deptype = 'e'\n        ) THEN\n            RAISE EXCEPTION 'pgokf 0.4.0-dev2 reconciliation refuses current function %: unexpected extension membership (it is not a member of extension pgokf)',\n                v_current.signature\n                USING ERRCODE = 'object_not_in_prerequisite_state',\n                      HINT = 'Review the object and restore or remove it deliberately, then retry ALTER EXTENSION pgokf UPDATE. Nothing was changed.';\n        END IF;\n        IF NOT EXISTS (\n            SELECT 1 FROM pg_catalog.pg_proc AS p\n            WHERE p.oid = v_function AND p.proowner = v_owner\n              AND (p.proacl IS NULL\n                   OR (SELECT pg_catalog.array_agg(\n                              pg_catalog.format('%s:%s:%s:%s', a.grantor, a.grantee,\n                                                a.privilege_type, a.is_grantable::text) ORDER BY a.grantee)\n                       FROM pg_catalog.aclexplode(p.proacl) AS a)\n                      = (SELECT pg_catalog.array_agg(pg_catalog.format('%s:%s:EXECUTE:false', v_owner, g) ORDER BY g)\n                         FROM (SELECT v_owner AS g UNION SELECT v_reader) AS expected))\n        ) THEN\n            RAISE EXCEPTION 'pgokf 0.4.0-dev2 reconciliation refuses current function %: unexpected owner or ACL (expected owner % with either the default ACL or EXECUTE for exactly the owner and pgokf_reader)',\n                v_current.signature, v_owner::pg_catalog.regrole\n                USING ERRCODE = 'object_not_in_prerequisite_state',\n                      HINT = 'Custom grants are never silently revoked. Review ownership and explicit ACLs and restore canonical metadata deliberately, then retry ALTER EXTENSION pgokf UPDATE. Nothing was changed.';\n        END IF;\n    END LOOP;\nEND\n$dev2_reconciliation_guard$;\n\n-- ===========================================================================\n-- 2. Drop the retired overloads (verified above; RESTRICT, never CASCADE).\n-- ===========================================================================\nDROP FUNCTION IF EXISTS pgokf.concept_search_semantic(real[], bigint, integer) RESTRICT;\nDROP FUNCTION IF EXISTS pgokf.concept_search_hybrid(text, real[], bigint, integer) RESTRICT;\nDROP FUNCTION IF EXISTS pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text) RESTRICT;\n\n-- ===========================================================================\n-- 3. The current BM25 helper: the bm25_hits_function block of\n-- src/catalog/search_backend.rs, verbatim except for CREATE OR REPLACE (a\n-- no-op where it already exists; api_stability keeps the two identical).\n-- plpgsql resolves the paradedb references only on execution, so this is\n-- harmless where pg_search is absent. A helper created here belongs to the\n-- extension owner, as on a fresh install, whoever runs the update.\n-- ===========================================================================\nCREATE OR REPLACE FUNCTION pgokf.bm25_hits(\n    p_query text,\n    p_bundle_id bigint,\n    p_limit bigint,\n    p_text_search_config text,\n    p_concept_type text,\n    p_tags text[],\n    p_status text,\n    p_trust_tier text,\n    p_after_rank real,\n    p_after_bundle_id bigint,\n    p_after_concept_id text,\n    p_concept_types text[])\nRETURNS TABLE (\n    bundle_id bigint,\n    concept_id text,\n    path text,\n    title text,\n    type text,\n    rank real,\n    headline text)\nLANGUAGE plpgsql\nSTABLE PARALLEL SAFE\nSECURITY DEFINER\nSET search_path = pg_catalog, pg_temp\nAS $fn$\nDECLARE\n    -- Resolved once, up front, and bound into the query as a parameter: the\n    -- policies inline current_setting() directly, but pg_search 0.25 cannot\n    -- plan its scan under a predicate that calls a function (that inline\n    -- form is exactly what row-level security injects for non-owners, and\n    -- exactly what the Unsupported-query-shape error was about). Empty = unset.\n    v_tenant text := NULLIF(pg_catalog.current_setting('pgokf.tenant', true), '');\nBEGIN\n    -- The policies' rule, applied here because this body bypasses them: an\n    -- unscoped session sees nothing when the catalog requires a tenant.\n    IF v_tenant IS NULL AND pgokf.tenant_required() THEN\n        RETURN;\n    END IF;\n    RETURN QUERY\n    SELECT hits.bundle_id,\n           hits.concept_id,\n           hits.path,\n           hits.title,\n           hits.type,\n           hits.rank,\n           hits.headline\n    FROM (\n        SELECT c.bundle_id AS bundle_id,\n               c.id AS concept_id,\n               c.path AS path,\n               c.title AS title,\n               c.type AS type,\n               paradedb.score(c) AS rank,\n               pg_catalog.ts_headline(\n                   p_text_search_config::pg_catalog.regconfig,\n                   pg_catalog.concat_ws(' ', c.title, c.description, c.body_text),\n                   pg_catalog.websearch_to_tsquery(p_text_search_config::pg_catalog.regconfig, p_query)) AS headline\n        FROM pgokf.concepts c\n        JOIN pgokf.bundles b ON b.id = c.bundle_id AND b.enabled AND b.retired_at IS NULL\n        LEFT JOIN pgokf.concept_provenance cp\n               ON cp.bundle_id = c.bundle_id AND cp.concept_id = c.id\n        WHERE c.id @@@ paradedb.boolean(should => ARRAY[\n                  paradedb.match('title', p_query),\n                  paradedb.match('description', p_query),\n                  paradedb.match('body_text', p_query)])\n          AND (v_tenant IS NULL OR c.tenant_id = v_tenant)\n          AND (p_bundle_id IS NULL OR c.bundle_id = p_bundle_id)\n          AND (p_concept_type IS NULL OR c.type = p_concept_type)\n          AND (p_tags IS NULL OR c.tags @> p_tags)\n          AND (p_status IS NULL OR cp.status = p_status)\n          AND (p_trust_tier IS NULL OR cp.trust_tier = p_trust_tier)\n          AND (p_concept_types IS NULL OR c.type = ANY(p_concept_types))\n    ) AS hits\n    WHERE p_after_rank IS NULL\n       OR hits.rank < p_after_rank\n       OR (hits.rank = p_after_rank AND hits.bundle_id > p_after_bundle_id)\n       OR (hits.rank = p_after_rank AND hits.bundle_id = p_after_bundle_id AND hits.concept_id > p_after_concept_id)\n    ORDER BY hits.rank DESC, hits.bundle_id ASC, hits.concept_id ASC\n    LIMIT p_limit;\nEND\n$fn$;\n\nDO $dev2_helper_owner$\nDECLARE\n    v_owner pg_catalog.oid;\nBEGIN\n    SELECT extowner INTO STRICT v_owner FROM pg_catalog.pg_extension WHERE extname = 'pgokf';\n    IF (SELECT proowner FROM pg_catalog.pg_proc\n        WHERE oid = 'pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[])'::pg_catalog.regprocedure)\n       <> v_owner THEN\n        EXECUTE pg_catalog.format(\n            'ALTER FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[]) OWNER TO %s',\n            v_owner::pg_catalog.regrole);\n    END IF;\nEND\n$dev2_helper_owner$;\n\nREVOKE ALL ON FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[]) FROM PUBLIC;\nGRANT EXECUTE ON FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[]) TO pgokf_reader;\nCOMMENT ON FUNCTION pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text, text[]) IS\n    'Internal helper behind concept_search when search_backend = bm25 resolves to the ParadeDB pg_search provider (the pg_textsearch provider runs inline with invoker rights and does not use it); not part of the stable API. Runs the ParadeDB pg_search BM25 hit query with the owner''s privileges (row-level security wraps the catalog tables in a shape pg_search cannot plan for non-owners) while applying the same pgokf.tenant scoping the policies enforce, over active bundles only, with concept_search''s filters (p_concept_types is the type-membership form concept_search_hybrid uses to constrain the lexical candidate list before truncation), keyset cursor, and limit. Reader-level; returns exactly the rows concept_search would.';\n\n-- ===========================================================================\n-- 4. Least-privilege ACLs and comments of the current search overloads (the\n-- statements of the embedding_function_hardening block of\n-- src/catalog/embedding.rs, verbatim). Inside the extension update\n-- PostgreSQL records the resulting ACLs as extension initial privileges.\n-- ===========================================================================\nREVOKE ALL ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer, text[]) FROM PUBLIC;\nREVOKE ALL ON FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer, text[]) FROM PUBLIC;\nGRANT EXECUTE ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer, text[]) TO pgokf_reader;\nGRANT EXECUTE ON FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer, text[]) TO pgokf_reader;\nCOMMENT ON FUNCTION pgokf.concept_search_semantic(real[], bigint, integer, text[]) IS\n    'Semantic nearest-neighbor search: rank concepts by pgvector cosine distance to query_embedding (rank = normalized cosine similarity). Reader-level, invoker rights; active bundles only. query_embedding must have embedding_dim dimensions; limit_count in 1..=500. Requires pgvector: raises 22023 naming the missing dependency when it is not installed (no lexical fallback). Only ELIGIBLE embeddings rank: source_file_hash equal to the concept''s current file_hash, model/dimension/contract matching the embedding_model/embedding_dim/embedding_contract policy, and the concept effectively fresh (bundle freshness fresh, no covering concept/path override); a stale or legacy (NULL-provenance) row never ranks even while the HNSW index physically retains it. concept_types is an optional type-membership filter (a hit''s type must be one of the listed types; NULL or empty is no filter) applied inside the ranked query BEFORE the candidate list is truncated to limit_count, so a filtered call returns up to limit_count eligible hits of the selected types even when excluded types outrank them.';\nCOMMENT ON FUNCTION pgokf.concept_search_hybrid(text, real[], bigint, integer, text[]) IS\n    'Hybrid search: Reciprocal Rank Fusion (RRF, k=60) of the lexical result of query (via the configured search_backend) and the semantic result of query_embedding, fused entirely in SQL (rank = fused RRF score). Reader-level, invoker rights; enabled bundles only; limit_count in 1..=500. The semantic component ranks eligible (current, fresh) embeddings only, so an ineligible vector never leaks into the fused result; the lexical component may still return a stale concept, labeled by pgokf.concept_search_fresh. Degrades to lexical-only with a WARNING when pgvector is not installed. concept_types is an optional type-membership filter (a hit''s type must be one of the listed types; NULL or empty is no filter) applied to BOTH ranked inputs before either is truncated to limit_count, so the fused page is exactly the type-filtered top-limit_count, never underfilled by higher-ranked excluded types.';\n\n-- ===========================================================================\n-- 5. Current package-reader comments (the package_function_hardening block of\n-- src/catalog/packages.rs, verbatim).\n-- ===========================================================================\nCOMMENT ON FUNCTION pgokf.get_skill(bigint, text) IS\n    'Return one Agent Skills package as pgokf.skill_result: name, description, package directory and hash, visibility, the complete original frontmatter, the exact SKILL.md bytes, and the JSON listing of its scripts, references, and assets. Reader-level, tenant-scoped, and audited: each successful read appends a get_skill row to the access log. Raises 22023 for an unknown skill.';\nCOMMENT ON FUNCTION pgokf.get_script(bigint, text) IS\n    'Return one package script as pgokf.script_result: language, package-relative path and owning skill, size, SHA-256, declared runtime/arguments/exit codes when known, and the exact stored bytes (never body_text). Reader-level, tenant-scoped, and audited: each successful read appends a get_script row to the access log. Raises 22023 for an unknown script.';\nCOMMENT ON FUNCTION pgokf.get_reference(bigint, text, boolean) IS\n    'Return one package reference or asset as pgokf.reference_result: format and media type, package-relative path and owning skill, size, SHA-256, its text when textual, and the exact stored bytes when include_bytes (the default) is true. Reader-level, tenant-scoped, and audited: each successful read appends a get_reference row to the access log (detail metadata when the bytes were not requested). Raises 22023 for an unknown reference.';\n\n-- Last, so any relation a script adds is registered for pg_dump (none here;\n-- the rule holds for every upgrade script).\n-- SPDX-License-Identifier: AGPL-3.0-only\n-- pgokf extension upgrade: 0.4.0-dev2 -> 0.4.0-dev3\n--\n-- Web identity metadata reconciliation. The field catalog that carried the\n-- search-function drift reconciled by pgokf--0.4.0-dev1--0.4.0-dev2.sql was\n-- created by an early unpublished development build and hand-migrated when\n-- pgokf_web.users gained display_name/provider and pgokf_web.sessions gained\n-- provider. Compared with a fresh install it also carries:\n--\n--   * seven superseded comments, from before identity providers could be\n--     many: the pgokf_web schema, the pgokf_web.users table, and its name,\n--     role, password_hash, created_at and updated_at columns;\n--   * the appended physical column order of pgokf_web.users (display_name,\n--     provider after updated_at) and pgokf_web.sessions (provider after\n--     created_at), and so the attribute order of their row types.\n--\n-- The comments are restored here, verbatim from the web_identity_tables\n-- block of src/catalog/web_identity.rs (api_stability keeps the two\n-- identical). On a factory catalog every statement is a no-op.\n--\n-- The column order is NOT changed. Reordering would mean rebuilding the\n-- tables that hold the site's people and live sessions inside the update,\n-- for no behavioral gain: every statement pgokf ships names its columns, and\n-- nothing depends on either row type. It is instead the one declared catalog\n-- exception (tests/upgrade/catalog-exceptions.json, \"Declared catalog\n-- exceptions\" in docs/api-stability.md): exactly these two tables, exactly\n-- the fresh or the recorded appended order, every other column property\n-- (name, type, default, nullability, collation, generated, identity, ACL,\n-- comment) equal to a fresh install. tests/test_release_integrity.py refuses\n-- positional access to either table or row type in shipped code, and\n-- scripts/upgrade-parity.py replays the product's own statements against\n-- both orders.\n--\n-- The 0.4.0-dev2 edge's claim that a drifted catalog ends object-for-object\n-- equal to a fresh install holds for the search functions it reconciles;\n-- with this step, every object of a catalog in either state ends equal to a\n-- fresh 0.4.0-dev3 install except for that declared column order.\n--\n-- Never DROP, TRUNCATE, DELETE, or rewrite existing catalog data in an upgrade\n-- script: doing so would break the no-data-loss guarantee asserted by the\n-- api_stability upgrade tests. Comments carry no data.\n\nCOMMENT ON SCHEMA pgokf_web IS\n    'The web UI''s identity state: the people a local sign-in knows, the sessions the UI has issued, the bearer tokens the MCP server accepts over HTTP, and the identity providers an admin set up. Owned by the extension so it is transactional, shared by every UI instance, and dumped with the catalog; read and written by pgokf_writer only, and never by the extension itself.';\nCOMMENT ON TABLE pgokf_web.users IS\n    'People the web UI''s users identity mode signs in: one row per person with their role on the viewer < uploader < editor < approver < admin ladder and an Argon2id hash of their password - or, for a person an identity provider signed in, no password and the provider that brought them, their row appearing at their first sign-in. A name belongs to exactly one way in. Managed by pgokf-web (its user add / set-password commands and the Admin page); pgokf_writer only, so a reader never sees a hash.';\nCOMMENT ON COLUMN pgokf_web.users.name IS\n    'The sign-in name: one plain token of letters, digits, and . _ @ + - (at most 128), which is also the person''s OKF actor (human:<name>). For a person an identity provider signed in, the identity claim the provider was set up with (sub, login, email...).';\nCOMMENT ON COLUMN pgokf_web.users.role IS\n    'The role the UI grants on every request: viewer, uploader, editor, approver, or admin (each holds everything below it). A session cookie carries no role, so a change here takes effect at once. A person an identity provider signed in holds the higher of this role and the one their groups map to.';\nCOMMENT ON COLUMN pgokf_web.users.password_hash IS\n    'An Argon2id PHC string of the password, or NULL for a person an identity provider signed in: they have no password here, a password sign-in under their name is refused, and their row exists so an admin can see them and set their role. A fingerprint of the hash is bound into every session a password opens, so a changed password ends the sessions opened before it.';\nCOMMENT ON COLUMN pgokf_web.users.created_at IS 'When the person was added, or first signed in.';\nCOMMENT ON COLUMN pgokf_web.users.updated_at IS 'When the role, password, or name last changed.';\n\n-- Last, so any relation a script adds is registered for pg_dump (none here;\n-- the rule holds for every upgrade script).\nSELECT pgokf_private.register_dump_relations();\n"
+      },
+      {
+        "path": "pgokf--0.4.0-dev1--0.4.0-dev2.sql",
+        "before": null,
+        "after": null,
+        "delete": true
+      },
+      {
+        "path": "pgokf--0.4.0-dev1.sql",
+        "before": null,
+        "after": null,
+        "copy_from": "pgokf--0.4.0-dev3.sql"
+      },
+      {
+        "path": "pgokf--0.4.0-dev2--0.4.0-dev3.sql",
+        "before": null,
+        "after": null,
+        "delete": true
+      },
+      {
+        "path": "pgokf--0.4.0-dev3.sql",
+        "before": null,
+        "after": null,
+        "delete": true
+      },
+      {
+        "path": "pgokf.control",
+        "before": "stgreSQL catalog for Open Knowledge Format bundles'\ndefault_version = '0.4.0-dev3'\nmodule_pathname = '$libdir/pgokf'\nrelocatable = false\nsuperuser = true\ntrusted",
+        "after": "stgreSQL catalog for Open Knowledge Format bundles'\ndefault_version = '0.4.0-dev1'\nmodule_pathname = '$libdir/pgokf'\nrelocatable = false\nsuperuser = true\ntrusted"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "retired function pgokf.concept_search_semantic(real[], bigint, integer) survived",
+    "legacy_source_detector": "reviewed development edge pgokf--0.3.1--0.4.0-dev1.sql rewritten in place"
+  },
+  {
+    "name": "skip web comment schema",
+    "edits": [
+      {
+        "path": "pgokf--0.4.0-dev2--0.4.0-dev3.sql",
+        "before": "rted by the\n-- api_stability upgrade tests. Comments carry no data.\n\nCOMMENT ON SCHEMA pgokf_web IS\n    'The web UI''s identity state: the people a local sign-in knows, the sessions the UI has issued, the bearer tokens the MCP server accepts over HTTP, and the identity providers an admin set up. Owned by the extension so it is transactional, shared by every UI instance, and dumped with the catalog; read and written by pgokf_writer only, and never by the extension itself.';\nCOMMENT ON TABLE pgokf_web.users IS\n    'People the web UI''s users identity mode signs in:",
+        "after": "rted by the\n-- api_stability upgrade tests. Comments carry no data.\n\nCOMMENT ON TABLE pgokf_web.users IS\n    'People the web UI''s users identity mode signs in:"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "[\"schema\", \"pgokf_web\"",
+    "legacy_source_detector": null
+  },
+  {
+    "name": "skip web comment users table",
+    "edits": [
+      {
+        "path": "pgokf--0.4.0-dev2--0.4.0-dev3.sql",
+        "before": "d written by pgokf_writer only, and never by the extension itself.';\nCOMMENT ON TABLE pgokf_web.users IS\n    'People the web UI''s users identity mode signs in: one row per person with their role on the viewer < uploader < editor < approver < admin ladder and an Argon2id hash of their password - or, for a person an identity provider signed in, no password and the provider that brought them, their row appearing at their first sign-in. A name belongs to exactly one way in. Managed by pgokf-web (its user add / set-password commands and the Admin page); pgokf_writer only, so a reader never sees a hash.';\nCOMMENT ON COLUMN pgokf_web.users.name IS\n    'The sign-in name: one plain token of letters",
+        "after": "d written by pgokf_writer only, and never by the extension itself.';\nCOMMENT ON COLUMN pgokf_web.users.name IS\n    'The sign-in name: one plain token of letters"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "[\"relation\", \"pgokf_web.users\"",
+    "legacy_source_detector": null
+  },
+  {
+    "name": "skip web comment users.name",
+    "edits": [
+      {
+        "path": "pgokf--0.4.0-dev2--0.4.0-dev3.sql",
+        "before": "writer only, so a reader never sees a hash.';\nCOMMENT ON COLUMN pgokf_web.users.name IS\n    'The sign-in name: one plain token of letters, digits, and . _ @ + - (at most 128), which is also the person''s OKF actor (human:<name>). For a person an identity provider signed in, the identity claim the provider was set up with (sub, login, email...).';\nCOMMENT ON COLUMN pgokf_web.users.role IS\n    'The role the UI grants on every request: viewer, uploader, editor, ",
+        "after": "writer only, so a reader never sees a hash.';\nCOMMENT ON COLUMN pgokf_web.users.role IS\n    'The role the UI grants on every request: viewer, uploader, editor, "
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "[\"column\", \"pgokf_web.users.name\"",
+    "legacy_source_detector": null
+  },
+  {
+    "name": "skip web comment users.role",
+    "edits": [
+      {
+        "path": "pgokf--0.4.0-dev2--0.4.0-dev3.sql",
+        "before": "der was set up with (sub, login, email...).';\nCOMMENT ON COLUMN pgokf_web.users.role IS\n    'The role the UI grants on every request: viewer, uploader, editor, approver, or admin (each holds everything below it). A session cookie carries no role, so a change here takes effect at once. A person an identity provider signed in holds the higher of this role and the one their groups map to.';\nCOMMENT ON COLUMN pgokf_web.users.password_hash IS\n    'An Argon2id PHC string of the password, or NULL for a pers",
+        "after": "der was set up with (sub, login, email...).';\nCOMMENT ON COLUMN pgokf_web.users.password_hash IS\n    'An Argon2id PHC string of the password, or NULL for a pers"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "[\"column\", \"pgokf_web.users.role\"",
+    "legacy_source_detector": null
+  },
+  {
+    "name": "skip web comment users.password_hash",
+    "edits": [
+      {
+        "path": "pgokf--0.4.0-dev2--0.4.0-dev3.sql",
+        "before": " this role and the one their groups map to.';\nCOMMENT ON COLUMN pgokf_web.users.password_hash IS\n    'An Argon2id PHC string of the password, or NULL for a person an identity provider signed in: they have no password here, a password sign-in under their name is refused, and their row exists so an admin can see them and set their role. A fingerprint of the hash is bound into every session a password opens, so a changed password ends the sessions opened before it.';\nCOMMENT ON COLUMN pgokf_web.users.created_at IS 'When the person was added, or first signed in.';\nCOMMENT ON COLUM",
+        "after": " this role and the one their groups map to.';\nCOMMENT ON COLUMN pgokf_web.users.created_at IS 'When the person was added, or first signed in.';\nCOMMENT ON COLUM"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "[\"column\", \"pgokf_web.users.password_hash\"",
+    "legacy_source_detector": null
+  },
+  {
+    "name": "skip web comment users.created_at",
+    "edits": [
+      {
+        "path": "pgokf--0.4.0-dev2--0.4.0-dev3.sql",
+        "before": "assword ends the sessions opened before it.';\nCOMMENT ON COLUMN pgokf_web.users.created_at IS 'When the person was added, or first signed in.';\nCOMMENT ON COLUMN pgokf_web.users.updated_at IS 'When the role, password, or name last changed.';\n\n-- Last, so any",
+        "after": "assword ends the sessions opened before it.';\nCOMMENT ON COLUMN pgokf_web.users.updated_at IS 'When the role, password, or name last changed.';\n\n-- Last, so any"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "[\"column\", \"pgokf_web.users.created_at\"",
+    "legacy_source_detector": null
+  },
+  {
+    "name": "skip web comment users.updated_at",
+    "edits": [
+      {
+        "path": "pgokf--0.4.0-dev2--0.4.0-dev3.sql",
+        "before": "pgokf_web.users.created_at IS 'When the person was added, or first signed in.';\nCOMMENT ON COLUMN pgokf_web.users.updated_at IS 'When the role, password, or name last changed.';\n\n-- Last, so any relation a script adds is registered for pg_dump (none here;\n--",
+        "after": "pgokf_web.users.created_at IS 'When the person was added, or first signed in.';\n\n-- Last, so any relation a script adds is registered for pg_dump (none here;\n--"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "[\"column\", \"pgokf_web.users.updated_at\"",
+    "legacy_source_detector": null
+  },
+  {
+    "name": "reword web comment",
+    "edits": [
+      {
+        "path": "pgokf--0.4.0-dev2--0.4.0-dev3.sql",
+        "before": "and the provider that brought them, their row appearing at their first sign-in. A name belongs to exactly one way in. Managed by pgokf-web (its user add / set-password commands and the Admin page); ",
+        "after": "and the provider that brought them, their row appearing at their first sign-in. Managed by pgokf-web (its user add / set-password commands and the Admin page); "
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "[\"relation\", \"pgokf_web.users\"",
+    "legacy_source_detector": null
+  },
+  {
+    "name": "keep version at dev2",
+    "edits": [
+      {
+        "path": "pgokf--0.4.0-dev2.sql",
+        "before": null,
+        "after": null,
+        "copy_from": "pgokf--0.4.0-dev3.sql"
+      },
+      {
+        "path": "pgokf--0.4.0-dev3.sql",
+        "before": null,
+        "after": null,
+        "delete": true
+      },
+      {
+        "path": "pgokf.control",
+        "before": "stgreSQL catalog for Open Knowledge Format bundles'\ndefault_version = '0.4.0-dev3'\nmodule_pathname = '$libdir/pgokf'\nrelocatable = false\nsuperuser = true\ntrusted",
+        "after": "stgreSQL catalog for Open Knowledge Format bundles'\ndefault_version = '0.4.0-dev2'\nmodule_pathname = '$libdir/pgokf'\nrelocatable = false\nsuperuser = true\ntrusted"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "[\"schema\", \"pgokf_web\"",
+    "legacy_source_detector": null
+  },
+  {
+    "name": "rewrite dev2 in place",
+    "edits": [
+      {
+        "path": "pgokf--0.4.0-dev1--0.4.0-dev2.sql",
+        "before": "registered for pg_dump (none here;\n-- the rule holds for every upgrade script).\nSELECT pgokf_private.register_dump_relations();\n",
+        "after": "registered for pg_dump (none here;\n-- the rule holds for every upgrade script).\n-- SPDX-License-Identifier: AGPL-3.0-only\n-- pgokf extension upgrade: 0.4.0-dev2 -> 0.4.0-dev3\n--\n-- Web identity metadata reconciliation. The field catalog that carried the\n-- search-function drift reconciled by pgokf--0.4.0-dev1--0.4.0-dev2.sql was\n-- created by an early unpublished development build and hand-migrated when\n-- pgokf_web.users gained display_name/provider and pgokf_web.sessions gained\n-- provider. Compared with a fresh install it also carries:\n--\n--   * seven superseded comments, from before identity providers could be\n--     many: the pgokf_web schema, the pgokf_web.users table, and its name,\n--     role, password_hash, created_at and updated_at columns;\n--   * the appended physical column order of pgokf_web.users (display_name,\n--     provider after updated_at) and pgokf_web.sessions (provider after\n--     created_at), and so the attribute order of their row types.\n--\n-- The comments are restored here, verbatim from the web_identity_tables\n-- block of src/catalog/web_identity.rs (api_stability keeps the two\n-- identical). On a factory catalog every statement is a no-op.\n--\n-- The column order is NOT changed. Reordering would mean rebuilding the\n-- tables that hold the site's people and live sessions inside the update,\n-- for no behavioral gain: every statement pgokf ships names its columns, and\n-- nothing depends on either row type. It is instead the one declared catalog\n-- exception (tests/upgrade/catalog-exceptions.json, \"Declared catalog\n-- exceptions\" in docs/api-stability.md): exactly these two tables, exactly\n-- the fresh or the recorded appended order, every other column property\n-- (name, type, default, nullability, collation, generated, identity, ACL,\n-- comment) equal to a fresh install. tests/test_release_integrity.py refuses\n-- positional access to either table or row type in shipped code, and\n-- scripts/upgrade-parity.py replays the product's own statements against\n-- both orders.\n--\n-- The 0.4.0-dev2 edge's claim that a drifted catalog ends object-for-object\n-- equal to a fresh install holds for the search functions it reconciles;\n-- with this step, every object of a catalog in either state ends equal to a\n-- fresh 0.4.0-dev3 install except for that declared column order.\n--\n-- Never DROP, TRUNCATE, DELETE, or rewrite existing catalog data in an upgrade\n-- script: doing so would break the no-data-loss guarantee asserted by the\n-- api_stability upgrade tests. Comments carry no data.\n\nCOMMENT ON SCHEMA pgokf_web IS\n    'The web UI''s identity state: the people a local sign-in knows, the sessions the UI has issued, the bearer tokens the MCP server accepts over HTTP, and the identity providers an admin set up. Owned by the extension so it is transactional, shared by every UI instance, and dumped with the catalog; read and written by pgokf_writer only, and never by the extension itself.';\nCOMMENT ON TABLE pgokf_web.users IS\n    'People the web UI''s users identity mode signs in: one row per person with their role on the viewer < uploader < editor < approver < admin ladder and an Argon2id hash of their password - or, for a person an identity provider signed in, no password and the provider that brought them, their row appearing at their first sign-in. A name belongs to exactly one way in. Managed by pgokf-web (its user add / set-password commands and the Admin page); pgokf_writer only, so a reader never sees a hash.';\nCOMMENT ON COLUMN pgokf_web.users.name IS\n    'The sign-in name: one plain token of letters, digits, and . _ @ + - (at most 128), which is also the person''s OKF actor (human:<name>). For a person an identity provider signed in, the identity claim the provider was set up with (sub, login, email...).';\nCOMMENT ON COLUMN pgokf_web.users.role IS\n    'The role the UI grants on every request: viewer, uploader, editor, approver, or admin (each holds everything below it). A session cookie carries no role, so a change here takes effect at once. A person an identity provider signed in holds the higher of this role and the one their groups map to.';\nCOMMENT ON COLUMN pgokf_web.users.password_hash IS\n    'An Argon2id PHC string of the password, or NULL for a person an identity provider signed in: they have no password here, a password sign-in under their name is refused, and their row exists so an admin can see them and set their role. A fingerprint of the hash is bound into every session a password opens, so a changed password ends the sessions opened before it.';\nCOMMENT ON COLUMN pgokf_web.users.created_at IS 'When the person was added, or first signed in.';\nCOMMENT ON COLUMN pgokf_web.users.updated_at IS 'When the role, password, or name last changed.';\n\n-- Last, so any relation a script adds is registered for pg_dump (none here;\n-- the rule holds for every upgrade script).\nSELECT pgokf_private.register_dump_relations();\n"
+      },
+      {
+        "path": "pgokf--0.4.0-dev2--0.4.0-dev3.sql",
+        "before": null,
+        "after": null,
+        "delete": true
+      },
+      {
+        "path": "pgokf--0.4.0-dev2.sql",
+        "before": null,
+        "after": null,
+        "copy_from": "pgokf--0.4.0-dev3.sql"
+      },
+      {
+        "path": "pgokf--0.4.0-dev3.sql",
+        "before": null,
+        "after": null,
+        "delete": true
+      },
+      {
+        "path": "pgokf.control",
+        "before": "stgreSQL catalog for Open Knowledge Format bundles'\ndefault_version = '0.4.0-dev3'\nmodule_pathname = '$libdir/pgokf'\nrelocatable = false\nsuperuser = true\ntrusted",
+        "after": "stgreSQL catalog for Open Knowledge Format bundles'\ndefault_version = '0.4.0-dev2'\nmodule_pathname = '$libdir/pgokf'\nrelocatable = false\nsuperuser = true\ntrusted"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": "reviewed development edge pgokf--0.4.0-dev1--0.4.0-dev2.sql rewritten in place"
+  },
+  {
+    "name": "fixture without the column order",
+    "edits": [
+      {
+        "path": "tests/upgrade/live-drift.sql",
+        "before": "tes were not requested). Raises 22023 for an unknown or hidden reference.';\n\n-- The web identity tables' appended column order. The existing rows (people\n-- signed in by password and by an identity provider, and their sessions) are\n-- carried across: the appended columns are dropped and re-added at the end\n-- with their checks, the values restored by key, then the cross-column checks\n-- re-added.\nCREATE TEMPORARY TABLE live_drift_users AS SELECT name, display_name, provider FROM pgokf_web.users;\nCREATE TEMPORARY TABLE live_drift_sessions AS SELECT nonce, provider FROM pgokf_web.sessions;\nALTER TABLE pgokf_web.users DROP COLUMN display_name, DROP COLUMN provider;\nALTER TABLE pgokf_web.users\n    ADD COLUMN display_name text\n        CONSTRAINT users_display_name_check\n        CHECK (display_name ~ '^[^[:cntrl:]]+$' AND char_length(display_name) <= 256),\n    ADD COLUMN provider text\n        CONSTRAINT users_provider_check CHECK (provider ~ '^[a-z0-9][a-z0-9-]{0,31}$');\nUPDATE pgokf_web.users AS u SET display_name = d.display_name, provider = d.provider\nFROM live_drift_users AS d WHERE d.name = u.name;\nALTER TABLE pgokf_web.users\n    ADD CONSTRAINT users_sign_in_check CHECK ((password_hash IS NULL) <> (provider IS NULL));\nCOMMENT ON COLUMN pgokf_web.users.display_name IS\n    'What the person is called wherever the UI shows them: for a person an identity provider signed in, the name the provider reports, refreshed at every sign-in; for a password person, what an admin entered, or NULL to show the sign-in name. Their OKF actor stays human:<name>.';\nCOMMENT ON COLUMN pgokf_web.users.provider IS\n    'For a person without a password, the identity provider that signed them in (identity_providers.id); NULL for a password person. With users_sign_in_check this makes a name belong to exactly one way in: a provider never signs in a password person''s name, nor a name another provider brought.';\nALTER TABLE pgokf_web.sessions DROP COLUMN provider;\nALTER TABLE pgokf_web.sessions\n    ADD COLUMN provider text\n        CONSTRAINT sessions_provider_check CHECK (provider ~ '^[a-z0-9][a-z0-9-]{0,31}$');\nUPDATE pgokf_web.sessions AS s SET provider = d.provider\nFROM live_drift_sessions AS d WHERE d.nonce = s.nonce;\nALTER TABLE pgokf_web.sessions\n    ADD CONSTRAINT sessions_provider_mode_check CHECK (provider IS NULL OR mode = 'oidc');\nCOMMENT ON COLUMN pgokf_web.sessions.provider IS 'For a session opened by an identity provider set up on the Admin page: that provider (identity_providers.id), so switching it off or removing it ends its sessions alone; NULL for a password session, or one the oidc mode''s own provider opened.';\nDROP TABLE live_drift_users, live_drift_sessions;\n\n-- Superseded web identity comments (from before identity providers could be\n-- man",
+        "after": "tes were not requested). Raises 22023 for an unknown or hidden reference.';\n\n-- Superseded web identity comments (from before identity providers could be\n-- man"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "live-drift fixture does not reproduce exactly the recorded field drift",
+    "legacy_source_detector": null
+  },
+  {
+    "name": "fixture without the sessions order",
+    "edits": [
+      {
+        "path": "tests/upgrade/live-drift.sql",
+        "before": "ever signs in a password person''s name, nor a name another provider brought.';\nALTER TABLE pgokf_web.sessions DROP COLUMN provider;\nALTER TABLE pgokf_web.sessions\n    ADD COLUMN provider text\n        CONSTRAINT sessions_provider_check CHECK (provider ~ '^[a-z0-9][a-z0-9-]{0,31}$');\nUPDATE pgokf_web.sessions AS s SET provider = d.provider\nFROM live_drift_sessions AS d WHERE d.nonce = s.nonce;\nALTER TABLE pgokf_web.sessions\n    ADD CONSTRAINT sessions_provider_mode_check CHECK (provider IS NULL OR mode = 'oidc');\nCOMMENT ON COLUMN pgokf_web.sessions.provider IS 'For a session opened by an identity provider set up on the Admin page: that provider (identity_providers.id), so switching it off or removing it ends its sessions alone; NULL for a password session, or one the oidc mode''s own provider opened.';\nDROP TABLE live_drift_users, live_drift_sessions;\n\n-- Superseded web identity co",
+        "after": "ever signs in a password person''s name, nor a name another provider brought.';\nDROP TABLE live_drift_users, live_drift_sessions;\n\n-- Superseded web identity co"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "live-drift fixture does not reproduce exactly the recorded field drift",
+    "legacy_source_detector": null
+  },
+  {
+    "name": "fixture without the stale comments",
+    "edits": [
+      {
+        "path": "tests/upgrade/live-drift.sql",
+        "before": "de''s own provider opened.';\nDROP TABLE live_drift_users, live_drift_sessions;\n\n-- Superseded web identity comments (from before identity providers could be\n-- many).\nCOMMENT ON SCHEMA pgokf_web IS\n    'The web UI''s identity state: the people a local sign-in knows, the sessions the UI has issued, the bearer tokens the MCP server accepts over HTTP, and the identity provider an admin set up. Owned by the extension so it is transactional, shared by every UI instance, and dumped with the catalog; read and written by pgokf_writer only, and never by the extension itself.';\nCOMMENT ON TABLE pgokf_web.users IS\n    'People the web UI''s users identity mode signs in: one row per person with their role on the viewer < uploader < editor < approver < admin ladder and an Argon2id hash of their password. Managed by pgokf-web (its user add / set-password commands and the Admin page); pgokf_writer only, so a reader never sees a hash.';\nCOMMENT ON COLUMN pgokf_web.users.name IS\n    'The sign-in name: one plain token of letters, digits, and . _ @ + - (at most 128), which is also the person''s OKF actor (human:<name>).';\nCOMMENT ON COLUMN pgokf_web.users.role IS\n    'The role the UI grants on every request: viewer, uploader, editor, approver, or admin (each holds everything below it). A session cookie carries no role, so a change here takes effect at once.';\nCOMMENT ON COLUMN pgokf_web.users.password_hash IS\n    'An Argon2id PHC string of the password, or NULL for a person the identity provider signed in: they have no password here, a password sign-in under their name is refused, and their row exists so an admin can see them and set their role. A fingerprint of the hash is bound into every session a password opens, so a changed password ends the sessions opened before it.';\nCOMMENT ON COLUMN pgokf_web.users.created_at IS 'When the person was added.';\nCOMMENT ON COLUMN pgokf_web.users.updated_at IS 'When the role or password last changed.';\n",
+        "after": "de''s own provider opened.';\nDROP TABLE live_drift_users, live_drift_sessions;\n\n"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "live-drift fixture does not reproduce exactly the recorded field drift",
+    "legacy_source_detector": null
+  },
+  {
+    "name": "fixture of the rejected dev2 candidate",
+    "edits": [
+      {
+        "path": "tests/upgrade/live-drift.sql",
+        "before": " bytes were not requested). Raises 22023 for an unknown or hidden reference.';\n\n-- The web identity tables' appended column order. The existing rows (people\n-- signed in by password and by an identity provider, and their sessions) are\n-- carried across: the appended columns are dropped and re-added at the end\n-- with their checks, the values restored by key, then the cross-column checks\n-- re-added.\nCREATE TEMPORARY TABLE live_drift_users AS SELECT name, display_name, provider FROM pgokf_web.users;\nCREATE TEMPORARY TABLE live_drift_sessions AS SELECT nonce, provider FROM pgokf_web.sessions;\nALTER TABLE pgokf_web.users DROP COLUMN display_name, DROP COLUMN provider;\nALTER TABLE pgokf_web.users\n    ADD COLUMN display_name text\n        CONSTRAINT users_display_name_check\n        CHECK (display_name ~ '^[^[:cntrl:]]+$' AND char_length(display_name) <= 256),\n    ADD COLUMN provider text\n        CONSTRAINT users_provider_check CHECK (provider ~ '^[a-z0-9][a-z0-9-]{0,31}$');\nUPDATE pgokf_web.users AS u SET display_name = d.display_name, provider = d.provider\nFROM live_drift_users AS d WHERE d.name = u.name;\nALTER TABLE pgokf_web.users\n    ADD CONSTRAINT users_sign_in_check CHECK ((password_hash IS NULL) <> (provider IS NULL));\nCOMMENT ON COLUMN pgokf_web.users.display_name IS\n    'What the person is called wherever the UI shows them: for a person an identity provider signed in, the name the provider reports, refreshed at every sign-in; for a password person, what an admin entered, or NULL to show the sign-in name. Their OKF actor stays human:<name>.';\nCOMMENT ON COLUMN pgokf_web.users.provider IS\n    'For a person without a password, the identity provider that signed them in (identity_providers.id); NULL for a password person. With users_sign_in_check this makes a name belong to exactly one way in: a provider never signs in a password person''s name, nor a name another provider brought.';\nALTER TABLE pgokf_web.sessions DROP COLUMN provider;\nALTER TABLE pgokf_web.sessions\n    ADD COLUMN provider text\n        CONSTRAINT sessions_provider_check CHECK (provider ~ '^[a-z0-9][a-z0-9-]{0,31}$');\nUPDATE pgokf_web.sessions AS s SET provider = d.provider\nFROM live_drift_sessions AS d WHERE d.nonce = s.nonce;\nALTER TABLE pgokf_web.sessions\n    ADD CONSTRAINT sessions_provider_mode_check CHECK (provider IS NULL OR mode = 'oidc');\nCOMMENT ON COLUMN pgokf_web.sessions.provider IS 'For a session opened by an identity provider set up on the Admin page: that provider (identity_providers.id), so switching it off or removing it ends its sessions alone; NULL for a password session, or one the oidc mode''s own provider opened.';\nDROP TABLE live_drift_users, live_drift_sessions;\n\n-- Superseded web identity comments (from before identity providers could be\n-- many).\nCOMMENT ON SCHEMA pgokf_web IS\n    'The web UI''s identity state: the people a local sign-in knows, the sessions the UI has issued, the bearer tokens the MCP server accepts over HTTP, and the identity provider an admin set up. Owned by the extension so it is transactional, shared by every UI instance, and dumped with the catalog; read and written by pgokf_writer only, and never by the extension itself.';\nCOMMENT ON TABLE pgokf_web.users IS\n    'People the web UI''s users identity mode signs in: one row per person with their role on the viewer < uploader < editor < approver < admin ladder and an Argon2id hash of their password. Managed by pgokf-web (its user add / set-password commands and the Admin page); pgokf_writer only, so a reader never sees a hash.';\nCOMMENT ON COLUMN pgokf_web.users.name IS\n    'The sign-in name: one plain token of letters, digits, and . _ @ + - (at most 128), which is also the person''s OKF actor (human:<name>).';\nCOMMENT ON COLUMN pgokf_web.users.role IS\n    'The role the UI grants on every request: viewer, uploader, editor, approver, or admin (each holds everything below it). A session cookie carries no role, so a change here takes effect at once.';\nCOMMENT ON COLUMN pgokf_web.users.password_hash IS\n    'An Argon2id PHC string of the password, or NULL for a person the identity provider signed in: they have no password here, a password sign-in under their name is refused, and their row exists so an admin can see them and set their role. A fingerprint of the hash is bound into every session a password opens, so a changed password ends the sessions opened before it.';\nCOMMENT ON COLUMN pgokf_web.users.created_at IS 'When the person was added.';\nCOMMENT ON COLUMN pgokf_web.users.updated_at IS 'When the role or password last changed.';\n",
+        "after": " bytes were not requested). Raises 22023 for an unknown or hidden reference.';\n\n"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "live-drift fixture does not reproduce exactly the recorded field drift",
+    "legacy_source_detector": null
+  },
+  {
+    "name": "third column-order drift",
+    "edits": [],
+    "operator": "CREATE TEMPORARY TABLE reorder_keep AS SELECT * FROM pgokf_web.mcp_tokens;\nCREATE TEMPORARY TABLE reorder_note AS SELECT col_description('pgokf_web.mcp_tokens'::regclass, attnum) AS note FROM pg_attribute WHERE attrelid = 'pgokf_web.mcp_tokens'::regclass AND attname = 'created_by';\nALTER TABLE pgokf_web.mcp_tokens DROP COLUMN created_by CASCADE;\nALTER TABLE pgokf_web.mcp_tokens ADD COLUMN created_by text;\nUPDATE pgokf_web.mcp_tokens AS t SET created_by = k.created_by FROM reorder_keep AS k WHERE k.digest = t.digest;\nALTER TABLE pgokf_web.mcp_tokens ALTER COLUMN created_by SET NOT NULL;\nDO $note$ BEGIN EXECUTE format('COMMENT ON COLUMN pgokf_web.mcp_tokens.created_by IS %L', (SELECT note FROM reorder_note)); END $note$;\nDROP TABLE reorder_keep, reorder_note;\n",
+    "legacy_diagnostic": "[\"column\", \"pgokf_web.mcp_tokens.created_by\"",
+    "legacy_source_detector": null
+  },
+  {
+    "name": "undeclared users order",
+    "edits": [],
+    "operator": "CREATE TEMPORARY TABLE reorder_keep AS SELECT * FROM pgokf_web.users;\nCREATE TEMPORARY TABLE reorder_note AS SELECT col_description('pgokf_web.users'::regclass, attnum) AS note FROM pg_attribute WHERE attrelid = 'pgokf_web.users'::regclass AND attname = 'role';\nALTER TABLE pgokf_web.users DROP COLUMN role CASCADE;\nALTER TABLE pgokf_web.users ADD COLUMN role text;\nUPDATE pgokf_web.users AS u SET role = k.role FROM reorder_keep AS k WHERE k.name = u.name;\nALTER TABLE pgokf_web.users ALTER COLUMN role SET NOT NULL, ADD CONSTRAINT users_role_check CHECK (role IN ('viewer', 'uploader', 'editor', 'approver', 'admin'));\nDO $note$ BEGIN EXECUTE format('COMMENT ON COLUMN pgokf_web.users.role IS %L', (SELECT note FROM reorder_note)); END $note$;\nDROP TABLE reorder_keep, reorder_note;\n",
+    "legacy_diagnostic": "pgokf_web.users order name,password_hash",
+    "legacy_source_detector": null
+  },
+  {
+    "name": "widen the exception to another table",
+    "edits": [
+      {
+        "path": "tests/upgrade/catalog-exceptions.json",
+        "before": "er a silent one.\",\n  \"column_order\": {\n    \"pgokf_web.users\": {\n      \"fresh\": [\"name\", \"role\", \"password_hash\", \"display_name\", \"provider\", \"created_at\", \"updated_at\"],\n      \"declared\": [\"name\", \"role\", \"password_hash\", \"created_at\", \"updated_at\", \"display_name\", \"provider\"],\n      \"reason\": \"display_name and provider appended by hand to a table an early unpublished development build had created\"\n    },\n    \"pgokf_web.sessions\": {\n      \"fresh\": [\"nonce\", \"subject\", \"mode\", \"provider\", \"expires_at\", \"created_at\"],\n      \"declared\": [\"nonce\", \"subject\", \"mode\", \"expires_at\", \"created_at\", \"provider\"],\n      \"reason\": \"provider appended by hand to a table an early unpublished development build had created\"\n    }\n  },\n  \"runtime_indexes\": {\n    \"pgokf.concepts_bm25_idx\": {\"table\": \"pgokf.concepts\", \"access_method\": \"bm25\", \"created_by\": \"pgokf.rebuild_search_index()\"},\n    \"pgokf.concept_embedding_hnsw_idx\": {\"table\": \"pgokf.concept_embedding\", \"access_method\": \"hnsw\", \"created_by\": \"pgokf.rebuild_embedding_index()\"}\n  },\n  \"positional_access\": {\n    \"scan_roots\": [\"crates\", \"deploy\", \"packaging\", \"skills\", \"templates\", \"examples\"],\n    \"dynamic_statements\": [\"SELECT 1 FROM {table} LIMIT 0\"]\n  }\n}\n",
+        "after": "er a silent one.\",\n  \"column_order\": {\n    \"pgokf_web.users\": {\n      \"fresh\": [\n        \"name\",\n        \"role\",\n        \"password_hash\",\n        \"display_name\",\n        \"provider\",\n        \"created_at\",\n        \"updated_at\"\n      ],\n      \"declared\": [\n        \"name\",\n        \"role\",\n        \"password_hash\",\n        \"created_at\",\n        \"updated_at\",\n        \"display_name\",\n        \"provider\"\n      ],\n      \"reason\": \"display_name and provider appended by hand to a table an early unpublished development build had created\"\n    },\n    \"pgokf_web.sessions\": {\n      \"fresh\": [\n        \"nonce\",\n        \"subject\",\n        \"mode\",\n        \"provider\",\n        \"expires_at\",\n        \"created_at\"\n      ],\n      \"declared\": [\n        \"nonce\",\n        \"subject\",\n        \"mode\",\n        \"expires_at\",\n        \"created_at\",\n        \"provider\"\n      ],\n      \"reason\": \"provider appended by hand to a table an early unpublished development build had created\"\n    },\n    \"pgokf_web.mcp_tokens\": {\n      \"fresh\": [\n        \"name\",\n        \"role\",\n        \"tenant\",\n        \"digest\",\n        \"created_by\",\n        \"created_at\"\n      ],\n      \"declared\": [\n        \"name\",\n        \"role\",\n        \"tenant\",\n        \"digest\",\n        \"created_at\",\n        \"created_by\"\n      ]\n    }\n  },\n  \"runtime_indexes\": {\n    \"pgokf.concepts_bm25_idx\": {\n      \"table\": \"pgokf.concepts\",\n      \"access_method\": \"bm25\",\n      \"created_by\": \"pgokf.rebuild_search_index()\"\n    },\n    \"pgokf.concept_embedding_hnsw_idx\": {\n      \"table\": \"pgokf.concept_embedding\",\n      \"access_method\": \"hnsw\",\n      \"created_by\": \"pgokf.rebuild_embedding_index()\"\n    }\n  },\n  \"positional_access\": {\n    \"scan_roots\": [\n      \"crates\",\n      \"deploy\",\n      \"packaging\",\n      \"skills\",\n      \"templates\",\n      \"examples\"\n    ],\n    \"dynamic_statements\": [\n      \"SELECT 1 FROM {table} LIMIT 0\"\n    ]\n  }\n}\n"
+      }
+    ],
+    "operator": "CREATE TEMPORARY TABLE reorder_keep AS SELECT * FROM pgokf_web.mcp_tokens;\nCREATE TEMPORARY TABLE reorder_note AS SELECT col_description('pgokf_web.mcp_tokens'::regclass, attnum) AS note FROM pg_attribute WHERE attrelid = 'pgokf_web.mcp_tokens'::regclass AND attname = 'created_by';\nALTER TABLE pgokf_web.mcp_tokens DROP COLUMN created_by CASCADE;\nALTER TABLE pgokf_web.mcp_tokens ADD COLUMN created_by text;\nUPDATE pgokf_web.mcp_tokens AS t SET created_by = k.created_by FROM reorder_keep AS k WHERE k.digest = t.digest;\nALTER TABLE pgokf_web.mcp_tokens ALTER COLUMN created_by SET NOT NULL;\nDO $note$ BEGIN EXECUTE format('COMMENT ON COLUMN pgokf_web.mcp_tokens.created_by IS %L', (SELECT note FROM reorder_note)); END $note$;\nDROP TABLE reorder_keep, reorder_note;\n",
+    "legacy_diagnostic": "exception probe other table order: UNSAFE ACCEPTANCE",
+    "legacy_source_detector": "catalog exceptions changed: column_order"
+  },
+  {
+    "name": "declare any users order",
+    "edits": [],
+    "operator": null,
+    "legacy_diagnostic": "exception probe third users order: UNSAFE ACCEPTANCE",
+    "legacy_source_detector": null,
+    "unit_test": "catalog::tests::third_order_rejected",
+    "failure_contains": "PGOKF_ASSERT:third_order_rejected:compare_inventory(&fresh, &bad, true).is_err()"
+  },
+  {
+    "name": "exception blind to comments",
+    "edits": [],
+    "operator": null,
+    "legacy_diagnostic": "exception probe column comment stale: UNSAFE ACCEPTANCE",
+    "legacy_source_detector": null,
+    "unit_test": "catalog::tests::metadata_on_exception_stays_visible",
+    "failure_contains": "PGOKF_ASSERT:metadata_on_exception_stays_visible:field 10"
+  },
+  {
+    "name": "exception drops the declared tables",
+    "edits": [],
+    "operator": null,
+    "legacy_diagnostic": "exception probe column default: UNSAFE ACCEPTANCE",
+    "legacy_source_detector": null,
+    "unit_test": "catalog::tests::metadata_on_exception_stays_visible",
+    "failure_contains": "PGOKF_ASSERT:metadata_on_exception_stays_visible:compare_inventory(&fresh, &bad, true).is_err()"
+  },
+  {
+    "name": "widen the runtime indexes",
+    "edits": [
+      {
+        "path": "tests/upgrade/catalog-exceptions.json",
+        "before": "er a silent one.\",\n  \"column_order\": {\n    \"pgokf_web.users\": {\n      \"fresh\": [\"name\", \"role\", \"password_hash\", \"display_name\", \"provider\", \"created_at\", \"updated_at\"],\n      \"declared\": [\"name\", \"role\", \"password_hash\", \"created_at\", \"updated_at\", \"display_name\", \"provider\"],\n      \"reason\": \"display_name and provider appended by hand to a table an early unpublished development build had created\"\n    },\n    \"pgokf_web.sessions\": {\n      \"fresh\": [\"nonce\", \"subject\", \"mode\", \"provider\", \"expires_at\", \"created_at\"],\n      \"declared\": [\"nonce\", \"subject\", \"mode\", \"expires_at\", \"created_at\", \"provider\"],\n      \"reason\": \"provider appended by hand to a table an early unpublished development build had created\"\n    }\n  },\n  \"runtime_indexes\": {\n    \"pgokf.concepts_bm25_idx\": {\"table\": \"pgokf.concepts\", \"access_method\": \"bm25\", \"created_by\": \"pgokf.rebuild_search_index()\"},\n    \"pgokf.concept_embedding_hnsw_idx\": {\"table\": \"pgokf.concept_embedding\", \"access_method\": \"hnsw\", \"created_by\": \"pgokf.rebuild_embedding_index()\"}\n  },\n  \"positional_access\": {\n    \"scan_roots\": [\"crates\", \"deploy\", \"packaging\", \"skills\", \"templates\", \"examples\"],\n    \"dynamic_statements\": [\"SELECT 1 FROM {table} LIMIT 0\"]\n  }\n}\n",
+        "after": "er a silent one.\",\n  \"column_order\": {\n    \"pgokf_web.users\": {\n      \"fresh\": [\n        \"name\",\n        \"role\",\n        \"password_hash\",\n        \"display_name\",\n        \"provider\",\n        \"created_at\",\n        \"updated_at\"\n      ],\n      \"declared\": [\n        \"name\",\n        \"role\",\n        \"password_hash\",\n        \"created_at\",\n        \"updated_at\",\n        \"display_name\",\n        \"provider\"\n      ],\n      \"reason\": \"display_name and provider appended by hand to a table an early unpublished development build had created\"\n    },\n    \"pgokf_web.sessions\": {\n      \"fresh\": [\n        \"nonce\",\n        \"subject\",\n        \"mode\",\n        \"provider\",\n        \"expires_at\",\n        \"created_at\"\n      ],\n      \"declared\": [\n        \"nonce\",\n        \"subject\",\n        \"mode\",\n        \"expires_at\",\n        \"created_at\",\n        \"provider\"\n      ],\n      \"reason\": \"provider appended by hand to a table an early unpublished development build had created\"\n    }\n  },\n  \"runtime_indexes\": {\n    \"pgokf.concepts_bm25_idx\": {\n      \"table\": \"pgokf.concepts\",\n      \"access_method\": \"bm25\",\n      \"created_by\": \"pgokf.rebuild_search_index()\"\n    },\n    \"pgokf.concept_embedding_hnsw_idx\": {\n      \"table\": \"pgokf.concept_embedding\",\n      \"access_method\": \"hnsw\",\n      \"created_by\": \"pgokf.rebuild_embedding_index()\"\n    },\n    \"pgokf.concepts_hostile_idx\": {\n      \"table\": \"pgokf.concepts\",\n      \"access_method\": \"btree\"\n    }\n  },\n  \"positional_access\": {\n    \"scan_roots\": [\n      \"crates\",\n      \"deploy\",\n      \"packaging\",\n      \"skills\",\n      \"templates\",\n      \"examples\"\n    ],\n    \"dynamic_statements\": [\n      \"SELECT 1 FROM {table} LIMIT 0\"\n    ]\n  }\n}\n"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "exception probe undeclared runtime index: UNSAFE ACCEPTANCE",
+    "legacy_source_detector": "catalog exceptions changed: runtime_indexes"
+  },
+  {
+    "name": "runtime index kind unchecked",
+    "edits": [],
+    "operator": null,
+    "legacy_diagnostic": "exception probe declared runtime index of the wrong kind: UNSAFE ACCEPTANCE",
+    "legacy_source_detector": null,
+    "unit_test": "catalog::tests::shared_provider_metadata_forgeries_fail",
+    "failure_contains": "PGOKF_ASSERT:shared_provider_metadata_forgeries_fail:access_method"
+  },
+  {
+    "name": "comparison blind to ACLs",
+    "edits": [],
+    "operator": null,
+    "legacy_diagnostic": "exception probe table acl: UNSAFE ACCEPTANCE",
+    "legacy_source_detector": null,
+    "unit_test": "catalog::tests::metadata_on_exception_stays_visible",
+    "failure_contains": "PGOKF_ASSERT:metadata_on_exception_stays_visible:field 8"
+  },
+  {
+    "name": "comparison always equal",
+    "edits": [],
+    "operator": null,
+    "legacy_diagnostic": "exception probe schema comment stale: UNSAFE ACCEPTANCE",
+    "legacy_source_detector": null,
+    "unit_test": "catalog::tests::metadata_on_exception_stays_visible",
+    "failure_contains": "PGOKF_ASSERT:metadata_on_exception_stays_visible:compare_inventory(&fresh, &bad, true).is_err()"
+  },
+  {
+    "name": "row-type dependents unchecked",
+    "edits": [],
+    "operator": null,
+    "legacy_diagnostic": "exception probe row-type function: UNSAFE ACCEPTANCE",
+    "legacy_source_detector": null
+  },
+  {
+    "name": "fixture pin removed, fixture incomplete",
+    "edits": [
+      {
+        "path": "tests/upgrade/live-drift.sql",
+        "before": "de''s own provider opened.';\nDROP TABLE live_drift_users, live_drift_sessions;\n\n-- Superseded web identity comments (from before identity providers could be\n-- many).\nCOMMENT ON SCHEMA pgokf_web IS\n    'The web UI''s identity state: the people a local sign-in knows, the sessions the UI has issued, the bearer tokens the MCP server accepts over HTTP, and the identity provider an admin set up. Owned by the extension so it is transactional, shared by every UI instance, and dumped with the catalog; read and written by pgokf_writer only, and never by the extension itself.';\nCOMMENT ON TABLE pgokf_web.users IS\n    'People the web UI''s users identity mode signs in: one row per person with their role on the viewer < uploader < editor < approver < admin ladder and an Argon2id hash of their password. Managed by pgokf-web (its user add / set-password commands and the Admin page); pgokf_writer only, so a reader never sees a hash.';\nCOMMENT ON COLUMN pgokf_web.users.name IS\n    'The sign-in name: one plain token of letters, digits, and . _ @ + - (at most 128), which is also the person''s OKF actor (human:<name>).';\nCOMMENT ON COLUMN pgokf_web.users.role IS\n    'The role the UI grants on every request: viewer, uploader, editor, approver, or admin (each holds everything below it). A session cookie carries no role, so a change here takes effect at once.';\nCOMMENT ON COLUMN pgokf_web.users.password_hash IS\n    'An Argon2id PHC string of the password, or NULL for a person the identity provider signed in: they have no password here, a password sign-in under their name is refused, and their row exists so an admin can see them and set their role. A fingerprint of the hash is bound into every session a password opens, so a changed password ends the sessions opened before it.';\nCOMMENT ON COLUMN pgokf_web.users.created_at IS 'When the person was added.';\nCOMMENT ON COLUMN pgokf_web.users.updated_at IS 'When the role or password last changed.';\n",
+        "after": "de''s own provider opened.';\nDROP TABLE live_drift_users, live_drift_sessions;\n\n"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": "live-drift fixture lacks the superseded comment on"
+  },
+  {
+    "name": "positional insert in the product",
+    "edits": [
+      {
+        "path": "crates/pgokf-web/src/user_store.rs",
+        "before": "                 .execute(\n                        \"INSERT INTO pgokf_web.users (name, role, password_hash, display_name)\n                         VALUES ($1, $2, $3, $4)\",\n                        &[&name, &role.id(), &hash, &display],\n             ",
+        "after": "                 .execute(\n                        \"INSERT INTO pgokf_web.users VALUES ($1, $2, $3, $4, NULL, now(), now())\",\n                        &[&name, &role.id(), &hash, &display],\n             "
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "differs from the product statements",
+    "legacy_source_detector": "INSERT without a column list"
+  },
+  {
+    "name": "positional insert, registered",
+    "edits": [
+      {
+        "path": "crates/pgokf-web/src/user_store.rs",
+        "before": "                 .execute(\n                        \"INSERT INTO pgokf_web.users (name, role, password_hash, display_name)\n                         VALUES ($1, $2, $3, $4)\",\n                        &[&name, &role.id(), &hash, &display],\n             ",
+        "after": "                 .execute(\n                        \"INSERT INTO pgokf_web.users VALUES ($1, $2, $3, $4, NULL, now(), now())\",\n                        &[&name, &role.id(), &hash, &display],\n             "
+      },
+      {
+        "path": "tests/upgrade/web-identity-statements.json",
+        "before": "s\": []\n        }\n      ]\n    },\n    {\n      \"sql\": \"INSERT INTO pgokf_web.users (name, role, password_hash, display_name) VALUES ($1, $2, $3, $4)\",\n      \"runs\": [\n        {\n          \"args\": [\n            \"upgrade-new\",\n   ",
+        "after": "s\": []\n        }\n      ]\n    },\n    {\n      \"sql\": \"INSERT INTO pgokf_web.users VALUES ($1, $2, $3, $4, NULL, now(), now())\",\n      \"runs\": [\n        {\n          \"args\": [\n            \"upgrade-new\",\n   "
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "product statements",
+    "legacy_source_detector": "INSERT without a column list"
+  },
+  {
+    "name": "select star in the product, registered",
+    "edits": [
+      {
+        "path": "crates/pgokf-web/src/user_store.rs",
+        "before": "          let row = db\n                    .query_opt(\n                        &format!(\"SELECT {RECORD_COLUMNS} FROM pgokf_web.users WHERE name = $1\"),\n                        &[&name],\n                    )\n                    .",
+        "after": "          let row = db\n                    .query_opt(\n                        &\"SELECT * FROM pgokf_web.users WHERE name = $1\".to_owned(),\n                        &[&name],\n                    )\n                    ."
+      },
+      {
+        "path": "tests/upgrade/web-identity-statements.json",
+        "before": "     {\n          \"args\": []\n        }\n      ]\n    },\n    {\n      \"sql\": \"SELECT role, password_hash, display_name, provider FROM pgokf_web.users WHERE name = $1\",\n      \"runs\": [\n        {\n          \"arg",
+        "after": "     {\n          \"args\": []\n        }\n      ]\n    },\n    {\n      \"sql\": \"SELECT * FROM pgokf_web.users WHERE name = $1\",\n      \"runs\": [\n        {\n          \"arg"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "product statements",
+    "legacy_source_detector": "SELECT * projection"
+  },
+  {
+    "name": "returning star in the product, registered",
+    "edits": [
+      {
+        "path": "crates/pgokf-web/src/session_store.rs",
+        "before": "=> {\n                db.execute(\"DELETE FROM pgokf_web.sessions WHERE nonce = $1\", &[&nonce])\n                    .await\n                    .context(\"ending a ",
+        "after": "=> {\n                db.execute(\"DELETE FROM pgokf_web.sessions WHERE nonce = $1 RETURNING *\", &[&nonce])\n                    .await\n                    .context(\"ending a "
+      },
+      {
+        "path": "tests/upgrade/web-identity-statements.json",
+        "before": "    ]\n    },\n    {\n      \"sql\": \"DELETE FROM pgokf_web.sessions WHERE nonce = $1\",\n      \"runs\": [\n        {\n          \"args\": [\n            \"nonce-new-local\"\n ",
+        "after": "    ]\n    },\n    {\n      \"sql\": \"DELETE FROM pgokf_web.sessions WHERE nonce = $1 RETURNING *\",\n      \"runs\": [\n        {\n          \"args\": [\n            \"nonce-new-local\"\n "
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "product statements",
+    "legacy_source_detector": "RETURNING *"
+  },
+  {
+    "name": "row-type function in an edge",
+    "edits": [
+      {
+        "path": "pgokf--0.4.0-dev2--0.4.0-dev3.sql",
+        "before": "registered for pg_dump (none here;\n-- the rule holds for every upgrade script).\nSELECT pgokf_private.register_dump_relations();\n",
+        "after": "registered for pg_dump (none here;\n-- the rule holds for every upgrade script).\nCREATE FUNCTION pgokf.user_label(u pgokf_web.users) RETURNS text LANGUAGE sql AS 'SELECT u.name';\nSELECT pgokf_private.register_dump_relations();\n"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "objects depend on the web identity row types",
+    "legacy_source_detector": "row-type function signature"
+  },
+  {
+    "name": "allow-list expansion",
+    "edits": [
+      {
+        "path": "crates/pgokf-web/src/main.rs",
+        "before": "r]) -> Result<()> {\n    for table in tables {\n        db.query(&format!(\"SELECT 1 FROM {table} LIMIT 0\"), &[])\n            .await\n            .with_context(|| {\n",
+        "after": "r]) -> Result<()> {\n    for table in tables {\n        db.query(&format!(\"SELECT * FROM {table} LIMIT 0\"), &[])\n            .await\n            .with_context(|| {\n"
+      },
+      {
+        "path": "tests/upgrade/catalog-exceptions.json",
+        "before": "er a silent one.\",\n  \"column_order\": {\n    \"pgokf_web.users\": {\n      \"fresh\": [\"name\", \"role\", \"password_hash\", \"display_name\", \"provider\", \"created_at\", \"updated_at\"],\n      \"declared\": [\"name\", \"role\", \"password_hash\", \"created_at\", \"updated_at\", \"display_name\", \"provider\"],\n      \"reason\": \"display_name and provider appended by hand to a table an early unpublished development build had created\"\n    },\n    \"pgokf_web.sessions\": {\n      \"fresh\": [\"nonce\", \"subject\", \"mode\", \"provider\", \"expires_at\", \"created_at\"],\n      \"declared\": [\"nonce\", \"subject\", \"mode\", \"expires_at\", \"created_at\", \"provider\"],\n      \"reason\": \"provider appended by hand to a table an early unpublished development build had created\"\n    }\n  },\n  \"runtime_indexes\": {\n    \"pgokf.concepts_bm25_idx\": {\"table\": \"pgokf.concepts\", \"access_method\": \"bm25\", \"created_by\": \"pgokf.rebuild_search_index()\"},\n    \"pgokf.concept_embedding_hnsw_idx\": {\"table\": \"pgokf.concept_embedding\", \"access_method\": \"hnsw\", \"created_by\": \"pgokf.rebuild_embedding_index()\"}\n  },\n  \"positional_access\": {\n    \"scan_roots\": [\"crates\", \"deploy\", \"packaging\", \"skills\", \"templates\", \"examples\"],\n    \"dynamic_statements\": [\"SELECT 1 FROM {table} LIMIT 0\"]\n  }\n}\n",
+        "after": "er a silent one.\",\n  \"column_order\": {\n    \"pgokf_web.users\": {\n      \"fresh\": [\n        \"name\",\n        \"role\",\n        \"password_hash\",\n        \"display_name\",\n        \"provider\",\n        \"created_at\",\n        \"updated_at\"\n      ],\n      \"declared\": [\n        \"name\",\n        \"role\",\n        \"password_hash\",\n        \"created_at\",\n        \"updated_at\",\n        \"display_name\",\n        \"provider\"\n      ],\n      \"reason\": \"display_name and provider appended by hand to a table an early unpublished development build had created\"\n    },\n    \"pgokf_web.sessions\": {\n      \"fresh\": [\n        \"nonce\",\n        \"subject\",\n        \"mode\",\n        \"provider\",\n        \"expires_at\",\n        \"created_at\"\n      ],\n      \"declared\": [\n        \"nonce\",\n        \"subject\",\n        \"mode\",\n        \"expires_at\",\n        \"created_at\",\n        \"provider\"\n      ],\n      \"reason\": \"provider appended by hand to a table an early unpublished development build had created\"\n    }\n  },\n  \"runtime_indexes\": {\n    \"pgokf.concepts_bm25_idx\": {\n      \"table\": \"pgokf.concepts\",\n      \"access_method\": \"bm25\",\n      \"created_by\": \"pgokf.rebuild_search_index()\"\n    },\n    \"pgokf.concept_embedding_hnsw_idx\": {\n      \"table\": \"pgokf.concept_embedding\",\n      \"access_method\": \"hnsw\",\n      \"created_by\": \"pgokf.rebuild_embedding_index()\"\n    }\n  },\n  \"positional_access\": {\n    \"scan_roots\": [\n      \"crates\",\n      \"deploy\",\n      \"packaging\",\n      \"skills\",\n      \"templates\",\n      \"examples\"\n    ],\n    \"dynamic_statements\": [\n      \"SELECT 1 FROM {table} LIMIT 0\",\n      \"SELECT * FROM {table} LIMIT 0\"\n    ]\n  }\n}\n"
+      },
+      {
+        "path": "tests/upgrade/web-identity-statements.json",
+        "before": "         \"args\": [\n            \"upgrade-new\"\n          ]\n        }\n      ]\n    }\n  ]\n}\n",
+        "after": "         \"args\": [\n            \"upgrade-new\"\n          ]\n        }\n      ]\n    },\n    {\n      \"sql\": \"SELECT * FROM pgokf_web.users LIMIT 0\",\n      \"runs\": [\n        {\n          \"args\": []\n        }\n      ]\n    },\n    {\n      \"sql\": \"SELECT * FROM pgokf_web.sessions LIMIT 0\",\n      \"runs\": [\n        {\n          \"args\": []\n        }\n      ]\n    }\n  ]\n}\n"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "product statements",
+    "legacy_source_detector": "catalog exceptions changed: positional_access"
+  },
+  {
+    "name": "independent provider validation removed",
+    "edits": [],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "unit_test": "catalog::tests::shared_provider_metadata_forgeries_fail",
+    "failure_contains": "PGOKF_ASSERT:shared_provider_metadata_forgeries_fail:schema"
+  },
+  {
+    "name": "tier database config ignored",
+    "edits": [],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "unit_test": "catalog::tests::shared_database_config_fails",
+    "failure_contains": "PGOKF_ASSERT:shared_database_config_fails:validate_contract(&snapshot, &contract).is_err()"
+  },
+  {
+    "name": "argument continuity ignored",
+    "edits": [],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "unit_test": "upgrade::tests::argument_continuity_is_checked",
+    "failure_contains": "PGOKF_ASSERT:argument_continuity_is_checked:validate_registry(&registry).is_err()"
+  },
+  {
+    "name": "provider guard unique",
+    "unit_test": "catalog::tests::shared_index_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/provider.rs",
+        "before": "index.unique",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_index_fields_fail:field unique"
+  },
+  {
+    "name": "provider guard primary",
+    "unit_test": "catalog::tests::shared_index_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/provider.rs",
+        "before": "index.primary",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_index_fields_fail:field primary"
+  },
+  {
+    "name": "provider guard exclusion",
+    "unit_test": "catalog::tests::shared_index_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/provider.rs",
+        "before": "index.exclusion",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_index_fields_fail:field exclusion"
+  },
+  {
+    "name": "provider guard immediate",
+    "unit_test": "catalog::tests::shared_index_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/provider.rs",
+        "before": "!index.immediate",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_index_fields_fail:field immediate"
+  },
+  {
+    "name": "provider guard clustered",
+    "unit_test": "catalog::tests::shared_index_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/provider.rs",
+        "before": "index.clustered",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_index_fields_fail:field clustered"
+  },
+  {
+    "name": "provider guard replica_identity",
+    "unit_test": "catalog::tests::shared_index_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/provider.rs",
+        "before": "index.replica_identity",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_index_fields_fail:field replica_identity"
+  },
+  {
+    "name": "provider guard nulls_not_distinct",
+    "unit_test": "catalog::tests::shared_index_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/provider.rs",
+        "before": "index.nulls_not_distinct",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_index_fields_fail:field nulls_not_distinct"
+  },
+  {
+    "name": "provider guard included_columns",
+    "unit_test": "catalog::tests::shared_index_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/provider.rs",
+        "before": "!index.included_columns.is_empty()",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_index_fields_fail:field included_columns"
+  },
+  {
+    "name": "provider guard predicate",
+    "unit_test": "catalog::tests::shared_index_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/provider.rs",
+        "before": "index.predicate.is_some()",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_index_fields_fail:field predicate"
+  },
+  {
+    "name": "provider guard acl",
+    "unit_test": "catalog::tests::shared_index_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/provider.rs",
+        "before": "!index.acl.is_empty()",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_index_fields_fail:field acl"
+  },
+  {
+    "name": "provider guard comment",
+    "unit_test": "catalog::tests::shared_index_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/provider.rs",
+        "before": "index.comment.is_some()",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_index_fields_fail:field comment"
+  },
+  {
+    "name": "provider guard security_labels",
+    "unit_test": "catalog::tests::shared_index_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/provider.rs",
+        "before": "!index.security_labels.is_empty()",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_index_fields_fail:field security_labels"
+  },
+  {
+    "name": "provider guard persistence",
+    "unit_test": "catalog::tests::shared_index_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/provider.rs",
+        "before": "index.persistence != \"p\"",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_index_fields_fail:field persistence"
+  },
+  {
+    "name": "provider guard tablespace",
+    "unit_test": "catalog::tests::shared_index_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/provider.rs",
+        "before": "index.tablespace != \"pg_default\"",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_index_fields_fail:field tablespace"
+  },
+  {
+    "name": "tier guard login",
+    "unit_test": "catalog::tests::shared_tier_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "role.login",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_tier_fields_fail:login"
+  },
+  {
+    "name": "tier guard superuser",
+    "unit_test": "catalog::tests::shared_tier_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "role.superuser",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_tier_fields_fail:superuser"
+  },
+  {
+    "name": "tier guard create_role",
+    "unit_test": "catalog::tests::shared_tier_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "role.create_role",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_tier_fields_fail:create_role"
+  },
+  {
+    "name": "tier guard create_db",
+    "unit_test": "catalog::tests::shared_tier_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "role.create_db",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_tier_fields_fail:create_db"
+  },
+  {
+    "name": "tier guard replication",
+    "unit_test": "catalog::tests::shared_tier_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "role.replication",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_tier_fields_fail:replication"
+  },
+  {
+    "name": "tier guard bypass_rls",
+    "unit_test": "catalog::tests::shared_tier_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "role.bypass_rls",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_tier_fields_fail:bypass_rls"
+  },
+  {
+    "name": "tier guard inherit",
+    "unit_test": "catalog::tests::shared_tier_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "!role.inherit",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_tier_fields_fail:inherit"
+  },
+  {
+    "name": "tier guard connection_limit",
+    "unit_test": "catalog::tests::shared_tier_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "role.connection_limit != -1",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_tier_fields_fail:connection_limit"
+  },
+  {
+    "name": "tier guard valid_until",
+    "unit_test": "catalog::tests::shared_tier_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "role.valid_until.is_some()",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_tier_fields_fail:valid_until"
+  },
+  {
+    "name": "tier guard config",
+    "unit_test": "catalog::tests::shared_tier_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "!role.config.is_empty()",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_tier_fields_fail:config"
+  },
+  {
+    "name": "tier guard security_labels",
+    "unit_test": "catalog::tests::shared_tier_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "!role.security_labels.is_empty()",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_tier_fields_fail:security_labels"
+  },
+  {
+    "name": "tier guard comment",
+    "unit_test": "catalog::tests::shared_tier_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "role.comment.as_ref() != comments.get(name)",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_tier_fields_fail:comment"
+  },
+  {
+    "name": "runtime guard relation",
+    "unit_test": "catalog::tests::shared_index_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "index.relation != relation",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_index_fields_fail:field relation"
+  },
+  {
+    "name": "runtime guard valid",
+    "unit_test": "catalog::tests::shared_index_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "!index.valid",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_index_fields_fail:field valid"
+  },
+  {
+    "name": "runtime guard ready",
+    "unit_test": "catalog::tests::shared_index_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "!index.ready",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_index_fields_fail:field ready"
+  },
+  {
+    "name": "runtime guard live",
+    "unit_test": "catalog::tests::shared_index_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "!index.live",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_index_fields_fail:field live"
+  },
+  {
+    "name": "runtime guard extension_member",
+    "unit_test": "catalog::tests::shared_index_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "index.extension_member",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_index_fields_fail:field extension_member"
+  },
+  {
+    "name": "runtime guard owner",
+    "unit_test": "catalog::tests::shared_index_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "index.owner != expected.extension_owner",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_index_fields_fail:field owner"
+  },
+  {
+    "name": "embedding required policy removed",
+    "unit_test": "catalog::tests::embedding_presence_uses_explicit_contract_not_row_count",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "required.insert(EMBEDDING_INDEX);",
+        "after": "let _ = EMBEDDING_INDEX;"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:embedding_presence_uses_explicit_contract_not_row_count:required HNSW absent from both"
+  },
+  {
+    "name": "tier annotations policy removed",
+    "unit_test": "catalog::tests::shared_tier_annotations_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "    let comments = tier_comments()?;",
+        "after": "    let comments = expected.tiers.iter().filter_map(|r|r.comment.clone().map(|c|(r.name.clone(),c))).collect::<BTreeMap<_,_>>();"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_tier_annotations_fail:validate_contract(&snapshot, &contract).is_err()"
+  },
+  {
+    "name": "relation grant validation removed",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "        validate_relation_grants(&rows, &expected.catalog.extension_owner)?;",
+        "after": ""
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "shared catalog forgery survived:",
+    "legacy_source_detector": null,
+    "probe": "catalog-controls"
+  },
+  {
+    "name": "tenant policy validation removed",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "        validate_tenant_policies(&rows)?;",
+        "after": ""
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "shared catalog forgery survived:",
+    "legacy_source_detector": null,
+    "probe": "catalog-controls"
+  },
+  {
+    "name": "relation ownership validation removed",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "row.2.get(6).and_then(Value::as_str) != Some(owner)",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "unit_test": "catalog::owner_tests::independent_relation_owner",
+    "failure_contains": "PGOKF_ASSERT:independent_relation_owner:validate_relation_owners(&[row], \"postgres\").is_err()"
+  },
+  {
+    "name": "seed value comparison removed",
+    "unit_test": "upgrade::tests::seed_rows_and_all_fields_are_preserved",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/upgrade.rs",
+        "before": "if SeedSnapshot::parse(before)? != SeedSnapshot::parse(after)?",
+        "after": "if false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:seed_rows_and_all_fields_are_preserved:verify_seed(good, &bad).is_err()"
+  },
+  {
+    "name": "seed object check removed",
+    "unit_test": "upgrade::tests::seed_shapes_fail_closed",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/upgrade.rs",
+        "before": "if !row.is_object()",
+        "after": "if false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:seed_shapes_fail_closed:verify_seed(bad, bad).is_err()"
+  },
+  {
+    "name": "seed duplicate check removed",
+    "unit_test": "upgrade::tests::seed_shapes_fail_closed",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/upgrade.rs",
+        "before": "if !rows.insert((table.to_owned(), row.to_string()))",
+        "after": "if false && !rows.insert((table.to_owned(), row.to_string()))"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:seed_shapes_fail_closed:verify_seed(bad, bad).is_err()"
+  },
+  {
+    "name": "parameter ordinal gap check removed",
+    "unit_test": "upgrade::tests::argument_continuity_is_checked",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/upgrade.rs",
+        "before": "if parameters != (1..=arity).collect()",
+        "after": "if false && parameters != (1..=arity).collect()"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:argument_continuity_is_checked:validate_registry(&registry).is_err()"
+  },
+  {
+    "name": "registry duplicate check removed",
+    "unit_test": "upgrade::tests::registry_shapes_fail_closed",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/upgrade.rs",
+        "before": "if !seen.insert(&statement.sql)",
+        "after": "if { let _ = seen.insert(&statement.sql); false }"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:registry_shapes_fail_closed:duplicate"
+  },
+  {
+    "name": "registry empty runs check removed",
+    "unit_test": "upgrade::tests::registry_shapes_fail_closed",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/upgrade.rs",
+        "before": "if statement.runs.is_empty()",
+        "after": "if false && statement.runs.is_empty()"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:registry_shapes_fail_closed:no runs"
+  },
+  {
+    "name": "registry empty statements check removed",
+    "unit_test": "upgrade::tests::registry_shapes_fail_closed",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/upgrade.rs",
+        "before": "if seen.is_empty()",
+        "after": "if false && seen.is_empty()"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:registry_shapes_fail_closed:validate_registry("
+  },
+  {
+    "name": "registry scalar argument check removed",
+    "unit_test": "upgrade::tests::registry_shapes_fail_closed",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/upgrade.rs",
+        "before": "            arguments(&run.args)?;",
+        "after": "            let _ = &run.args;"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:registry_shapes_fail_closed:argument"
+  },
+  {
+    "name": "prepared execution contract removed",
+    "unit_test": "upgrade::tests::parameter_runs_and_preparation_are_fail_closed",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/upgrade.rs",
+        "before": "if observed != expected",
+        "after": "if false && observed != expected"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:parameter_runs_and_preparation_are_fail_closed:check_behaviour(&bad, &r).is_err()"
+  },
+  {
+    "name": "ordinary index comparison removed",
+    "unit_test": "catalog::tests::ordinary_index_metadata_stays_visible",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "if keyed(&candidate.relation_indexes, |r| &r.name)?",
+        "after": "if false && keyed(&candidate.relation_indexes, |r| &r.name)?"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:ordinary_index_metadata_stays_visible:validate_contract(&snapshot, &contract).is_err()"
+  },
+  {
+    "name": "external tier role ingress removed",
+    "unit_test": "catalog::tests::broad_predefined_membership_fails",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "if tier(&edge.member) {",
+        "after": "if tier(&edge.member) && tier(&edge.role) {"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:broad_predefined_membership_fails:validate_contract(&s, &c).is_err()"
+  },
+  {
+    "name": "external tier onward grant removed",
+    "unit_test": "catalog::tests::onward_login_grant_fails",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "if candidate.memberships.iter().any(|e| e.role == edge.member)",
+        "after": "if false && candidate.memberships.iter().any(|e| e.role == edge.member)"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:onward_login_grant_fails:validate_contract(&s, &c).is_err()"
+  },
+  {
+    "name": "catalog rowtype closure removed",
+    "unit_test": "catalog::tests::rowtype_dependency_fails",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "if !candidate.rowtype_dependents.is_empty()",
+        "after": "if false && !candidate.rowtype_dependents.is_empty()"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:rowtype_dependency_fails:validate_contract(&s, &c).is_err()"
+  },
+  {
+    "name": "tier validation removed",
+    "unit_test": "catalog::tests::unsafe_tier_even_in_reference_fails",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "    validate_tiers(candidate, expected)",
+        "after": "    Ok(())"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:unsafe_tier_even_in_reference_fails:validate_contract(&s, &c).is_err()"
+  },
+  {
+    "name": "textsearch shape removed",
+    "unit_test": "catalog::tests::shared_provider_metadata_forgeries_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/provider.rs",
+        "before": "if index.keys.len() != 1\n                    || index.keys[0].expression != TEXT_EXPRESSION\n                    || index.keys[0].opclass != identity(schema, \"text_bm25_ops\")\n                    || index.keys[0].collation.as_deref() != Some(\"\\\"default\\\"\")\n                    || index.options\n                        != BTreeMap::from([(\"text_config\".into(), context.text_config.clone())])",
+        "after": "if false && (index.keys.len() != 1\n                    || index.keys[0].expression != TEXT_EXPRESSION\n                    || index.keys[0].opclass != identity(schema, \"text_bm25_ops\")\n                    || index.keys[0].collation.as_deref() != Some(\"\\\"default\\\"\")\n                    || index.options\n                        != BTreeMap::from([(\"text_config\".into(), context.text_config.clone())]))"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_provider_metadata_forgeries_fail:schema"
+  },
+  {
+    "name": "search shape removed",
+    "unit_test": "catalog::tests::shared_search_and_vector_keys_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/provider.rs",
+        "before": "if expressions != [\"id\", \"title\", \"description\", \"body_text\", \"type\"]\n                    || context.search_opclasses != vec![identity(schema, \"anyelement_bm25_ops\"); 5]\n                    || opclasses != context.search_opclasses\n                    || context\n                        .search_opclasses\n                        .iter()\n                        .any(|name| !name.starts_with(&format!(\"{schema}.\")))\n                    || collations != [Some(\"\\\"default\\\"\"); 5]\n                    || index.options != BTreeMap::from([(\"key_field\".into(), \"id\".into())])",
+        "after": "if false && (expressions != [\"id\", \"title\", \"description\", \"body_text\", \"type\"]\n                    || context.search_opclasses != vec![identity(schema, \"anyelement_bm25_ops\"); 5]\n                    || opclasses != context.search_opclasses\n                    || context\n                        .search_opclasses\n                        .iter()\n                        .any(|name| !name.starts_with(&format!(\"{schema}.\")))\n                    || collations != [Some(\"\\\"default\\\"\"); 5]\n                    || index.options != BTreeMap::from([(\"key_field\".into(), \"id\".into())]))"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_search_and_vector_keys_fail:validate_contract(&snapshot, &contract).is_err()"
+  },
+  {
+    "name": "HNSW shape removed",
+    "unit_test": "catalog::tests::shared_search_and_vector_keys_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/provider.rs",
+        "before": "if index.keys.len() != 1\n            || index.keys[0].opclass != identity(schema, \"vector_cosine_ops\")\n            || index.keys[0].expression != expected\n            || index.keys[0].collation.is_some()\n            || !index.options.is_empty()",
+        "after": "if false && (index.keys.len() != 1\n            || index.keys[0].opclass != identity(schema, \"vector_cosine_ops\")\n            || index.keys[0].expression != expected\n            || index.keys[0].collation.is_some()\n            || !index.options.is_empty())"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_search_and_vector_keys_fail:validate_contract(&snapshot, &contract).is_err()"
+  },
+  {
+    "name": "runtime key option guard removed",
+    "unit_test": "catalog::tests::shared_provider_metadata_forgeries_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/provider.rs",
+        "before": "index.keys.iter().any(|key| key.options != 0)",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_provider_metadata_forgeries_fail:options"
+  },
+  {
+    "name": "tier membership guard r.admin",
+    "unit_test": "catalog::tests::shared_membership_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "r.admin",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_membership_fields_fail:admin"
+  },
+  {
+    "name": "tier membership guard !r.inherit",
+    "unit_test": "catalog::tests::shared_membership_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "!r.inherit",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_membership_fields_fail:inherit"
+  },
+  {
+    "name": "tier membership guard !r.set",
+    "unit_test": "catalog::tests::shared_membership_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "!r.set",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_membership_fields_fail:set"
+  },
+  {
+    "name": "tier membership guard r.grantor != expected.extension_owner",
+    "unit_test": "catalog::tests::shared_membership_fields_fail",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "r.grantor != expected.extension_owner",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:shared_membership_fields_fail:grantor"
+  },
+  {
+    "name": "external membership guard !login.login",
+    "unit_test": "catalog::tests::external_membership_semantics",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "!login.login",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:external_membership_semantics:login"
+  },
+  {
+    "name": "external membership guard edge.admin",
+    "unit_test": "catalog::tests::external_membership_semantics",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "edge.admin",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:external_membership_semantics:admin"
+  },
+  {
+    "name": "external membership guard !edge.inherit",
+    "unit_test": "catalog::tests::external_membership_semantics",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "!edge.inherit",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:external_membership_semantics:inherit"
+  },
+  {
+    "name": "external membership guard !edge.set",
+    "unit_test": "catalog::tests::external_membership_semantics",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "!edge.set",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:external_membership_semantics:set"
+  },
+  {
+    "name": "external membership guard edge.grantor != expected.extension_owner",
+    "unit_test": "catalog::tests::external_membership_semantics",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "edge.grantor != expected.extension_owner",
+        "after": "false"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:external_membership_semantics:grantor"
+  },
+  {
+    "name": "tier candidate equality removed",
+    "unit_test": "catalog::tests::every_tier_field_is_load_bearing",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "if roles.get(name) != Some(&role)",
+        "after": "if false && roles.get(name) != Some(&role)"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:every_tier_field_is_load_bearing:bypass_rls"
+  },
+  {
+    "name": "runtime presence equality removed",
+    "unit_test": "catalog::tests::required_runtime_index_cannot_disappear",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "if indexes != pinned",
+        "after": "if false && indexes != pinned"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:required_runtime_index_cannot_disappear:validate_contract(&s, &c).is_err()"
+  },
+  {
+    "name": "catalog context equality removed",
+    "unit_test": "catalog::tests::catalog_context_is_bound",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "if candidate.provider_context != expected.provider_context",
+        "after": "if false && (candidate.provider_context != expected.provider_context"
+      },
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "|| candidate.embedding_rows_present != expected.embedding_rows_present\n    {",
+        "after": "|| candidate.embedding_rows_present != expected.embedding_rows_present)\n    {"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null,
+    "failure_contains": "PGOKF_ASSERT:catalog_context_is_bound:provider"
+  },
+  {
+    "name": "column grant validation removed",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "if !acl.is_null() && acl.as_array().is_none_or(|entries| !entries.is_empty()) {",
+        "after": "if false && (!acl.is_null() && acl.as_array().is_none_or(|entries| !entries.is_empty())) {"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": "shared catalog forgery survived: column grant",
+    "legacy_source_detector": null,
+    "probe": "catalog-controls"
+  },
+  {
+    "name": "historical SQL authenticity guard removed",
+    "unit_test": "historical::tests::substituted_historical_sql_is_rejected",
+    "failure_contains": "PGOKF_ASSERT:historical-substitution:super::validate(",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/historical.rs",
+        "before": "if digest != PUBLISHED_SQL && digest != AMD64_SQL && digest != SOURCE_SQL",
+        "after": "if false && (digest != PUBLISHED_SQL && digest != AMD64_SQL && digest != SOURCE_SQL)"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null
+  },
+  {
+    "name": "mutation exact counts removed",
+    "unit_test": "reconciliation_mutations::tests::exact_named_assertion_accounting",
+    "failure_contains": "PGOKF_ASSERT:mutation-accounting:!intended_assertion(case, false, &bad)",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/reconciliation_mutations.rs",
+        "before": "libtest_counts(output) == Some((0, 1, 0))",
+        "after": "true"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null
+  },
+  {
+    "name": "mutation intended marker removed",
+    "unit_test": "reconciliation_mutations::tests::exact_named_assertion_accounting",
+    "failure_contains": "PGOKF_ASSERT:mutation-accounting:!intended_assertion(case, false, &bad)",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/reconciliation_mutations.rs",
+        "before": "output.contains(marker)",
+        "after": "true"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null
+  },
+  {
+    "name": "baseline selected name proof removed",
+    "unit_test": "reconciliation_mutations::tests::exact_named_assertion_accounting",
+    "failure_contains": "PGOKF_ASSERT:mutation-accounting:selected-name",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/reconciliation_mutations.rs",
+        "before": "        && selected.iter().all(|test| {\n            output\n                .lines()\n                .filter(|line| *line == format!(\"test {test} ... ok\"))\n                .count()\n                == 1\n        })",
+        "after": "        && true"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null
+  },
+  {
+    "name": "compiled executable digest check removed",
+    "unit_test": "reconciliation_mutations::tests::executable_and_source_identity_are_bound",
+    "failure_contains": "PGOKF_ASSERT:executable-binding:verify_binding(&binding, &source).is_err()",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/reconciliation_mutations.rs",
+        "before": "if binding.executable_sha256",
+        "after": "if false && binding.executable_sha256"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null
+  },
+  {
+    "name": "compiled source digest check removed",
+    "unit_test": "reconciliation_mutations::tests::executable_and_source_identity_are_bound",
+    "failure_contains": "PGOKF_ASSERT:source-binding:verify_binding(&binding, &source).is_err()",
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/reconciliation_mutations.rs",
+        "before": "|| binding.source_sha256",
+        "after": "|| false && binding.source_sha256"
+      }
+    ],
+    "operator": null,
+    "legacy_diagnostic": null,
+    "legacy_source_detector": null
+  }
+]

@@ -46,6 +46,7 @@ const LOOKUP_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
 /// and the tenant the token was minted for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bearer {
+    pub principal_id: String,
     pub name: String,
     pub role: Role,
     pub tenant: Option<String>,
@@ -54,6 +55,7 @@ pub struct Bearer {
 /// Which tools a role may call: the one place that decides it. `tools/list`
 /// filters by the same answer `tools/call` enforces, so a client is never
 /// shown a tool its token cannot call.
+#[cfg(test)]
 pub trait ToolAccess: Sized {
     /// Whether this role may call `tool`.
     fn allows_tool(self, tool: &str) -> bool;
@@ -64,22 +66,10 @@ pub trait ToolAccess: Sized {
     fn any_allows(tool: &str) -> bool;
 }
 
+#[cfg(test)]
 impl ToolAccess for Role {
     fn allows_tool(self, tool: &str) -> bool {
-        match tool {
-            "concept_search"
-            | "find_similar"
-            | "concept_neighbors"
-            | "get_concept"
-            | "get_skill"
-            | "check_workspace_plugin_freshness" => true,
-            "list_plugin_targets" | "build_workspace_plugin" => self >= Role::Builder,
-            "list_bundles" | "put_document" | "delete_document" => self >= Role::Writer,
-            "create_content_bundle" | "refresh_bundle" | "set_bundle_state" => self >= Role::Admin,
-            // A tool no role names is refused here and reported as unknown
-            // by the catalog, never silently allowed.
-            _ => false,
-        }
+        crate::registry::by_name(tool).is_some_and(|spec| self >= spec.minimum_role)
     }
 
     fn any_allows(tool: &str) -> bool {
@@ -184,7 +174,12 @@ impl TokenLookups for CatalogTokens {
             let role: String = row.try_get(1).context("reading the token's role")?;
             let tenant: Option<String> = row.try_get(2).context("reading the token's tenant")?;
             Ok(match Role::parse(&role) {
-                Some(role) => Lookup::Bearer(Bearer { name, role, tenant }),
+                Some(role) => Lookup::Bearer(Bearer {
+                    name,
+                    role,
+                    tenant,
+                    principal_id: digest.to_owned(),
+                }),
                 None => Lookup::ForeignRole { name, role },
             })
         })

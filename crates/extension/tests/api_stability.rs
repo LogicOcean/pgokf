@@ -907,6 +907,322 @@ fn dev1_upgrade_script_replays_the_dev_cycle_delta() {
     );
 }
 
+/// The `extension_sql!` block named `name` in `src/catalog/<file>`: the raw
+/// string literal immediately preceding its `name = "..."` argument.
+fn extension_sql_block(file: &str, name: &str) -> String {
+    let source = read_to_string(&crate_dir().join("src").join("catalog").join(file));
+    let marker = source
+        .find(&format!("name = \"{name}\""))
+        .unwrap_or_else(|| panic!("{file} defines no extension_sql! block named {name}"));
+    let end = source[..marker]
+        .rfind("\",")
+        .unwrap_or_else(|| panic!("{name}: raw string end not found"));
+    let start = source[..end]
+        .rfind("r\"")
+        .unwrap_or_else(|| panic!("{name}: raw string start not found"))
+        + 2;
+    source[start..end].trim().to_string()
+}
+
+/// The `0.4.0-dev1 -> 0.4.0-dev2` reconciliation step re-creates SQL that the
+/// fresh install generates from Rust sources. Its copies must stay verbatim
+/// (the helper definition modulo `CREATE OR REPLACE`), so a fresh install and
+/// a reconciled catalog cannot drift apart; the in-database upgrade-parity
+/// gate then proves the member catalogs equal.
+#[test]
+fn dev2_reconciliation_replays_the_fresh_install_sources() {
+    // Arrange
+    let script = read_to_string(
+        &crate_dir()
+            .join("sql")
+            .join("pgokf--0.4.0-dev1--0.4.0-dev2.sql"),
+    );
+    let helper = extension_sql_block("search_backend.rs", "bm25_hits_function");
+    let (definition, grants) = helper
+        .split_once("$fn$;")
+        .expect("the helper block defines one $fn$ body");
+    let definition = format!("{definition}$fn$;").replacen(
+        "CREATE FUNCTION pgokf.bm25_hits(",
+        "CREATE OR REPLACE FUNCTION pgokf.bm25_hits(",
+        1,
+    );
+    let hardening = extension_sql_block("embedding.rs", "embedding_function_hardening");
+    let packages = extension_sql_block("packages.rs", "package_function_hardening");
+
+    // Act / Assert: the helper definition and its grants/comment.
+    assert!(
+        definition.starts_with("CREATE OR REPLACE FUNCTION pgokf.bm25_hits("),
+        "the bm25_hits_function block must start with its CREATE FUNCTION"
+    );
+    assert!(
+        script.contains(&definition),
+        "pgokf--0.4.0-dev1--0.4.0-dev2.sql must re-create bm25_hits verbatim from \
+         the bm25_hits_function block of src/catalog/search_backend.rs"
+    );
+    assert!(
+        script.contains(grants.trim()),
+        "pgokf--0.4.0-dev1--0.4.0-dev2.sql must replay the helper's REVOKE/GRANT/COMMENT verbatim"
+    );
+    // The search-overload privileges and comments, and the package-reader
+    // comments, statement by statement.
+    let mut replayed = 0;
+    for statement in hardening.split(";\n").chain(packages.split(";\n")) {
+        let statement = statement.trim().trim_end_matches(';');
+        let search = statement.contains("pgokf.concept_search_semantic(")
+            || statement.contains("pgokf.concept_search_hybrid(");
+        let package_comment = statement.starts_with("COMMENT ON FUNCTION pgokf.get_");
+        if search || package_comment {
+            replayed += 1;
+            assert!(
+                script.contains(&format!("{statement};")),
+                "pgokf--0.4.0-dev1--0.4.0-dev2.sql is missing the fresh-install statement:\n{statement}"
+            );
+        }
+    }
+    assert_eq!(
+        replayed, 9,
+        "2 REVOKE + 2 GRANT + 2 search and 3 package comments"
+    );
+
+    // Ordering and shape of the retirement: the named guard first, then only
+    // the three retired signatures, RESTRICT, then the re-creation; never
+    // CASCADE; the dump receipt last.
+    let executable: String = script
+        .lines()
+        .map(|line| line.split("--").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let guard = executable
+        .find("DO $dev2_reconciliation_guard$")
+        .expect("named reconciliation guard present");
+    let first_drop = executable
+        .find("DROP FUNCTION")
+        .expect("retirement present");
+    let recreate = executable
+        .find("CREATE OR REPLACE FUNCTION pgokf.bm25_hits(")
+        .expect("helper re-creation present");
+    assert!(
+        guard < first_drop && first_drop < recreate,
+        "guard, drop, re-create order"
+    );
+    assert!(!executable.to_uppercase().contains("CASCADE"), "no CASCADE");
+    let drops: Vec<&str> = executable
+        .split(';')
+        .map(str::trim)
+        .filter(|statement| statement.starts_with("DROP"))
+        .collect();
+    assert_eq!(
+        drops,
+        [
+            "DROP FUNCTION IF EXISTS pgokf.concept_search_semantic(real[], bigint, integer) RESTRICT",
+            "DROP FUNCTION IF EXISTS pgokf.concept_search_hybrid(text, real[], bigint, integer) RESTRICT",
+            "DROP FUNCTION IF EXISTS pgokf.bm25_hits(text, bigint, bigint, text, text, text[], text, text, real, bigint, text) RESTRICT",
+        ]
+    );
+    assert!(
+        executable
+            .trim_end()
+            .ends_with("SELECT pgokf_private.register_dump_relations();"),
+        "the dump receipt must be the last statement"
+    );
+}
+
+/// The seven `pgokf_web` comments the `0.4.0-dev2 -> 0.4.0-dev3` step
+/// restores, in script order: the ones a field catalog created by an early
+/// development build still carried in their superseded wording.
+const DEV3_RECONCILED_COMMENTS: [&str; 7] = [
+    "COMMENT ON SCHEMA pgokf_web IS",
+    "COMMENT ON TABLE pgokf_web.users IS",
+    "COMMENT ON COLUMN pgokf_web.users.name IS",
+    "COMMENT ON COLUMN pgokf_web.users.role IS",
+    "COMMENT ON COLUMN pgokf_web.users.password_hash IS",
+    "COMMENT ON COLUMN pgokf_web.users.created_at IS",
+    "COMMENT ON COLUMN pgokf_web.users.updated_at IS",
+];
+
+/// The executable statements of `sql`, in order: `--` comments removed and
+/// split on `;` outside single-quoted literals (a comment's text may hold
+/// both), each trimmed and without its `;`.
+fn sql_statements(sql: &str) -> Vec<String> {
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut chars = sql.chars().peekable();
+    while let Some(c) = chars.next() {
+        if !quoted && c == '-' && chars.peek() == Some(&'-') {
+            for skipped in chars.by_ref() {
+                if skipped == '\n' {
+                    current.push('\n');
+                    break;
+                }
+            }
+            continue;
+        }
+        if c == '\'' {
+            quoted = !quoted;
+        }
+        if !quoted && c == ';' {
+            statements.push(current.trim().to_string());
+            current.clear();
+        } else {
+            current.push(c);
+        }
+    }
+    statements.push(current.trim().to_string());
+    statements.retain(|statement| !statement.is_empty());
+    statements
+}
+
+/// Why the `0.4.0-dev2 -> 0.4.0-dev3` script `script` does not replay the
+/// seven comments of the `web_identity_tables` block `block` verbatim - and
+/// nothing else but the dump receipt - or `Ok` when it does.
+fn check_dev3_comment_replay(script: &str, block: &str) -> Result<(), String> {
+    let fresh = sql_statements(block);
+    let mut expected = Vec::new();
+    for prefix in DEV3_RECONCILED_COMMENTS {
+        let matching: Vec<&String> = fresh
+            .iter()
+            .filter(|statement| {
+                statement
+                    .strip_prefix(prefix)
+                    .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+            })
+            .collect();
+        if matching.len() != 1 {
+            return Err(format!(
+                "web_identity_tables must hold exactly one `{prefix} ...`, found {}",
+                matching.len()
+            ));
+        }
+        expected.push(matching[0].clone());
+    }
+    expected.push("SELECT pgokf_private.register_dump_relations()".to_string());
+    let actual = sql_statements(script);
+    if actual != expected {
+        let first = actual
+            .iter()
+            .zip(&expected)
+            .position(|(a, e)| a != e)
+            .unwrap_or_else(|| actual.len().min(expected.len()));
+        return Err(format!(
+            "pgokf--0.4.0-dev2--0.4.0-dev3.sql must be exactly the seven fresh-install \
+             comments of src/catalog/web_identity.rs, verbatim and in order, then the dump \
+             receipt; statement {} differs:\n  script: {:?}\n  fresh:  {:?}",
+            first + 1,
+            actual.get(first),
+            expected.get(first)
+        ));
+    }
+    Ok(())
+}
+
+/// The `0.4.0-dev2 -> 0.4.0-dev3` step restores seven `pgokf_web` comments a
+/// field catalog carried in superseded wording. Its copies must stay
+/// verbatim equal to the fresh-install source, so a fresh install and a
+/// reconciled catalog cannot drift apart, and it must do nothing else (the
+/// column-order difference is a declared exception, never rebuilt here); the
+/// in-database upgrade-parity gate then proves the member catalog equal.
+#[test]
+fn dev3_reconciliation_replays_the_web_identity_comments() {
+    // Arrange
+    let script = read_to_string(
+        &crate_dir()
+            .join("sql")
+            .join("pgokf--0.4.0-dev2--0.4.0-dev3.sql"),
+    );
+    let block = extension_sql_block("web_identity.rs", "web_identity_tables");
+
+    // Act / Assert: the shipped script replays the source exactly.
+    assert_eq!(check_dev3_comment_replay(&script, &block), Ok(()));
+
+    // Mutations: every way the replay could silently weaken is refused.
+    let statements = sql_statements(&script);
+    assert_eq!(statements.len(), 8, "seven comments and the receipt");
+    for (index, statement) in statements[..7].iter().enumerate() {
+        let omitted = script.replacen(&format!("{statement};"), "", 1);
+        assert_ne!(omitted, script, "statement {index} is replaceable");
+        assert!(
+            check_dev3_comment_replay(&omitted, &block).is_err(),
+            "omitting comment {index} must be refused"
+        );
+        let weakened = script.replacen(
+            &format!("{statement};"),
+            &format!(
+                "{}';",
+                statement.trim_end_matches('\'').trim_end_matches('.')
+            ),
+            1,
+        );
+        assert!(
+            check_dev3_comment_replay(&weakened, &block).is_err(),
+            "rewording comment {index} must be refused"
+        );
+        let nulled = script.replacen(
+            &format!("{statement};"),
+            &format!("{} NULL;", DEV3_RECONCILED_COMMENTS[index]),
+            1,
+        );
+        assert!(
+            check_dev3_comment_replay(&nulled, &block).is_err(),
+            "clearing comment {index} must be refused"
+        );
+        // The Rust source changing without the replay following it.
+        let reworded_source = block.replacen(
+            statement.as_str(),
+            &format!("{}!'", &statement[..statement.len() - 2]),
+            1,
+        );
+        assert_ne!(
+            reworded_source, block,
+            "source statement {index} is present"
+        );
+        assert!(
+            check_dev3_comment_replay(&script, &reworded_source).is_err(),
+            "a source change not replayed for comment {index} must be refused"
+        );
+    }
+    for extra in [
+        "ALTER TABLE pgokf_web.users ALTER COLUMN display_name SET DEFAULT NULL;\n",
+        "COMMENT ON COLUMN pgokf_web.sessions.provider IS NULL;\n",
+        "DROP FUNCTION IF EXISTS pgokf.version() RESTRICT;\n",
+    ] {
+        let widened = script.replacen(
+            "SELECT pgokf_private.register_dump_relations();",
+            &format!("{extra}SELECT pgokf_private.register_dump_relations();"),
+            1,
+        );
+        assert!(
+            check_dev3_comment_replay(&widened, &block).is_err(),
+            "an added statement must be refused: {extra}"
+        );
+    }
+    let reordered = script
+        .replacen(&format!("{};", statements[0]), "", 1)
+        .replacen(
+            "SELECT pgokf_private.register_dump_relations();",
+            &format!(
+                "{};\nSELECT pgokf_private.register_dump_relations();",
+                statements[0]
+            ),
+            1,
+        );
+    assert!(
+        check_dev3_comment_replay(&reordered, &block).is_err(),
+        "the receipt must stay last and the comments in order"
+    );
+    assert!(
+        check_dev3_comment_replay(
+            &script,
+            &block.replace(
+                "COMMENT ON SCHEMA pgokf_web IS",
+                "COMMENT ON SCHEMA pgokf_web  IS"
+            )
+        )
+        .is_err(),
+        "a source block without the schema comment must be refused"
+    );
+}
+
 /// Whether one normalized, upper-cased statement would lose data.
 ///
 /// `ON DELETE CASCADE` is a foreign-key clause, and dropping a `CHECK`

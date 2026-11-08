@@ -15,7 +15,7 @@
 //! # Backend reuse (native and BM25)
 //!
 //! Because the salient terms are dispatched through
-//! [`crate::catalog::search::run_ranked_search`], the query honors the durable
+//! `crate::catalog::search::run_ranked_search`, the query honors the durable
 //! `search_backend` configuration exactly like `concept_search`:
 //!
 //! - **native** - the seed's salient terms are matched with

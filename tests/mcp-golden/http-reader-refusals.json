@@ -1,0 +1,75 @@
+[
+  {
+    "auth": "reader",
+    "request": {
+      "id": 1,
+      "jsonrpc": "2.0",
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "bundle_ids": [
+            1
+          ],
+          "limit": 10,
+          "target": "claude-code"
+        },
+        "name": "build_workspace_plugin"
+      }
+    },
+    "response": {
+      "error": {
+        "code": -32001,
+        "message": "the reader role may not call \"build_workspace_plugin\"; a token with the builder role can"
+      },
+      "id": 1,
+      "jsonrpc": "2.0"
+    },
+    "status": 200
+  },
+  {
+    "auth": "reader",
+    "request": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "method": "tools/call",
+      "params": {
+        "arguments": {},
+        "name": "list_bundles"
+      }
+    },
+    "response": {
+      "error": {
+        "code": -32001,
+        "message": "the reader role may not call \"list_bundles\"; a token with the writer role can"
+      },
+      "id": 2,
+      "jsonrpc": "2.0"
+    },
+    "status": 200
+  },
+  {
+    "auth": "reader",
+    "request": {
+      "id": 3,
+      "jsonrpc": "2.0",
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "bundle": "golden-content",
+          "path": "runbooks/refused.md",
+          "text": "---\ntype: Runbook\ntitle: Golden HTTP write\n---\n\n# Golden HTTP write\n\nWritten over HTTP by the golden MCP harness, then deleted again.\n"
+        },
+        "name": "put_document"
+      }
+    },
+    "response": {
+      "error": {
+        "code": -32001,
+        "message": "the reader role may not call \"put_document\"; a token with the writer role can"
+      },
+      "id": 3,
+      "jsonrpc": "2.0"
+    },
+    "status": 200
+  }
+]

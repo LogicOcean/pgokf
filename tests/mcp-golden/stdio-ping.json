@@ -1,0 +1,21 @@
+[
+  {
+    "request": {
+      "jsonrpc": "2.0",
+      "method": "notifications/initialized"
+    },
+    "response": null
+  },
+  {
+    "request": {
+      "id": 4,
+      "jsonrpc": "2.0",
+      "method": "ping"
+    },
+    "response": {
+      "id": 4,
+      "jsonrpc": "2.0",
+      "result": {}
+    }
+  }
+]

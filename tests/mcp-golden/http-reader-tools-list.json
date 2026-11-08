@@ -1,0 +1,167 @@
+[
+  {
+    "auth": "reader",
+    "request": {
+      "id": 1,
+      "jsonrpc": "2.0",
+      "method": "tools/list"
+    },
+    "response": {
+      "id": 1,
+      "jsonrpc": "2.0",
+      "result": {
+        "tools": [
+          {
+            "description": "Rank catalog concepts by a full-text query. Optional structured filters narrow by concept type, tags (all-of), status, and trust tier.",
+            "inputSchema": {
+              "properties": {
+                "bundle_id": {
+                  "description": "Restrict to one bundle id.",
+                  "type": "integer"
+                },
+                "limit": {
+                  "description": "Maximum hits (1..=500, default 20).",
+                  "type": "integer"
+                },
+                "query": {
+                  "description": "The search query (websearch syntax).",
+                  "type": "string"
+                },
+                "status": {
+                  "description": "Provenance status filter.",
+                  "type": "string"
+                },
+                "tags": {
+                  "description": "All-of tag containment filter.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "trust_tier": {
+                  "description": "Provenance trust-tier filter.",
+                  "type": "string"
+                },
+                "type": {
+                  "description": "Exact concept type filter.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "query"
+              ],
+              "type": "object"
+            },
+            "name": "concept_search"
+          },
+          {
+            "description": "Content more-like-this: rank concepts by similarity to a seed concept's salient terms, excluding the seed.",
+            "inputSchema": {
+              "properties": {
+                "bundle_id": {
+                  "description": "Bundle id (required if the concept id is ambiguous across bundles).",
+                  "type": "integer"
+                },
+                "concept_id": {
+                  "description": "The seed concept id.",
+                  "type": "string"
+                },
+                "limit": {
+                  "description": "Maximum hits (1..=500, default 10).",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "concept_id"
+              ],
+              "type": "object"
+            },
+            "name": "find_similar"
+          },
+          {
+            "description": "Traverse resolved internal links out from a concept, returning reachable concepts with their shortest hop count and path.",
+            "inputSchema": {
+              "properties": {
+                "bundle_id": {
+                  "description": "Bundle id (required if the concept id is ambiguous across bundles).",
+                  "type": "integer"
+                },
+                "concept_id": {
+                  "description": "The start concept id.",
+                  "type": "string"
+                },
+                "max_hops": {
+                  "description": "Traversal depth (>= 1, default 2; capped by pgokf.max_graph_hops).",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "concept_id"
+              ],
+              "type": "object"
+            },
+            "name": "concept_neighbors"
+          },
+          {
+            "description": "Fetch a concept's stored core fields (path, type, title, description, tags, resource, body text) by id.",
+            "inputSchema": {
+              "properties": {
+                "bundle_id": {
+                  "description": "Restrict to one bundle id.",
+                  "type": "integer"
+                },
+                "concept_id": {
+                  "description": "The concept id.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "concept_id"
+              ],
+              "type": "object"
+            },
+            "name": "get_concept"
+          },
+          {
+            "description": "Fetch an Agent Skills package stored in the catalog: its name, description, package directory and hash, the complete SKILL.md frontmatter, the exact SKILL.md text, and the list of scripts, references, and assets it owns (build_workspace_plugin materializes the whole package byte for byte).",
+            "inputSchema": {
+              "properties": {
+                "bundle_id": {
+                  "description": "The bundle id.",
+                  "type": "integer"
+                },
+                "concept_id": {
+                  "description": "The skill's concept id (its SKILL.md path without .md, e.g. skills/deploy/SKILL).",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "bundle_id",
+                "concept_id"
+              ],
+              "type": "object"
+            },
+            "name": "get_skill"
+          },
+          {
+            "description": "Compare a built plugin's okf-workspace.lock with the live catalog: the pinned bundle generations, sync hashes, and freshness states against what the catalog reports now. Answers current, stale, retired, or unknown, with reasons per bundle. A downloaded plugin cannot update itself; rebuild it with build_workspace_plugin when this says stale.",
+            "inputSchema": {
+              "properties": {
+                "lock": {
+                  "description": "The full content of the plugin's okf-workspace.lock file.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "lock"
+              ],
+              "type": "object"
+            },
+            "name": "check_workspace_plugin_freshness"
+          }
+        ]
+      }
+    },
+    "status": 200
+  }
+]

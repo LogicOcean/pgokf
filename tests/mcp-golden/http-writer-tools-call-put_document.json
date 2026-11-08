@@ -1,0 +1,32 @@
+[
+  {
+    "auth": "writer",
+    "request": {
+      "id": 1,
+      "jsonrpc": "2.0",
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "bundle": "golden-content",
+          "path": "runbooks/http-write.md",
+          "text": "---\ntype: Runbook\ntitle: Golden HTTP write\n---\n\n# Golden HTTP write\n\nWritten over HTTP by the golden MCP harness, then deleted again.\n"
+        },
+        "name": "put_document"
+      }
+    },
+    "response": {
+      "id": 1,
+      "jsonrpc": "2.0",
+      "result": {
+        "content": [
+          {
+            "text": "{\n  \"bundle\": \"golden-content\",\n  \"bundle_id\": 2,\n  \"generated_by\": \"agent:golden-writer\",\n  \"note\": \"Written as machine-generated. A person reviews it in the catalog's web UI; until then its trust tier is not human-reviewed.\",\n  \"path\": \"runbooks/http-write.md\",\n  \"replaced\": false,\n  \"sync\": {\n    \"added\": 1,\n    \"bundle_id\": 2,\n    \"path\": \"content:golden-content\",\n    \"removed\": 0,\n    \"total\": 2,\n    \"unchanged\": 1,\n    \"updated\": 0\n  },\n  \"verifications_set_aside\": 0,\n  \"written_by\": \"agent:golden-writer\"\n}",
+            "type": "text"
+          }
+        ],
+        "isError": false
+      }
+    },
+    "status": 200
+  }
+]

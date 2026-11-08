@@ -1,0 +1,37 @@
+[package]
+name = "pgokf-verifier"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+publish = false
+description = "Rust verification and public catalog contracts for pgokf"
+
+[dependencies]
+jsonschema.workspace = true
+regex = "1"
+base64 = "0.22"
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+sha2 = "0.11"
+toml = "0.9"
+syn = { version = "2", features = ["full", "visit", "extra-traits"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
+
+tempfile = "3"
+semver = "1"
+
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
+
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", features = ["fs", "signal", "process"] }
+
+[lints]
+workspace = true

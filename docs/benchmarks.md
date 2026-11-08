@@ -41,7 +41,7 @@ real decode of the exported file. See "Parquet read leg" below.
 
 ## Dataset
 
-`scripts/bench/generate_corpus.py` deterministically generates a bundle of
+The Rust `pgokf-verifier corpus` command deterministically generates a bundle of
 12,000 concepts (fixed seed → byte-identical output on every run):
 
 - YAML frontmatter with `type`, `title`, `description`, and a `tags` list;
@@ -85,7 +85,7 @@ The individual steps the script runs, for reference:
 
 ```bash
 # (a) YAML leg
-python3 scripts/bench/generate_corpus.py --count 12000 --out /tmp/corpus --seed 1337
+cargo run --locked -p pgokf-verifier -- corpus --count 12000 --out /tmp/corpus --seed 1337
 cargo run --release --example parse_all -p okf-parser -- /tmp/corpus
 
 # (b) PostgreSQL leg

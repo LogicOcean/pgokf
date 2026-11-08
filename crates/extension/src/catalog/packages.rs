@@ -96,6 +96,8 @@ CREATE TABLE pgokf.skills (
     package_hash     text   NOT NULL,
     source_file_hash text   NOT NULL,
     tenant_id        text   NOT NULL DEFAULT 'default',
+    skill_md_sha256  text   NOT NULL,
+    skill_md_byte_size bigint NOT NULL,
     CONSTRAINT skills_pkey PRIMARY KEY (bundle_id, concept_id),
     CONSTRAINT skills_concept_fk
         FOREIGN KEY (bundle_id, concept_id)
@@ -215,6 +217,10 @@ COMMENT ON COLUMN pgokf.skills.agent_skill IS
     'The complete original SKILL.md frontmatter as parsed (name, description, license, compatibility, metadata, allowed-tools, and any unknown field), never rewritten.';
 COMMENT ON COLUMN pgokf.skills.skill_md IS
     'The exact, unmodified bytes of SKILL.md as read at sync time; hashes to source_file_hash (BLAKE3).';
+COMMENT ON COLUMN pgokf.skills.skill_md_sha256 IS
+    'Lowercase hexadecimal SHA-256 of the exact SKILL.md bytes; distinct from the BLAKE3 source file and package hashes.';
+COMMENT ON COLUMN pgokf.skills.skill_md_byte_size IS
+    'Length in bytes of skill_md, recorded so discovery can size the manifest without loading its content.';
 COMMENT ON COLUMN pgokf.skills.package_root IS
     'Bundle-relative directory of the package (the manifest''s directory); empty when the bundle root itself is the package.';
 COMMENT ON COLUMN pgokf.skills.package_hash IS
@@ -1036,11 +1042,13 @@ fn upsert_skills(bundle_id: i64, columns: &SkillColumns) -> Result<(), CatalogEr
     const UPSERT: &str = "
         INSERT INTO pgokf.skills
             (bundle_id, tenant_id, concept_id, visibility, agent_skill, skill_md,
-             package_root, package_hash, source_file_hash)
+             package_root, package_hash, source_file_hash, skill_md_sha256, skill_md_byte_size)
         SELECT $1,
                (SELECT b.tenant_id FROM pgokf.bundles b WHERE b.id = $1),
                d.concept_id, d.visibility, d.agent_skill::jsonb, d.skill_md,
-               d.package_root, d.package_hash, d.source_file_hash
+               d.package_root, d.package_hash, d.source_file_hash,
+               pg_catalog.encode(pg_catalog.sha256(d.skill_md), 'hex'),
+               pg_catalog.octet_length(d.skill_md)::bigint
         FROM unnest($2::text[], $3::text[], $4::text[], $5::bytea[],
                     $6::text[], $7::text[], $8::text[])
              AS d(concept_id, visibility, agent_skill, skill_md,
@@ -1049,6 +1057,8 @@ fn upsert_skills(bundle_id: i64, columns: &SkillColumns) -> Result<(), CatalogEr
             visibility = excluded.visibility,
             agent_skill = excluded.agent_skill,
             skill_md = excluded.skill_md,
+            skill_md_sha256 = excluded.skill_md_sha256,
+            skill_md_byte_size = excluded.skill_md_byte_size,
             package_root = excluded.package_root,
             package_hash = excluded.package_hash,
             source_file_hash = excluded.source_file_hash";

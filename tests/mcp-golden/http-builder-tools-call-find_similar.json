@@ -1,0 +1,32 @@
+[
+  {
+    "auth": "builder",
+    "request": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "bundle_id": 1,
+          "concept_id": "runbooks/failover",
+          "limit": 5
+        },
+        "name": "find_similar"
+      }
+    },
+    "response": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "result": {
+        "content": [
+          {
+            "text": "[\n  {\n    \"bundle_id\": 1,\n    \"concept_id\": \"runbooks/failover-appendix\",\n    \"headline\": \"<b>Widget</b> <b>failover</b> <b>appendix</b> Supporting reference material for the <b>widget</b> <b>failover</b> runbook. <b>Widget</b> <b>failover</b> <b>appendix</b>\\nSupporting\",\n    \"path\": \"runbooks/failover-appendix.md\",\n    \"rank\": 4.9,\n    \"title\": \"Widget failover appendix\",\n    \"type\": \"Runbook\"\n  },\n  {\n    \"bundle_id\": 1,\n    \"concept_id\": \"services/widget\",\n    \"headline\": \"<b>Widget</b> service The <b>primary</b> transactional <b>widget</b> service. <b>Widget</b> service\\nThe <b>primary</b> transactional service. Streaming <b>replication</b>\",\n    \"path\": \"services/widget.md\",\n    \"rank\": 3,\n    \"title\": \"Widget service\",\n    \"type\": \"Service\"\n  },\n  {\n    \"bundle_id\": 1,\n    \"concept_id\": \"skills/deploy/SKILL\",\n    \"headline\": \"<b>widget</b> service safely with the bundled preflight checks. When to Use\\nRun the preflight check\",\n    \"path\": \"skills/deploy/SKILL.md\",\n    \"rank\": 0.8,\n    \"title\": \"deploy\",\n    \"type\": \"Skill\"\n  },\n  {\n    \"bundle_id\": 1,\n    \"concept_id\": \"skills/deploy/scripts/check.sh\",\n    \"headline\": \"<b>widget</b> deploy. #!/usr/bin/env bash\\n# Preflight check for the <b>widget</b> deploy.\\nset -euo pipefail\\necho ok\\n\",\n    \"path\": \"skills/deploy/scripts/check.sh\",\n    \"rank\": 0.5,\n    \"title\": \"check.sh\",\n    \"type\": \"Script\"\n  },\n  {\n    \"bundle_id\": 1,\n    \"concept_id\": \"skills/deploy/references/guide.md\",\n    \"headline\": \"Deploy guide Deploy guide\\nSteps for deploying <b>widgets</b> with the marmoset rollout strategy.\",\n    \"path\": \"skills/deploy/references/guide.md\",\n    \"rank\": 0.1,\n    \"title\": \"Deploy guide\",\n    \"type\": \"Reference\"\n  }\n]",
+            "type": "text"
+          }
+        ],
+        "isError": false
+      }
+    },
+    "status": 200
+  }
+]

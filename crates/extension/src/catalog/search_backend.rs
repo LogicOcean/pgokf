@@ -38,7 +38,7 @@
 //! back to [`NativeBackend`] rather than erroring, so a mis-set configuration
 //! degrades gracefully instead of breaking search.
 //!
-//! [`bm25 index`]: rebuild
+//! `bm25 index`: rebuild
 
 use std::path::Path;
 
@@ -53,7 +53,7 @@ use crate::errors::CatalogError;
 /// Canonical wire name of the native full-text-search backend (the default).
 pub const NATIVE: &str = "native";
 /// Canonical wire name of the optional BM25 backend, served by whichever BM25
-/// provider extension is installed (see [`Bm25Provider`]).
+/// provider extension is installed (see `Bm25Provider`).
 pub const BM25: &str = "bm25";
 
 /// `bm25_provider` value: pick the installed provider automatically, preferring
@@ -229,7 +229,7 @@ pub(crate) fn configured_provider() -> Result<String, CatalogError> {
 /// the three fields from the last `pgokf.concept_search_result` row of a page
 /// into a JSON object `{"rank":..,"bundle_id":..,"concept_id":..}` and passes it
 /// back as `after_cursor`; [`crate::catalog::search`] parses it into this struct
-/// and both backends resume from it (see [`bind_search_args`]).
+/// and both backends resume from it (see `bind_search_args`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cursor {
     /// The `rank` of the previous page's last row (the descending primary key).
@@ -283,7 +283,7 @@ pub struct SearchRequest<'a> {
 /// A ranked-search execution strategy.
 ///
 /// Implementations own how the request is executed and ranked; they all return
-/// the same [`SearchHit`] shape so [`crate::catalog::search::concept_search`]
+/// the same `SearchHit` shape so `crate::catalog::search::concept_search`
 /// can pack any backend's rows into `pgokf.concept_search_result`
 /// identically.
 pub trait SearchBackend {

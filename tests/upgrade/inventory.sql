@@ -1,6 +1,9 @@
 -- SPDX-License-Identifier: AGPL-3.0-only
 -- Stable identities, never database-local OIDs. Keep comments, ACLs, column
 -- order, security attributes, membership and dump registration in the comparison.
+-- Read-only catalog SELECTs only, so it can also inventory an installed catalog
+-- inside a READ ONLY transaction; scripts/catalog_parity.py compares two
+-- inventories under the declared exceptions (tests/upgrade/catalog-exceptions.json).
 SET search_path = pg_catalog;
 WITH namespaces AS (
     SELECT oid FROM pg_namespace WHERE nspname IN ('pgokf', 'pgokf_private', 'pgokf_web')
@@ -12,11 +15,14 @@ WITH namespaces AS (
     SELECT 'role' AS kind, rolname::text AS identity,
            jsonb_build_array(rolsuper, rolinherit, rolcreaterole, rolcreatedb,
                             rolcanlogin, rolreplication, rolbypassrls,
-                            shobj_description(oid, 'pg_authid')) AS definition
+                            shobj_description(oid, 'pg_authid'), rolconnlimit, rolvaliduntil::text,
+                            (SELECT array_agg(c ORDER BY c) FROM unnest(rolconfig) c),
+                            (SELECT jsonb_object_agg(db.datname,st.setconfig ORDER BY db.datname) FROM pg_db_role_setting st JOIN pg_database db ON db.oid=st.setdatabase WHERE st.setrole=pg_roles.oid),
+                            (SELECT jsonb_object_agg(provider,label ORDER BY provider) FROM pg_shseclabel WHERE classoid='pg_authid'::regclass AND objoid=pg_roles.oid)) AS definition
     FROM pg_roles WHERE rolname IN ('pgokf_reader', 'pgokf_writer', 'pgokf_admin', 'pgokf_dispatcher')
     UNION ALL
     SELECT 'role membership', roleid::regrole::text || ':' || member::regrole::text,
-           jsonb_build_array(admin_option, inherit_option, set_option)
+           jsonb_build_array(admin_option, coalesce((to_jsonb(pg_auth_members)->>'inherit_option')::boolean,true), coalesce((to_jsonb(pg_auth_members)->>'set_option')::boolean,true), pg_get_userbyid(grantor))
     FROM pg_auth_members WHERE roleid::regrole::text LIKE 'pgokf_%' OR member::regrole::text LIKE 'pgokf_%'
     UNION ALL
     SELECT 'function' AS kind, p.oid::regprocedure::text AS identity,
@@ -31,6 +37,11 @@ WITH namespaces AS (
                CASE WHEN c.relkind = 'v' THEN pg_get_viewdef(c.oid) END,
                CASE WHEN c.relkind = 'i' THEN pg_get_indexdef(c.oid) END)
     FROM pg_class c WHERE relnamespace IN (SELECT oid FROM namespaces)
+    UNION ALL
+    SELECT 'relation grant', jsonb_build_array(c.oid::regclass::text,pg_get_userbyid(g.grantor),CASE WHEN g.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(g.grantee) END,g.privilege_type)::text,
+           jsonb_build_array(c.oid::regclass::text,pg_get_userbyid(g.grantor),CASE WHEN g.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(g.grantee) END,g.privilege_type,g.is_grantable)
+    FROM pg_class c CROSS JOIN LATERAL aclexplode(coalesce(c.relacl,acldefault(CASE WHEN c.relkind='S' THEN 'S'::"char" ELSE 'r'::"char" END,c.relowner))) g
+    WHERE c.relnamespace IN (SELECT oid FROM namespaces) AND c.relkind IN ('r','p','v','m','S')
     UNION ALL
     SELECT 'column', a.attrelid::regclass::text || '.' || a.attname,
            jsonb_build_array(a.attnum, format_type(a.atttypid, a.atttypmod),
@@ -79,7 +90,7 @@ WITH namespaces AS (
     WHERE d.defaclnamespace IN (SELECT oid FROM namespaces) OR d.defaclnamespace = 0
     UNION ALL
     SELECT 'extension', extname, jsonb_build_array(extversion, extowner::regrole::text,
-               obj_description(oid, 'pg_extension'))
+               obj_description(oid, 'pg_extension'), extnamespace::regnamespace::text, extrelocatable)
     FROM pg_extension WHERE extname = 'pgokf'
     UNION ALL
     SELECT 'policy', polrelid::regclass::text || '.' || polname,
@@ -106,6 +117,15 @@ WITH namespaces AS (
     WHERE (pg_identify_object(classoid, objoid, objsubid)).schema IN ('pgokf', 'pgokf_private', 'pgokf_web')
        OR (classoid = 'pg_namespace'::regclass AND objoid IN (SELECT oid FROM namespaces))
        OR (classoid = 'pg_type'::regclass AND objoid IN (SELECT objid FROM owned_types))
+    UNION ALL
+    -- Initial privileges of objects that no longer exist (a dropped member
+    -- whose pg_init_privs row survived) - always one row, normally 0.
+    SELECT 'orphan initial privileges', 'count', to_jsonb(count(*))
+    FROM pg_init_privs i
+    WHERE (i.classoid = 'pg_proc'::regclass AND NOT EXISTS (SELECT 1 FROM pg_proc WHERE oid = i.objoid))
+       OR (i.classoid = 'pg_class'::regclass AND NOT EXISTS (SELECT 1 FROM pg_class WHERE oid = i.objoid))
+       OR (i.classoid = 'pg_type'::regclass AND NOT EXISTS (SELECT 1 FROM pg_type WHERE oid = i.objoid))
+       OR (i.classoid = 'pg_namespace'::regclass AND NOT EXISTS (SELECT 1 FROM pg_namespace WHERE oid = i.objoid))
     UNION ALL
     SELECT 'index state', i.indexrelid::regclass::text,
            jsonb_build_array(i.indisvalid, i.indisready, i.indislive, i.indisreplident)

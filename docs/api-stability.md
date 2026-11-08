@@ -253,6 +253,92 @@ earlier or later point of the cycle, or applied by hand), the step's
 statements must be idempotent - `CREATE OR REPLACE`, guarded `DO` blocks -
 and must adopt hand-applied copies into extension membership.
 
+**Reconciling field drift.** A reviewed point version is never rewritten in
+place: an installation may already be on it. When a catalog in the field is
+found to differ from a fresh install, the next point version carries the
+repair as an ordinary edge, so every route - factory or drifted - converges on
+the fresh inventory through a bare `ALTER EXTENSION pgokf UPDATE`. The
+`0.4.0-dev1 -> 0.4.0-dev2` step is the model: it retires the superseded 0.2.0
+`concept_search_semantic` / `concept_search_hybrid` overloads and 11-argument
+`bm25_hits` helper that a catalog following an unpublished early 0.3.0-dev
+build still carried, installs the current helper, and restores the fresh
+least-privilege ACLs, comments and extension initial privileges. Retirement is
+fail-closed: a named guard first re-checks each object's exact published shape
+(membership, language, arguments and defaults, entry point or body digest,
+volatility, security, configuration, owner, ACL) and the absence of
+catalog-recorded dependents; the drops are `RESTRICT`, never `CASCADE`; ACLs
+and comments change only through `REVOKE`/`GRANT`/`COMMENT` inside the update,
+so PostgreSQL itself records the initial privileges; and custom grants are
+never silently revoked. Any other shape aborts the whole update with a named
+diagnostic and changes nothing - there is no force flag; the operator reviews
+the object and retries the same `ALTER EXTENSION`. The Rust release-integrity tests in `pgokf-verifier`
+admit a development-edge `DROP FUNCTION` only for signatures listed in
+`RETIRED_FUNCTIONS`, behind that guard, and pin the reviewed development
+edges by content, so a later repair cannot be slipped into one in place.
+The `0.4.0-dev2 -> 0.4.0-dev3` step completes that catalog's reconciliation:
+it restores seven superseded `pgokf_web` comments verbatim from
+`src/catalog/web_identity.rs` (`api_stability` keeps the copies identical and
+the step otherwise empty). The Rust `parity` command replays the complete
+recorded drift (`tests/upgrade/live-drift.sql`, proven complete against a
+pinned list of the catalog differences it must produce), every refusal and an
+interrupted update, and compares each reconciled catalog with a fresh install
+member by member; the Rust `reconciliation-mutations` command proves the gate
+rejects plausible broken repairs, incomplete fixtures and weakened
+comparisons.
+
+**Declared catalog exceptions.** A reconciled catalog must equal a fresh
+install of the same version in every member-catalog object: schemas,
+relations and their columns, defaults, constraints, indexes, triggers,
+policies and row-level security flags, types and their attributes, functions,
+comments, ACLs, extension initial privileges, default ACLs, extension
+membership and dump configuration (`tests/upgrade/inventory.sql`, read-only
+catalog queries). The Rust `catalog-compare` command compares two such inventories,
+canonicalizing only what carries no meaning: rows and ACL items as sets (so
+database collation cannot reorder them), a column's position as its ordinal
+among live columns, and the runtime provider indexes
+(`pgokf.concepts_bm25_idx`, `pgokf.concept_embedding_hnsw_idx`), which are
+named non-member state that `rebuild_search_index()` and
+`rebuild_embedding_index()` create, checked for their table and access method
+and reported separately. `tests/upgrade/catalog-exceptions.json` then declares
+the one difference a reconciled catalog may keep: the physical column (and so
+row-type attribute) order of `pgokf_web.users`, whose `display_name` and
+`provider` a hand migration appended after `updated_at`, and of
+`pgokf_web.sessions`, whose `provider` it appended after `created_at`. The
+exception is exact - those two tables, the fresh order or that recorded order
+and no other permutation - and nothing else about their columns is exempt:
+names, types, defaults, nullability, collation, generation, identity,
+storage, ACLs and comments are compared, and no column may be missing or
+extra. It is not repaired, because reordering means rebuilding the tables that
+hold the site's people and live sessions inside the update, for no behavioral
+difference; instead it is kept safe:
+
+- the Rust positional-access verifier scans every shipped source
+  (`crates`, `deploy`, `packaging`, `skills`, `templates`, `examples`) and
+  refuses `SELECT *`, qualified `*`, `RETURNING *`, an `INSERT` or `COPY`
+  without a column list, the `TABLE` command, row-type casts, `%ROWTYPE`,
+  arrays or function signatures of either row type, whole-row functions and
+  `ROW(...)` near either table, and any dynamic statement over them outside
+  the pinned allow-list (`SELECT 1 FROM {table} LIMIT 0`);
+- it pins the exception file exactly, so widening the exception, the runtime
+  indexes, the scan or the allow-list is a reviewed change;
+- `tests/upgrade/web-identity-statements.json` lists every statement the
+  product runs against either table (kept equal to the source), and
+  the Rust `parity` command replays them as `pgokf_writer` against a fresh
+  catalog and each reconciled one holding representative password and
+  identity-provider people and sessions: results, state after every write,
+  query plans, constraint refusals and the reader's refusals must be
+  identical, and no catalog object may depend on either row type;
+- the same gate proves the comparison rejects any other difference, including
+  a third column order, with rolled-back mutations of a fresh catalog.
+
+For acceptance of an upgraded installation, use
+`cargo run --locked -p pgokf-verifier -- catalog-accept CONTRACT CAPTURE`.
+Generate the trusted contract independently with `parity --contract-output NEW_FILE`.
+The capture envelope includes both the complete typed snapshot and member inventory;
+runtime indexes and tier-role state remain validated rather than being erased by a
+permissive comparison scope. `catalog-compare --allow-declared-order FRESH ACTUAL`
+remains available for direct inventory comparison with the two exact declared orders.
+
 **Collapse at finalization.** When the cycle closes, `default_version`
 becomes the clean `0.3.1`, the install script regenerates under that name
 and is committed (pgrx's entity ordering is unstable across invocations, so
@@ -264,7 +350,8 @@ standing `register_dump_relations()` call) lets point-versioned deployments
 reach the release through the same machinery. The upgrade chain from the
 previous tag then runs `... -> 0.2.0 -> 0.3.0-dev -> 0.3.0-dev1 -> ... -> 0.3.0 -> 0.3.1`; the
 fresh-install-vs-upgrade parity harness proves the two routes converge
-object-by-object, and that every deployed point version reaches the release
+object-by-object (a reconciled field catalog: except for the declared
+exception above), and that every deployed point version reaches the release
 through a bare `ALTER EXTENSION pgokf UPDATE`.
 
 ## Deprecation process

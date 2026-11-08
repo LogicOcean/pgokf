@@ -4,7 +4,7 @@
 //! # What this records
 //!
 //! Every catalog mutation - a register/refresh/content sync
-//! ([`crate::catalog::sync::run_bundle_sync`]) and every bundle state mutation
+//! (`crate::catalog::sync::run_bundle_sync`) and every bundle state mutation
 //! (enable/disable/retire/unretire/unregister/purge in
 //! [`crate::catalog::admin`]) - appends exactly one row to
 //! `pgokf.catalog_change_event` **inside the mutation's own transaction**, after
@@ -18,9 +18,9 @@
 //! # Delivery model
 //!
 //! Delivery is at-least-once: a dispatcher claims pending (or expired-claim)
-//! events with [`claim_catalog_change_events`](pgokf::claim_catalog_change_events)
+//! events with `claim_catalog_change_events`
 //! (`FOR UPDATE SKIP LOCKED`, bounded lease, attempt counter) and acknowledges
-//! with [`ack_catalog_change_event`](pgokf::ack_catalog_change_event) only after
+//! with `ack_catalog_change_event` only after
 //! the subscribed producer durably accepted the event. Acknowledgment is
 //! idempotent and producer-bound: the same producer label that claimed must
 //! ack, and a repeated ack with the same `acceptance_key` is a no-op. An
@@ -31,7 +31,7 @@
 //!
 //! # Bounded payloads
 //!
-//! `changes` is a bounded `jsonb` summary - at most [`CHANGE_RECORD_CAP`]
+//! `changes` is a bounded `jsonb` summary - at most `CHANGE_RECORD_CAP`
 //! records per bucket (`added`/`updated`/`removed`), each carrying the concept
 //! id, path, and before/after `file_hash`, plus exact per-bucket `counts`, a
 //! `truncated` flag, and the sync's aggregate hash. A refresh of a very large

@@ -7,6 +7,9 @@
 # compile from source inside the builder stage).
 target/
 
+# Current verification tooling is a separate checkout, never product source.
+release-tools/
+
 # Version control and editor state.
 .git/
 .gitignore

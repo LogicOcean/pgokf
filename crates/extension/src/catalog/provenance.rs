@@ -30,7 +30,7 @@
 //! | `concept_provenance.status`           | `status` (LIFECYCLE; spec default when absent is `stable`)  |
 //! | `concept_provenance.stale_after`      | `stale_after` (ISO 8601 absolute instant)                  |
 //! | `concept_provenance.usage_window_*`   | top-level `usage_window {from,to}`                          |
-//! | `concept_provenance.trust_tier`       | DERIVED from the `verified[]` actors (see [`trust_tier`])   |
+//! | `concept_provenance.trust_tier`       | DERIVED from the `verified[]` actors (see `trust_tier`)   |
 //! | `concept_verification.*`              | each `verified[]` event `{by,at}`                          |
 //! | `concept_provenance_source.*`         | each `sources[]` entry `{id,resource,title,author,…}`      |
 //!
@@ -44,7 +44,7 @@
 //! # Timestamp handling
 //!
 //! ISO 8601 instants are parsed to Unix-epoch seconds entirely in Rust
-//! ([`parse_iso8601_epoch`]) and converted to `timestamptz` in SQL with
+//! (`parse_iso8601_epoch`) and converted to `timestamptz` in SQL with
 //! `to_timestamp`, exactly as the sync engine already handles filesystem
 //! modification times. A malformed or calendar-invalid instant yields `None`
 //! → SQL `NULL`; the raw string is still retained losslessly in `details`.
@@ -736,7 +736,7 @@ fn insert_source_rows(bundle_id: i64, rows: &ProvenanceRows) -> Result<(), Catal
 /// `concept_verification` row per `verified[]` event and one
 /// `concept_provenance_source` row per `sources[]` entry. Concepts without such
 /// frontmatter produce no rows. Both phases are set-based and chunked at
-/// [`BATCH_SIZE`].
+/// `BATCH_SIZE`.
 ///
 /// # Errors
 ///

@@ -4,7 +4,7 @@ use thiserror::Error;
 /// High-level classification of a parse failure.
 ///
 /// The sync layer aggregates per-file diagnostics by category, so every
-/// [`Error`] variant maps to exactly one category via [`Error::category`].
+/// [`enum@Error`] variant maps to exactly one category via [`Error::category`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ErrorCategory {
     /// A configured resource limit was exceeded.
