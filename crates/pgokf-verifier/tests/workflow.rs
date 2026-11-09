@@ -291,7 +291,7 @@ fn reviewed_context_binds_top_level_triggers_and_permissions() {
 }
 
 #[test]
-fn package_write_authority_is_dispatch_only_and_checkouts_drop_credentials() {
+fn package_write_authority_is_dispatch_only_and_job_env_scopes_are_valid() {
     let packages = workflow("packages");
     let jobs = packages["jobs"].as_object().unwrap();
     for (name, job) in jobs {
@@ -348,6 +348,34 @@ fn package_write_authority_is_dispatch_only_and_checkouts_drop_credentials() {
                 "{name} checkout persists credentials"
             );
         }
+    }
+    for name in ["docker-publish", "companions-publish"] {
+        let job_env = jobs[name]["env"].as_object().unwrap();
+        assert!(
+            job_env.get("ARCH_TAG").is_none(),
+            "{name} must not define an image tag in job-level env"
+        );
+        for (key, value) in job_env {
+            assert!(
+                !value.as_str().unwrap().contains("${{ env."),
+                "{name} job-level env {key} recursively references the unavailable env context"
+            );
+        }
+        let push = jobs[name]["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|step| step["name"] == "Push smoke-tested image and export digest")
+            .unwrap();
+        let expected = if name == "docker-publish" {
+            "${{ env.SERVER_IMAGE }}:${{ needs.prep.outputs.version }}-pg${{ matrix.pg }}-${{ matrix.arch }}"
+        } else {
+            "${{ env.COMPANIONS_IMAGE }}:${{ needs.prep.outputs.version }}-${{ matrix.arch }}"
+        };
+        assert_eq!(
+            push["env"]["ARCH_TAG"], expected,
+            "{name} image tag must resolve the workflow env only in step-level env, where that context is available"
+        );
     }
 }
 

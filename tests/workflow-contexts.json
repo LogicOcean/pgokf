@@ -23,19 +23,19 @@
     }
   },
   "packages": {
-    "workflow": "296b740bc0ce48cbbfabc6cd2a2cd3699ab6c5b1db355571b630f23fe2abbed3",
+    "workflow": "de76704ab7d96645fd7125f9465f74e583411bd8d98ce574b404afb88082098d",
     "triggers": "2435315dff6ccfeeefc9efe9cc1635359095d4cef70ea2bfe291fe204dc305cb",
     "permissions": "d8d6aceb1abc41990618a503082c3badcca8897feee0976f222af5b74e30bec2",
     "env": "4b54b06eca505534cdcbd3c2936a45f5442b41393415b9b8fd37eb42a7ac1184",
     "jobs": {
       "companions": "c5aa8533e2248701ce7801ca19ef0d722029acd3044a1212c4d85415c09d4722",
       "companions-manifest": "ea12a43cf76af242b2618a710b39789d13334fac9863cb4aa6077d16b9d94daa",
-      "companions-publish": "70af88eea0a5ec9a3d8025c80932e815f609bf56db208de7930672c854743fbb",
+      "companions-publish": "2fcf45f28e79932f495737c6e835c5f51b980c25f1b853014df0904ba3ba7646",
       "compatibility": "0d0328b63046f6348618b0d1c6f95e0297bd72b69027ec3a138359fa5883ee15",
       "deb": "ba1b9497e78abbf017981a02d9adbec9e3bbe4aca5f8151ecd216243f431dd8b",
       "docker": "914de56cf7e0b09309e963ea355a8daecdd715c605fb2963995d7c2bf73408bc",
       "docker-manifest": "915cb954b8f621d3966057e127d090543debe1624373421f7e157487d0c7bd92",
-      "docker-publish": "285bc3d4290d9530e9b0efe54d5ec737197506d764296ec11c97ee8ae94864a9",
+      "docker-publish": "bbfb6c3e60cac51291664cf268e339dfc7da5927d8157eac9ada72b82a222444",
       "homebrew-policy": "2009bf95209babccdc00cb3c72f0976fad7f2e28ae51dab8ef6a035e15f46c94",
       "lint": "708810c10314e8c06a8e3d065a8a9013941501c74d89f1898552a476beacfd7d",
       "meta": "b918171c0209f3caa93199bb81b0d3d2ffd75f4daa0a5bc99b833f784aebda91",

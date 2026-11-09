@@ -498,7 +498,6 @@ jobs:
     env:
       VERSION: ${{ needs.prep.outputs.version }}
       LOCAL_TAG: pgokf:${{ needs.prep.outputs.version }}-pg${{ matrix.pg }}
-      ARCH_TAG: ${{ env.SERVER_IMAGE }}:${{ needs.prep.outputs.version }}-pg${{ matrix.pg }}-${{ matrix.arch }}
     steps:
       - name: Download smoke-tested image
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -515,6 +514,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Push smoke-tested image and export digest
         env:
+          ARCH_TAG: ${{ env.SERVER_IMAGE }}:${{ needs.prep.outputs.version }}-pg${{ matrix.pg }}-${{ matrix.arch }}
           DIGEST_DIRECTORY: /tmp/digests
         run: |
           docker tag "$LOCAL_TAG" "$ARCH_TAG"
@@ -671,7 +671,6 @@ jobs:
             runner: ubuntu-24.04-arm
     env:
       LOCAL_TAG: pgokf-companions:${{ needs.prep.outputs.version }}
-      ARCH_TAG: ${{ env.COMPANIONS_IMAGE }}:${{ needs.prep.outputs.version }}-${{ matrix.arch }}
     steps:
       - name: Download smoke-tested image
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -688,6 +687,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Push smoke-tested image and export digest
         env:
+          ARCH_TAG: ${{ env.COMPANIONS_IMAGE }}:${{ needs.prep.outputs.version }}-${{ matrix.arch }}
           DIGEST_DIRECTORY: /tmp/digests
         run: |
           docker tag "$LOCAL_TAG" "$ARCH_TAG"
