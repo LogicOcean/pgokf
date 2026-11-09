@@ -970,6 +970,26 @@ pub fn check_release(packages: &Value, ci: &Value, pgrx: &Value) -> Vec<String> 
             errors.push(format!("artifact bypasses notices: {name}"));
         }
     }
+    // The production deb build depends on the maintained packaging suite:
+    // build-deb.sh must not run in this workflow unless its own test suite
+    // passed first on the same proven source, under no write authority.
+    let absent = &Value::Null;
+    let suite = jobs.get("deb-suite").unwrap_or(absent);
+    if suite.get("if").is_some()
+        || suite.get("continue-on-error").is_some()
+        || suite.get("defaults").is_some()
+        || suite["permissions"]["packages"] == "write"
+        || !active_named_command(
+            suite,
+            "Run the maintained build-deb.sh suite",
+            "packaging/deb/test-build-deb.sh",
+        )
+    {
+        errors.push("maintained deb suite execution changed".into());
+    }
+    if !dependencies(jobs.get("deb").unwrap_or(absent)).contains("deb-suite") {
+        errors.push("deb build bypasses the maintained deb suite".into());
+    }
     if let Some(steps) = packages["jobs"]["prep"]["steps"].as_array() {
         let resolve: Vec<_> = steps
             .iter()

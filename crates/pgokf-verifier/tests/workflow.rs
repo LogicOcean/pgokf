@@ -484,6 +484,57 @@ fn publication_dependency_mutations() {
 }
 
 #[test]
+fn production_deb_build_requires_the_maintained_deb_suite() {
+    let packages = workflow("packages");
+    let ci = workflow("ci");
+    let pgrx = workflow("pgrx-test");
+    for (case, diagnostic) in [
+        ("removed", "maintained deb suite execution changed"),
+        ("disabled", "maintained deb suite execution changed"),
+        ("altered", "maintained deb suite execution changed"),
+        ("write-authority", "maintained deb suite execution changed"),
+        (
+            "unproven-source",
+            "deb-suite: proven source checkout required",
+        ),
+        ("deb-bypass", "deb build bypasses the maintained deb suite"),
+    ] {
+        let mut bad = packages.clone();
+        match case {
+            "removed" => {
+                bad["jobs"].as_object_mut().unwrap().remove("deb-suite");
+            }
+            "disabled" => bad["jobs"]["deb-suite"]["continue-on-error"] = json!(true),
+            "altered" => {
+                step(
+                    &mut bad,
+                    "deb-suite",
+                    "name",
+                    "Run the maintained build-deb.sh suite",
+                )["run"] = json!("packaging/deb/test-build-deb.sh || true");
+            }
+            "write-authority" => {
+                bad["jobs"]["deb-suite"]["permissions"] = json!({"packages": "write"});
+            }
+            "unproven-source" => {
+                bad["jobs"]["deb-suite"]["steps"][0]["with"]["ref"] = json!("${{ github.sha }}");
+            }
+            _ => bad["jobs"]["deb"]["needs"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|dependency| dependency != "deb-suite"),
+        }
+        assert!(
+            check_release(&bad, &ci, &pgrx)
+                .iter()
+                .any(|e| e == diagnostic),
+            "{case}: {:?}",
+            check_release(&bad, &ci, &pgrx)
+        );
+    }
+}
+
+#[test]
 fn workflow_release_topology_and_required_commands() {
     let packages = workflow("packages");
     let ci = workflow("ci");

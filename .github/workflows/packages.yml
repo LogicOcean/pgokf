@@ -277,9 +277,31 @@ jobs:
           cargo run --locked --manifest-path release-tools/Cargo.toml -p pgokf-verifier -- compare-install-sql /tmp/pgokf-regenerated.sql /tmp/pgokf-regenerated-again.sql
           cargo run --locked --manifest-path release-tools/Cargo.toml -p pgokf-verifier -- compare-install-sql "$target" /tmp/pgokf-regenerated.sql
 
+  # ---------------------------------------------------------------------------
+  # The maintained suite for packaging/deb/build-deb.sh is the gate the
+  # production deb build depends on: build-deb.sh may not run anywhere in
+  # this workflow unless its own tests passed first, against the same
+  # proven source the deb job builds. Read-only like every validation job
+  # (no packages: write, no persisted credentials); the suite runs entirely
+  # inside a disposable stub fixture and writes nothing outside it.
+  # ---------------------------------------------------------------------------
+  deb-suite:
+    name: Maintained deb packaging suite
+    needs: prep
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout selected release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.prep.outputs.source_ref }}
+
+      - name: Run the maintained build-deb.sh suite
+        run: packaging/deb/test-build-deb.sh
+
   deb:
     name: Build .deb (PostgreSQL ${{ matrix.pg }}, ${{ matrix.arch }})
-    needs: [prep, notices]
+    needs: [prep, notices, deb-suite]
     runs-on: ${{ matrix.runner }}
     # Every declared major is required; missing provisioning must fail.
     strategy:

@@ -23,7 +23,7 @@
     }
   },
   "packages": {
-    "workflow": "de76704ab7d96645fd7125f9465f74e583411bd8d98ce574b404afb88082098d",
+    "workflow": "62b04f74cd81b885386a439c134dbf8c276aad58101e3eb76c171774e70acaac",
     "triggers": "2435315dff6ccfeeefc9efe9cc1635359095d4cef70ea2bfe291fe204dc305cb",
     "permissions": "d8d6aceb1abc41990618a503082c3badcca8897feee0976f222af5b74e30bec2",
     "env": "4b54b06eca505534cdcbd3c2936a45f5442b41393415b9b8fd37eb42a7ac1184",
@@ -32,7 +32,8 @@
       "companions-manifest": "ea12a43cf76af242b2618a710b39789d13334fac9863cb4aa6077d16b9d94daa",
       "companions-publish": "2fcf45f28e79932f495737c6e835c5f51b980c25f1b853014df0904ba3ba7646",
       "compatibility": "0d0328b63046f6348618b0d1c6f95e0297bd72b69027ec3a138359fa5883ee15",
-      "deb": "ba1b9497e78abbf017981a02d9adbec9e3bbe4aca5f8151ecd216243f431dd8b",
+      "deb": "5be8992ea784ffc5be1f14f2045ed4a1023fb1cc3ed5258cf2ba97401b6b7999",
+      "deb-suite": "7d485cc50909a69a1255d9b2f93d221ad049a98dd3e12c1035496ece7a853aa8",
       "docker": "914de56cf7e0b09309e963ea355a8daecdd715c605fb2963995d7c2bf73408bc",
       "docker-manifest": "915cb954b8f621d3966057e127d090543debe1624373421f7e157487d0c7bd92",
       "docker-publish": "bbfb6c3e60cac51291664cf268e339dfc7da5927d8157eac9ada72b82a222444",
