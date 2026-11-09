@@ -25,8 +25,8 @@ the complete file with the checksum-pinned cargo-about binary:
     cargo run --locked -p pgokf-verifier -- \
       notices-render . /path/to/pinned/cargo-about > THIRD-PARTY-NOTICES.txt
 
-  Apache License 2.0: 342 crate(s)
-  MIT License: 116 crate(s)
+  Apache License 2.0: 344 crate(s)
+  MIT License: 117 crate(s)
   ISC License: 23 crate(s)
   Unicode License v3: 19 crate(s)
   BSD 3-Clause "New" or "Revised" License: 12 crate(s)
@@ -6183,6 +6183,8 @@ Used by:
   - core-foundation-sys 0.8.7  (https://github.com/servo/core-foundation-rs)
   - core-foundation 0.10.1  (https://github.com/servo/core-foundation-rs)
   - crossbeam-channel 0.5.16  (https://github.com/crossbeam-rs/crossbeam)
+  - crossbeam-deque 0.8.8  (https://github.com/crossbeam-rs/crossbeam)
+  - crossbeam-epoch 0.9.21  (https://github.com/crossbeam-rs/crossbeam)
   - crossbeam-utils 0.8.22  (https://github.com/crossbeam-rs/crossbeam)
   - displaydoc 0.2.7  (https://github.com/yaahc/displaydoc)
   - either 1.18.0  (https://github.com/rayon-rs/either)
@@ -11381,6 +11383,7 @@ Used by:
   - aho-corasick 1.1.5  (https://github.com/BurntSushi/aho-corasick)
   - byteorder 1.5.0  (https://github.com/BurntSushi/byteorder)
   - globset 0.4.20  (https://github.com/BurntSushi/ripgrep/tree/master/crates/globset)
+  - ignore 0.4.34  (https://github.com/BurntSushi/ripgrep/tree/master/crates/ignore)
   - memchr 2.8.3  (https://github.com/BurntSushi/memchr)
   - walkdir 2.5.0  (https://github.com/BurntSushi/walkdir)
 
