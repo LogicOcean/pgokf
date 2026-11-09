@@ -16,8 +16,18 @@ establish live provider or package parity.
 
 ## Source and execution review
 
-The source guard inventories tracked and nonignored untracked files using Git,
-including tracked files in ignored directories. It rejects source symlinks,
+The source guard requires a valid committed `HEAD`, verifies that the default Git
+index matches that commit, and compares checkout type and executable mode with
+both the index and committed tree. It inventories tracked files plus untracked
+files not excluded by `.gitignore` definitions read from committed `HEAD` blobs.
+A modified or untracked `.gitignore` is source input, never inventory policy, so
+it cannot hide itself or neighboring files. Repository-local Git settings that
+change path discovery are overridden. The verifier pins Git from an absolute
+executable selected from the build environment (or the build-only
+`PGOKF_BUILD_GIT` override), so runtime `PATH` cannot substitute a wrapper while
+non-FHS build layouts remain supported.
+
+The inventory includes tracked files in ignored directories. It rejects source symlinks,
 owned Python files and shebangs, verification interpreter invocations,
 and verification package dependencies. YAML is parsed structurally with duplicate
 keys rejected and merge keys resolved. The only third-party documentation

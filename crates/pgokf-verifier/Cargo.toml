@@ -14,6 +14,7 @@ description = "Rust verification and public catalog contracts for pgokf"
 [dependencies]
 jsonschema.workspace = true
 regex = "1"
+ignore = "0.4"
 base64 = "0.22"
 flate2 = "1"
 serde.workspace = true

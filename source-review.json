@@ -74,7 +74,7 @@
       "executable": false
     },
     "Cargo.lock": {
-      "sha256": "010bd9cdf7a7de75a6f99842a9d51c0b916065d6a396507662c5e428829cfa08",
+      "sha256": "61276a205473fb2dff5b19cd86a6081f082b1e432d45962245ad89387838ab9d",
       "executable": false
     },
     "Cargo.toml": {
@@ -638,7 +638,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/Cargo.toml": {
-      "sha256": "d5743abb75b52d4de6fdd4ddb6531be62a9de37e4c7d838aaa07992e223403c7",
+      "sha256": "9dd84fde808db7a4c56302038d7bceb0d0ae0816e10b4735348ef05dc3df0b31",
       "executable": false
     },
     "crates/pgokf-verifier/README.md": {
@@ -838,7 +838,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/src/source.rs": {
-      "sha256": "9a679ef23a8a99fafbae15e0ff5b4fc5c4ae12b16f09b31c549ce9c2175d6490",
+      "sha256": "6e8cdbad5f4cedc9d48cd851ce5a9cebabd98d022d461b9938cc393b227b0ede",
       "executable": false
     },
     "crates/pgokf-verifier/src/sql.rs": {
@@ -910,7 +910,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/tests/source_hygiene.rs": {
-      "sha256": "6d7689587ba31e90fa129e5513e0249458bcfcd2e0198f121f1e7dbd5ab4f722",
+      "sha256": "18c7c0dd6c2fd757d55234266405d90a73fab1e37032f362df5c7f8d26548a26",
       "executable": false
     },
     "crates/pgokf-verifier/tests/sql_source.rs": {
@@ -1426,7 +1426,7 @@
       "executable": false
     },
     "docs/rust-verification.md": {
-      "sha256": "d58d1eb9d1a94ff2342584ba4d13a900726dbebb4e3956a332de3fcd906afe6f",
+      "sha256": "c1f73d04e72c55e4f94c1ccc2dd8065cf14662343f462bc9e3ac13a6b767dbf9",
       "executable": false
     },
     "docs/search-guide.md": {
