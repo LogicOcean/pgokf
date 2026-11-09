@@ -267,6 +267,91 @@ fn reviewed_context_digests_are_exactly_equal() {
     }
 }
 #[test]
+fn reviewed_context_binds_top_level_triggers_and_permissions() {
+    let contracts = contexts();
+    for file in ["ci", "packages"] {
+        let original = workflow(file);
+        for (field, replacement) in [
+            ("permissions", json!("write-all")),
+            ("on", json!({"workflow_dispatch":{}})),
+            (
+                "concurrency",
+                json!({"group":"packages","cancel-in-progress":true}),
+            ),
+        ] {
+            let mut mutated = original.clone();
+            mutated[field] = replacement;
+            assert_ne!(
+                execution_context(&mutated).unwrap(),
+                contracts[original["name"].as_str().unwrap()],
+                "{file} {field}"
+            );
+        }
+    }
+}
+
+#[test]
+fn package_write_authority_is_dispatch_only_and_checkouts_drop_credentials() {
+    let packages = workflow("packages");
+    let jobs = packages["jobs"].as_object().unwrap();
+    for (name, job) in jobs {
+        if job["permissions"]["packages"] == "write" {
+            assert_eq!(
+                job["if"], "needs.prep.outputs.publish == 'true'",
+                "{name} receives package-write authority outside authenticated publication"
+            );
+            let steps = job["steps"].as_array().unwrap();
+            let all_uses: Vec<_> = steps
+                .iter()
+                .filter_map(|step| step["uses"].as_str())
+                .collect();
+            assert!(
+                !all_uses.iter().any(|uses| uses.contains("checkout@")),
+                "{name} checks out repository-controlled code under package-write authority"
+            );
+            let all_runs = steps
+                .iter()
+                .filter_map(|step| step["run"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                !all_runs.contains("cargo run"),
+                "{name} executes repository-controlled Rust under package-write authority"
+            );
+            if matches!(name.as_str(), "docker-publish" | "companions-publish") {
+                let uses = all_uses;
+                assert!(uses.iter().any(|uses| uses.contains("download-artifact@")));
+                assert!(!uses.iter().any(|uses| {
+                    uses.contains("checkout@") || uses.contains("build-push-action@")
+                }));
+                let runs = steps
+                    .iter()
+                    .filter_map(|step| step["run"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(runs.contains("docker load --input"));
+                assert!(runs.contains("docker push"));
+            }
+        }
+        for checkout in job["steps"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|step| {
+                step["uses"]
+                    .as_str()
+                    .is_some_and(|uses| uses.starts_with("actions/checkout@"))
+            })
+        {
+            assert_eq!(
+                checkout["with"]["persist-credentials"], false,
+                "{name} checkout persists credentials"
+            );
+        }
+    }
+}
+
+#[test]
 fn required_support_contract_passes() {
     assert_eq!(
         check_support(&workflow("packages"), &workflow("pgrx-test"), &contexts()),
@@ -376,6 +461,15 @@ fn workflow_release_topology_and_required_commands() {
     let ci = workflow("ci");
     let pgrx = workflow("pgrx-test");
     assert_eq!(check_release(&packages, &ci, &pgrx), Vec::<String>::new());
+    for value in [json!("v0.4.0"), json!(false), Value::Null] {
+        let mut bad = packages.clone();
+        bad["on"]["workflow_dispatch"]["inputs"]["release_tag"]["default"] = value;
+        assert!(
+            check_release(&bad, &ci, &pgrx)
+                .iter()
+                .any(|error| error == "immutable release tag input required")
+        );
+    }
     for mutator in [
         "missing-history",
         "moved-cwd",
@@ -399,7 +493,7 @@ fn workflow_release_topology_and_required_commands() {
                 bad["jobs"]["deb"]["steps"][0]["with"]["ref"] = json!("${{ github.sha }}");
             }
             "wrong-version" => bad["jobs"]["docker"]["env"]["VERSION"] = json!("0.2.0"),
-            "prep-bypass" => bad["jobs"]["docker"]["if"] = json!("always()"),
+            "prep-bypass" => bad["jobs"]["docker-publish"]["if"] = json!("always()"),
             _ => {
                 bad["jobs"]["hostile"] =
                     json!({"steps":[{"uses":"actions/upload-artifact@deadbeef"}]});
@@ -420,6 +514,27 @@ fn workflow_release_topology_and_required_commands() {
             json!(true)
         };
         assert!(!check_release(&packages, &bad, &pgrx).is_empty());
+    }
+    for job in [
+        "deb",
+        "docker",
+        "docker-publish",
+        "companions",
+        "companions-publish",
+        "docker-manifest",
+        "companions-manifest",
+    ] {
+        let mut bad = packages.clone();
+        bad["jobs"][job]["needs"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|dependency| dependency != "notices");
+        assert!(
+            check_release(&bad, &ci, &pgrx)
+                .iter()
+                .any(|error| error == &format!("artifact bypasses notices: {job}")),
+            "{job}"
+        );
     }
 }
 
@@ -479,10 +594,11 @@ fn step<'a>(w: &'a mut Value, job: &str, key: &str, value: &str) -> &'a mut Valu
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One table-driven registry covers independent release boundaries.
 fn release_predicates_report_each_independent_boundary() {
     for (case, diagnostic) in [
         ("input", "immutable release tag input required"),
-        ("prep-bypass", "publication bypasses prep: docker"),
+        ("prep-bypass", "publication bypasses prep: docker-publish"),
         ("tooling", "current tooling checkout changed"),
         ("source", "deb: proven source checkout required"),
         ("version", "docker: proven package version required"),
@@ -505,6 +621,16 @@ fn release_predicates_report_each_independent_boundary() {
         ),
         ("brew-disabled", "required macOS job disabled"),
         ("brew-command", "Homebrew API execution contract changed"),
+        ("notice-job", "authoritative package notice job changed"),
+        (
+            "notice-source-checkout",
+            "authoritative package notice job changed",
+        ),
+        ("ci-notice", "authoritative CI notice verification changed"),
+        (
+            "ci-notice-checkout",
+            "authoritative CI notice verification changed",
+        ),
         (
             "cycle",
             "release dependency graph is cyclic, malformed or incomplete",
@@ -520,7 +646,7 @@ fn release_predicates_report_each_independent_boundary() {
                     .unwrap()
                     .remove("release_tag");
             }
-            "prep-bypass" => p["jobs"]["docker"]["if"] = json!("always()"),
+            "prep-bypass" => p["jobs"]["docker-publish"]["if"] = json!("always()"),
             "tooling" => {
                 step(
                     &mut p,
@@ -561,6 +687,28 @@ fn release_predicates_report_each_independent_boundary() {
                     "name",
                     "Execute actual Homebrew environment policy",
                 )["run"] = json!("true");
+            }
+            "notice-job" => {
+                step(
+                    &mut p,
+                    "notices",
+                    "name",
+                    "Verify deterministic third-party notices",
+                )["run"] = json!("true");
+            }
+            "notice-source-checkout" => {
+                p["jobs"]["notices"]["steps"][0]["with"]["ref"] = json!("${{ github.sha }}");
+            }
+            "ci-notice" => {
+                step(
+                    &mut c,
+                    "notices",
+                    "name",
+                    "Verify deterministic third-party notices",
+                )["run"] = json!("true");
+            }
+            "ci-notice-checkout" => {
+                c["jobs"]["notices"]["steps"][0]["with"] = json!({"ref":"refs/heads/main"});
             }
             _ => p["jobs"]["docker"]["needs"]
                 .as_array_mut()

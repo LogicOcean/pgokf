@@ -360,7 +360,8 @@ pub fn release_intent(
     version: &str,
     head: &str,
     clean: bool,
-    event_ref: &str,
+    event_name: &str,
+    _event_ref: &str,
     dispatch: &str,
     resolve: impl FnOnce(&str) -> Result<String, String>,
 ) -> Result<ReleaseIntent, String> {
@@ -373,12 +374,13 @@ pub fn release_intent(
     if head.len() != 40 || !head.bytes().all(|c| c.is_ascii_hexdigit()) {
         return Err("invalid commit identity".into());
     }
-    let tag = if event_ref.starts_with("refs/tags/v") {
-        Some(event_ref.to_owned())
-    } else if dispatch.is_empty() {
-        None
-    } else {
+    if event_name != "workflow_dispatch" && !dispatch.is_empty() {
+        return Err("release tag input is accepted only for workflow_dispatch".into());
+    }
+    let tag = if event_name == "workflow_dispatch" && !dispatch.is_empty() {
         Some(format!("refs/tags/{dispatch}"))
+    } else {
+        None
     };
     if let Some(tag) = &tag {
         if tag != &format!("refs/tags/v{version}") {

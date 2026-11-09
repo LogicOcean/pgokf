@@ -298,7 +298,8 @@ ${PG_BIN}/pg_ctl -D "$DATA" -w stop -m fast && rm -rf /tmp/pgokf-rel
 ## 8. Publish
 
 - [ ] Attach the per-major `cargo pgrx package` artifacts to the release.
-- [ ] Confirm the `packages` workflow run for the tag published the
+- [ ] Explicitly dispatch the `packages` workflow with `release_tag` set to the
+      immutable version tag, then confirm that validated dispatch published the
       multi-architecture images (`ghcr.io/logicocean/pgokf:<version>-pg<major>`
       and `ghcr.io/logicocean/pgokf-companions:<version>`, each listing
       `linux/amd64` and `linux/arm64` in `docker buildx imagetools inspect`).

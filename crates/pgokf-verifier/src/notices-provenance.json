@@ -1,0 +1,512 @@
+{
+  "assets": [
+    {
+      "asset_sha256": "d96e738edcca580edd524730c1c6b05ed2efce028c23ca95db1bf43033a72e42",
+      "components": [
+        {
+          "integrity": "sha512-tzI353gW1nXPpnC7VTa3JjMg+3cp77qOLUFO0vucPTfF+q5R6sQsNsIqVTbRIb7RSypn14nBa4yfkOe9ThxASw==",
+          "license_sha256": "7262e566e874d1ce8cfadace01d4f635f8d704b6bdf7b4345cc028e5faeafded",
+          "name": "3d-force-graph",
+          "npm_name": null,
+          "selectors": [],
+          "source": "https://github.com/vasturiano/3d-force-graph",
+          "source_content_sha256": "95ef92b82821a789f912da28c46a2493452b1dce99acce835901a1ca6acb0303",
+          "spdx": "MIT",
+          "tarball": "https://registry.npmjs.org/3d-force-graph/-/3d-force-graph-1.80.0.tgz",
+          "tarball_sha256": "1b146925a2b994e339fbdf383f50196a64e56dfd8a2a1ed3d89da0079e56893f",
+          "version": "1.80.0"
+        },
+        {
+          "integrity": "sha512-JiDShH45zKHWyGe4ZNVRrCjBz8Nh9TMmZG1kh4QTK8hCBTWBi8Da+i7s1fJw7/lYpM4ccepSNfqzZ/QvABBi5g==",
+          "license_sha256": "117da2af0d4ce0fe1c8e19b5cff9dcd806adf973d328d27b11d4448c4ff24f76",
+          "name": "@babel/runtime",
+          "npm_name": null,
+          "selectors": [
+            "@babel/runtime@^7.17.8"
+          ],
+          "source": "https://github.com/babel/babel#directory=packages/babel-runtime",
+          "source_content_sha256": "fb0256471ce931d9d7eb97cd39e67c3173a1b684016a42200a025b615261cffd",
+          "spdx": "MIT",
+          "tarball": "https://registry.npmjs.org/@babel/runtime/-/runtime-7.29.2.tgz",
+          "tarball_sha256": "91d6dda69e8514cca05e8bda7f6fe19b80f9a405fbd88c21e4eccc54f10f87e5",
+          "version": "7.29.2"
+        },
+        {
+          "integrity": "sha512-XKLA6syeBUaPzx4j3qwMqzzq+V4uo72BnlbOjmuljLrRqdsd3qnzvZZoxvMHZ23ndsRS4aufU6JOZYpCbU6T1A==",
+          "license_sha256": "c95fecd88f2709bfc34e4d1f1ccc36d17048990e6ba26c283cfecdef0432936b",
+          "name": "@tweenjs/tween.js",
+          "npm_name": null,
+          "selectors": [
+            "@tweenjs/tween.js@18 - 25"
+          ],
+          "source": "https://github.com/tweenjs/tween.js.git",
+          "source_content_sha256": "406ff1bf31983570108b0a01ce1d6c5eb9b842511d8293dbee8f41b5b2317227",
+          "spdx": "MIT",
+          "tarball": "https://registry.npmjs.org/@tweenjs/tween.js/-/tween.js-25.0.0.tgz",
+          "tarball_sha256": "3adc6badf9071b9ad70df0e3771ebf6ef2c4d7e0850fbd1249f853893a5ad6b2",
+          "version": "25.0.0"
+        },
+        {
+          "integrity": "sha512-rkAofCwe/FvYFUlMB0v0gWmhqtfAtV1IUkdPbfhTUyYniu5LrC0A0UJkTH0Jv3S8SvwkmfuAlY+mQIJATdocMA==",
+          "license_sha256": "7262e566e874d1ce8cfadace01d4f635f8d704b6bdf7b4345cc028e5faeafded",
+          "name": "accessor-fn",
+          "npm_name": null,
+          "selectors": [
+            "accessor-fn@1"
+          ],
+          "source": "git+https://github.com/vasturiano/accessor-fn.git",
+          "source_content_sha256": "999a9c7d154cf364c03f1b63011e77af3ed5554baccce7193197a136473b6f5f",
+          "spdx": "MIT",
+          "tarball": "https://registry.npmjs.org/accessor-fn/-/accessor-fn-1.5.3.tgz",
+          "tarball_sha256": "da1a548e81adfdad9e1449223372ba27da0e743b9bac3d90e55a30518a2ce871",
+          "version": "1.5.3"
+        },
+        {
+          "integrity": "sha512-tdQAmyA18i4J7wprpYq8ClcxZy3SC31QMeByyCFyRt7BVHdREQZ5lpzoe5mFEYZUWe+oq8HBvk9JjpibyEV4Jg==",
+          "license_sha256": "3e6849627f74ff73c257a3ae1efb574015d94fc1035c05ec3c15805165efcbc4",
+          "name": "d3-array",
+          "npm_name": null,
+          "selectors": [
+            "d3-array@1 - 3",
+            "d3-array@2 - 3",
+            "d3-array@2.10.0 - 3"
+          ],
+          "source": "https://github.com/d3/d3-array.git",
+          "source_content_sha256": "54785b6462be69b7b54a77cfa1faca8c89ac084916e5f206bbff8fe72fcb3f0c",
+          "spdx": "ISC",
+          "tarball": "https://registry.npmjs.org/d3-array/-/d3-array-3.2.4.tgz",
+          "tarball_sha256": "6dbf3f2be39e48f86775be6e166a5d3e5a585ca7144453cd6ad1912f5ae4417f",
+          "version": "3.2.4"
+        },
+        {
+          "integrity": "sha512-cElUNH+sHu95L04m92pG73t2MEJXKu+GeKUN1TJkFsu93E5W8E9Sc3kHEGJKgenGvj19m6upSn2EunvMgMD2Yw==",
+          "license_sha256": "7262e566e874d1ce8cfadace01d4f635f8d704b6bdf7b4345cc028e5faeafded",
+          "name": "d3-binarytree",
+          "npm_name": null,
+          "selectors": [
+            "d3-binarytree@1"
+          ],
+          "source": "https://github.com/vasturiano/d3-binarytree.git",
+          "source_content_sha256": "ef8e7c3d13a7b734f5b43e52fa20862888b1ba92bdb2ccdf77b590c1193dfeb6",
+          "spdx": "MIT",
+          "tarball": "https://registry.npmjs.org/d3-binarytree/-/d3-binarytree-1.0.2.tgz",
+          "tarball_sha256": "4a05e2634e9a2bd09dd001e76ea575f4137f6f31ddb77eef9ebd477e0603d2bd",
+          "version": "1.0.2"
+        },
+        {
+          "integrity": "sha512-rzUyPU/S7rwUflMyLc1ETDeBj0NRuHKKAcvukozwhshr6g6c5d8zh4c2gQjY2bZ0dXeGLWc1PF174P2tVvKhfg==",
+          "license_sha256": "e008c5e25a6be382593089c29bfabbc553c6378eee02895aec46ce396cc404ee",
+          "name": "d3-dispatch",
+          "npm_name": null,
+          "selectors": [
+            "d3-dispatch@1 - 3"
+          ],
+          "source": "https://github.com/d3/d3-dispatch.git",
+          "source_content_sha256": "27c19307732d188f8649f572e3a251c1718d0b1ff8ca599d1d3b65462929f240",
+          "spdx": "ISC",
+          "tarball": "https://registry.npmjs.org/d3-dispatch/-/d3-dispatch-3.0.1.tgz",
+          "tarball_sha256": "3d1a0b5c003e0e9608ad57f6ca21a0c8368031fcbe5f5317fe4e50b3f797ea23",
+          "version": "3.0.1"
+        },
+        {
+          "integrity": "sha512-4tsKHUPLOVkyfEffZo1v6sFHvGFwAIIjt/W8IThbp08DYAsXZck+2pSHEG5W1+gQgEvFLdZkYvmJAbRM2EzMnA==",
+          "license_sha256": "7262e566e874d1ce8cfadace01d4f635f8d704b6bdf7b4345cc028e5faeafded",
+          "name": "d3-force-3d",
+          "npm_name": null,
+          "selectors": [
+            "d3-force-3d@2 - 3"
+          ],
+          "source": "https://github.com/vasturiano/d3-force-3d.git",
+          "source_content_sha256": "4baf5a8d16f7624d27655404ec95e5226077232c0545be42c4b574bd9d290c28",
+          "spdx": "MIT",
+          "tarball": "https://registry.npmjs.org/d3-force-3d/-/d3-force-3d-3.0.6.tgz",
+          "tarball_sha256": "ec4088e86fb1cfa35812d9e162fc09163212a1e6eba2e80ae9f3e4dd615c6c54",
+          "version": "3.0.6"
+        },
+        {
+          "integrity": "sha512-F8gPlqpP+HwRPMO/8uOu5wjH110+6q4cgJvgJT6vlpy3BEaDIKlTZrgHKZSp/i1InRpVfh4puY/kvL6MxK930A==",
+          "license_sha256": "7262e566e874d1ce8cfadace01d4f635f8d704b6bdf7b4345cc028e5faeafded",
+          "name": "d3-octree",
+          "npm_name": null,
+          "selectors": [
+            "d3-octree@1"
+          ],
+          "source": "https://github.com/vasturiano/d3-octree.git",
+          "source_content_sha256": "44bfc0e9c2a21d42321d7dc2ec332d8b4acda9928eaa83dc944082fb8eb82855",
+          "spdx": "MIT",
+          "tarball": "https://registry.npmjs.org/d3-octree/-/d3-octree-1.1.0.tgz",
+          "tarball_sha256": "523d344ec3e7d4cd3e02252469bb2940bc4beb403749dcc041505f1cb68ed45c",
+          "version": "1.1.0"
+        },
+        {
+          "integrity": "sha512-04xDrxQTDTCFwP5H6hRhsRcb9xxv2RzkcsygFzmkSIOJy3PeRJP7sNk3VRIbKXcog561P9oU0/rVH6vDROAgUw==",
+          "license_sha256": "e008c5e25a6be382593089c29bfabbc553c6378eee02895aec46ce396cc404ee",
+          "name": "d3-quadtree",
+          "npm_name": null,
+          "selectors": [
+            "d3-quadtree@1 - 3"
+          ],
+          "source": "https://github.com/d3/d3-quadtree.git",
+          "source_content_sha256": "d9edc484efae089953015ee93657cb3c93d3cd637476fbe40a74f58b020bbd7a",
+          "spdx": "ISC",
+          "tarball": "https://registry.npmjs.org/d3-quadtree/-/d3-quadtree-3.0.1.tgz",
+          "tarball_sha256": "d4145e9cecca8a6077e1099de96375ec9923b0de0df4004bd98aafa17c2d557f",
+          "version": "3.0.1"
+        },
+        {
+          "integrity": "sha512-GZW464g1SH7ag3Y7hXjf8RoUuAFIqklOAq3MRl4OaWabTFJY9PN/E1YklhXLh+OQ3fM9yS2nOkCoS+WLZ6kvxQ==",
+          "license_sha256": "e008c5e25a6be382593089c29bfabbc553c6378eee02895aec46ce396cc404ee",
+          "name": "d3-scale",
+          "npm_name": null,
+          "selectors": [
+            "d3-scale@1 - 4"
+          ],
+          "source": "https://github.com/d3/d3-scale.git",
+          "source_content_sha256": "41d797d1c4b78a664a4944fd05675351d3e8a72e79fc4da016df33cdc5c3b124",
+          "spdx": "ISC",
+          "tarball": "https://registry.npmjs.org/d3-scale/-/d3-scale-4.0.2.tgz",
+          "tarball_sha256": "bf50a1f34ba0e6fa25cb7ae902abe0b9e2f85ced39fdca7b18fbe863fbaa39a7",
+          "version": "4.0.2"
+        },
+        {
+          "integrity": "sha512-A3s5PWiZ9YCXFye1o246KoscMWqf8BsD9eRiJ3He7C9OBaxKhAd5TFCdEx/7VbKtxxTsu//1mMJFrEt572cEyQ==",
+          "license_sha256": "0986d93944902cca9af86824b6a641b4b7c2d10602fc510c433a8bcd443919fe",
+          "name": "d3-scale-chromatic",
+          "npm_name": null,
+          "selectors": [
+            "d3-scale-chromatic@1 - 3"
+          ],
+          "source": "https://github.com/d3/d3-scale-chromatic.git",
+          "source_content_sha256": "436d3e3c9ace72ddb341706edd2d106a39723a3f7efc42386bce34c060e14fe5",
+          "spdx": "ISC",
+          "tarball": "https://registry.npmjs.org/d3-scale-chromatic/-/d3-scale-chromatic-3.1.0.tgz",
+          "tarball_sha256": "2573f980e0acbbecc919f5c5fdf7cd3a8110eda2497da7b94ae303fab9c32aa4",
+          "version": "3.1.0"
+        },
+        {
+          "integrity": "sha512-fmTRWbNMmsmWq6xJV8D19U/gw/bwrHfNXxrIN+HfZgnzqTHp9jOmKMhsTUjXOJnZOdZY9Q28y4yebKzqDKlxlQ==",
+          "license_sha256": "e008c5e25a6be382593089c29bfabbc553c6378eee02895aec46ce396cc404ee",
+          "name": "d3-selection",
+          "npm_name": null,
+          "selectors": [
+            "d3-selection@2 - 3"
+          ],
+          "source": "https://github.com/d3/d3-selection.git",
+          "source_content_sha256": "62d107f7f507ec9d9a1dee095dfce5353bfc27a2d22184148b0248dab109a83c",
+          "spdx": "ISC",
+          "tarball": "https://registry.npmjs.org/d3-selection/-/d3-selection-3.0.0.tgz",
+          "tarball_sha256": "a1f872f30dca23b76de89cae9e882f56c325433e7f3aee87b95fa830d12789f3",
+          "version": "3.0.0"
+        },
+        {
+          "integrity": "sha512-ndfJ/JxxMd3nw31uyKoY2naivF+r29V+Lc0svZxe1JvvIRmi8hUsrMvdOwgS1o6uBHmiz91geQ0ylPP0aj1VUA==",
+          "license_sha256": "e008c5e25a6be382593089c29bfabbc553c6378eee02895aec46ce396cc404ee",
+          "name": "d3-timer",
+          "npm_name": null,
+          "selectors": [
+            "d3-timer@1 - 3"
+          ],
+          "source": "https://github.com/d3/d3-timer.git",
+          "source_content_sha256": "eef0046768ce4cc4a8c27894aa2e0f7bd3ec4651accab1e6614670f90d810c27",
+          "spdx": "ISC",
+          "tarball": "https://registry.npmjs.org/d3-timer/-/d3-timer-3.0.1.tgz",
+          "tarball_sha256": "05cdf901e1876a7f24f4c365a879252752e22e3cc52b131ca616639f07e8ed05",
+          "version": "3.0.1"
+        },
+        {
+          "integrity": "sha512-QmU3lyEnbENQPo0M1F9BMu4s6cqNNp8iJA+b/HP2sSb7pf3dxwF3+EP1eO69rwBfH9kFJ1apmzrtogAmVt2/Xw==",
+          "license_sha256": "bbba7cb786b64e6b7f9d7cb6dacae5c78898752f7c60d3fc04c13ca67e4dc7f2",
+          "name": "data-bind-mapper",
+          "npm_name": null,
+          "selectors": [
+            "data-bind-mapper@1"
+          ],
+          "source": "git+https://github.com/vasturiano/data-bind-mapper.git",
+          "source_content_sha256": "cb5654f85715263ddb55e26dbc9bd82fa130e944a2e7ad8437e33c2f74978730",
+          "spdx": "MIT",
+          "tarball": "https://registry.npmjs.org/data-bind-mapper/-/data-bind-mapper-1.0.3.tgz",
+          "tarball_sha256": "f6f4db2f5c8a95c750b382a7da346c07d6997177a7fb382b686343b6930092fa",
+          "version": "1.0.3"
+        },
+        {
+          "integrity": "sha512-/kXzuDnnBqyyWyhDMH7+PfP8J/oXiAavGzcRxASOMRHFuReDtofizLLJsf7nnDLAfEaMW4pVWaXrAjtnglpEkg==",
+          "license_sha256": "07e7bf38169a0e26e088a0a6e6ba7f60704b2d0442c4433044169924c68ba732",
+          "name": "float-tooltip",
+          "npm_name": null,
+          "selectors": [
+            "float-tooltip@^1.7"
+          ],
+          "source": "git+https://github.com/vasturiano/float-tooltip.git",
+          "source_content_sha256": "4505e8bc6ae8bef3db59fd167ba6b22dae0bf582ea303364cbec6581717078b1",
+          "spdx": "MIT",
+          "tarball": "https://registry.npmjs.org/float-tooltip/-/float-tooltip-1.7.5.tgz",
+          "tarball_sha256": "82b70518266f8c2af5d4ab799ace1f7aa051322e7c4fd5e22dc0a356c77e627d",
+          "version": "1.7.5"
+        },
+        {
+          "integrity": "sha512-5Hh7Y1wQbvY5ooGgPbDaL5iYLAPzMTUrjMulskHLH6wnv/A+1q5rgEaiuqEjB+oxGXIVZs1FF+R/KPN3ZSQYYg==",
+          "license_sha256": "9ea8903938dab5f12c4572d60725069bec2d1b0dc3bcc210b09bae946a5ebb1f",
+          "name": "internmap",
+          "npm_name": null,
+          "selectors": [
+            "internmap@1 - 2"
+          ],
+          "source": "https://github.com/mbostock/internmap.git",
+          "source_content_sha256": "102ae066fa680ca88b03e9eeb9e4c8c2fbd18f2abef8325959d79ba39331913d",
+          "spdx": "ISC",
+          "tarball": "https://registry.npmjs.org/internmap/-/internmap-2.0.3.tgz",
+          "tarball_sha256": "39d1936831a4d3f2bd6e088db28a10de4458d823f652c36b2c808bf5b978c48d",
+          "version": "2.0.3"
+        },
+        {
+          "integrity": "sha512-4+5mNNf4vZDSwPhKprKwz3330iisPrb08JyMgbsdFrimBCKNHecua/WBwvVg3n7vwx0C1ARjfhwIpbrbd9n5wg==",
+          "license_sha256": "7262e566e874d1ce8cfadace01d4f635f8d704b6bdf7b4345cc028e5faeafded",
+          "name": "kapsule",
+          "npm_name": null,
+          "selectors": [
+            "kapsule@^1.16"
+          ],
+          "source": "git+https://github.com/vasturiano/kapsule.git",
+          "source_content_sha256": "9f3c9ec60f73491fb0147b0f61a23b3870f5ca092a3e20b8b2a36782d01f4250",
+          "spdx": "MIT",
+          "tarball": "https://registry.npmjs.org/kapsule/-/kapsule-1.16.3.tgz",
+          "tarball_sha256": "4a82d225d7b75c1d3d4064a1e3ca5b6ea6d4bf62a3a3d465e28a8305f124606c",
+          "version": "1.16.3"
+        },
+        {
+          "integrity": "sha512-J8xewKD/Gk22OZbhpOVSwcs60zhd95ESDwezOFuA3/099925PdHJ7OFHNTGtajL3AlZkykD32HykiMo+BIBI8A==",
+          "license_sha256": "f71e8ed126b46346494aad5486874cd8f0aafe95092ed67d2e3cb6110f939abc",
+          "name": "lodash-es",
+          "npm_name": null,
+          "selectors": [
+            "lodash-es@4"
+          ],
+          "source": "https://github.com/lodash/lodash",
+          "source_content_sha256": "d2429d7ab8375e9ed0468254424ec90b4d5004fd97d67d3636055efc288e5c0d",
+          "spdx": "MIT",
+          "tarball": "https://registry.npmjs.org/lodash-es/-/lodash-es-4.18.1.tgz",
+          "tarball_sha256": "b0c810e5cd4cd580ed7b18fc71384b9a80c151dc5c85b1729bd656a49e3f16f8",
+          "version": "4.18.1"
+        },
+        {
+          "integrity": "sha512-NeDGI4DSyjBNBRtA86222JoYietsmCXbs8CEB0dZ51Xeh4lhVl1y3wpWLumczvnha8sFQIW4E0vvVWwgmX2mGw==",
+          "license_sha256": "a70b73ddfbc2ce8a01e2f66a50fff4c37c052b8602a95842a54cbd1be2c463e6",
+          "name": "ngraph.events",
+          "npm_name": null,
+          "selectors": [
+            "ngraph.events@^1.0.0",
+            "ngraph.events@^1.4.0"
+          ],
+          "source": "https://github.com/anvaka/ngraph.events.git",
+          "source_content_sha256": "971d28b44e719cafeb83cae6ad9842be799b6c7c4f81573110b693e58329c95e",
+          "spdx": "BSD-3-Clause",
+          "tarball": "https://registry.npmjs.org/ngraph.events/-/ngraph.events-1.4.0.tgz",
+          "tarball_sha256": "b59e7dcdefe18f6ad4ca75cf142deb30f39cb64c95315f7f6dbc466e571ab5eb",
+          "version": "1.4.0"
+        },
+        {
+          "integrity": "sha512-MKBuEh1wujyQHFTW57y5vd/uuEOK0XfXYxm3lC7kktjJLRdt/KEKEknyOlc6tjXflqBKEuYBBcu7Ax5VY+S6aw==",
+          "license_sha256": "28b2d0a69b4f870bc9d181ddef39e117e2db3a64816d83db3a67669f65e7083d",
+          "name": "ngraph.forcelayout",
+          "npm_name": null,
+          "selectors": [
+            "ngraph.forcelayout@3"
+          ],
+          "source": "https://github.com/anvaka/ngraph.forcelayout.git",
+          "source_content_sha256": "ab509366dc541591831d4d796ce0ac0af035e91bbe6853a655d98ff8f73cf4ff",
+          "spdx": "BSD-3-Clause",
+          "tarball": "https://registry.npmjs.org/ngraph.forcelayout/-/ngraph.forcelayout-3.3.1.tgz",
+          "tarball_sha256": "8ac25a7b4f81172a11b844668b7a3f85ca5236b38cfb658903cb16718760fcd9",
+          "version": "3.3.1"
+        },
+        {
+          "integrity": "sha512-W/G3GBR3Y5UxMLHTUCPP9v+pbtpzwuAEIqP5oZV+9IwgxAIEZwh+Foc60iPc1idlnK7Zxu0p3puxAyNmDvBd0Q==",
+          "license_sha256": "54dcd2d143f95c33650b436731c6119554f8e825f9efc5d500b6585cd6865719",
+          "name": "ngraph.graph",
+          "npm_name": null,
+          "selectors": [
+            "ngraph.graph@20"
+          ],
+          "source": "https://github.com/anvaka/ngraph.graph.git",
+          "source_content_sha256": "4927cd2e457f46a891392487ed027353aa5a38d87fb2ab30574c87025fea4ec8",
+          "spdx": "BSD-3-Clause",
+          "tarball": "https://registry.npmjs.org/ngraph.graph/-/ngraph.graph-20.1.2.tgz",
+          "tarball_sha256": "51b34bd35e35662a729e38ba844f6bdafa1914df737b2ea991060591d27592e9",
+          "version": "20.1.2"
+        },
+        {
+          "integrity": "sha512-5J8YjGITUJeapsomtTALYsw7rFveYkM+lBj3QiYZ79EymQcuri65Nw3knQtFxQBU1r5iOaVRXrSwMENUPK62Vg==",
+          "license_sha256": "e9b1ba0cc96533c469b1c76b2769e8d92a6426d53237f87efa09d599af76a520",
+          "name": "ngraph.merge",
+          "npm_name": null,
+          "selectors": [
+            "ngraph.merge@^1.0.0"
+          ],
+          "source": "https://github.com/anvaka/ngraph.merge",
+          "source_content_sha256": "df927d86a228ba6d65ba98aa21f84dcb087bf07c21459d464dbcd88a529e2a5f",
+          "spdx": "MIT",
+          "tarball": "https://registry.npmjs.org/ngraph.merge/-/ngraph.merge-1.0.0.tgz",
+          "tarball_sha256": "607b648ebbd87bbb3cdcc0b8856edb426f5caf936859f48e886e237785494a83",
+          "version": "1.0.0"
+        },
+        {
+          "integrity": "sha512-4EUeAGbB2HWX9njd6bP6tciN6ByJfoaAvmVL9QTaZSeXrW46eNGA9GajiXiPBbvFqxUWFkEbyo6x5qsACUuVfA==",
+          "license_sha256": "3a3f33e4a8dae9e3b64430f4e207435a3169e8f48e54fddc5c9982ca32680977",
+          "name": "ngraph.random",
+          "npm_name": null,
+          "selectors": [
+            "ngraph.random@^1.0.0"
+          ],
+          "source": "https://github.com/anvaka/ngraph.random.git",
+          "source_content_sha256": "bbc8fa9b6cfa0c3077846ffa17dc2ca6b09290c4282e446994a909cc9bba2b6f",
+          "spdx": "BSD-3-Clause",
+          "tarball": "https://registry.npmjs.org/ngraph.random/-/ngraph.random-1.2.0.tgz",
+          "tarball_sha256": "cfcff8032add3b0c7544bca5887998106ee9934389898c29727f18c5722751e2",
+          "version": "1.2.0"
+        },
+        {
+          "integrity": "sha512-OBatVyC/N7SCW/FaDHrSd+vn0o5cS855TOmYi4OkdWUMSJCET/xip//ch8xGUvtr3i44X9LVyWwQlRMTN3pwSA==",
+          "license_sha256": "671e164460e3edbb93c0e22813d45dd37c1c643c6a7cbddde0f70c8914aab294",
+          "name": "polished",
+          "npm_name": null,
+          "selectors": [
+            "polished@4"
+          ],
+          "source": "git+https://github.com/styled-components/polished.git",
+          "source_content_sha256": "3ab9524b7137281739ca289efe8c15766d7d6df1ee30f15d7fe2d4c6521c61ff",
+          "spdx": "MIT",
+          "tarball": "https://registry.npmjs.org/polished/-/polished-4.3.1.tgz",
+          "tarball_sha256": "dd6094407bda9bcaf96eda981e26904fb12fe766baebc588d12be68219342426",
+          "version": "4.3.1"
+        },
+        {
+          "integrity": "sha512-gQCLc/vWroE8lIpleXtdJhTFDogTdZG9AjMUpVkDf2iTCNwYNWA+u16dL41TqUDJO4gm2IgrcMv3uTpjd4Pwmg==",
+          "license_sha256": "1fe6958409c8c257a70c587a18b6f7f412b179b456630790d30b2ec9a8e4b7d4",
+          "name": "preact",
+          "npm_name": null,
+          "selectors": [
+            "preact@10"
+          ],
+          "source": "https://github.com/preactjs/preact",
+          "source_content_sha256": "53d708565e5a22fc9f700b472f067bb0da3effc1200a7508cd32b7461d0f4608",
+          "spdx": "MIT",
+          "tarball": "https://registry.npmjs.org/preact/-/preact-10.29.1.tgz",
+          "tarball_sha256": "7a9143129486379cb8340c66c68a9cedad7762730fda7286f96befa1028cce80",
+          "version": "10.29.1"
+        },
+        {
+          "integrity": "sha512-IezA2qp+vcdlhJaVm5SOdPPTUu0FCEqfNSli2vRuSIBbu5Nq5UvygTk/VzeCqfLz2Atj3dVII5QBKGZRZ0edzw==",
+          "license_sha256": "4043c740a6b6749d1f706cacae941ddfaff6f882b66fce5df99b7f36176ae112",
+          "name": "style-inject",
+          "npm_name": null,
+          "selectors": [
+            "style-inject@^0.3.0"
+          ],
+          "source": "git+https://github.com/egoist/style-inject.git",
+          "source_content_sha256": "40340726873e43727392faa095acbfd3feff54d2b07edeaca73dd3494ff9fde7",
+          "spdx": "MIT",
+          "tarball": "https://registry.npmjs.org/style-inject/-/style-inject-0.3.0.tgz",
+          "tarball_sha256": "bb015cc38bdc388fc8ead1b20311c3a351d4c4cb9595a5daa49494823adf6db8",
+          "version": "0.3.0"
+        },
+        {
+          "integrity": "sha512-di3BsL2FEQ1PA7Hcvn4fyJOlxRRgFYBpMTcyOgkwJIaDOdJMebEFPA+t98EvjuljDx4hNulAGwF6KIjtwI5jgQ==",
+          "license_sha256": "8b378ebe60e2fe500158cb0ac71cb5e8b7d92953c2abcc63a0eb90499653b5bc",
+          "name": "three",
+          "npm_name": null,
+          "selectors": [
+            "three@>=0.179 <1"
+          ],
+          "source": "https://github.com/mrdoob/three.js",
+          "source_content_sha256": "ac5bca73903ac155c9d09996644664d11807eea296e55d012fd428e067e8a2ec",
+          "spdx": "MIT",
+          "tarball": "https://registry.npmjs.org/three/-/three-0.183.2.tgz",
+          "tarball_sha256": "435d785005cec60a2e9dcca23b69c6a4c048278098f2669d3d879881dff9ce4d",
+          "version": "0.183.2"
+        },
+        {
+          "integrity": "sha512-KUlqDaWVsrYtKx0NVVi5M3NR46K5JQIiPEzZnTMvBq7EHVF2tJpWtgGiAT1mhaerrlJ7F4UGNS2rIVYHmVrzYw==",
+          "license_sha256": "7262e566e874d1ce8cfadace01d4f635f8d704b6bdf7b4345cc028e5faeafded",
+          "name": "three-forcegraph",
+          "npm_name": null,
+          "selectors": [
+            "three-forcegraph@1"
+          ],
+          "source": "git+https://github.com/vasturiano/three-forcegraph.git",
+          "source_content_sha256": "2fcf91b36124f5fe2bd14f8f205038bf3f180c819af057a45acecacc9fd1523d",
+          "spdx": "MIT",
+          "tarball": "https://registry.npmjs.org/three-forcegraph/-/three-forcegraph-1.43.2.tgz",
+          "tarball_sha256": "ef45e99f87e30196850bce5289abcbfc95e9b13855c2bad4182cb47ba9b79fbc",
+          "version": "1.43.2"
+        },
+        {
+          "integrity": "sha512-0H7l7yREPVKfO3HL7RjPQ67T0phHgnyMeEc4ww/OCEfK6jbsm7psEcrR0SGFqGDyS/pDQTPi4DyPbS/xlHRJKw==",
+          "license_sha256": "5b6dc9ce44c7b73620b191c567339212bd00537af46fdedaf98304c34214cc9c",
+          "name": "three-render-objects",
+          "npm_name": null,
+          "selectors": [
+            "three-render-objects@^1.41"
+          ],
+          "source": "git+https://github.com/vasturiano/three-render-objects.git",
+          "source_content_sha256": "a200c8e13e7ed5f8a14c6f293d1d9217a8f7770a27cb1d08eb5532848801cabe",
+          "spdx": "MIT",
+          "tarball": "https://registry.npmjs.org/three-render-objects/-/three-render-objects-1.41.1.tgz",
+          "tarball_sha256": "915de8bbeb4a52893da7d33e1fa6692a5cb4befa3a2600be2fb1d721f0c79fb3",
+          "version": "1.41.1"
+        },
+        {
+          "integrity": "sha512-XPaBkWQJdsf3pLKJV9p4qN/S+fm2Oj8AIPo1BTUhg5oxkvm9+SVEGFdhyOz7tTdUTfvxMiAs4sp6/eZO2Ew+pw==",
+          "license_sha256": "c6cb470a9ba0a50d57611aeec1f31da609c5aefdbee8eac7f289bcb0e30625fa",
+          "name": "tinycolor2",
+          "npm_name": null,
+          "selectors": [
+            "tinycolor2@1"
+          ],
+          "source": "https://github.com/bgrins/TinyColor.git",
+          "source_content_sha256": "70edf95a868e6fc1a83a5b0b2e5b34004d7a8fa87987d826ce4df4f6c30f7d75",
+          "spdx": "MIT",
+          "tarball": "https://registry.npmjs.org/tinycolor2/-/tinycolor2-1.6.0.tgz",
+          "tarball_sha256": "1fd8164c4b0e1bad09bf2252705fbcf6789dcce7c121aa52b515dd6438eb635b",
+          "version": "1.6.0"
+        }
+      ],
+      "lockfile_sha256": "f1a7b5614d1718ddc5214a852f48ae09e8d8f3b44e1046a27f33d2e63af3c05e",
+      "name": "3d-force-graph",
+      "npm_tarball_sha256": "1b146925a2b994e339fbdf383f50196a64e56dfd8a2a1ed3d89da0079e56893f",
+      "path": "crates/pgokf-web/static/vendor/3d-force-graph.min.js",
+      "source": "https://github.com/vasturiano/3d-force-graph",
+      "source_map_sha256": "a631ad2b13b8acb5b90ca3acbbfb963a5281f3d03e973ccbd8fd730c23e9f514",
+      "spdx": "MIT",
+      "tarball_member": "package/dist/3d-force-graph.min.js",
+      "version": "1.80.0"
+    },
+    {
+      "asset_sha256": "e209dda5c8235479f3166defc7750e1dbcd5a5c1808b7792fc2e6733768fb447",
+      "components": [
+        {
+          "integrity": "sha512-HLxMCdfXDOJirs3vBZl/ZLoY+c7PfM4Ahr2Ad4YXh6d22T5ltbTXFFkpx9Tgb2vvmWFMbIc3LqN2ToNkZJvyYQ==",
+          "license_sha256": "d3d2456f76414f2456104660ebd65aff1c04cd7966b942bdabd63f3cdb316a38",
+          "name": "htmx",
+          "npm_name": "htmx.org",
+          "selectors": [],
+          "source": "https://github.com/bigskysoftware/htmx",
+          "source_content_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "spdx": "0BSD",
+          "tarball": "https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.4.tgz",
+          "tarball_sha256": "a34988d1b9f005a458d593aa8d7486537cb878b8ac3b82703db1268983123ecc",
+          "version": "2.0.4"
+        }
+      ],
+      "lockfile_sha256": null,
+      "name": "htmx",
+      "npm_tarball_sha256": "a34988d1b9f005a458d593aa8d7486537cb878b8ac3b82703db1268983123ecc",
+      "path": "crates/pgokf-web/static/vendor/htmx.min.js",
+      "source": "https://github.com/bigskysoftware/htmx",
+      "source_map_sha256": null,
+      "spdx": "0BSD",
+      "tarball_member": "package/dist/htmx.min.js",
+      "version": "2.0.4"
+    }
+  ],
+  "schema_version": 1
+}

@@ -166,33 +166,69 @@ fn formula_observation_expectations_are_independent_and_unique() {
     }
 }
 #[test]
-fn publication_requires_exact_tag_and_clean_current_commit() {
+fn publication_is_dispatch_only_and_requires_exact_clean_tag_commit() {
     let v = env!("CARGO_PKG_VERSION");
     let head = "a".repeat(40);
-    let branch = release_intent(v, &head, true, "refs/heads/main", "", |_| {
+    let branch = release_intent(v, &head, true, "push", "refs/heads/main", "", |_| {
         panic!("branch needs no tag")
     })
     .unwrap();
     assert!(!branch.publish);
-    for (event, input) in [
-        (format!("refs/tags/v{v}"), String::new()),
-        ("refs/heads/main".into(), format!("v{v}")),
+    let tag_push = release_intent(
+        v,
+        &head,
+        true,
+        "push",
+        &format!("refs/tags/v{v}"),
+        "",
+        |_| panic!("tag pushes must not resolve publication tags"),
+    )
+    .unwrap();
+    assert!(!tag_push.publish);
+    assert!(
+        release_intent(
+            v,
+            &head,
+            true,
+            "workflow_dispatch",
+            "refs/heads/main",
+            &format!("v{v}"),
+            |_| Ok(head.clone())
+        )
+        .unwrap()
+        .publish
+    );
+    assert!(
+        release_intent(
+            v,
+            &head,
+            true,
+            "workflow_dispatch",
+            "refs/heads/main",
+            &format!("v{v}"),
+            |_| Ok("b".repeat(40))
+        )
+        .is_err()
+    );
+    for (version, clean, event_name, event, input) in [
+        (v, false, "push", "refs/heads/main", ""),
+        (
+            "0.2.0",
+            true,
+            "workflow_dispatch",
+            "refs/heads/main",
+            "v0.2.0",
+        ),
+        (v, true, "workflow_dispatch", "refs/heads/main", "v0.2.0"),
+        (v, true, "workflow_dispatch", "refs/heads/main", "main"),
+        (v, true, "push", "refs/heads/main", &format!("v{v}")),
     ] {
         assert!(
-            release_intent(v, &head, true, &event, &input, |_| Ok(head.clone()))
-                .unwrap()
-                .publish
+            release_intent(version, &head, clean, event_name, event, input, |_| Ok(
+                head.clone()
+            ))
+            .is_err()
         );
-        assert!(release_intent(v, &head, true, &event, &input, |_| Ok("b".repeat(40))).is_err());
-    }
-    for (version, clean, event, input) in [
-        (v, false, "refs/heads/main", ""),
-        ("0.2.0", true, "refs/tags/v0.2.0", ""),
-        (v, true, "refs/tags/v0.2.0", ""),
-        (v, true, "refs/heads/main", "main"),
-        (v, true, "refs/heads/main", "v0.2.0"),
-    ] {
-        assert!(release_intent(version, &head, clean, event, input, |_| Ok(head.clone())).is_err());
     }
 }
 

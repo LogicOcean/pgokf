@@ -66,7 +66,12 @@ pub fn history_check(root: &Path) -> Result<(), String> {
 }
 /// # Errors
 /// Inconsistent source or immutable tag identity fails before any output publication.
-pub fn resolve(root: &Path, event_ref: &str, dispatch: &str) -> Result<ReleaseIntent, String> {
+pub fn resolve(
+    root: &Path,
+    event_name: &str,
+    event_ref: &str,
+    dispatch: &str,
+) -> Result<ReleaseIntent, String> {
     let identity = crate::release_identity::source_identity(root)?;
     let head = output(&command(root, "git", &["rev-parse", "HEAD"]))?;
     let clean = command(root, "git", &["diff", "--quiet", "HEAD", "--"])
@@ -77,6 +82,7 @@ pub fn resolve(root: &Path, event_ref: &str, dispatch: &str) -> Result<ReleaseIn
         &identity.version,
         &head,
         clean,
+        event_name,
         event_ref,
         dispatch,
         |tag| {

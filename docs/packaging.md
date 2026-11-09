@@ -149,9 +149,11 @@ packages the three network companions (`pgokf-ingest`, `pgokf-embed`,
 `pgokf-mcp`) into one non-root image.
 
 CI builds and smoke-tests both images **natively on amd64 and arm64** for every
-supported major on every packaging change, and on a version tag pushes the
-per-architecture images by digest and merges them into multi-architecture
-manifests: `ghcr.io/logicocean/pgokf:<version>-pg<major>` and
+supported major on every packaging change and version-tag push. Those events are
+nonpublishing. An explicit `workflow_dispatch` whose `release_tag` is proven to
+name the current immutable release tag publishes the per-architecture images by
+digest and merges them into multi-architecture manifests:
+`ghcr.io/logicocean/pgokf:<version>-pg<major>` and
 `ghcr.io/logicocean/pgokf-companions:<version>` (so the same tag runs on x86,
 arm64 servers, and Apple Silicon). Between releases, build locally with the
 commands above. The smoke scripts CI runs
@@ -198,16 +200,18 @@ commit and then the external tap; follow the exact
 3. **Tag.** `git tag -a v0.4.0 -m "pgokf 0.4.0" && git push origin v0.4.0`. CI
    ([`.github/workflows/packages.yml`](https://github.com/LogicOcean/pgokf/blob/main/.github/workflows/packages.yml))
    builds the `.deb`s (uploaded as workflow artifacts), validates `META.json`,
-   and builds the Docker images per major.
+   and builds and smoke-tests the Docker images per major without publishing.
 4. **PGXN.** Verify the already committed, twice-generated SQL against the
    immutable tagged source; do not mutate the tag or regenerate its distribution
    contents after tagging. Build the distribution zip from that exact source,
    and upload it at <https://manager.pgxn.org/> under the `pgokf` distribution.
-5. **Docker.** Automatic: pushing the version tag runs the packages workflow,
-   which builds, smoke-tests, then pushes
+5. **Docker.** Explicitly dispatch the packages workflow with `release_tag` set
+   to the immutable version tag. The validated dispatch rebuilds and smoke-tests
+   the selected source, then publishes
    `ghcr.io/logicocean/pgokf:<version>-pg<major>` for each supported major.
-   A newly created GHCR package is private; flip it to public once, in the
-   package settings, on the first release only.
+   Tag pushes and ordinary package-workflow runs never publish. A newly created
+   GHCR package is private; flip it to public once, in the package settings, on
+   the first release only.
 6. **Homebrew.** Hash the immutable tag archive, then advance URL, digest,
    and test assertions together in a post-tag main commit and in
    `LogicOcean/homebrew-pgokf`'s `Formula/pgokf.rb`. Follow the

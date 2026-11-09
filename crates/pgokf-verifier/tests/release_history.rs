@@ -61,7 +61,7 @@ fn real_history_absent_moved_and_retired_sources_fail() {
             ("refs/heads/main".into(), tag.into()),
             ("refs/heads/main".into(), String::new()),
         ] {
-            assert!(resolve(&clone, &event, &input).is_err());
+            assert!(resolve(&clone, "workflow_dispatch", &event, &input).is_err());
         }
     }
     git(&clone, &["tag", "--force", "v0.2.0", HISTORY[1].1]);
@@ -103,20 +103,24 @@ fn real_git_release_dispatch_and_transactional_refusal() {
     let version = env!("CARGO_PKG_VERSION");
     let tag = format!("v{version}");
     git(dir.path(), &["tag", "-a", &tag, "-m", "Annotated fixture"]);
-    let branch = resolve(dir.path(), "refs/heads/main", "").unwrap();
+    let branch = resolve(dir.path(), "push", "refs/heads/main", "").unwrap();
     assert!(!branch.publish);
-    for (event, input) in [
-        (format!("refs/tags/{tag}"), String::new()),
-        ("refs/heads/main".into(), tag.clone()),
-    ] {
-        assert!(resolve(dir.path(), &event, &input).unwrap().publish);
-    }
-    assert!(resolve(dir.path(), "refs/tags/v0.2.0", "").is_err());
+    assert!(
+        !resolve(dir.path(), "push", &format!("refs/tags/{tag}"), "")
+            .unwrap()
+            .publish
+    );
+    assert!(
+        resolve(dir.path(), "workflow_dispatch", "refs/heads/main", &tag)
+            .unwrap()
+            .publish
+    );
+    assert!(resolve(dir.path(), "workflow_dispatch", "refs/heads/main", "v0.2.0").is_err());
     let output = dir.path().join("output");
     write_intent(&output, &branch).unwrap();
     let previous = std::fs::read(&output).unwrap();
     std::fs::write(dir.path().join("META.json"), "{}").unwrap();
-    let refused = resolve(dir.path(), &format!("refs/tags/{tag}"), "");
+    let refused = resolve(dir.path(), "workflow_dispatch", "refs/heads/main", &tag);
     assert!(refused.is_err());
     assert_eq!(std::fs::read(output).unwrap(), previous);
     git(dir.path(), &["checkout", "--", "META.json"]);
@@ -124,7 +128,7 @@ fn real_git_release_dispatch_and_transactional_refusal() {
     git(dir.path(), &["add", "other"]);
     git(dir.path(), &["commit", "-qm", "New branch source"]);
     assert!(
-        resolve(dir.path(), "refs/heads/main", &tag)
+        resolve(dir.path(), "workflow_dispatch", "refs/heads/main", &tag)
             .unwrap_err()
             .contains("HEAD is not")
     );

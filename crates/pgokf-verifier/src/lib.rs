@@ -11,6 +11,7 @@ pub mod mcp;
 pub mod mcp_coverage;
 pub mod migration;
 pub mod mutations;
+pub mod notices;
 pub mod owned_docker;
 pub mod ownership;
 pub mod package_archive;

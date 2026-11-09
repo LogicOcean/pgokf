@@ -5,9 +5,10 @@
 # accepted list mirrors the `allow` list in deny.toml, so a dependency that
 # passes `cargo deny check licenses` also has a reproducible notice here.
 #
-# Regenerate with:
-#   cargo about generate --locked --workspace --all-features -o /dev/stdout about.hbs \
-#     | LC_ALL=C sed 's/[[:blank:]]*$//' > THIRD-PARTY-NOTICES.txt
+# Regenerate the Cargo section plus the authenticated vendored-JavaScript
+# appendix with:
+#   cargo run --locked -p pgokf-verifier -- \
+#     notices-render . /path/to/pinned/cargo-about > THIRD-PARTY-NOTICES.txt
 
 # Every target matters: the .deb/.rpm ship a Linux cdylib, but the companions
 # are built on whatever a user targets, so do not filter by triple.

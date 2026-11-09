@@ -10,10 +10,12 @@ as the build context (`.dockerignore` keeps `target/` and `.git/` out):
 
 Both are **multi-architecture** (`linux/amd64` + `linux/arm64`): CI
 ([`.github/workflows/packages.yml`](../../.github/workflows/packages.yml))
-builds each architecture natively on its own runner, smoke-tests it there
-with the scripts in this directory, and on a version tag re-exports the same
-cached build by digest and merges the two into one manifest per tag - so the
-same tag runs on x86 servers, arm64 servers, and Apple Silicon. Between releases there is nothing new to pull; build
+builds each architecture natively on its own runner and smoke-tests it there
+with the scripts in this directory. Packaging changes and version-tag pushes are
+nonpublishing. An explicit `workflow_dispatch` whose `release_tag` is proven to
+name the current immutable release tag publishes image digests and merges them
+into one manifest per tag - so the same tag runs on x86 servers, arm64 servers,
+and Apple Silicon. Between releases there is nothing new to pull; build
 locally as below. `0.4.0` in the examples is the extension version, read from
 `crates/extension/pgokf.control` - the single source of truth CI and
 `packaging/deb/build-deb.sh` both resolve at build time.

@@ -5,11 +5,11 @@ name: packages
 # (no QEMU emulation), is smoke-tested there, and the per-arch images are
 # merged into one multi-architecture manifest per tag - so the published
 # images run unchanged on x86 servers, arm64 servers, and Apple Silicon.
-# Runs on tags (a release) and on demand; also on pushes touching packaging so
-# the build scripts stay green. Publication is immutable-tag-only: a version
-# tag push, or a workflow_dispatch whose explicit release_tag input names that
-# tag - either way the resolver proves the checked-out HEAD is the tag's
-# commit, and every job builds that exact source.
+# Runs on tags and on demand; also on pushes touching packaging so the build
+# scripts stay green. Push and pull-request events only build and smoke-test.
+# Publication is workflow_dispatch-only: the explicit release_tag input must
+# name the current immutable tag, and the resolver proves the selected source
+# is that tag's commit before any registry write can run.
 on:
   push:
     branches:
@@ -23,6 +23,21 @@ on:
       - ".dockerignore"
       - ".hadolint.yaml"
       - ".github/workflows/packages.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "about.hbs"
+      - "about.toml"
+      - "vendored-notices.toml"
+      - "THIRD-PARTY-NOTICES.txt"
+      - "scripts/install-cargo-about.sh"
+      - "crates/**/Cargo.toml"
+      - "crates/pgokf-verifier/src/lib.rs"
+      - "crates/pgokf-verifier/src/main.rs"
+      - "crates/pgokf-verifier/src/notices.rs"
+      - "crates/pgokf-web/src/routes.rs"
+      - "crates/pgokf-web/static/*.js"
+      - "crates/pgokf-web/static/vendor/**"
+      - "third-party-notice-evidence/**"
   pull_request:
     paths:
       - "packaging/**"
@@ -31,6 +46,21 @@ on:
       - ".dockerignore"
       - ".hadolint.yaml"
       - ".github/workflows/packages.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "about.hbs"
+      - "about.toml"
+      - "vendored-notices.toml"
+      - "THIRD-PARTY-NOTICES.txt"
+      - "scripts/install-cargo-about.sh"
+      - "crates/**/Cargo.toml"
+      - "crates/pgokf-verifier/src/lib.rs"
+      - "crates/pgokf-verifier/src/main.rs"
+      - "crates/pgokf-verifier/src/notices.rs"
+      - "crates/pgokf-web/src/routes.rs"
+      - "crates/pgokf-web/static/*.js"
+      - "crates/pgokf-web/static/vendor/**"
+      - "third-party-notice-evidence/**"
   workflow_dispatch:
     inputs:
       release_tag:
@@ -64,10 +94,10 @@ jobs:
   # Resolve the one version every artifact carries, whether this run publishes
   # images, and the exact immutable source every job builds. The control file
   # is the single source of truth (the same one build-deb.sh reads).
-  # Publication is immutable-tag-only: packaging/resolve-release.sh accepts a
-  # tag push or an explicit dispatch tag only when the tag is v<default_version>
-  # AND the checked-out HEAD is that tag's commit, so a branch HEAD or untagged
-  # commit can never publish versioned images/manifests.
+  # Publication is dispatch-only: packaging/resolve-release.sh accepts an
+  # explicit workflow_dispatch tag only when it is v<default_version> AND the
+  # checked-out HEAD is that tag's commit. Pushes, including tag pushes, build
+  # and smoke-test but cannot publish images/manifests.
   # ---------------------------------------------------------------------------
   prep:
     name: Resolve version and publish intent
@@ -83,10 +113,12 @@ jobs:
       # Keep validation tooling separate from the proven release source.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ github.sha }}
           path: release-tools
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0
           path: release-source
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag != '' && format('refs/tags/{0}', inputs.release_tag) || github.sha }}
@@ -101,6 +133,32 @@ jobs:
         working-directory: release-source
         run: ../release-tools/packaging/resolve-release.sh
 
+  notices:
+    name: Verify release notices
+    needs: prep
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout selected release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.prep.outputs.source_ref }}
+          path: release-source
+      - name: Checkout current provenance tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+          path: release-tools
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Install checksum-pinned cargo-about
+        run: release-tools/scripts/install-cargo-about.sh "$RUNNER_TEMP/cargo-about"
+      - name: Verify deterministic third-party notices
+        run: cargo run --locked --manifest-path release-tools/Cargo.toml -p pgokf-verifier -- notices-verify release-source "$RUNNER_TEMP/cargo-about"
+
   # ---------------------------------------------------------------------------
   # Static checks on the container packaging: Dockerfiles, the shell scripts
   # they run, and the shipped compose stack.
@@ -114,6 +172,7 @@ jobs:
       # pinned immutable release tags (the Rust workflow verifier enforces this).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ needs.prep.outputs.source_ref }}
           fetch-depth: 0
 
@@ -169,11 +228,13 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ needs.prep.outputs.source_ref }}
 
       - name: Checkout release validation tooling
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ github.sha }}
           path: release-tools
 
@@ -218,7 +279,7 @@ jobs:
 
   deb:
     name: Build .deb (PostgreSQL ${{ matrix.pg }}, ${{ matrix.arch }})
-    needs: prep
+    needs: [prep, notices]
     runs-on: ${{ matrix.runner }}
     # Every declared major is required; missing provisioning must fail.
     strategy:
@@ -234,11 +295,13 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ needs.prep.outputs.source_ref }}
 
       - name: Checkout release validation tooling
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ github.sha }}
           path: release-tools
 
@@ -319,18 +382,13 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Per-major, per-architecture server image. Built and smoke-tested natively
-  # on each runner; on a publish run the same build is pushed by digest, and
-  # the manifest job below merges the digests into one multi-arch tag.
+  # on each read-only runner. Separate dispatch-only jobs receive package-write
+  # authority only after every required build and smoke gate succeeds.
   # ---------------------------------------------------------------------------
   docker:
     name: Build image (PostgreSQL ${{ matrix.pg }}, ${{ matrix.arch }})
-    needs: [prep, lint, meta, deb, compatibility, homebrew-policy]
+    needs: [prep, notices, lint, meta, deb, compatibility, homebrew-policy]
     runs-on: ${{ matrix.runner }}
-    # packages:write is needed only by the publish steps below; the
-    # workflow-level default stays contents:read.
-    permissions:
-      contents: read
-      packages: write
     # Every declared major is required; missing provisioning must fail.
     strategy:
       fail-fast: false
@@ -354,11 +412,13 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ needs.prep.outputs.source_ref }}
 
       - name: Checkout release validation tooling
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ github.sha }}
           path: release-tools
 
@@ -404,48 +464,69 @@ jobs:
         if: steps.base.outputs.available == 'true'
         run: cargo run --locked --manifest-path release-tools/Cargo.toml -p pgokf-verifier -- image-smoke . "$LOCAL_TAG" "$VERSION" optional "$RUNNER_TEMP/server-smoke-evidence"
 
-      # Publish only when prep proved an immutable v<default_version> tag and
-      # checked out its commit, and only
-      # after the smoke test above proved the image starts, creates the
-      # extensions, and materializes a bundle. The push re-runs the build
-      # against the BuildKit cache the smoke-tested build just filled (every
-      # layer a cache hit, so the same content) and exports it by digest; the
-      # manifest job merges the per-arch digests into the versioned tag.
-      - name: Log in to GHCR
+      - name: Export the smoke-tested image
         if: steps.base.outputs.available == 'true' && needs.prep.outputs.publish == 'true'
+        run: docker save "$LOCAL_TAG" --output "$RUNNER_TEMP/server-image.tar"
+
+      - name: Upload the smoke-tested image
+        if: steps.base.outputs.available == 'true' && needs.prep.outputs.publish == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-server-pg${{ matrix.pg }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/server-image.tar
+          if-no-files-found: error
+          retention-days: 1
+
+  docker-publish:
+    name: Publish image digest (PostgreSQL ${{ matrix.pg }}, ${{ matrix.arch }})
+    needs: [prep, notices, docker]
+    if: needs.prep.outputs.publish == 'true'
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [15, 16, 17, 18]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      VERSION: ${{ needs.prep.outputs.version }}
+      LOCAL_TAG: pgokf:${{ needs.prep.outputs.version }}-pg${{ matrix.pg }}
+      ARCH_TAG: ${{ env.SERVER_IMAGE }}:${{ needs.prep.outputs.version }}-pg${{ matrix.pg }}-${{ matrix.arch }}
+    steps:
+      - name: Download smoke-tested image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: image-server-pg${{ matrix.pg }}-${{ matrix.arch }}
+          path: /tmp/image
+      - name: Load smoke-tested image
+        run: docker load --input /tmp/image/server-image.tar
+      - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Push image by digest
-        if: steps.base.outputs.available == 'true' && needs.prep.outputs.publish == 'true'
-        id: push
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          context: .
-          file: packaging/docker/Dockerfile
-          build-args: |
-            PG_MAJOR=${{ matrix.pg }}
-            RUST_VERSION=${{ env.RUST_TOOLCHAIN }}
-            CARGO_PGRX_VERSION=${{ env.CARGO_PGRX_VERSION }}
-            PGOKF_VERSION=${{ env.VERSION }}
-            WITH_PG_TEXTSEARCH=${{ env.WITH_PG_TEXTSEARCH }}
-          outputs: type=image,name=${{ env.SERVER_IMAGE }},push-by-digest=true,name-canonical=true,push=true
-
-      - name: Export digest
-        if: steps.base.outputs.available == 'true' && needs.prep.outputs.publish == 'true'
+      - name: Push smoke-tested image and export digest
         env:
-          DIGEST: ${{ steps.push.outputs.digest }}
+          DIGEST_DIRECTORY: /tmp/digests
         run: |
-          cargo run --locked --manifest-path release-tools/Cargo.toml -p pgokf-verifier -- digest-check "$DIGEST"
-          mkdir -p /tmp/digests
-          touch "/tmp/digests/${DIGEST#sha256:}"
-          echo "pushed ${SERVER_IMAGE}@${DIGEST} (${{ matrix.arch }}, pg${{ matrix.pg }})"
-
+          docker tag "$LOCAL_TAG" "$ARCH_TAG"
+          docker push "$ARCH_TAG"
+          reference=$(docker image inspect --format '{{index .RepoDigests 0}}' "$ARCH_TAG")
+          [[ $reference == "${SERVER_IMAGE}@sha256:"* ]]
+          digest=${reference#*@}
+          [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]]
+          mkdir -p "$DIGEST_DIRECTORY"
+          touch "$DIGEST_DIRECTORY/${digest#sha256:}"
+          echo "pushed ${reference} (${{ matrix.arch }}, pg${{ matrix.pg }})"
       - name: Upload digest
-        if: steps.base.outputs.available == 'true' && needs.prep.outputs.publish == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: digests-server-pg${{ matrix.pg }}-${{ matrix.arch }}
@@ -460,7 +541,7 @@ jobs:
   # ---------------------------------------------------------------------------
   docker-manifest:
     name: Publish multi-arch manifest (PostgreSQL ${{ matrix.pg }})
-    needs: [prep, docker, companions]
+    needs: [prep, notices, docker-publish, companions-publish]
     if: needs.prep.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     permissions:
@@ -474,16 +555,6 @@ jobs:
     env:
       TAG: ghcr.io/logicocean/pgokf:${{ needs.prep.outputs.version }}-pg${{ matrix.pg }}
     steps:
-      - name: Checkout release validation tooling
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-          path: release-tools
-
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-
       - name: Download per-arch digests
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -504,7 +575,11 @@ jobs:
         run: |
           shopt -s nullglob
           digests=(/tmp/digests/*)
-          cargo run --locked --manifest-path release-tools/Cargo.toml -p pgokf-verifier -- digests-check /tmp/digests
+          [[ ${#digests[@]} -eq 2 ]]
+          for d in "${digests[@]}"; do
+            [[ -f $d && ! -L $d && ! -s $d ]]
+            [[ $(basename "$d") =~ ^[0-9a-f]{64}$ ]]
+          done
           refs=()
           for d in "${digests[@]}"; do refs+=("${SERVER_IMAGE}@sha256:$(basename "$d")"); done
           docker buildx imagetools create -t "$TAG" "${refs[@]}"
@@ -516,11 +591,8 @@ jobs:
   # ---------------------------------------------------------------------------
   companions:
     name: Build companions image (${{ matrix.arch }})
-    needs: [prep, lint, meta, deb, compatibility, homebrew-policy]
+    needs: [prep, notices, lint, meta, deb, compatibility, homebrew-policy]
     runs-on: ${{ matrix.runner }}
-    permissions:
-      contents: read
-      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -535,11 +607,13 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ needs.prep.outputs.source_ref }}
 
       - name: Checkout release validation tooling
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ github.sha }}
           path: release-tools
 
@@ -566,37 +640,66 @@ jobs:
       - name: Smoke test image
         run: cargo run --locked --manifest-path release-tools/Cargo.toml -p pgokf-verifier -- companions-smoke "$LOCAL_TAG" "$RUNNER_TEMP/companions-smoke-evidence"
 
-      - name: Log in to GHCR
+      - name: Export the smoke-tested image
         if: needs.prep.outputs.publish == 'true'
+        run: docker save "$LOCAL_TAG" --output "$RUNNER_TEMP/companions-image.tar"
+
+      - name: Upload the smoke-tested image
+        if: needs.prep.outputs.publish == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-companions-${{ matrix.arch }}
+          path: ${{ runner.temp }}/companions-image.tar
+          if-no-files-found: error
+          retention-days: 1
+
+  companions-publish:
+    name: Publish companions image digest (${{ matrix.arch }})
+    needs: [prep, notices, companions]
+    if: needs.prep.outputs.publish == 'true'
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      LOCAL_TAG: pgokf-companions:${{ needs.prep.outputs.version }}
+      ARCH_TAG: ${{ env.COMPANIONS_IMAGE }}:${{ needs.prep.outputs.version }}-${{ matrix.arch }}
+    steps:
+      - name: Download smoke-tested image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: image-companions-${{ matrix.arch }}
+          path: /tmp/image
+      - name: Load smoke-tested image
+        run: docker load --input /tmp/image/companions-image.tar
+      - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Push image by digest
-        if: needs.prep.outputs.publish == 'true'
-        id: push
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          context: .
-          file: packaging/docker/Dockerfile.companions
-          build-args: |
-            RUST_VERSION=${{ env.RUST_TOOLCHAIN }}
-          outputs: type=image,name=${{ env.COMPANIONS_IMAGE }},push-by-digest=true,name-canonical=true,push=true
-
-      - name: Export digest
-        if: needs.prep.outputs.publish == 'true'
+      - name: Push smoke-tested image and export digest
         env:
-          DIGEST: ${{ steps.push.outputs.digest }}
+          DIGEST_DIRECTORY: /tmp/digests
         run: |
-          cargo run --locked --manifest-path release-tools/Cargo.toml -p pgokf-verifier -- digest-check "$DIGEST"
-          mkdir -p /tmp/digests
-          touch "/tmp/digests/${DIGEST#sha256:}"
-          echo "pushed ${COMPANIONS_IMAGE}@${DIGEST} (${{ matrix.arch }})"
-
+          docker tag "$LOCAL_TAG" "$ARCH_TAG"
+          docker push "$ARCH_TAG"
+          reference=$(docker image inspect --format '{{index .RepoDigests 0}}' "$ARCH_TAG")
+          [[ $reference == "${COMPANIONS_IMAGE}@sha256:"* ]]
+          digest=${reference#*@}
+          [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]]
+          mkdir -p "$DIGEST_DIRECTORY"
+          touch "$DIGEST_DIRECTORY/${digest#sha256:}"
+          echo "pushed ${reference} (${{ matrix.arch }})"
       - name: Upload digest
-        if: needs.prep.outputs.publish == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: digests-companions-${{ matrix.arch }}
@@ -606,7 +709,7 @@ jobs:
 
   companions-manifest:
     name: Publish multi-arch companions manifest
-    needs: [prep, docker, companions]
+    needs: [prep, notices, docker-publish, companions-publish]
     if: needs.prep.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     permissions:
@@ -615,16 +718,6 @@ jobs:
     env:
       TAG: ghcr.io/logicocean/pgokf-companions:${{ needs.prep.outputs.version }}
     steps:
-      - name: Checkout release validation tooling
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-          path: release-tools
-
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-
       - name: Download per-arch digests
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -645,7 +738,11 @@ jobs:
         run: |
           shopt -s nullglob
           digests=(/tmp/digests/*)
-          cargo run --locked --manifest-path release-tools/Cargo.toml -p pgokf-verifier -- digests-check /tmp/digests
+          [[ ${#digests[@]} -eq 2 ]]
+          for d in "${digests[@]}"; do
+            [[ -f $d && ! -L $d && ! -s $d ]]
+            [[ $(basename "$d") =~ ^[0-9a-f]{64}$ ]]
+          done
           refs=()
           for d in "${digests[@]}"; do refs+=("${COMPANIONS_IMAGE}@sha256:$(basename "$d")"); done
           docker buildx imagetools create -t "$TAG" "${refs[@]}"
@@ -663,6 +760,7 @@ jobs:
       - name: Checkout release validation tooling
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ github.sha }}
           path: release-tools
 

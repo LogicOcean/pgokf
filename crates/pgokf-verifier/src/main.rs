@@ -48,6 +48,8 @@ const HELP: &str = r"pgokf-verifier commands:
   corpus --count N --out DIR --seed SEED [--manifest FILE]
   corpus-field MANIFEST FIELD
   corpus-check DIRECTORY
+  notices-render ROOT CARGO_ABOUT
+  notices-verify ROOT CARGO_ABOUT
   notices-check EXPECTED ACTUAL
   rpm-check SPEC
   pgxn-check META_JSON
@@ -79,6 +81,14 @@ fn run() -> Result<(), String> {
         return pgokf_verifier::upgrade::cli(&args[1..]);
     }
     match args.as_slice() {
+        [command, root, cargo_about] if command == "notices-render" => {
+            let bytes = pgokf_verifier::notices::render(Path::new(root), Path::new(cargo_about))?;
+            std::io::Write::write_all(&mut std::io::stdout().lock(), &bytes)
+                .map_err(|error| error.to_string())
+        }
+        [command, root, cargo_about] if command == "notices-verify" => {
+            pgokf_verifier::notices::verify(Path::new(root), Path::new(cargo_about))
+        }
         [command, expected, actual] if command == "notices-check" => {
             pgokf_verifier::artifact_checks::notices(Path::new(expected), Path::new(actual))
         }
@@ -366,6 +376,7 @@ fn run() -> Result<(), String> {
         [command, root] if command == "release-resolve" => {
             let intent = pgokf_verifier::release_runtime::resolve(
                 Path::new(root),
+                &std::env::var("GITHUB_EVENT_NAME").unwrap_or_default(),
                 &std::env::var("GITHUB_REF").unwrap_or_default(),
                 &std::env::var("RELEASE_TAG_INPUT").unwrap_or_default(),
             )?;

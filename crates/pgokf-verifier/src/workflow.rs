@@ -112,6 +112,9 @@ pub fn parse(source: &str) -> Result<Value, String> {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionContext {
+    pub workflow: String,
+    pub triggers: String,
+    pub permissions: String,
     pub env: String,
     pub jobs: BTreeMap<String, String>,
 }
@@ -171,7 +174,14 @@ pub fn execution_context(workflow: &Value) -> Result<ExecutionContext, String> {
         .and_then(Value::as_object)
         .ok_or("workflow jobs must be an object")?;
     let empty = json!({});
+    let triggers = workflow.get("on").ok_or("workflow triggers are required")?;
+    let permissions = workflow
+        .get("permissions")
+        .ok_or("workflow permissions are required")?;
     Ok(ExecutionContext {
+        workflow: digest(workflow)?,
+        triggers: digest(triggers)?,
+        permissions: digest(permissions)?,
         env: digest(workflow.get("env").unwrap_or(&empty))?,
         jobs: jobs
             .iter()
@@ -443,11 +453,12 @@ pub fn check_pages_policy(docs: &Value, contexts: &Contexts) -> Vec<String> {
 /// Stable packaging remains PG15–18; pinned PG19 compatibility is required.
 /// Exact execution-context contracts bind all current commands and conditions.
 #[must_use]
+#[allow(clippy::too_many_lines)] // One support-matrix boundary checks every required leg.
 pub fn check_support(packages: &Value, pgrx: &Value, contexts: &Contexts) -> Vec<String> {
     let mut errors = check_shell_policy(packages, contexts);
     errors.extend(check_shell_policy(pgrx, contexts));
     let stable = vec![json!(15), json!(16), json!(17), json!(18)];
-    for job in ["deb", "docker", "docker-manifest"] {
+    for job in ["deb", "docker", "docker-publish", "docker-manifest"] {
         match matrix(packages, job) {
             Ok(m)
                 if m.axes.get("pg") == Some(&stable)
@@ -511,6 +522,7 @@ pub fn check_support(packages: &Value, pgrx: &Value, contexts: &Contexts) -> Vec
         let needs = dependencies(&packages["jobs"][name]);
         if ![
             "prep",
+            "notices",
             "lint",
             "meta",
             "deb",
@@ -523,9 +535,24 @@ pub fn check_support(packages: &Value, pgrx: &Value, contexts: &Contexts) -> Vec
             errors.push(format!("publication gate: {name}"));
         }
     }
+    for (name, build) in [
+        ("docker-publish", "docker"),
+        ("companions-publish", "companions"),
+    ] {
+        let job = &packages["jobs"][name];
+        let needs = dependencies(job);
+        if job["if"] != "needs.prep.outputs.publish == 'true'"
+            || job["permissions"] != json!({"contents":"read","packages":"write"})
+            || !["prep", "notices", build]
+                .into_iter()
+                .all(|dependency| needs.contains(dependency))
+        {
+            errors.push(format!("dispatch-only publication authority: {name}"));
+        }
+    }
     for name in ["docker-manifest", "companions-manifest"] {
         let needs = dependencies(&packages["jobs"][name]);
-        if !["docker", "companions"]
+        if !["docker-publish", "companions-publish"]
             .into_iter()
             .all(|job| needs.contains(job))
         {
@@ -719,6 +746,78 @@ fn valid_graph(jobs: &serde_json::Map<String, Value>) -> bool {
         .all(|name| visit(name, jobs, &mut BTreeSet::new(), &mut done))
 }
 
+fn active_named_command(job: &Value, name: &str, command: &str) -> bool {
+    let matches: Vec<_> = job["steps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|step| step["name"] == name)
+        .collect();
+    matches.len() == 1
+        && matches[0]["run"] == command
+        && matches[0].get("if").is_none()
+        && matches[0].get("continue-on-error").is_none()
+        && matches[0].get("shell").is_none()
+}
+
+fn notice_job_contract(workflow: &Value, packages: bool) -> bool {
+    let job = &workflow["jobs"]["notices"];
+    if job.get("if").is_some()
+        || job.get("continue-on-error").is_some()
+        || job.get("defaults").is_some()
+    {
+        return false;
+    }
+    if (packages && dependencies(job) != BTreeSet::from(["prep"]))
+        || (!packages && job.get("needs").is_some())
+    {
+        return false;
+    }
+    let Some(steps) = job["steps"].as_array() else {
+        return false;
+    };
+    let checkouts: Vec<_> = steps
+        .iter()
+        .filter(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|uses| uses.starts_with("actions/checkout@"))
+        })
+        .collect();
+    let checkout_contract = if packages {
+        checkouts.len() == 2
+            && checkouts[0]["name"] == "Checkout selected release source"
+            && checkouts[0]["with"]
+                == json!({"persist-credentials":false,"ref":"${{ needs.prep.outputs.source_ref }}","path":"release-source"})
+            && checkouts[1]["name"] == "Checkout current provenance tooling"
+            && checkouts[1]["with"]
+                == json!({"persist-credentials":false,"ref":"${{ github.sha }}","path":"release-tools"})
+            && checkouts.iter().all(|checkout| {
+                checkout.get("if").is_none() && checkout.get("continue-on-error").is_none()
+            })
+    } else {
+        checkouts.len() == 1
+            && checkouts[0]["with"] == json!({"persist-credentials":false})
+            && checkouts[0].get("if").is_none()
+            && checkouts[0].get("continue-on-error").is_none()
+    };
+    if !checkout_contract {
+        return false;
+    }
+    let install = if packages {
+        "release-tools/scripts/install-cargo-about.sh \"$RUNNER_TEMP/cargo-about\""
+    } else {
+        "scripts/install-cargo-about.sh \"$RUNNER_TEMP/cargo-about\""
+    };
+    let verify = if packages {
+        "cargo run --locked --manifest-path release-tools/Cargo.toml -p pgokf-verifier -- notices-verify release-source \"$RUNNER_TEMP/cargo-about\""
+    } else {
+        "cargo run --locked -p pgokf-verifier -- notices-verify . \"$RUNNER_TEMP/cargo-about\""
+    };
+    active_named_command(job, "Install checksum-pinned cargo-about", install)
+        && active_named_command(job, "Verify deterministic third-party notices", verify)
+}
+
 /// Explicit release topology and source/tooling checkout contracts supplement
 /// the reviewed execution hashes. Unknown or cyclic publication graphs fail.
 #[must_use]
@@ -731,20 +830,54 @@ pub fn check_release(packages: &Value, ci: &Value, pgrx: &Value) -> Vec<String> 
     if !valid_graph(jobs) {
         errors.push("release dependency graph is cyclic, malformed or incomplete".into());
     }
+    if !notice_job_contract(packages, true) {
+        errors.push("authoritative package notice job changed".into());
+    }
+    if !notice_job_contract(ci, false) {
+        errors.push("authoritative CI notice verification changed".into());
+    }
     let inputs = &packages["on"]["workflow_dispatch"]["inputs"];
-    if inputs.get("release_tag").is_none() || inputs.get("publish_images").is_some() {
+    let release_tag = &inputs["release_tag"];
+    if inputs.as_object().is_none_or(|inputs| inputs.len() != 1)
+        || release_tag["type"] != "string"
+        || release_tag["required"] != false
+        || release_tag["default"] != ""
+        || release_tag["description"]
+            .as_str()
+            .is_none_or(str::is_empty)
+    {
         errors.push("immutable release tag input required".into());
     }
     let mut artifacts = BTreeSet::new();
     for (name, job) in jobs {
+        let package_write = job["permissions"]["packages"] == "write";
+        if package_write && job["if"] != "needs.prep.outputs.publish == 'true'" {
+            errors.push(format!(
+                "package-write authority is not dispatch-only: {name}"
+            ));
+        }
         let Some(steps) = job["steps"].as_array() else {
             continue;
         };
+        if package_write
+            && steps.iter().any(|step| {
+                step["uses"]
+                    .as_str()
+                    .is_some_and(|uses| uses.starts_with("actions/checkout@"))
+                    || step["run"]
+                        .as_str()
+                        .is_some_and(|run| run.contains("cargo run"))
+            })
+        {
+            errors.push(format!(
+                "{name}: repository-controlled code executes under package-write authority"
+            ));
+        }
         for step in steps {
             if step["uses"]
                 .as_str()
                 .is_some_and(|u| u.contains("upload-artifact@"))
-                || step["with"].get("push").is_some()
+                || step["with"]["push"] == true
                 || step["run"]
                     .as_str()
                     .is_some_and(|r| r.contains("imagetools create"))
@@ -759,8 +892,19 @@ pub fn check_release(packages: &Value, ci: &Value, pgrx: &Value) -> Vec<String> 
                     .as_str()
                     .is_some_and(|u| u.starts_with("actions/checkout@"))
             {
-                if step["name"] == "Checkout release validation tooling" {
-                    if step["with"] != json!({"ref":"${{ github.sha }}","path":"release-tools"}) {
+                if step["with"]["persist-credentials"] != false {
+                    errors.push(format!("{name}: checkout credentials must not persist"));
+                }
+                if matches!(
+                    step["name"].as_str(),
+                    Some(
+                        "Checkout release validation tooling"
+                            | "Checkout current provenance tooling"
+                    )
+                ) {
+                    if step["with"]
+                        != json!({"persist-credentials":false,"ref":"${{ github.sha }}","path":"release-tools"})
+                    {
                         errors.push("current tooling checkout changed".into());
                     }
                 } else if step["with"]["ref"] != "${{ needs.prep.outputs.source_ref }}" {
@@ -780,16 +924,51 @@ pub fn check_release(packages: &Value, ci: &Value, pgrx: &Value) -> Vec<String> 
             }
         }
     }
+    for name in ["docker-publish", "companions-publish"] {
+        let steps = jobs[name]["steps"].as_array();
+        let Some(steps) = steps else {
+            errors.push(format!("{name}: publication steps missing"));
+            continue;
+        };
+        let uses: Vec<_> = steps
+            .iter()
+            .filter_map(|step| step["uses"].as_str())
+            .collect();
+        let runs = steps
+            .iter()
+            .filter_map(|step| step["run"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if uses.iter().any(|uses| {
+            uses.starts_with("actions/checkout@") || uses.contains("build-push-action@")
+        }) || !uses
+            .iter()
+            .any(|uses| uses.starts_with("actions/download-artifact@"))
+            || !runs.contains("docker load --input")
+            || !runs.contains("docker push")
+        {
+            errors.push(format!(
+                "{name}: publication must push the downloaded smoke-tested image without rebuilding"
+            ));
+        }
+    }
     if artifacts
         != BTreeSet::from([
             "deb",
             "docker",
+            "docker-publish",
             "companions",
+            "companions-publish",
             "docker-manifest",
             "companions-manifest",
         ])
     {
         errors.push("artifact job inventory changed".into());
+    }
+    for name in &artifacts {
+        if !dependencies(&jobs[*name]).contains("notices") {
+            errors.push(format!("artifact bypasses notices: {name}"));
+        }
     }
     if let Some(steps) = packages["jobs"]["prep"]["steps"].as_array() {
         let resolve: Vec<_> = steps
@@ -826,8 +1005,10 @@ pub fn check_release(packages: &Value, ci: &Value, pgrx: &Value) -> Vec<String> 
         })
         .collect();
     if checkouts.len() != 2
-        || checkouts[0]["with"] != json!({"ref":"${{ inputs.source_ref || github.sha }}"})
-        || checkouts[1]["with"] != json!({"ref":"${{ github.sha }}","path":"release-tools"})
+        || checkouts[0]["with"]
+            != json!({"persist-credentials":false,"ref":"${{ inputs.source_ref || github.sha }}"})
+        || checkouts[1]["with"]
+            != json!({"persist-credentials":false,"ref":"${{ github.sha }}","path":"release-tools"})
         || checkouts
             .iter()
             .any(|s| s.get("if").is_some() || s.get("continue-on-error").is_some())
@@ -943,7 +1124,7 @@ mod tests {
         assert!(canonical(&json!(0.1)).is_err());
     }
     fn fixture() -> (Value, Contexts) {
-        let workflow = json!({"name":"example","defaults":{"run":{"shell":CLEAN_SHELL}},"jobs":{"test":{"steps":[{"run":"cargo test --locked"}]}}});
+        let workflow = json!({"name":"example","on":{"push":{}},"permissions":{"contents":"read"},"defaults":{"run":{"shell":CLEAN_SHELL}},"jobs":{"test":{"steps":[{"run":"cargo test --locked"}]}}});
         let contexts = BTreeMap::from([("example".into(), execution_context(&workflow).unwrap())]);
         (workflow, contexts)
     }

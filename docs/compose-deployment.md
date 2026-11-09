@@ -43,10 +43,11 @@ attach to it.
 - Docker Engine with Compose v2 (`docker compose`), on x86_64 or arm64.
 - A fast local disk for the cluster data, a directory tree for the OKF
   bundles, and a directory for backups.
-- The images. On a version tag CI publishes both to GHCR for `linux/amd64`
-  and `linux/arm64`; between releases, or for a private build, build them
-  locally from the repository root (the build is native to the daemon's
-  architecture; see [packaging/docker/README.md](https://github.com/LogicOcean/pgokf/blob/main/packaging/docker/README.md)):
+- The images. A validated packages-workflow dispatch with an immutable
+  `release_tag` publishes both to GHCR for `linux/amd64` and `linux/arm64`;
+  tag pushes build and smoke-test but do not publish. Between releases, or for a
+  private build, build them locally from the repository root (the build is
+  native to the daemon's architecture; see [packaging/docker/README.md](https://github.com/LogicOcean/pgokf/blob/main/packaging/docker/README.md)):
 
   ```bash
   docker build -f packaging/docker/Dockerfile --build-arg PG_MAJOR=18 -t pgokf:0.4.0-pg18 .
