@@ -26,7 +26,19 @@
 # (usr/lib/postgresql/N/lib, usr/share/postgresql/N/extension). Staging is a
 # single verbatim copy of that tree -- the one canonical "stage the pgrx
 # package output" step reused by every packaging format (see docs/packaging.md).
+#
+# Package metadata contract: environment-provided metadata (MAINTAINER,
+# DEB_REVISION) is validated before any build work and rendered as pure
+# data. It must not contain control characters (dpkg fields are
+# single-line), DEB_REVISION is restricted to the Debian revision charset
+# [A-Za-z0-9.+~], and no value is ever spliced into an executable sed or
+# shell program (see render_control below).
 set -euo pipefail
+
+# Byte-exact processing for the whole build: control-character detection,
+# version parsing, and filename construction must not vary with the host
+# locale.
+export LC_ALL=C
 
 # --------------------------------------------------------------------------
 # Resolve paths and parameters
@@ -50,6 +62,26 @@ case "${PG_MAJOR}" in
   *) die "unsupported PG_MAJOR '${PG_MAJOR}' (supported: 15 16 17 18)" ;;
 esac
 
+# Metadata validation gates. These run before any tool check or build work
+# so hostile metadata can never reach a packaging step. Control characters
+# are the shell/sed injection vector (a newline-bearing MAINTAINER once
+# became an executable sed `e` command) and dpkg fields are single-line.
+# The case pattern matches the whole value, so CR and LF are caught even
+# though line-oriented tools (grep, sed) never see the LF separator byte.
+die_if_control_chars() {
+  case "$2" in
+    *[[:cntrl:]]*) die "$1 must not contain control characters (CR, LF, TAB, ESC, ...)" ;;
+  esac
+}
+
+case "${DEB_REVISION}" in
+  *[!A-Za-z0-9.+~]*)
+    die "DEB_REVISION may contain only ASCII alphanumerics, '+', '.', '~' (Debian revision charset); got '${DEB_REVISION}'"
+    ;;
+esac
+[ -n "${MAINTAINER}" ] || die "MAINTAINER must not be empty"
+die_if_control_chars MAINTAINER "${MAINTAINER}"
+
 command -v dpkg-deb  >/dev/null 2>&1 || die "dpkg-deb not found (install the 'dpkg' package)"
 command -v cargo     >/dev/null 2>&1 || die "cargo not found"
 [ -x "${PG_CONFIG}" ] || die "pg_config not executable at '${PG_CONFIG}' (set PG_CONFIG or install postgresql-server-dev-${PG_MAJOR})"
@@ -57,8 +89,18 @@ command -v cargo     >/dev/null 2>&1 || die "cargo not found"
 # The extension version is the single source of truth for the package version.
 EXT_VERSION="$(sed -n "s/^default_version *= *'\\([^']*\\)'.*/\\1/p" "${EXTENSION_DIR}/pgokf.control")"
 [ -n "${EXT_VERSION}" ] || die "could not read default_version from ${EXTENSION_DIR}/pgokf.control"
+case "${EXT_VERSION}" in
+  [-.]*) die "extension version must not begin with '-' or '.': '${EXT_VERSION}'" ;;
+  *[!A-Za-z0-9.+~-]*)
+    die "extension version contains characters outside the Debian version charset: '${EXT_VERSION}'"
+    ;;
+esac
 
 ARCH="$(dpkg --print-architecture)"
+die_if_control_chars ARCH "${ARCH}"
+case "${ARCH}" in
+  ''|*[!A-Za-z0-9]*) die "unusable dpkg architecture '${ARCH}'" ;;
+esac
 DEB_VERSION="${EXT_VERSION}-${DEB_REVISION}"
 PKG_NAME="postgresql-${PG_MAJOR}-pgokf"
 DEB_FILE="${OUTPUT_DIR}/${PKG_NAME}_${DEB_VERSION}_${ARCH}.deb"
@@ -112,18 +154,63 @@ find "${PKG_ROOT}/usr/share" -type f -exec chmod 0644 {} +
 # 3. Render DEBIAN/control from the template
 # --------------------------------------------------------------------------
 INSTALLED_SIZE="$(du -k -s "${PKG_ROOT}/usr" | cut -f1)"
+case "${INSTALLED_SIZE}" in
+  ''|*[!0-9]*) die "could not compute a numeric Installed-Size (got '${INSTALLED_SIZE}')" ;;
+esac
 SYNOPSIS="Materialized PostgreSQL catalog for Open Knowledge Format bundles"
 
+# control_token_value <token>: the closed set of template tokens and the
+# validated values they render to. This lookup table is the only bridge
+# between template tokens and metadata; a token absent from it is fatal
+# (see render_control), so template drift cannot silently pass through.
+control_token_value() {
+  case "${1}" in
+    '@PG_MAJOR@')       printf '%s' "${PG_MAJOR}" ;;
+    '@DEB_VERSION@')    printf '%s' "${DEB_VERSION}" ;;
+    '@ARCH@')           printf '%s' "${ARCH}" ;;
+    '@MAINTAINER@')     printf '%s' "${MAINTAINER}" ;;
+    '@HOMEPAGE@')       printf '%s' "${HOMEPAGE}" ;;
+    '@INSTALLED_SIZE@') printf '%s' "${INSTALLED_SIZE}" ;;
+    '@SYNOPSIS@')       printf '%s' "${SYNOPSIS}" ;;
+    *) return 1 ;;
+  esac
+}
+
+# render_control <template> <output>: fixed-format, data-only rendering.
+# Each template line is scanned once for the fixed '@TOKEN@' delimiters and
+# every recognized token is replaced by its validated value, which is
+# appended as pure data with no substitution, escaping, or command
+# semantics. Metadata never becomes part of an executed program here: the
+# historic env-interpolated `sed -e "s|...|${MAINTAINER}|g"` construction
+# let a newline-bearing MAINTAINER close the substitute command and run an
+# arbitrary GNU sed `e` (shell) command with the build's exit status 0.
+render_control() {
+  local template="$1" output="$2" line out rest token value
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    out=''
+    while [[ "${line}" == *@* ]]; do
+      out+="${line%%@*}"
+      rest="${line#*@}"
+      if [[ "${rest}" != *@* ]]; then
+        # A single unterminated '@' is literal text, not a token.
+        out+='@'
+        line="${rest}"
+        break
+      fi
+      token="@${rest%%@*}@"
+      line="${rest#*@}"
+      if value="$(control_token_value "${token}")"; then
+        out+="${value}"
+      else
+        die "control.template contains undeclared token '${token}'"
+      fi
+    done
+    printf '%s\n' "${out}${line}"
+  done <"${template}" >"${output}"
+}
+
 mkdir -p "${PKG_ROOT}/DEBIAN"
-sed \
-  -e "s|@PG_MAJOR@|${PG_MAJOR}|g" \
-  -e "s|@DEB_VERSION@|${DEB_VERSION}|g" \
-  -e "s|@ARCH@|${ARCH}|g" \
-  -e "s|@MAINTAINER@|${MAINTAINER}|g" \
-  -e "s|@HOMEPAGE@|${HOMEPAGE}|g" \
-  -e "s|@INSTALLED_SIZE@|${INSTALLED_SIZE}|g" \
-  -e "s|@SYNOPSIS@|${SYNOPSIS}|g" \
-  "${SCRIPT_DIR}/control.template" > "${PKG_ROOT}/DEBIAN/control"
+render_control "${SCRIPT_DIR}/control.template" "${PKG_ROOT}/DEBIAN/control"
 
 log "Rendered DEBIAN/control:"
 sed 's/^/    /' "${PKG_ROOT}/DEBIAN/control" >&2

@@ -1490,12 +1490,16 @@
       "executable": true
     },
     "packaging/deb/build-deb.sh": {
-      "sha256": "67b80bd67cad673dda9327cc205b299d581d725baa4aebe2c80e24d01f6919c7",
+      "sha256": "6a9d95b62947d23a0f5d2c6081c52a44a68c880106186f73c014c84bc1a456b9",
       "executable": true
     },
     "packaging/deb/control.template": {
       "sha256": "92a7d58b1c1afc4dd767d10091e03cb81099241b6a69133c0bc1d774247ff675",
       "executable": false
+    },
+    "packaging/deb/test-build-deb.sh": {
+      "sha256": "757d65df935c55b65fd593d3e6011eb4d28550aa5cc399b64d62d0cb19b369ed",
+      "executable": true
     },
     "packaging/docker/Dockerfile": {
       "sha256": "53ee9ec35f1b5e56405a986d257df001082b7a949cfc03fcfbfce3539a8f9fb2",
