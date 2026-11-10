@@ -175,7 +175,7 @@ pub fn validate_rollback(manifest: &RollbackManifest) -> Result<(), String> {
         if !(15..=19).contains(&image.postgres_major)
             || image.postgres_image_tag
                 != if image.postgres_major == 19 {
-                    "19beta3".into()
+                    "19rc1".into()
                 } else {
                     image.postgres_major.to_string()
                 }
@@ -420,7 +420,7 @@ fn image_build_inner(
     let identity = crate::release_identity::source_identity_version(context, version)?;
     image_feature(context, postgres_major)?;
     let postgres_image_tag = if postgres_major == 19 {
-        "19beta3".into()
+        "19rc1".into()
     } else {
         postgres_major.to_string()
     };

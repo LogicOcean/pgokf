@@ -552,9 +552,10 @@ impl Drop for Service {
 mod tests {
     use super::*;
     use nix::unistd::Pid;
+    #[cfg(target_os = "macos")]
+    use std::os::unix::process::CommandExt as _;
     use std::{
         fs::File,
-        os::unix::process::CommandExt as _,
         process::{Command, Stdio},
     };
 

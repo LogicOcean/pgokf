@@ -232,19 +232,19 @@ services:
       - ./examples/sample-bundle:/bundles/sample:ro
 ```
 
-### PostgreSQL 19 Beta 3 compatibility (non-production)
+### PostgreSQL 19 RC 1 compatibility (non-production)
 
-`PG_MAJOR=19` selects pgrx's `pg19` feature; `PG_IMAGE_TAG=19beta3` selects
+`PG_MAJOR=19` selects pgrx's `pg19` feature; `PG_IMAGE_TAG=19rc1` selects
 an explicitly prerelease base. CI requires this nonpublishing test, including
 strict Clippy, pgrx database tests, and smoke/backup/restore. Optional provider
 packages are disabled for this leg. There is no stable `0.4.0-pg19` image or
-PG19 .deb. The PGDG `19` component and both server/dev Beta 3 versions are
+PG19 .deb. The PGDG `19` component and both server/dev RC 1 versions are
 verified; missing or changed packages fail closed. GA promotion requires a
 reviewed update to provisioning, matrices, guards, and documentation.
 
 ```bash
 docker build -f packaging/docker/Dockerfile --build-arg PG_MAJOR=19 \
-  --build-arg PG_IMAGE_TAG=19beta3 --build-arg WITH_PGVECTOR=0 \
+  --build-arg PG_IMAGE_TAG=19rc1 --build-arg WITH_PGVECTOR=0 \
   --build-arg WITH_PG_CRON=0 --build-arg WITH_PG_TEXTSEARCH=0 \
   -t pgokf-local-beta-test .
 SMOKE_WITH_OPTIONAL=0 packaging/docker/smoke-test.sh pgokf-local-beta-test 0.4.0

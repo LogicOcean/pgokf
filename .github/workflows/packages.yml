@@ -156,6 +156,13 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Install checksum-pinned cargo-about
         run: release-tools/scripts/install-cargo-about.sh "$RUNNER_TEMP/cargo-about"
+      # cargo-about resolves the complete release-source workspace under
+      # --frozen while this job only builds release-tools' pgokf-verifier; the
+      # remaining release lockfile entries must be prefetched with the
+      # identical --locked resolution.
+      - name: Prefetch locked release-source dependencies
+        working-directory: release-source
+        run: cargo fetch --locked
       - name: Verify deterministic third-party notices
         run: cargo run --locked --manifest-path release-tools/Cargo.toml -p pgokf-verifier -- notices-verify release-source "$RUNNER_TEMP/cargo-about"
 

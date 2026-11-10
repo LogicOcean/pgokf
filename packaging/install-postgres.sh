@@ -4,7 +4,7 @@ set -euo pipefail
 major=${1:?PostgreSQL major required}
 component=main
 image_tag=$major
-if [[ "$major" == 19 ]]; then component='main 19'; image_tag=19beta3; fi
+if [[ "$major" == 19 ]]; then component='main 19'; image_tag=19rc1; fi
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 verifier() {
     if [[ -n "${PGOKF_VERIFIER:-}" ]]; then "$PGOKF_VERIFIER" "$@";

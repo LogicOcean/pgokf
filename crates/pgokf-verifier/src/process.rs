@@ -247,13 +247,35 @@ mod unix {
 
         impl Eq for IdentityHandle {}
 
+        /// pidfd_open reports a vanished pid as ESRCH. Kernels carrying the
+        /// pidfs task-lookup series additionally report a pid whose task is in
+        /// its exit window as ENOENT, or as EINVAL before that series settled
+        /// (observed as os errors 2 and 22 on CI and container kernels). With
+        /// the empty flags this capture always passes, EINVAL cannot describe
+        /// the flag request, so all three mean the identity already terminated
+        /// and nothing is left to contain. Any other errno, or a nonempty flag
+        /// request, stays a capture failure.
+        pub(super) fn pidfd_open_reports_already_terminated(
+            flags: PidfdFlags,
+            error: rustix::io::Errno,
+        ) -> bool {
+            flags.is_empty()
+                && matches!(
+                    error,
+                    rustix::io::Errno::SRCH | rustix::io::Errno::NOENT | rustix::io::Errno::INVAL
+                )
+        }
+
         impl IdentityHandle {
             pub(super) fn capture(pid: u32) -> Result<Option<Self>, String> {
                 let raw = i32::try_from(pid).map_err(|error| error.to_string())?;
                 let pid_value = Pid::from_raw(raw).ok_or("process pid must be positive")?;
-                let fd = match pidfd_open(pid_value, PidfdFlags::empty()) {
+                let flags = PidfdFlags::empty();
+                let fd = match pidfd_open(pid_value, flags) {
                     Ok(fd) => fd,
-                    Err(error) if error == rustix::io::Errno::SRCH => return Ok(None),
+                    Err(error) if pidfd_open_reports_already_terminated(flags, error) => {
+                        return Ok(None);
+                    }
                     Err(error) => return Err(format!("pidfd_open failed for {pid}: {error}")),
                 };
                 let started = match process_start_ticks(pid) {
@@ -1192,6 +1214,7 @@ mod unix {
     #[cfg(test)]
     mod tests {
         use super::*;
+        #[cfg(target_os = "macos")]
         use std::os::unix::process::CommandExt as _;
 
         #[test]
@@ -1249,6 +1272,50 @@ mod unix {
             let signals = owned.signals_sent;
             owned.signal_group(Signal::SIGKILL);
             assert_eq!(owned.signals_sent, signals);
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn exited_pidfd_open_errnos_are_already_terminated() {
+            use super::identity_signal::pidfd_open_reports_already_terminated;
+            use rustix::{io::Errno, process::PidfdFlags};
+            // Classic kernels report a vanished pid as ESRCH. Kernels with the
+            // pidfs task-lookup series report a pid in its exit window as
+            // ENOENT, or as EINVAL before that series settled (os errors 2 and
+            // 22, both observed failing CI-identical containment paths). With
+            // the empty flags this capture always passes, all three must be
+            // already-terminated, and every other request stays fatal.
+            let empty = PidfdFlags::empty();
+            assert!(pidfd_open_reports_already_terminated(empty, Errno::SRCH));
+            assert!(pidfd_open_reports_already_terminated(empty, Errno::NOENT));
+            assert!(pidfd_open_reports_already_terminated(empty, Errno::INVAL));
+            assert!(!pidfd_open_reports_already_terminated(empty, Errno::PERM));
+            // A nonempty flag request keeps every errno, EINVAL included,
+            // fatal: the classification proves nothing about a rejected flag.
+            assert!(!pidfd_open_reports_already_terminated(
+                PidfdFlags::NONBLOCK,
+                Errno::INVAL
+            ));
+            assert!(!pidfd_open_reports_already_terminated(
+                PidfdFlags::NONBLOCK,
+                Errno::SRCH
+            ));
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn already_exited_process_is_already_terminated() {
+            use super::identity_signal::IdentityHandle;
+            let mut command = Command::new("/bin/sh");
+            command.arg("-c").arg("exit 0");
+            let mut child = command.spawn().unwrap();
+            let exited = child.id();
+            child.wait().unwrap();
+            let captured = IdentityHandle::capture(exited);
+            assert!(
+                captured.is_ok(),
+                "already-exited identity must be already-terminated, not an error: {captured:?}"
+            );
         }
     }
 }

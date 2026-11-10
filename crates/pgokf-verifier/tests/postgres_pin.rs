@@ -39,14 +39,14 @@ fn root() -> PathBuf {
 #[test]
 fn installed_beta_package_must_match_exact_release() {
     for (version, expected) in [
-        ("19~beta3-1.pgdg13+1", true),
-        ("19~beta2-1.pgdg13+1", false),
-        ("19~rc1-1", false),
+        ("19~rc1-1.pgdg13+1", true),
+        ("19~beta3-1.pgdg13+1", false),
+        ("19~rc2-1", false),
         ("19.0-1", false),
         ("", false),
     ] {
         assert_eq!(
-            pgokf_verifier::postgres_pin::package(19, "19beta3", version).is_ok(),
+            pgokf_verifier::postgres_pin::package(19, "19rc1", version).is_ok(),
             expected,
             "{version}"
         );
@@ -72,11 +72,11 @@ fn beta_image_must_have_exact_immutable_digest() {
 fn beta_provisioning_refuses_missing_drifted_and_failed_packages() {
     let original = std::fs::read_to_string(root().join("packaging/install-postgres.sh")).unwrap();
     for (scenario, candidate, expected) in [
-        ("ok", "19~beta3-1.pgdg24.04+1", true),
+        ("ok", "19~rc1-1.pgdg24.04+1", true),
         ("missing", "(none)", false),
-        ("drift", "19~beta4-1", false),
+        ("drift", "19~rc2-1", false),
         ("ga", "19.0-1", false),
-        ("install-failure", "19~beta3-1", false),
+        ("install-failure", "19~rc1-1", false),
     ] {
         let directory = tempfile::tempdir().unwrap();
         let target = |name| directory.path().join(name).to_str().unwrap().to_owned();
@@ -204,20 +204,16 @@ esac
     .unwrap();
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
     for (server, headers, failed, expected) in [
-        ("19~beta3-1", "19~beta3-1", "", true),
-        ("19~beta4-1", "19~beta3-1", "", false),
-        ("19~beta3-1", "19~beta4-1", "", false),
-        ("19~beta3-1", "19~beta3-1", "postgresql-19", false),
-        (
-            "19~beta3-1",
-            "19~beta3-1",
-            "postgresql-server-dev-19",
-            false,
-        ),
+        ("19~rc1-1", "19~rc1-1", "", true),
+        ("19~rc2-1", "19~rc1-1", "", false),
+        ("19~rc1-1", "19~rc2-1", "", false),
+        ("19~beta3-1", "19~rc1-1", "", false),
+        ("19~rc1-1", "19~rc1-1", "postgresql-19", false),
+        ("19~rc1-1", "19~rc1-1", "postgresql-server-dev-19", false),
     ] {
         let mut command =
             pgokf_verifier::process::CommandSpec::new(env!("CARGO_BIN_EXE_pgokf-verifier"));
-        command.args = ["postgres-check", "19", "19beta3"]
+        command.args = ["postgres-check", "19", "19rc1"]
             .into_iter()
             .map(Into::into)
             .collect();

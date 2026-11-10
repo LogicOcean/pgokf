@@ -74,6 +74,42 @@ fn release_notice_verification_uses_current_provenance_tooling() {
 }
 
 #[test]
+fn notice_verification_prefetches_locked_workspace_dependencies() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let load = |name| {
+        serde_yaml::from_str::<serde_yaml::Value>(
+            &fs::read_to_string(root.join(format!(".github/workflows/{name}.yml"))).unwrap(),
+        )
+        .unwrap()
+    };
+    let ci = load("ci");
+    let packages = load("packages");
+    // cargo-about resolves the complete workspace under --frozen while these
+    // jobs only build pgokf-verifier; every remaining lockfile entry must be
+    // prefetched with the identical --locked resolution before verification.
+    for (workflow, directory) in [(&ci, None), (&packages, Some("release-source"))] {
+        let steps = workflow["jobs"]["notices"]["steps"].as_sequence().unwrap();
+        let fetch = steps
+            .iter()
+            .position(|step| step["run"].as_str() == Some("cargo fetch --locked"))
+            .unwrap_or_else(|| panic!("locked dependency prefetch missing from notices"));
+        let verify = steps
+            .iter()
+            .position(|step| {
+                step["name"].as_str() == Some("Verify deterministic third-party notices")
+            })
+            .unwrap();
+        assert!(
+            fetch < verify,
+            "notices verification ran without prefetched dependencies"
+        );
+        let step = &steps[fetch];
+        assert_eq!(step["working-directory"].as_str(), directory);
+        assert!(step.get("if").is_none() && step.get("continue-on-error").is_none());
+    }
+}
+
+#[test]
 fn cargo_about_install_and_notice_verification_are_shared_and_pinned() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let installer = fs::read_to_string(root.join("scripts/install-cargo-about.sh")).unwrap();

@@ -70,6 +70,11 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Install checksum-pinned cargo-about
         run: scripts/install-cargo-about.sh "$RUNNER_TEMP/cargo-about"
+      # cargo-about resolves the complete workspace under --frozen while this
+      # job only builds pgokf-verifier; the remaining lockfile entries must be
+      # prefetched with the identical --locked resolution.
+      - name: Prefetch locked workspace dependencies
+        run: cargo fetch --locked
       - name: Verify deterministic third-party notices
         run: cargo run --locked -p pgokf-verifier -- notices-verify . "$RUNNER_TEMP/cargo-about"
 

@@ -65,7 +65,7 @@ table (the `version_comment` finalize block is the last entity emitted).
 All declared PG15–18 CI and packaging legs are required. Missing PGDG packages,
 failed provisioning or absent base images fail the workflow; there is no
 advisory success or skipped-coverage green. PG19 coverage is not established
-until its pinned **19 Beta 3**, nonpublishing actual clippy and in-database test steps complete. A provisioning
+until its pinned **19 RC 1**, nonpublishing actual clippy and in-database test steps complete. A provisioning
 failure blocks the support/release gate, even when other majors pass.
 `cargo test --locked -p pgokf-verifier` executes the missing-package
 failed-install and missing-image branches with local stubs and requires nonzero exits.

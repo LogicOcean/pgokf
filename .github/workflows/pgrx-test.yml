@@ -29,7 +29,7 @@ jobs:
         pg: [15, 16, 17, 18]
         include:
           - pg: 19
-            image_tag: 19beta3
+            image_tag: 19rc1
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -55,7 +55,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
-      - name: Verify immutable Beta 3 base
+      - name: Verify immutable RC 1 base
         if: matrix.pg == 19
         run: release-tools/packaging/check-beta-image.sh
 
@@ -146,7 +146,7 @@ jobs:
           cargo build --locked -p pgokf-mcp
           cargo run --locked -p pgokf-verifier -- mcp-golden . "$PGOKF_PG_CONFIG" "$PGOKF_MCP_BIN" "$RUNNER_TEMP/mcp-golden-evidence"
 
-      - name: Nonproduction PostgreSQL 19 Beta 3 image compatibility
+      - name: Nonproduction PostgreSQL 19 RC 1 image compatibility
         if: matrix.pg == 19
         run: |
           cargo run --locked --manifest-path release-tools/Cargo.toml -p pgokf-verifier -- compatibility-image . release-tools pgokf-beta-compat "$RUNNER_TEMP/beta-image.json"

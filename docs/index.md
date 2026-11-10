@@ -26,7 +26,7 @@ inside PostgreSQL, turning the database into a small self-contained install that
 needs no external file store.
 
 - **Extension name and SQL schema:** `pgokf`
-- **Supported PostgreSQL:** 15, 16, 17, 18 (PG19 Beta 3 compatibility testing only)
+- **Supported PostgreSQL:** 15, 16, 17, 18 (PG19 RC 1 compatibility testing only)
 - **Built with:** Rust (edition 2024) and [pgrx](https://github.com/pgcentralfoundation/pgrx) 0.19
 - **Search backends:** native PostgreSQL FTS by default; an optional
   `search_backend=bm25` mode routes search through Tiger Data `pg_textsearch`
