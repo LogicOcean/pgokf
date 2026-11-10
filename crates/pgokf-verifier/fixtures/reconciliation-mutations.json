@@ -196,6 +196,8 @@
   },
   {
     "name": "keep version at dev1",
+    "unit_test": "release::tests::current_control_declares_exact_package_version",
+    "failure_contains": "PGOKF_ASSERT:current_control_declares_exact_package_version:",
     "edits": [
       {
         "path": "pgokf--0.4.0-dev1.sql",
@@ -221,6 +223,8 @@
   },
   {
     "name": "rewrite dev1 in place",
+    "unit_test": "release::tests::current_control_declares_exact_package_version",
+    "failure_contains": "PGOKF_ASSERT:current_control_declares_exact_package_version:",
     "edits": [
       {
         "path": "pgokf--0.3.1--0.4.0-dev1.sql",
@@ -367,6 +371,8 @@
   },
   {
     "name": "keep version at dev2",
+    "unit_test": "release::tests::current_control_declares_exact_package_version",
+    "failure_contains": "PGOKF_ASSERT:current_control_declares_exact_package_version:",
     "edits": [
       {
         "path": "pgokf--0.4.0-dev2.sql",
@@ -392,6 +398,8 @@
   },
   {
     "name": "rewrite dev2 in place",
+    "unit_test": "release::tests::current_control_declares_exact_package_version",
+    "failure_contains": "PGOKF_ASSERT:current_control_declares_exact_package_version:",
     "edits": [
       {
         "path": "pgokf--0.4.0-dev1--0.4.0-dev2.sql",
@@ -494,6 +502,8 @@
   },
   {
     "name": "widen the exception to another table",
+    "unit_test": "positional::source_tests::exception_contract_cannot_widen",
+    "failure_contains": "PGOKF_ASSERT:exception_contract_cannot_widen:",
     "edits": [
       {
         "path": "tests/upgrade/catalog-exceptions.json",
@@ -534,6 +544,8 @@
   },
   {
     "name": "widen the runtime indexes",
+    "unit_test": "positional::source_tests::exception_contract_cannot_widen",
+    "failure_contains": "PGOKF_ASSERT:exception_contract_cannot_widen:",
     "edits": [
       {
         "path": "tests/upgrade/catalog-exceptions.json",
@@ -565,7 +577,13 @@
   },
   {
     "name": "comparison always equal",
-    "edits": [],
+    "edits": [
+      {
+        "path": "crates/pgokf-verifier/src/catalog.rs",
+        "before": "        == canonical_inventory(actual, allow_declared_order)?",
+        "after": "        == canonical_inventory(expected, allow_declared_order)?"
+      }
+    ],
     "operator": null,
     "legacy_diagnostic": "exception probe schema comment stale: UNSAFE ACCEPTANCE",
     "legacy_source_detector": null,
@@ -594,6 +612,8 @@
   },
   {
     "name": "positional insert in the product",
+    "unit_test": "positional::source_tests::product_sql_never_uses_positional_access",
+    "failure_contains": "PGOKF_ASSERT:product_sql_never_uses_positional_access:",
     "edits": [
       {
         "path": "crates/pgokf-web/src/user_store.rs",
@@ -607,6 +627,8 @@
   },
   {
     "name": "positional insert, registered",
+    "unit_test": "positional::source_tests::product_sql_never_uses_positional_access",
+    "failure_contains": "PGOKF_ASSERT:product_sql_never_uses_positional_access:",
     "edits": [
       {
         "path": "crates/pgokf-web/src/user_store.rs",
@@ -625,6 +647,8 @@
   },
   {
     "name": "select star in the product, registered",
+    "unit_test": "positional::source_tests::product_sql_never_uses_positional_access",
+    "failure_contains": "PGOKF_ASSERT:product_sql_never_uses_positional_access:",
     "edits": [
       {
         "path": "crates/pgokf-web/src/user_store.rs",
@@ -643,6 +667,8 @@
   },
   {
     "name": "returning star in the product, registered",
+    "unit_test": "positional::source_tests::product_sql_never_uses_positional_access",
+    "failure_contains": "PGOKF_ASSERT:product_sql_never_uses_positional_access:",
     "edits": [
       {
         "path": "crates/pgokf-web/src/session_store.rs",
@@ -674,6 +700,8 @@
   },
   {
     "name": "allow-list expansion",
+    "unit_test": "positional::source_tests::exception_contract_cannot_widen",
+    "failure_contains": "PGOKF_ASSERT:exception_contract_cannot_widen:",
     "edits": [
       {
         "path": "crates/pgokf-web/src/main.rs",
@@ -1104,7 +1132,7 @@
       {
         "path": "crates/pgokf-verifier/src/catalog.rs",
         "before": "role.comment.as_ref() != comments.get(name)",
-        "after": "false"
+        "after": "false && role.comment.as_ref() != comments.get(name)"
       }
     ],
     "operator": null,
@@ -1119,7 +1147,7 @@
       {
         "path": "crates/pgokf-verifier/src/catalog.rs",
         "before": "index.relation != relation",
-        "after": "false"
+        "after": "false && index.relation != relation"
       }
     ],
     "operator": null,
@@ -1237,12 +1265,12 @@
     "edits": [
       {
         "path": "crates/pgokf-verifier/src/catalog.rs",
-        "before": "        validate_relation_grants(&rows, &expected.catalog.extension_owner)?;",
-        "after": ""
+        "before": "    let readers = BTreeSet::from([",
+        "after": "    if true {\n        return Ok(());\n    }\n    let readers = BTreeSet::from(["
       }
     ],
     "operator": null,
-    "legacy_diagnostic": "shared catalog forgery survived:",
+    "legacy_diagnostic": "shared catalog forgery survived: grant option",
     "legacy_source_detector": null,
     "probe": "catalog-controls"
   },
@@ -1252,7 +1280,7 @@
       {
         "path": "crates/pgokf-verifier/src/catalog.rs",
         "before": "        validate_tenant_policies(&rows)?;",
-        "after": ""
+        "after": "        if false { validate_tenant_policies(&rows)?; }"
       }
     ],
     "operator": null,
@@ -1266,7 +1294,7 @@
       {
         "path": "crates/pgokf-verifier/src/catalog.rs",
         "before": "row.2.get(6).and_then(Value::as_str) != Some(owner)",
-        "after": "false"
+        "after": "false && row.2.get(6).and_then(Value::as_str) != Some(owner)"
       }
     ],
     "operator": null,
@@ -1282,7 +1310,7 @@
       {
         "path": "crates/pgokf-verifier/src/upgrade.rs",
         "before": "if SeedSnapshot::parse(before)? != SeedSnapshot::parse(after)?",
-        "after": "if false"
+        "after": "if false && SeedSnapshot::parse(before)? != SeedSnapshot::parse(after)?"
       }
     ],
     "operator": null,
@@ -1477,7 +1505,7 @@
       {
         "path": "crates/pgokf-verifier/src/catalog.rs",
         "before": "    validate_tiers(candidate, expected)",
-        "after": "    Ok(())"
+        "after": "    if false { validate_tiers(candidate, expected) } else { Ok(()) }"
       }
     ],
     "operator": null,
@@ -1612,7 +1640,7 @@
       {
         "path": "crates/pgokf-verifier/src/catalog.rs",
         "before": "!login.login",
-        "after": "false"
+        "after": "false && !login.login"
       }
     ],
     "operator": null,
@@ -1782,7 +1810,7 @@
       {
         "path": "crates/pgokf-verifier/src/reconciliation_mutations.rs",
         "before": "output.contains(marker)",
-        "after": "true"
+        "after": "{ let _ = marker; true }"
       }
     ],
     "operator": null,
@@ -1797,7 +1825,7 @@
       {
         "path": "crates/pgokf-verifier/src/reconciliation_mutations.rs",
         "before": "        && selected.iter().all(|test| {\n            output\n                .lines()\n                .filter(|line| *line == format!(\"test {test} ... ok\"))\n                .count()\n                == 1\n        })",
-        "after": "        && true"
+        "after": "        && { let _ = selected; true }"
       }
     ],
     "operator": null,

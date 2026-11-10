@@ -33,7 +33,13 @@ zip = { version = "9.4", default-features = false, features = ["deflate"] }
 uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31", features = ["fs", "signal", "process"] }
+nix = { version = "0.31", features = ["fs", "signal", "process", "user"] }
+rustix = { version = "1", features = ["process"] }
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+kqueue = "1.2"
+pgokf-process-handle = { version = "=0.4.0", path = "../pgokf-process-handle" }
 
 [lints]
 workspace = true

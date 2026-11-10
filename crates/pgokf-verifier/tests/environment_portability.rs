@@ -203,15 +203,29 @@ fn real_homebrew_uses_owned_formula_without_live_tap_writes() {
         "(version 1)(allow default)(deny file-write* (subpath {}))",
         serde_json::to_string(taps.to_str().unwrap()).unwrap()
     );
-    let output = Command::new("/usr/bin/sandbox-exec")
-        .args(["-p", &profile])
-        .arg(std::env::current_exe().unwrap())
-        .args(["--exact", "environment_worker", "--nocapture"])
-        .env("TMPDIR", &scratch)
-        .env("PGOKF_ENV_CONTROL", "homebrew")
-        .env("PGOKF_ENV_EVIDENCE", task.path())
-        .output()
-        .unwrap();
+    let mut command = pgokf_verifier::process::CommandSpec::new("/usr/bin/sandbox-exec");
+    command.args = [
+        "-p".into(),
+        profile.into(),
+        std::env::current_exe().unwrap().into_os_string(),
+        "--exact".into(),
+        "environment_worker".into(),
+        "--nocapture".into(),
+    ]
+    .into();
+    command
+        .env
+        .insert("TMPDIR".into(), scratch.as_os_str().to_owned());
+    command
+        .env
+        .insert("PGOKF_ENV_CONTROL".into(), "homebrew".into());
+    command.env.insert(
+        "PGOKF_ENV_EVIDENCE".into(),
+        task.path().as_os_str().to_owned(),
+    );
+    command.timeout = std::time::Duration::from_mins(1);
+    command.delegate_nested_supervision = true;
+    let output = command.run().unwrap();
     assert_eq!(
         inventory(&taps),
         before,

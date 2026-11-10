@@ -68,6 +68,48 @@ Native socket directories use compact names while retaining exclusive random
 creation; durable parity receipts use separately retained owned directories.
 PostgreSQL's platform socket pathname limit still applies to native probes.
 
+Native readiness probes share the existing one-minute startup deadline and
+supervise the owned server while `psql` runs. Both server pipes are drained
+during probes; an observed server exit interrupts and reaps the dependent
+probe. Output remains capped, with at most 4 KiB per stream in diagnostics.
+The retained `startup.json` records the deadline, each attempt, elapsed time,
+socket and data paths, child state, final SQL outcome and bounded output tails.
+Startup failures also record the cleanup result. Reaping the owned foreground
+server proves shutdown even when PostgreSQL exits before becoming ready.
+
+Service intent, start, readiness and stop receipts share the same identity,
+including campaign and case IDs. The reconciliation mutation runner assigns a
+fresh campaign ID and binds each case to its service receipts. Standalone
+callers can set `PGOKF_VERIFICATION_CAMPAIGN` and `PGOKF_VERIFICATION_CASE`;
+otherwise IDs are generated. These two diagnostic labels are retained, but the
+inherited environment is not serialized.
+
+Portable Rust fault controls cover child exit, output pressure, persistent
+refusal and live startup near the deadline. Opt-in native regressions exercise
+real PostgreSQL log pressure and a fatal startup configuration in owned scratch:
+
+```sh
+PGOKF_NATIVE_BINDIR="$(pg_config --bindir)" cargo test --locked -p pgokf-verifier \
+  --test startup_supervision native_postgres -- --ignored
+```
+
+The native pressure control uses `RAISE LOG` without creating product data.
+Native boundary controls also exercise a real server starting just before the
+original deadline, a blocked readiness probe that must not extend that deadline,
+and an abandoned Unix socket that PostgreSQL must replace and clean up. Run all
+startup controls serially and retain their printed service receipts:
+
+```sh
+PGOKF_NATIVE_BINDIR="$(pg_config --bindir)" cargo test --locked -p pgokf-verifier \
+  --test startup_supervision --test startup_native_boundaries \
+  -- --include-ignored --test-threads=1 --nocapture
+```
+
+Portable controls additionally require draining final shutdown diagnostics and
+bounding a blocked probe by the remaining startup budget. These focused tests do
+not establish native product parity or explain earlier failures whose process
+output was not retained.
+
 The Homebrew policy gate copies the formula into owned scratch and passes its
 absolute path to the real `Formulary.factory`. The subprocess uses Homebrew's
 documented developer mode for local formula paths; an explicit operator ban on
@@ -141,6 +183,13 @@ Set an external `CARGO_TARGET_DIR` to reuse a verifier build cache. Do not share
 that target concurrently with another source checkout or mutation campaign.
 The runner uses at most two build jobs, honors `CARGO_BUILD_JOBS=1`, and disables
 incremental compilation.
+
+Startup supervision implementation recipes are maintained in
+`crates/pgokf-verifier/fixtures/startup-mutations.json` and use the same
+`mutation-campaign` command. Their exact assertions cover supervision, draining,
+identity, diagnostics, cleanup, receipt publication and the original deadline.
+Recipes preserve references to otherwise removed bindings so warnings-denied
+compilation reaches the semantic assertion; compiler rejection earns no credit.
 
 ## Verification surfaces
 

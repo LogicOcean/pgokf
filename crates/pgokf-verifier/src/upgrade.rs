@@ -4,7 +4,9 @@ use crate::{catalog, json, process::CommandSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt::Write as _;
-use std::io::Write as _;
+use std::io::{Read as _, Seek as _, Write as _};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt as _;
 use std::{
     collections::BTreeMap,
     fs,
@@ -199,6 +201,380 @@ impl Report {
     }
 }
 
+fn finalize_startup_result(
+    readiness: Result<(), String>,
+    observation: &serde_json::Value,
+) -> Result<(), String> {
+    readiness?;
+    if let Some(error) = observation["pump_error"].as_str() {
+        return Err(format!("final startup observation failed: {error}"));
+    }
+    if observation["state"] != "running" {
+        return Err(format!(
+            "final startup observation is not running: {}",
+            observation["state"]
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Clone)]
+struct SemanticFailure {
+    phase: String,
+    oracle: String,
+    error: String,
+}
+
+struct PhaseStart {
+    phase: String,
+    sequence: u64,
+    started: std::time::Instant,
+}
+
+struct PhaseJournal {
+    file: std::cell::RefCell<fs::File>,
+    next_sequence: std::cell::Cell<u64>,
+    started: std::time::Instant,
+    campaign_id: Option<String>,
+    case_id: Option<String>,
+    #[cfg(unix)]
+    directory: PathBuf,
+    #[cfg(unix)]
+    directory_device: u64,
+    #[cfg(unix)]
+    directory_inode: u64,
+}
+impl PhaseJournal {
+    fn new(directory: &Path) -> Result<Self, String> {
+        #[cfg(unix)]
+        let directory_metadata = fs::metadata(directory).map_err(|error| error.to_string())?;
+        let path = directory.join("phase-journal.jsonl");
+        let file = fs::OpenOptions::new()
+            .create_new(true)
+            .append(true)
+            .open(&path)
+            .map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+        fs::File::open(directory)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| error.to_string())?;
+        Ok(Self {
+            file: std::cell::RefCell::new(file),
+            next_sequence: std::cell::Cell::new(0),
+            started: std::time::Instant::now(),
+            campaign_id: std::env::var("PGOKF_VERIFICATION_CAMPAIGN").ok(),
+            case_id: std::env::var("PGOKF_VERIFICATION_CASE").ok(),
+            #[cfg(unix)]
+            directory: directory.to_path_buf(),
+            #[cfg(unix)]
+            directory_device: directory_metadata.dev(),
+            #[cfg(unix)]
+            directory_inode: directory_metadata.ino(),
+        })
+    }
+    fn write(&self, value: &serde_json::Value) -> Result<(), String> {
+        #[cfg(unix)]
+        {
+            let metadata =
+                fs::symlink_metadata(&self.directory).map_err(|error| error.to_string())?;
+            if metadata.file_type().is_symlink()
+                || metadata.dev() != self.directory_device
+                || metadata.ino() != self.directory_inode
+            {
+                return Err("phase journal directory identity changed".into());
+            }
+        }
+        let mut bytes = serde_json::to_vec(value).map_err(|error| error.to_string())?;
+        bytes.push(b'\n');
+        let mut file = self.file.borrow_mut();
+        file.write_all(&bytes).map_err(|error| error.to_string())?;
+        file.sync_data().map_err(|error| error.to_string())
+    }
+    fn begin(&self, phase: &str) -> Result<PhaseStart, String> {
+        if phase.is_empty() {
+            return Err("phase journal name is empty".into());
+        }
+        let sequence = self.next_sequence.get();
+        self.next_sequence.set(sequence + 1);
+        let started = std::time::Instant::now();
+        let unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_millis();
+        self.write(&serde_json::json!({
+            "format_version": 1,
+            "sequence": sequence,
+            "phase": phase,
+            "event": "start",
+            "campaign_id": self.campaign_id,
+            "case_id": self.case_id,
+            "unix_ms": unix_ms,
+            "campaign_elapsed_ms": self.started.elapsed().as_millis(),
+        }))?;
+        Ok(PhaseStart {
+            phase: phase.into(),
+            sequence,
+            started,
+        })
+    }
+    fn finish(&self, start: &PhaseStart, output: &serde_json::Value) -> Result<(), String> {
+        let sequence = self.next_sequence.get();
+        self.next_sequence.set(sequence + 1);
+        let unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_millis();
+        self.write(&serde_json::json!({
+            "format_version": 1,
+            "sequence": sequence,
+            "phase": start.phase,
+            "event": "end",
+            "campaign_id": self.campaign_id,
+            "case_id": self.case_id,
+            "start_sequence": start.sequence,
+            "unix_ms": unix_ms,
+            "campaign_elapsed_ms": self.started.elapsed().as_millis(),
+            "elapsed_ms": start.started.elapsed().as_millis(),
+            "output": output,
+        }))
+    }
+    fn run<T>(
+        &self,
+        phase: &str,
+        operation: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let start = self.begin(phase)?;
+        let result = operation();
+        let output = match &result {
+            Ok(_) => serde_json::json!({"status":"success"}),
+            Err(error) => serde_json::json!({"status":"error","error":error}),
+        };
+        let journal = self.finish(&start, &output);
+        match (result, journal) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Ok(_), Err(error)) => Err(format!("phase journal end failed: {error}")),
+            (Err(error), Ok(())) => Err(error),
+            (Err(error), Err(journal)) => {
+                Err(format!("{error}; phase journal end failed: {journal}"))
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct SemanticState {
+    active: std::cell::RefCell<Option<String>>,
+    failure: std::cell::RefCell<Option<SemanticFailure>>,
+}
+impl SemanticState {
+    fn run<T>(
+        &self,
+        phase: &str,
+        operation: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        if phase.is_empty() || self.active.borrow().is_some() || self.failure.borrow().is_some() {
+            return Err("invalid nested semantic verification phase".into());
+        }
+        self.active.replace(Some(phase.into()));
+        let result = operation();
+        self.active.replace(None);
+        result
+    }
+    fn fail<T>(&self, oracle: &str, error: String) -> Result<T, String> {
+        let Some(phase) = self.active.borrow().clone() else {
+            return Err(error);
+        };
+        if oracle.is_empty() || self.failure.borrow().is_some() {
+            return Err("invalid semantic oracle transition".into());
+        }
+        self.failure.replace(Some(SemanticFailure {
+            phase,
+            oracle: oracle.into(),
+            error: error.clone(),
+        }));
+        Err(error)
+    }
+    fn failure(&self) -> Option<SemanticFailure> {
+        self.failure.borrow().clone()
+    }
+}
+
+#[derive(Clone)]
+struct VerificationContext {
+    path: PathBuf,
+    nonce: String,
+    campaign_id: String,
+    case_id: String,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VerificationIntent {
+    format_version: u32,
+    state: String,
+    nonce: String,
+    campaign_id: String,
+    case_id: String,
+}
+
+const SERVICE_RECEIPTS_ENV: &str = "PGOKF_VERIFICATION_SERVICE_RECEIPTS";
+const SERVICE_RECEIPTS_DEVICE_ENV: &str = "PGOKF_VERIFICATION_SERVICE_RECEIPTS_DEVICE";
+const SERVICE_RECEIPTS_INODE_ENV: &str = "PGOKF_VERIFICATION_SERVICE_RECEIPTS_INODE";
+
+pub(crate) fn validate_service_receipts(
+    path: &Path,
+    expected_device: Option<&str>,
+    expected_inode: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    if !path.is_absolute() {
+        return Err("service receipt directory must be absolute".into());
+    }
+    let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("service receipt path must be a directory, not a symlink".into());
+    }
+    let canonical = path.canonicalize().map_err(|error| error.to_string())?;
+    if canonical != path {
+        return Err("service receipt directory must be canonical".into());
+    }
+    #[cfg(unix)]
+    {
+        let device = metadata.dev().to_string();
+        let inode = metadata.ino().to_string();
+        if expected_device.is_some_and(|expected| expected != device)
+            || expected_inode.is_some_and(|expected| expected != inode)
+        {
+            return Err("service receipt directory identity differs".into());
+        }
+        Ok(serde_json::json!({
+            "path": canonical,
+            "device": device,
+            "inode": inode,
+        }))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (metadata, expected_device, expected_inode);
+        Err("service receipt directory identity requires Unix".into())
+    }
+}
+
+pub(crate) fn bind_service_receipts(
+    command: &mut CommandSpec,
+    path: &Path,
+) -> Result<serde_json::Value, String> {
+    let binding = validate_service_receipts(path, None, None)?;
+    command
+        .env
+        .insert(SERVICE_RECEIPTS_ENV.into(), path.as_os_str().into());
+    command.env.insert(
+        SERVICE_RECEIPTS_DEVICE_ENV.into(),
+        binding["device"]
+            .as_str()
+            .ok_or("service receipt device missing")?
+            .into(),
+    );
+    command.env.insert(
+        SERVICE_RECEIPTS_INODE_ENV.into(),
+        binding["inode"]
+            .as_str()
+            .ok_or("service receipt inode missing")?
+            .into(),
+    );
+    Ok(binding)
+}
+
+fn service_receipts_directory() -> Result<PathBuf, String> {
+    let path = std::env::var_os(SERVICE_RECEIPTS_ENV).map(PathBuf::from);
+    let device = std::env::var(SERVICE_RECEIPTS_DEVICE_ENV).ok();
+    let inode = std::env::var(SERVICE_RECEIPTS_INODE_ENV).ok();
+    if path.is_none() && device.is_none() && inode.is_none() {
+        return Ok(crate::scratch::directory("pgokf-parity-receipts-")?.keep());
+    }
+    let (Some(path), Some(device), Some(inode)) = (path, device, inode) else {
+        return Err("incomplete service receipt directory context".into());
+    };
+    validate_service_receipts(&path, Some(&device), Some(&inode))?;
+    Ok(path)
+}
+
+fn transition_verification_receipt(
+    context: &VerificationContext,
+    value: &serde_json::Value,
+) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let metadata = fs::symlink_metadata(&context.path).map_err(|error| error.to_string())?;
+        if !metadata.file_type().is_file()
+            || metadata.dev() != context.device
+            || metadata.ino() != context.inode
+        {
+            return Err("verification receipt identity differs".into());
+        }
+    }
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&context.path)
+        .map_err(|error| error.to_string())?;
+    #[cfg(unix)]
+    {
+        let metadata = file.metadata().map_err(|error| error.to_string())?;
+        if metadata.dev() != context.device || metadata.ino() != context.inode {
+            return Err("verification receipt identity differs".into());
+        }
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    let intent: VerificationIntent = json::from_slice(&bytes)?;
+    if intent.format_version != 3
+        || intent.state != "intent"
+        || intent.nonce != context.nonce
+        || intent.campaign_id != context.campaign_id
+        || intent.case_id != context.case_id
+    {
+        return Err("verification receipt intent differs".into());
+    }
+    let bytes = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
+    file.seek(std::io::SeekFrom::Start(0))
+        .map_err(|error| error.to_string())?;
+    file.set_len(0).map_err(|error| error.to_string())?;
+    file.write_all(&bytes).map_err(|error| error.to_string())?;
+    file.sync_all().map_err(|error| error.to_string())
+}
+
+enum CloseState {
+    Open,
+    Closed,
+}
+
+fn combine_cleanup(cleanup: Result<(), String>, journal: Result<(), String>) -> Result<(), String> {
+    match (cleanup, journal) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(journal)) => Err(format!("cleanup journal failed: {journal}")),
+        (Err(error), Err(journal)) => Err(format!("{error}; cleanup journal failed: {journal}")),
+    }
+}
+
+fn finish_cleanup_journal(
+    journal: &PhaseJournal,
+    phase: Result<PhaseStart, String>,
+    success: bool,
+) -> Result<(), String> {
+    phase.and_then(|phase| {
+        journal.finish(
+            &phase,
+            &serde_json::json!({"status": if success { "success" } else { "error" }}),
+        )
+    })
+}
+
 pub struct Cluster {
     pub bindir: PathBuf,
     service: Option<std::cell::RefCell<crate::service::Service>>,
@@ -206,8 +582,71 @@ pub struct Cluster {
     started: bool,
     docker: Option<crate::ownership::CreationReceipt>,
     receipts: PathBuf,
+    journal: PhaseJournal,
+    verification: Option<VerificationContext>,
+    semantic: SemanticState,
+    startup_succeeded: bool,
+    verification_published: bool,
+    close_state: CloseState,
 }
 impl Cluster {
+    fn verification_context() -> Result<Option<VerificationContext>, String> {
+        let path = std::env::var_os("PGOKF_VERIFICATION_RECEIPT").map(PathBuf::from);
+        let nonce = std::env::var("PGOKF_VERIFICATION_NONCE").ok();
+        let campaign_id = std::env::var("PGOKF_VERIFICATION_CAMPAIGN").ok();
+        let case_id = std::env::var("PGOKF_VERIFICATION_CASE").ok();
+        let device = std::env::var("PGOKF_VERIFICATION_DEVICE").ok();
+        let inode = std::env::var("PGOKF_VERIFICATION_INODE").ok();
+        if path.is_none() && nonce.is_none() && device.is_none() && inode.is_none() {
+            return Ok(None);
+        }
+        let (Some(path), Some(nonce), Some(campaign_id), Some(case_id), Some(device), Some(inode)) =
+            (path, nonce, campaign_id, case_id, device, inode)
+        else {
+            return Err("incomplete verification receipt context".into());
+        };
+        #[cfg(unix)]
+        {
+            Ok(Some(VerificationContext {
+                path,
+                nonce,
+                campaign_id,
+                case_id,
+                device: device.parse().map_err(|_| "invalid receipt device")?,
+                inode: inode.parse().map_err(|_| "invalid receipt inode")?,
+            }))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (path, nonce, campaign_id, case_id, device, inode);
+            Err("verification receipt identity requires Unix".into())
+        }
+    }
+
+    pub(crate) fn semantic<T>(
+        &self,
+        phase: &str,
+        operation: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.semantic.run(phase, operation)
+    }
+
+    pub(crate) fn observed<T>(
+        &self,
+        phase: &str,
+        operation: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.journal.run(phase, operation)
+    }
+
+    pub(crate) fn semantic_failure<T>(
+        &self,
+        oracle: &str,
+        error: impl Into<String>,
+    ) -> Result<T, String> {
+        self.semantic.fail(oracle, error.into())
+    }
+
     /// # Errors
     /// Requires installed `PostgreSQL` binaries and a private local socket.
     pub fn start(options: &Options) -> Result<Self, String> {
@@ -219,28 +658,39 @@ impl Cluster {
         let bindir = PathBuf::from(text(config.checked()?.stdout)?);
         // Reserve the Unix socket pathname budget for the caller's root.
         let work = crate::scratch::directory("p")?;
+        let receipts = service_receipts_directory()?;
+        let journal = PhaseJournal::new(&receipts)?;
         let mut cluster = Self {
             bindir,
             service: None,
             work,
             started: false,
             docker: None,
-            // Receipts must survive the cluster's temporary data directory.
-            receipts: crate::scratch::directory("pgokf-parity-receipts-")?.keep(),
+            // Receipts survive the cluster data directory and may be campaign-bound.
+            receipts,
+            journal,
+            verification: Self::verification_context()?,
+            semantic: SemanticState::default(),
+            startup_succeeded: false,
+            verification_published: false,
+            close_state: CloseState::Open,
         };
-        cluster
-            .command(
-                "initdb",
-                &[
-                    "-D".into(),
-                    cluster.data().into_os_string(),
-                    "-U".into(),
-                    "postgres".into(),
-                    "--auth=trust".into(),
-                    "--no-locale".into(),
-                ],
-            )?
-            .checked()?;
+        cluster.journal.run("startup.initdb", || {
+            cluster
+                .command(
+                    "initdb",
+                    &[
+                        "-D".into(),
+                        cluster.data().into_os_string(),
+                        "-U".into(),
+                        "postgres".into(),
+                        "--auth=trust".into(),
+                        "--no-locale".into(),
+                    ],
+                )?
+                .checked()
+                .map(|_| ())
+        })?;
         let mut conf = format!(
             "\nlisten_addresses = ''\nunix_socket_directories = {}\n",
             literal(cluster.work.path().to_str().ok_or("non-UTF8 socket path")?)
@@ -273,27 +723,122 @@ impl Cluster {
         let mut command =
             cluster.command("postgres", &["-D".into(), cluster.data().into_os_string()])?;
         command.timeout = Duration::from_hours(1);
-        cluster.service = Some(std::cell::RefCell::new(crate::service::Service::spawn(
-            &command,
-            &cluster.receipts.join("service.json"),
-        )?));
-        let deadline = std::time::Instant::now() + Duration::from_mins(1);
-        loop {
-            if cluster.sql("postgres", "SELECT 1;").is_ok() {
-                break;
+        let service = cluster.journal.run("startup.postgres-spawn", || {
+            crate::service::Service::spawn(&command, &cluster.receipts.join("service.json"))
+        })?;
+        cluster.service = Some(std::cell::RefCell::new(service));
+        cluster.finish_startup()
+    }
+    fn finish_startup(mut self) -> Result<Self, String> {
+        let start = std::time::Instant::now();
+        let mut attempts = Vec::new();
+        let readiness = self.journal.run("startup.readiness", || {
+            self.await_ready(start, Duration::from_mins(1), &mut attempts)
+        });
+        let (service_observation, service_health) = self.service.as_ref().map_or_else(
+            || {
+                let observation = serde_json::json!({
+                    "state": "missing",
+                    "pump_error": "service missing",
+                });
+                (observation, Err("service missing".into()))
+            },
+            |service| service.borrow_mut().checked_observation(),
+        );
+        let result = readiness
+            .and(service_health)
+            .and_then(|()| finalize_startup_result(Ok(()), &service_observation));
+        let mut receipt = serde_json::json!({
+            "identity": self.service.as_ref().map(|s| s.borrow().identity().clone()),
+            "deadline_ms": 60_000,
+            "data": self.data(), "socket": self.work.path(),
+            "elapsed_ms": start.elapsed().as_millis(), "attempts": attempts,
+            "service": service_observation,
+            "error": result.as_ref().err(),
+        });
+        if let Err(error) = result {
+            let receipts = self.receipts.clone();
+            let work = self.work.path().to_path_buf();
+            let cleanup = self.close();
+            if cleanup.is_err() {
+                self.work.disable_cleanup(true);
             }
-            if std::time::Instant::now() > deadline {
+            drop(self);
+            receipt["cleanup"] = serde_json::json!({
+                "error": cleanup.err(), "directory_removed": !work.exists(),
+            });
+            let publication =
+                crate::owned_docker::publish(&receipts.join("startup.json"), &receipt);
+            let summary = serde_json::json!({
+                "data": receipt["data"], "socket": receipt["socket"],
+                "elapsed_ms": receipt["elapsed_ms"], "attempts": attempts.len(),
+                "last_sql": attempts.last(), "service": receipt["service"],
+                "cleanup": receipt["cleanup"],
+            });
+            return Err(format!(
+                "{error}; startup diagnostics: {summary}; receipt: {}; publication: {publication:?}",
+                receipts.join("startup.json").display()
+            ));
+        }
+        crate::owned_docker::publish(&self.receipts.join("startup.json"), &receipt)?;
+        self.startup_succeeded = true;
+        Ok(self)
+    }
+    fn await_ready(
+        &self,
+        start: std::time::Instant,
+        budget: Duration,
+        attempts: &mut Vec<serde_json::Value>,
+    ) -> Result<(), String> {
+        let deadline = start + budget;
+        loop {
+            let service = self.service.as_ref().ok_or("service missing")?;
+            service.borrow_mut().check()?;
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
                 return Err("owned PostgreSQL startup timed out".into());
             }
-            cluster
-                .service
-                .as_mut()
-                .ok_or("service missing")?
-                .borrow_mut()
-                .check()?;
-            std::thread::sleep(Duration::from_millis(100));
+            // Do not replace the last completed SQL refusal with launch/setup
+            // noise from a probe that cannot plausibly start inside the
+            // original budget. Consume the exact remainder before refusing so
+            // the startup deadline remains the sole time authority.
+            if remaining <= Duration::from_millis(250) {
+                std::thread::sleep(remaining);
+                return Err("owned PostgreSQL startup timed out".into());
+            }
+            let mut command = self.sql_command("postgres", "SELECT 1;", "postgres")?;
+            command.timeout = remaining;
+            let mut service_error = None;
+            let result = command.checked_supervised(&mut || {
+                let result = service.borrow_mut().check();
+                if let Err(error) = &result {
+                    service_error = Some(error.clone());
+                }
+                result
+            });
+            attempts.push(serde_json::json!({
+                "elapsed_ms": start.elapsed().as_millis(),
+                "error": result.as_ref().err().map(|error| {
+                    String::from_utf8_lossy(&error.as_bytes()[error.len().saturating_sub(4096)..])
+                }),
+                "success": result.is_ok(),
+            }));
+            if let Some(error) = service_error {
+                return Err(error);
+            }
+            if result.is_ok() {
+                return if std::time::Instant::now() < deadline {
+                    Ok(())
+                } else {
+                    Err("owned PostgreSQL startup timed out".into())
+                };
+            }
+            service.borrow_mut().check()?;
+            std::thread::sleep(
+                Duration::from_millis(100)
+                    .min(deadline.saturating_duration_since(std::time::Instant::now())),
+            );
         }
-        Ok(cluster)
     }
     fn data(&self) -> PathBuf {
         self.work.path().join("data")
@@ -363,7 +908,35 @@ impl Cluster {
         Ok(command)
     }
     pub(crate) fn sql_as(&self, db: &str, statement: &str, user: &str) -> Result<String, String> {
-        text(self.sql_command(db, statement, user)?.checked()?.stdout)
+        text(
+            self.checked_dependent(&self.sql_command(db, statement, user)?)?
+                .stdout,
+        )
+    }
+
+    /// Run a dependent command while keeping the owned service drained.
+    ///
+    /// Contained services write through bounded platform streams (8 KiB
+    /// FIFOs under launchd containment), so a service-side error report
+    /// larger than the stream capacity blocks the writing service until a
+    /// reader drains it. Pumping only between commands stalls the command
+    /// path for the whole blocked write, so the service pump rides along
+    /// with the dependent command itself, on the same supervised loop that
+    /// already guards startup readiness.
+    fn run_dependent(&self, command: &CommandSpec) -> Result<std::process::Output, String> {
+        let Some(service) = &self.service else {
+            return command.run();
+        };
+        command.run_supervised(&mut || service.borrow_mut().check())
+    }
+
+    /// Checked variant of [`Cluster::run_dependent`] for commands whose
+    /// nonzero exit is itself a verification failure.
+    fn checked_dependent(&self, command: &CommandSpec) -> Result<std::process::Output, String> {
+        let Some(service) = &self.service else {
+            return command.checked();
+        };
+        command.checked_supervised(&mut || service.borrow_mut().check())
     }
     pub(crate) fn sql(&self, db: &str, statement: &str) -> Result<String, String> {
         self.sql_as(db, statement, "postgres")
@@ -382,13 +955,21 @@ impl Cluster {
         )?;
         Ok(())
     }
+    /// The bound service-receipt root that outlives the cluster data directory.
+    pub(crate) fn service_receipts(&self) -> &Path {
+        &self.receipts
+    }
 }
 impl Cluster {
-    fn close(&mut self) -> Result<(), String> {
+    pub(crate) fn close(&mut self) -> Result<(), String> {
+        if matches!(self.close_state, CloseState::Closed) {
+            return Ok(());
+        }
+        let cleanup_phase = self.journal.begin("cleanup");
         if let Some(proof) = &self.docker {
             use crate::owned_docker::{Docker, DurableStore, cleanup};
             let key = "pgokf.parity-run";
-            cleanup(
+            let result = cleanup(
                 &mut Docker::default(),
                 &mut DurableStore,
                 &proof.container.id,
@@ -396,32 +977,84 @@ impl Cluster {
                 &proof.ownership_label[key],
                 &self.receipts.join("delete.json"),
                 Some(proof),
-            )?;
-            self.docker = None;
-            return Ok(());
+            );
+            if result.is_ok() {
+                self.docker = None;
+            }
+            let journal = finish_cleanup_journal(&self.journal, cleanup_phase, result.is_ok());
+            let combined = combine_cleanup(result, journal);
+            if combined.is_ok() {
+                self.close_state = CloseState::Closed;
+            }
+            return combined;
         }
-        if self.started {
-            let stopped = self
-                .command(
-                    "pg_ctl",
-                    &[
-                        "-D".into(),
-                        self.data().into_os_string(),
-                        "-m".into(),
-                        "immediate".into(),
-                        "-w".into(),
-                        "stop".into(),
-                    ],
-                )
-                .and_then(|c| c.checked().map(|_| ()));
-            let reaped = self
-                .service
-                .as_ref()
-                .map_or(Ok(()), |service| service.borrow_mut().stop());
-            stopped.and(reaped)?;
-            self.started = false;
+        let pre_cleanup = self
+            .service
+            .as_ref()
+            .map(|service| service.borrow_mut().observation());
+        let service_running_before_cleanup = pre_cleanup.as_ref().is_some_and(|observation| {
+            observation["state"] == "running" && observation["pump_error"].is_null()
+        });
+        let cleanup = (|| {
+            if self.started {
+                let stopped = self
+                    .command(
+                        "pg_ctl",
+                        &[
+                            "-D".into(),
+                            self.data().into_os_string(),
+                            "-m".into(),
+                            "immediate".into(),
+                            "-w".into(),
+                            "stop".into(),
+                        ],
+                    )
+                    .and_then(|c| c.checked().map(|_| ()));
+                if let Some(service) = &self.service {
+                    service.borrow_mut().stop()?;
+                } else {
+                    stopped?;
+                }
+                self.started = false;
+            }
+            if self.work.path().exists() {
+                fs::remove_dir_all(self.work.path()).map_err(|error| error.to_string())?;
+            }
+            Ok(())
+        })();
+        let directory_removed = !self.work.path().exists();
+        let publication = if let Some(context) = &self.verification
+            && !self.verification_published
+        {
+            let semantic = self.semantic.failure();
+            let value = serde_json::json!({
+                "format_version": 3,
+                "state": "complete",
+                "nonce": context.nonce,
+                "campaign_id": context.campaign_id,
+                "case_id": context.case_id,
+                "startup_succeeded": self.startup_succeeded,
+                "semantic_phase": semantic.as_ref().map(|failure| failure.phase.as_str()),
+                "semantic_oracle": semantic.as_ref().map(|failure| failure.oracle.as_str()),
+                "semantic_error": semantic.as_ref().map(|failure| failure.error.as_str()),
+                "service_running_before_cleanup": service_running_before_cleanup,
+                "cleanup_succeeded": cleanup.is_ok() && directory_removed,
+            });
+            let result = transition_verification_receipt(context, &value);
+            if result.is_ok() {
+                self.verification_published = true;
+            }
+            result
+        } else {
+            Ok(())
+        };
+        let result = cleanup.and(publication);
+        let journal = finish_cleanup_journal(&self.journal, cleanup_phase, result.is_ok());
+        let combined = combine_cleanup(result, journal);
+        if combined.is_ok() {
+            self.close_state = CloseState::Closed;
         }
-        Ok(())
+        combined
     }
 }
 impl Drop for Cluster {
@@ -547,29 +1180,15 @@ pub fn check_committed_install(
     work.and(cleanup).and(restore)
 }
 
+/// Audit the installed extension against the exact committed source.
 /// # Errors
-/// Runs the full requested gate; a missing prerequisite is a failure.
-#[allow(
-    clippy::too_many_lines,
-    reason = "Sequential preflight and parity evidence ordering"
-)]
-pub fn run(options: &Options) -> Result<Report, String> {
-    if let Some(path) = &options.historical_install {
-        crate::historical::validate(&fs::read(path).map_err(|e| e.to_string())?)?;
-    }
-    let p = probes()?;
-    catalog::check_exceptions(&read(
-        options.root.join("tests/upgrade/catalog-exceptions.json"),
-    )?)?;
-    let version = crate::release::compatibility_source(&options.root)?;
-    let mut cluster = Cluster::start(options)?;
+/// Installed control, migration or historical SQL differing from source fails.
+pub(crate) fn verify_installed(cluster: &Cluster, options: &Options) -> Result<PathBuf, String> {
     let sharedir = cluster.external("pg_config", &["--sharedir"])?;
-    let extension = options
-        .extension_prefix
-        .as_ref()
-        .map_or(PathBuf::from(sharedir.trim()).join("extension"), |p| {
-            p.join("extension")
-        });
+    let extension = options.extension_prefix.as_ref().map_or_else(
+        || PathBuf::from(sharedir.trim()).join("extension"),
+        |p| p.join("extension"),
+    );
     equal(
         &read(options.root.join("crates/extension/pgokf.control"))?,
         &cluster.file(&extension.join("pgokf.control"))?,
@@ -608,6 +1227,54 @@ pub fn run(options: &Options) -> Result<Report, String> {
     }
     let historical = cluster.file(&extension.join("pgokf--0.2.0.sql"))?;
     crate::historical::validate(historical.as_bytes())?;
+    Ok(extension)
+}
+
+/// Build and validate the fresh current-version baseline database.
+/// # Errors
+/// Fresh install, acceptance or version identity failures refuse.
+pub(crate) fn fresh_baseline(
+    c: &Cluster,
+    p: &Probes,
+    inventory: &str,
+    version: &str,
+) -> Result<(String, String), String> {
+    c.sql("postgres", "CREATE DATABASE fresh;")?;
+    c.sql("fresh", "CREATE EXTENSION pgokf;")?;
+    validate_stage(
+        c,
+        "fresh",
+        inventory,
+        catalog::EmbeddingPolicy::NotRequested,
+    )?;
+    let expected = c.sql("fresh", inventory)?;
+    let metadata = c.sql("fresh", &p.function_metadata)?;
+    equal(
+        version,
+        &c.sql("fresh", "SELECT pgokf.version();")?,
+        "library version",
+    )?;
+    c.drop_catalog("fresh")?;
+    Ok((expected, metadata))
+}
+
+/// # Errors
+/// Runs the full requested gate; a missing prerequisite is a failure.
+#[allow(
+    clippy::too_many_lines,
+    reason = "Sequential preflight and parity evidence ordering"
+)]
+pub fn run(options: &Options, refusal_workers: usize) -> Result<Report, String> {
+    if let Some(path) = &options.historical_install {
+        crate::historical::validate(&fs::read(path).map_err(|e| e.to_string())?)?;
+    }
+    let p = probes()?;
+    catalog::check_exceptions(&read(
+        options.root.join("tests/upgrade/catalog-exceptions.json"),
+    )?)?;
+    let version = crate::release::compatibility_source(&options.root)?;
+    let mut cluster = Cluster::start(options)?;
+    let extension = verify_installed(&cluster, options)?;
     let mut report = Report::default();
     if let Some(provider) = &options.preload {
         equal(
@@ -624,58 +1291,52 @@ pub fn run(options: &Options) -> Result<Report, String> {
     }
     let inventory = read(options.root.join("tests/upgrade/inventory.sql"))?;
     let seed = read(options.root.join("tests/upgrade/seed.sql"))?;
-    cluster.sql("postgres", "CREATE DATABASE fresh;")?;
-    cluster.sql("fresh", "CREATE EXTENSION pgokf;")?;
-    validate_stage(
-        &cluster,
-        "fresh",
-        &inventory,
-        catalog::EmbeddingPolicy::NotRequested,
-    )?;
-    let expected = cluster.sql("fresh", &inventory)?;
-    let metadata = cluster.sql("fresh", &p.function_metadata)?;
-    equal(
-        &version,
-        &cluster.sql("fresh", "SELECT pgokf.version();")?,
-        "library version",
-    )?;
-    cluster.drop_catalog("fresh")?;
+    let (expected, metadata) = cluster.observed("parity.fresh-baseline", || {
+        fresh_baseline(&cluster, &p, &inventory, &version)
+    })?;
     report.passed(format!("fresh {version}"));
     let committed = options
         .root
         .join(format!("crates/extension/sql/pgokf--{version}.sql"));
     if committed.is_file() && options.docker_image.is_none() {
-        check_committed_install(
-            |d, s| cluster.sql(d, s),
-            &extension.join(committed.file_name().ok_or("install filename")?),
-            &committed,
-            &expected,
-            &inventory,
-            &version,
-        )?;
+        cluster.observed("parity.committed-installer", || {
+            check_committed_install(
+                |d, s| cluster.sql(d, s),
+                &extension.join(committed.file_name().ok_or("install filename")?),
+                &committed,
+                &expected,
+                &inventory,
+                &version,
+            )
+        })?;
         report.passed("committed installer");
     }
-    crate::reconciliation::run(
-        &cluster,
-        options,
-        &p,
-        &expected,
-        &metadata,
-        &inventory,
-        &seed,
-        &version,
-        &mut report,
-    )?;
-    if !options.reconciliation_only && options.probe.is_none() {
-        routes(
+    cluster.observed("parity.reconciliation", || {
+        crate::reconciliation::run(
             &cluster,
+            options,
             &p,
             &expected,
+            &metadata,
             &inventory,
             &seed,
             &version,
             &mut report,
-        )?;
+            refusal_workers,
+        )
+    })?;
+    if !options.reconciliation_only && options.probe.is_none() {
+        cluster.observed("parity.routes", || {
+            routes(
+                &cluster,
+                &p,
+                &expected,
+                &inventory,
+                &seed,
+                &version,
+                &mut report,
+            )
+        })?;
     }
     cluster.close()?;
     Ok(report)
@@ -705,7 +1366,13 @@ fn invariants(
     verify_seed(before, &c.sql(db, fp)?)?;
     validate_stage(c, db, inventory, catalog::EmbeddingPolicy::NotRequested)?;
     equal("stale:legacy_pre_0.3.0",&c.sql(db,"SELECT state || ':' || array_to_string(reason_codes, ',') FROM pgokf.bundle_freshness;")?,"legacy freshness")?;
-    catalog::compare_inventory(expected, &c.sql(db, inventory)?, declared)?;
+    let actual_inventory = c.sql(db, inventory)?;
+    if let Some(keys) = catalog::inventory_difference(expected, &actual_inventory, declared)? {
+        return c.semantic_failure(
+            "reconciled.catalog-equal-with-declared-order",
+            format!("catalog drift outside exact declared column-order exceptions: {keys:?}"),
+        );
+    }
     equal(
         "t",
         &c.sql(
@@ -977,10 +1644,29 @@ pub(crate) fn refusal(
     version: &str,
 ) -> Result<(), String> {
     let before = c.sql(db, inventory)?;
-    match c.sql(db, "ALTER EXTENSION pgokf UPDATE;") {
-        Ok(_) => return Err(format!("unsafe acceptance: {diagnostic}")),
-        Err(e) if e.contains(diagnostic) => (),
-        Err(e) => return Err(format!("wrong refusal: {e}")),
+    let command = c.sql_command(db, "ALTER EXTENSION pgokf UPDATE;", "postgres")?;
+    let output = c.run_dependent(&command)?;
+    if let Some(service) = &c.service {
+        service.borrow_mut().check()?;
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if output.status.success() {
+        return c.semantic_failure(
+            "refusal.update-rejected",
+            format!("unsafe acceptance: {diagnostic}"),
+        );
+    }
+    if output.status.code() != Some(3) {
+        return Err(format!(
+            "dependent psql failure during refusal: {}: {}",
+            output.status, stderr
+        ));
+    }
+    if !stderr.contains(diagnostic) {
+        return c.semantic_failure(
+            "refusal.diagnostic-matched",
+            format!("wrong refusal: {stderr}"),
+        );
     }
     equal(&before, &c.sql(db, inventory)?, "refusal atomicity")?;
     equal(
@@ -992,6 +1678,19 @@ pub(crate) fn refusal(
         "refusal version",
     )
 }
+/// Exact-oracle refusal scheduling: the serial runner (1) or three private
+/// shard commands (3). Any other count is unmeasured and refuses.
+const DEFAULT_REFUSAL_WORKERS: usize = 3;
+/// # Errors
+/// Rejects any worker count other than the serial runner or three shards.
+fn parse_refusal_workers(value: &str) -> Result<usize, String> {
+    match value {
+        "1" => Ok(1),
+        "3" => Ok(DEFAULT_REFUSAL_WORKERS),
+        _ => Err("refusal workers must be exactly 1 or 3".into()),
+    }
+}
+
 /// # Errors
 /// Rejects unknown options and failed verification.
 pub fn cli(args: &[String]) -> Result<(), String> {
@@ -1014,6 +1713,7 @@ fn cli_mode(args: &[String], probe: Option<Probe>) -> Result<(), String> {
     };
     let mut contract_output = None;
     let mut controls_output = None;
+    let mut refusal_workers = DEFAULT_REFUSAL_WORKERS;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -1059,6 +1759,10 @@ fn cli_mode(args: &[String], probe: Option<Probe>) -> Result<(), String> {
             "--operator-sql" => {
                 o.operator_sql = Some(iter.next().ok_or("operator SQL missing")?.into());
             }
+            "--refusal-workers" => {
+                refusal_workers =
+                    parse_refusal_workers(iter.next().ok_or("refusal workers missing")?.as_str())?;
+            }
             _ => return Err(format!("unknown parity option: {arg}")),
         }
     }
@@ -1068,7 +1772,7 @@ fn cli_mode(args: &[String], probe: Option<Probe>) -> Result<(), String> {
     if let Some(output) = contract_output {
         return reference(&o, &output);
     }
-    let report = run(&o)?;
+    let report = run(&o, refusal_workers)?;
     println!(
         "{}",
         serde_json::to_string(&report).map_err(|e| e.to_string())?
@@ -1113,7 +1817,8 @@ impl Cluster {
     fn docker_start(options: &Options) -> Result<Self, String> {
         use crate::owned_docker::{Docker, DockerApi, DurableStore, create};
         // Validate the root before even persistent receipt creation.
-        let receipts = crate::scratch::directory("pgokf-parity-receipts-")?.keep();
+        let receipts = service_receipts_directory()?;
+        let journal = PhaseJournal::new(&receipts)?;
         let work = crate::scratch::directory("p")?;
         let mut docker = Docker::default();
         let value = uuid::Uuid::new_v4().to_string();
@@ -1145,6 +1850,12 @@ impl Cluster {
             started: false,
             docker: Some(proof),
             receipts,
+            journal,
+            verification: Self::verification_context()?,
+            semantic: SemanticState::default(),
+            startup_succeeded: false,
+            verification_published: false,
+            close_state: CloseState::Open,
         };
         docker.call(&[
             "start".into(),
@@ -1260,6 +1971,8 @@ impl Cluster {
             }
             std::thread::sleep(Duration::from_millis(200));
         }
+        let mut cluster = cluster;
+        cluster.startup_succeeded = true;
         Ok(cluster)
     }
 }
@@ -1472,43 +2185,90 @@ fn catalog_control_cases(
 pub fn catalog_controls(options: &Options, output: &Path) -> Result<(), String> {
     let mut cluster = Cluster::start(options)?;
     let inventory = read(options.root.join("tests/upgrade/inventory.sql"))?;
-    for db in ["reference", "candidate"] {
-        cluster.sql("postgres", &format!("CREATE DATABASE {db};"))?;
-        cluster.sql(db, "CREATE EXTENSION pgokf;")?;
-        if let Some(provider) = &options.preload {
-            cluster.sql(db,&format!("CREATE EXTENSION {provider} CASCADE; SELECT pgokf.set_config('search_backend','\"bm25\"'::jsonb); SELECT pgokf.rebuild_search_index();"))?;
-        }
-    }
-    for db in ["reference", "candidate"] {
-        prepare_embedding(&cluster, db, options)?;
-    }
-    let reference = capture(&cluster, "reference", &inventory, "")?;
-    let contract = acceptance(&reference, options.embedding_policy);
-    let baseline = capture(&cluster, "candidate", &inventory, "")?;
-    catalog::validate_acceptance(&contract, &baseline, false)?;
-    crate::owned_docker::publish(&output.with_extension("reference.json"), &contract)?;
-    let mutations = catalog_control_cases(options, &contract);
-    let mut results = vec![];
-    for (i, (label, sql)) in mutations.iter().enumerate() {
-        let candidate = capture(&cluster, "candidate", &inventory, sql)?;
-        let result = catalog::validate_acceptance(&contract, &candidate, false);
-        crate::owned_docker::publish(&output.with_extension(format!("{i}.json")), &candidate)?;
-        if result.is_ok() {
-            return Err(format!("catalog control survived: {label}"));
-        }
-        if *label != "third index" {
-            let forged = acceptance(&candidate, options.embedding_policy);
-            if catalog::validate_acceptance(&forged, &candidate, false).is_ok() {
-                return Err(format!("shared catalog forgery survived: {label}"));
+    cluster.observed("catalog-controls.database-setup", || {
+        for db in ["reference", "candidate"] {
+            cluster.sql("postgres", &format!("CREATE DATABASE {db};"))?;
+            cluster.sql(db, "CREATE EXTENSION pgokf;")?;
+            if let Some(provider) = &options.preload {
+                cluster.sql(db,&format!("CREATE EXTENSION {provider} CASCADE; SELECT pgokf.set_config('search_backend','\"bm25\"'::jsonb); SELECT pgokf.rebuild_search_index();"))?;
             }
         }
-        results.push(serde_json::json!({"control":label,"rejected":true,"reason":result.err()}));
-    }
-    let after = capture(&cluster, "candidate", &inventory, "")?;
-    catalog::validate_acceptance(&contract, &after, false)?;
-    crate::owned_docker::publish(output, &results)?;
-    cluster.sql("postgres", "DROP DATABASE reference;")?;
-    cluster.drop_catalog("candidate")?;
+        Ok(())
+    })?;
+    cluster.observed("catalog-controls.embedding-setup", || {
+        for db in ["reference", "candidate"] {
+            prepare_embedding(&cluster, db, options)?;
+        }
+        Ok(())
+    })?;
+    let reference = cluster.observed("catalog-controls.reference-capture", || {
+        capture(&cluster, "reference", &inventory, "")
+    })?;
+    let contract = acceptance(&reference, options.embedding_policy);
+    let baseline = cluster.observed("catalog-controls.baseline-capture", || {
+        capture(&cluster, "candidate", &inventory, "")
+    })?;
+    cluster.observed("catalog-controls.baseline-validation", || {
+        catalog::validate_acceptance(&contract, &baseline, false)
+    })?;
+    cluster.observed("catalog-controls.reference-publication", || {
+        crate::owned_docker::publish(&output.with_extension("reference.json"), &contract)
+    })?;
+    let mutations = catalog_control_cases(options, &contract);
+    let mut results = vec![];
+    cluster.semantic("catalog-controls", || {
+        for (i, (label, sql)) in mutations.iter().enumerate() {
+            let phase = format!("catalog-controls.mutation-{i:02}-{label}");
+            cluster.observed(&phase, || {
+                let candidate = capture(&cluster, "candidate", &inventory, sql)?;
+                let result = catalog::validate_acceptance(&contract, &candidate, false);
+                crate::owned_docker::publish(
+                    &output.with_extension(format!("{i}.json")),
+                    &candidate,
+                )?;
+                if result.is_ok() {
+                    return cluster.semantic_failure(
+                        "catalog-controls.fixed-contract-rejected",
+                        format!("catalog control survived: {label}"),
+                    );
+                }
+                if *label != "third index" {
+                    let forged = acceptance(&candidate, options.embedding_policy);
+                    if catalog::validate_acceptance(&forged, &candidate, false).is_ok() {
+                        let oracle = match *label {
+                            "column grant" => "catalog-controls.column-grant-forgery-rejected",
+                            "tenant policy expression" => {
+                                "catalog-controls.tenant-policy-forgery-rejected"
+                            }
+                            _ => "catalog-controls.shared-forgery-rejected",
+                        };
+                        return cluster.semantic_failure(
+                            oracle,
+                            format!("shared catalog forgery survived: {label}"),
+                        );
+                    }
+                }
+                results.push(serde_json::json!({
+                    "control":label,
+                    "rejected":true,
+                    "reason":result.err()
+                }));
+                Ok(())
+            })?;
+        }
+        Ok(())
+    })?;
+    cluster.observed("catalog-controls.final-capture-validation", || {
+        let after = capture(&cluster, "candidate", &inventory, "")?;
+        catalog::validate_acceptance(&contract, &after, false)
+    })?;
+    cluster.observed("catalog-controls.result-publication", || {
+        crate::owned_docker::publish(output, &results)
+    })?;
+    cluster.observed("catalog-controls.database-cleanup", || {
+        cluster.sql("postgres", "DROP DATABASE reference;")?;
+        cluster.drop_catalog("candidate")
+    })?;
     cluster.close()
 }
 
@@ -1563,7 +2323,7 @@ pub fn compatibility(root: &Path, pg_config: &Path) -> Result<(), String> {
         };
         let result = (|| {
             fs::write(&path, sql).map_err(|e| e.to_string())?;
-            run(&Options {
+            let options = Options {
                 root: root.into(),
                 pg_config: pg_config.into(),
                 preload: None,
@@ -1576,7 +2336,8 @@ pub fn compatibility(root: &Path, pg_config: &Path) -> Result<(), String> {
                 probe: None,
                 embedding_policy: catalog::EmbeddingPolicy::NotRequested,
                 embedding_dimensions: None,
-            })
+            };
+            run(&options, DEFAULT_REFUSAL_WORKERS)
         })();
         let restored = if let Some(bytes) = before {
             fs::write(&path, bytes)
@@ -1687,6 +2448,130 @@ fn prepare_embedding(cluster: &Cluster, db: &str, options: &Options) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn durable_phase_journal_preserves_an_unfinished_phase() {
+        let directory = tempfile::tempdir().unwrap();
+        let journal = PhaseJournal::new(directory.path()).unwrap();
+        let _unfinished = journal.begin("case00.catalog-controls").unwrap();
+        let bytes = fs::read(directory.path().join("phase-journal.jsonl")).unwrap();
+        let lines = bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>();
+        assert_eq!(lines.len(), 1);
+        let event: serde_json::Value = json::from_slice(lines[0]).unwrap();
+        assert_eq!(event["phase"], "case00.catalog-controls");
+        assert_eq!(event["event"], "start");
+        assert_eq!(event["sequence"], 0);
+
+        let root = tempfile::tempdir().unwrap();
+        let owned = root.path().join("owned");
+        let displaced = root.path().join("displaced");
+        fs::create_dir(&owned).unwrap();
+        let journal = PhaseJournal::new(&owned).unwrap();
+        let phase = journal.begin("identity-bound").unwrap();
+        fs::rename(&owned, &displaced).unwrap();
+        fs::create_dir(&owned).unwrap();
+        assert!(
+            journal
+                .finish(&phase, &serde_json::json!({"status":"success"}))
+                .unwrap_err()
+                .contains("directory identity changed")
+        );
+    }
+    #[test]
+    fn final_startup_observation_must_still_be_healthy() {
+        let exited = serde_json::json!({
+            "state": "exited exit status: 23",
+            "pump_error": null,
+        });
+        assert!(finalize_startup_result(Ok(()), &exited).is_err());
+        let pump_failed = serde_json::json!({
+            "state": "running",
+            "pump_error": "service output cap exceeded",
+        });
+        assert!(finalize_startup_result(Ok(()), &pump_failed).is_err());
+        let running = serde_json::json!({"state": "running", "pump_error": null});
+        assert!(finalize_startup_result(Ok(()), &running).is_ok());
+        assert!(finalize_startup_result(Err("readiness failed".into()), &running).is_err());
+    }
+    #[test]
+    fn panic_inside_semantic_phase_is_not_a_semantic_failure() {
+        let state = SemanticState::default();
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = state.run("reconciled", || -> Result<(), String> {
+                panic!("injected semantic panic")
+            });
+        }));
+        assert!(panic.is_err());
+        assert!(state.failure().is_none());
+    }
+    #[test]
+    fn semantic_state_authenticates_only_an_explicit_oracle_failure() {
+        let state = SemanticState::default();
+        state.run("first", || Ok::<_, String>(())).unwrap();
+        assert!(state.failure().is_none());
+        let dependent = state
+            .run("reconciled", || {
+                Err::<(), _>("retired overload: dependent psql exit 72".into())
+            })
+            .unwrap_err();
+        assert_eq!(dependent, "retired overload: dependent psql exit 72");
+        assert!(state.failure().is_none());
+        let error = state
+            .run("reconciled", || {
+                state.fail::<()>(
+                    "reconciled.retired-semantic-absent",
+                    "retired overload: exact".into(),
+                )
+            })
+            .unwrap_err();
+        assert_eq!(error, "retired overload: exact");
+        let failure = state.failure().unwrap();
+        assert_eq!(failure.phase, "reconciled");
+        assert_eq!(failure.oracle, "reconciled.retired-semantic-absent");
+        assert_eq!(failure.error, "retired overload: exact");
+        assert!(state.run("later", || Ok::<_, String>(())).is_err());
+    }
+    #[test]
+    fn verification_receipt_transition_requires_matching_parent_intent() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("receipt.json");
+        fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "format_version": 3,
+                "state": "intent",
+                "nonce": "nonce-b",
+                "campaign_id": "campaign-a",
+                "case_id": "case-a",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let metadata = fs::metadata(&path).unwrap();
+        let context = VerificationContext {
+            path: path.clone(),
+            nonce: "nonce-a".into(),
+            campaign_id: "campaign-a".into(),
+            case_id: "case-a".into(),
+            #[cfg(unix)]
+            device: metadata.dev(),
+            #[cfg(unix)]
+            inode: metadata.ino(),
+        };
+        let completed = serde_json::json!({
+            "format_version": 2,
+            "state": "complete",
+            "nonce": "nonce-a",
+            "campaign_id": "campaign-a",
+            "case_id": "case-a",
+        });
+        assert!(transition_verification_receipt(&context, &completed).is_err());
+        let retained: serde_json::Value = json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(retained["state"], "intent");
+        assert_eq!(retained["nonce"], "nonce-b");
+    }
     #[test]
     fn seed_rows_and_all_fields_are_preserved() {
         let good = "bundles:{\"id\":1,\"name\":\"fixture\"}\nconcept_metadata:{\"key\":\"fixture\",\"value\":{\"preserved\":true}}\nconcept_source:{\"raw_content\":\"\\\\x000aff\",\"byte_size\":3}\nconcepts:{\"id\":\"entry\",\"body\":\"preserved\"}";
@@ -1803,6 +2688,18 @@ mod tests {
         );
     }
     #[test]
+    fn refusal_worker_options_fail_closed() {
+        assert_eq!(parse_refusal_workers("1").unwrap(), 1);
+        assert_eq!(parse_refusal_workers("3").unwrap(), 3);
+        for rejected in ["0", "2", "4", "", "three", " 3", "31"] {
+            crate::semantic_assert!(
+                "refusal_worker_options_fail_closed",
+                parse_refusal_workers(rejected).is_err(),
+                "{rejected}"
+            );
+        }
+    }
+    #[test]
     fn standalone_always_cleans_and_restores() {
         for failure in ["none", "create", "inventory", "version", "cleanup"] {
             let dir = tempfile::tempdir().unwrap();
@@ -1851,5 +2748,222 @@ mod tests {
                 assert!(calls.iter().any(|s| s.starts_with("DROP ROLE")));
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Dependent-command service supervision. Contained services write through
+    // bounded platform streams (8 KiB FIFOs under launchd containment), so a
+    // service-side error report larger than the stream capacity blocks the
+    // writing service until a reader drains it. These fixtures reproduce the
+    // regression shape without a real PostgreSQL: a fake service emits an
+    // oversized error report (or dies) while a dependent psql command runs.
+
+    fn executable_script(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::write(path, body).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn wait_for_marker(path: &Path, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            if path.exists() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        path.exists()
+    }
+
+    /// Start a real `Cluster` against a fake binary directory. `{m}` in
+    /// `service_template` expands to the marker directory: the fake service
+    /// runs the template after `trigger` appears; the fake psql exits 0 until
+    /// `arm` exists, then publishes `psql-running`, holds the session open
+    /// until `release` appears, and prints 32 KiB on stdout.
+    fn fake_cluster(service_template: &str) -> (Cluster, PathBuf) {
+        let root = tempfile::tempdir().unwrap().keep();
+        let bindir = root.join("bin");
+        let markers = root.join("markers");
+        fs::create_dir(&bindir).unwrap();
+        fs::create_dir(&markers).unwrap();
+        let m = markers.display().to_string();
+        executable_script(
+            &bindir.join("pg_config"),
+            &format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", bindir.display()),
+        );
+        executable_script(
+            &bindir.join("initdb"),
+            &"#!/bin/sh\nmkdir -p \"$2\"\n: > \"$2/postgresql.conf\"\nexit 0\n".replace("{m}", &m),
+        );
+        executable_script(&bindir.join("pg_ctl"), "#!/bin/sh\nexit 0\n");
+        executable_script(
+            &bindir.join("postgres"),
+            &service_template.replace("{m}", &m),
+        );
+        executable_script(
+            &bindir.join("psql"),
+            &r#"#!/bin/sh
+if [ ! -e "{m}/arm" ]; then exit 0; fi
+touch "{m}/psql-running"
+while [ ! -e "{m}/started-writing" ]; do /bin/sleep 0.02; done
+/usr/bin/head -c 32768 /dev/zero
+while [ ! -e "{m}/release" ]; do /bin/sleep 0.02; done
+exit 0
+"#
+            .replace("{m}", &m),
+        );
+        let options = Options {
+            root: root.clone(),
+            pg_config: bindir.join("pg_config"),
+            preload: None,
+            extension_prefix: None,
+            operator_sql: None,
+            reconciliation_only: false,
+            docker_image: None,
+            historical_install: None,
+            provider_package: None,
+            probe: None,
+            embedding_policy: catalog::EmbeddingPolicy::NotRequested,
+            embedding_dimensions: None,
+        };
+        let cluster = Cluster::start(&options).unwrap_or_else(|error| {
+            panic!(
+                "fake cluster start failed: {error}; markers: {}; bindir: {}",
+                markers.display(),
+                bindir.display()
+            )
+        });
+        fs::write(markers.join("arm"), b"").unwrap();
+        (cluster, markers)
+    }
+
+    #[test]
+    fn dependent_command_drains_service_output_above_fifo_capacity() {
+        let (mut cluster, markers) = fake_cluster(
+            r#"#!/bin/sh
+while [ ! -e "{m}/trigger" ]; do /bin/sleep 0.05; done
+touch "{m}/started-writing"
+i=0
+while [ "$i" -lt 64 ]; do
+/usr/bin/head -c 1024 /dev/zero >&2
+i=$((i + 1))
+/bin/sleep 0.02
+done
+touch "{m}/write-done"
+/bin/sleep 300
+"#,
+        );
+        let start = std::time::Instant::now();
+        let outcome = std::thread::scope(|scope| {
+            let gate = scope.spawn(|| -> Result<(), String> {
+                fs::write(markers.join("trigger"), b"").map_err(|e| e.to_string())?;
+                if !wait_for_marker(&markers.join("started-writing"), Duration::from_secs(5)) {
+                    return Err("service never began its error report".into());
+                }
+                // The service is writing a 64 KiB report while the dependent
+                // command runs. The command path must drain it concurrently;
+                // the bounded wait keeps a regression loud in seconds instead
+                // of hanging until a session timer truncates the write.
+                if !wait_for_marker(&markers.join("write-done"), Duration::from_secs(10)) {
+                    fs::write(markers.join("release"), b"").map_err(|e| e.to_string())?;
+                    return Err(format!(
+                        "service error report never completed while a dependent command ran \
+                         (elapsed {:?}); the service stream must be pumped during the command",
+                        start.elapsed()
+                    ));
+                }
+                fs::write(markers.join("release"), b"").map_err(|e| e.to_string())?;
+                Ok(())
+            });
+            let sql = cluster.sql("fresh", "SELECT 1;");
+            let gate_result = gate
+                .join()
+                .map_err(|_| "gate thread panicked".to_string())
+                .and_then(|result| result);
+            sql.and_then(|output| gate_result.map(move |()| output))
+        });
+        let closed = cluster.close().map_err(|e| format!("cleanup failed: {e}"));
+        let outcome = outcome.and_then(|output| closed.map(move |()| output));
+        let output = outcome.unwrap();
+        // The command's own result must not be starved by service pumping.
+        assert_eq!(
+            output.len(),
+            32768,
+            "dependent command result was starved by service pumping"
+        );
+        let observation = cluster
+            .service
+            .as_ref()
+            .expect("service survives close")
+            .borrow_mut()
+            .observation();
+        // The whole oversized report must have been drained and captured —
+        // not abandoned mid-write by a timer truncation path.
+        assert_eq!(
+            observation["output_bytes"],
+            serde_json::json!(65536u64),
+            "service error report was truncated: {observation}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_mins(1),
+            "supervised write resolved via the timer-truncation path: {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn dependent_command_fails_closed_when_service_exits_mid_command() {
+        let (mut cluster, markers) = fake_cluster(
+            r#"#!/bin/sh
+while [ ! -e "{m}/trigger" ]; do /bin/sleep 0.05; done
+touch "{m}/started-writing"
+exit 17
+"#,
+        );
+        let outcome = std::thread::scope(|scope| {
+            let gate = scope.spawn(|| -> Result<(), String> {
+                if !wait_for_marker(&markers.join("psql-running"), Duration::from_secs(5)) {
+                    return Err("dependent command never started".into());
+                }
+                // The dependent command is now running; kill the service
+                // underneath it. A supervised path must observe the death and
+                // fail the command closed instead of returning a stale
+                // success after the session drifts from its service.
+                fs::write(markers.join("trigger"), b"").map_err(|e| e.to_string())?;
+                if !wait_for_marker(&markers.join("started-writing"), Duration::from_secs(5)) {
+                    return Err("service never exited".into());
+                }
+                fs::write(markers.join("release"), b"").map_err(|e| e.to_string())?;
+                Ok(())
+            });
+            let sql = cluster.sql("fresh", "SELECT 1;");
+            let gate_result = gate
+                .join()
+                .map_err(|_| "gate thread panicked".to_string())
+                .and_then(|result| result);
+            sql.and(gate_result)
+        });
+        let error = outcome.expect_err("dependent command must fail closed when its service dies");
+        assert!(
+            error.contains("service exited exit status: 17"),
+            "unexpected failure shape: {error}"
+        );
+        let closed = cluster.close().map_err(|e| format!("cleanup failed: {e}"));
+        closed.expect("cluster cleanup after mid-command service death");
+    }
+
+    #[test]
+    fn drain_paths_move_pre_containment_pipe_sized_chunks() {
+        // Contained stdio under launchd is an OS-fixed 8 KiB FIFO (measured
+        // 8,192 bytes on this host; std::process pipes measure 65,536), with
+        // no macOS knob to enlarge it. No behavior may depend on a stdio
+        // capacity below the pre-containment pipe size: the supervised pump
+        // keeps the bounded streams drained regardless, and every buffer
+        // the machinery itself controls is the explicit 64 KiB
+        // pre-containment capacity, never a platform default.
+        assert_eq!(crate::service::SERVICE_PUMP_CHUNK, 64 * 1024);
+        assert_eq!(crate::process::COMMAND_DRAIN_CHUNK, 64 * 1024);
+        #[cfg(target_os = "macos")]
+        assert_eq!(crate::process::launchd::STDIN_CHUNK, 64 * 1024);
     }
 }

@@ -488,6 +488,20 @@ fn canonical_inventory_mode(
     Ok(output)
 }
 
+pub(crate) fn inventory_difference(
+    expected: &str,
+    actual: &str,
+    allow_declared_order: bool,
+) -> Result<Option<BTreeSet<(String, String)>>, String> {
+    if canonical_inventory(expected, allow_declared_order)?
+        == canonical_inventory(actual, allow_declared_order)?
+    {
+        Ok(None)
+    } else {
+        Ok(Some(differing_keys(expected, actual)?))
+    }
+}
+
 /// # Errors
 /// Rejects invalid inventories or differences after permitted normalization.
 pub fn compare_inventory(
@@ -495,12 +509,9 @@ pub fn compare_inventory(
     actual: &str,
     allow_declared_order: bool,
 ) -> Result<(), String> {
-    if canonical_inventory(expected, allow_declared_order)?
-        != canonical_inventory(actual, allow_declared_order)?
-    {
+    if let Some(keys) = inventory_difference(expected, actual, allow_declared_order)? {
         return Err(format!(
-            "catalog drift outside exact declared column-order exceptions: {:?}",
-            differing_keys(expected, actual)?
+            "catalog drift outside exact declared column-order exceptions: {keys:?}"
         ));
     }
     Ok(())

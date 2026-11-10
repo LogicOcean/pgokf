@@ -1819,9 +1819,20 @@ mod source_tests {
         );
     }
     #[test]
+    fn product_sql_never_uses_positional_access() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        crate::semantic_assert!(
+            "product_sql_never_uses_positional_access",
+            product_statements(&root).is_ok()
+        );
+    }
+    #[test]
     fn exception_contract_cannot_widen() {
         let bytes = include_bytes!("../../../tests/upgrade/catalog-exceptions.json");
-        assert!(check_exceptions(bytes).is_ok());
+        crate::semantic_assert!(
+            "exception_contract_cannot_widen",
+            check_exceptions(bytes).is_ok()
+        );
         let original: serde_json::Value = crate::json::from_slice(bytes).unwrap();
         for field in ["column_order", "runtime_indexes", "positional_access"] {
             let mut mutated = original.clone();

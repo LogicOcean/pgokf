@@ -11,7 +11,7 @@ const HELP: &str = r"pgokf-verifier commands:
          [--preload PROVIDER] [--provider-package PATH] [--historical-install SQL] [--extension-prefix DIR]
          [--reconciliation-only] [--operator-sql SQL]
          [--controls-output OUTPUT] [--contract-output OUTPUT]
-         [--embedding-policy not_requested|rebuilt] [--embedding-dim N]
+         [--embedding-policy not_requested|rebuilt] [--embedding-dim N] [--refusal-workers 1|3]
   reconciliation-mutations --results NEW_FILE [--pg-config PATH] [--preload PROVIDER]
                            [--extension-prefix DIR] [--only NAME]
   compatibility-parity ROOT PG_CONFIG
@@ -79,6 +79,9 @@ fn run() -> Result<(), String> {
     }
     if args.first().is_some_and(|a| a == "parity") {
         return pgokf_verifier::upgrade::cli(&args[1..]);
+    }
+    if args.first().is_some_and(|a| a == "reconciliation-shard") {
+        return pgokf_verifier::reconciliation::shard_cli(&args[1..]);
     }
     match args.as_slice() {
         [command, root, cargo_about] if command == "notices-render" => {

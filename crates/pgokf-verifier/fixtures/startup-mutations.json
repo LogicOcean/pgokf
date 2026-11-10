@@ -1,0 +1,114 @@
+{
+  "mutations": [
+    {
+      "name": "omit-probe-supervision",
+      "path": "crates/pgokf-verifier/src/process.rs",
+      "before": "supervise().map_err(|error| {",
+      "after": "{ let _ = &supervise; Ok::<(), String>(()) }.map_err(|error| {",
+      "test": "child_exit_interrupts_blocked_readiness",
+      "target": {
+        "integration": "startup_supervision"
+      },
+      "failure_contains": "PGOKF_ASSERT: dead service must interrupt probe"
+    },
+    {
+      "name": "omit-service-drain",
+      "path": "crates/pgokf-verifier/src/service.rs",
+      "before": "self.pump()?;\n        if let Some(status) = self.child.try_wait()",
+      "after": "if let Some(status) = self.child.try_wait()",
+      "test": "dependent_probe_does_not_block_service_output",
+      "target": {
+        "integration": "startup_supervision"
+      },
+      "failure_contains": "PGOKF_ASSERT: drained service must become ready"
+    },
+    {
+      "name": "lose-campaign-identity",
+      "path": "crates/pgokf-verifier/src/service.rs",
+      "before": "std::env::var(\"PGOKF_VERIFICATION_CAMPAIGN\")",
+      "after": "std::env::var(\"PGOKF_MISSING_CAMPAIGN\")",
+      "test": "child_exit_interrupts_blocked_readiness",
+      "target": {
+        "integration": "startup_supervision"
+      },
+      "failure_contains": "PGOKF_ASSERT: campaign identity"
+    },
+    {
+      "name": "lose-stop-identity",
+      "path": "crates/pgokf-verifier/src/service.rs",
+      "before": "\"identity\":self.identity,\"observation\":observation",
+      "after": "\"identity\":serde_json::Value::Null,\"observation\":observation",
+      "test": "child_exit_interrupts_blocked_readiness",
+      "target": {
+        "integration": "startup_supervision"
+      },
+      "failure_contains": "PGOKF_ASSERT: stopped identity"
+    },
+    {
+      "name": "lose-service-stderr",
+      "path": "crates/pgokf-verifier/src/service.rs",
+      "before": "\"stderr_tail\": String::from_utf8_lossy(&self.errors[self.errors.len().saturating_sub(4096)..])",
+      "after": "\"stderr_tail\": \"\"",
+      "test": "child_exit_interrupts_blocked_readiness",
+      "target": {
+        "integration": "startup_supervision"
+      },
+      "failure_contains": "PGOKF_ASSERT: service exit diagnostics"
+    },
+    {
+      "name": "reject-reaped-cleanup",
+      "path": "crates/pgokf-verifier/src/upgrade.rs",
+      "before": "service.borrow_mut().stop()?;\n            } else {",
+      "after": "service.borrow_mut().stop()?;\n                stopped?;\n            } else {",
+      "test": "exited_owned_service_proves_cleanup_without_pg_ctl",
+      "target": {
+        "integration": "startup_supervision"
+      },
+      "failure_contains": "PGOKF_ASSERT: owned data cleanup"
+    },
+    {
+      "name": "omit-failed-startup-receipt",
+      "path": "crates/pgokf-verifier/src/upgrade.rs",
+      "before": "crate::owned_docker::publish(&receipts.join(\"startup.json\"), &receipt)",
+      "after": "Ok::<(), String>(())",
+      "test": "child_exit_interrupts_blocked_readiness",
+      "target": {
+        "integration": "startup_supervision"
+      },
+      "failure_contains": "PGOKF_ASSERT: startup receipt"
+    },
+    {
+      "name": "extend-readiness-probe-budget",
+      "path": "crates/pgokf-verifier/src/upgrade.rs",
+      "before": "command.timeout = remaining;",
+      "after": "command.timeout = Duration::from_mins(2);",
+      "test": "blocked_probe_cannot_extend_original_budget",
+      "target": {
+        "integration": "startup_supervision"
+      },
+      "failure_contains": "PGOKF_ASSERT: original probe budget"
+    },
+    {
+      "name": "shorten-original-startup-budget",
+      "path": "crates/pgokf-verifier/src/upgrade.rs",
+      "before": "self.await_ready(start, Duration::from_mins(1), &mut attempts)",
+      "after": "self.await_ready(start, Duration::from_secs(55), &mut attempts)",
+      "test": "delayed_live_startup_within_original_budget_succeeds",
+      "target": {
+        "integration": "startup_supervision"
+      },
+      "failure_contains": "PGOKF_ASSERT: startup within original budget"
+    },
+    {
+      "name": "omit-shutdown-drain",
+      "path": "crates/pgokf-verifier/src/service.rs",
+      "before": "loop {\n            let _ = self.pump();\n            if self.child.try_wait()",
+      "after": "loop {\n            if self.child.try_wait()",
+      "test": "shutdown_drains_final_service_diagnostics",
+      "target": {
+        "integration": "startup_supervision"
+      },
+      "failure_contains": "PGOKF_ASSERT: shutdown drains final diagnostics"
+    }
+  ]
+}

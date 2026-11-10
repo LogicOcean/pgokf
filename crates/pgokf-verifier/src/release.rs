@@ -284,6 +284,14 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn current_control_declares_exact_package_version() {
+        let control = include_str!("../../extension/pgokf.control");
+        crate::semantic_assert!(
+            "current_control_declares_exact_package_version",
+            compatibility_identity(control, env!("CARGO_PKG_VERSION")).is_ok()
+        );
+    }
 }
 
 #[cfg(test)]

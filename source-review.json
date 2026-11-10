@@ -74,11 +74,11 @@
       "executable": false
     },
     "Cargo.lock": {
-      "sha256": "61276a205473fb2dff5b19cd86a6081f082b1e432d45962245ad89387838ab9d",
+      "sha256": "7529282da8ff8007387587ab2ed819fcdfb391eda93b76fd3be9c99497559840",
       "executable": false
     },
     "Cargo.toml": {
-      "sha256": "8c69df28a13dc3089f1b87ca43b55c622871ab0933e832bc59fb0d35e492973c",
+      "sha256": "70bc0477c0b8991d23720c42dd6694253df252f1cda7bdefa95906342b64a82a",
       "executable": false
     },
     "LICENSE": {
@@ -102,7 +102,7 @@
       "executable": false
     },
     "THIRD-PARTY-NOTICES.txt": {
-      "sha256": "d85a2b12f0ac4f3049aee3f587e639a1c22f95a750e4868ec66eb42e6d151cc6",
+      "sha256": "d69e0f2c733edbfda0892899774681d482a30b6a6d3a508ab625116c8f1e2d4c",
       "executable": false
     },
     "about.hbs": {
@@ -637,8 +637,20 @@
       "sha256": "5d6040ad8c61d5aaba3a8fe5b73e85d706908b6a85a675ea25b3e22eb1bc6061",
       "executable": false
     },
+    "crates/pgokf-process-handle/Cargo.toml": {
+      "sha256": "84685c744c8d59fbd01b7c92adf426c7ca6edad817d25823dcc5657094dce785",
+      "executable": false
+    },
+    "crates/pgokf-process-handle/src/lib.rs": {
+      "sha256": "a875f3d33d79996ef0619355273c9c71b406a805627a9c0fd6e80fdc69bf090f",
+      "executable": false
+    },
+    "crates/pgokf-process-handle/src/macos.rs": {
+      "sha256": "965a34918180e5e0b63cc50e1558ae6f382f4568a38913acd59a87153823e306",
+      "executable": false
+    },
     "crates/pgokf-verifier/Cargo.toml": {
-      "sha256": "9dd84fde808db7a4c56302038d7bceb0d0ae0816e10b4735348ef05dc3df0b31",
+      "sha256": "e02a80829b06c833462b4fd2e0fda40cb5bc464e89657194a264ccae9f683c8c",
       "executable": false
     },
     "crates/pgokf-verifier/README.md": {
@@ -650,7 +662,11 @@
       "executable": false
     },
     "crates/pgokf-verifier/fixtures/reconciliation-mutations.json": {
-      "sha256": "8a1f3793b058de3a53a456f7912a1fdc15b55c8b772c2628745b938fd25069df",
+      "sha256": "e43bc48eae5697b645a8744917f2668cd4c8735c08328e5426aedd6be7c266ae",
+      "executable": false
+    },
+    "crates/pgokf-verifier/fixtures/startup-mutations.json": {
+      "sha256": "8accace77cc69087a9f0aa98f74f87ba19a5a10cc4ceb7651c50e4e4b2e9e0ca",
       "executable": false
     },
     "crates/pgokf-verifier/fixtures/upgrade-probes.json": {
@@ -666,7 +682,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/src/catalog.rs": {
-      "sha256": "c71f0d526eee4a32c8a205eaed502420992216c4b20a2803effbfc7c50ce4ea8",
+      "sha256": "84e61a57fc077b7cf5d181d41a60d8ad4fade1ca7049e9efc3d21dc320bec37c",
       "executable": false
     },
     "crates/pgokf-verifier/src/checkout_shapes.rs": {
@@ -698,7 +714,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/src/main.rs": {
-      "sha256": "8a109ef6da87f1a5edd504e98d61c9bbdc3b6502864abf644a55bf5856044ee4",
+      "sha256": "305c6ba385b9555210b8646b3ef0369ce94ffade2158a4dca13010b449ab85c1",
       "executable": false
     },
     "crates/pgokf-verifier/src/mcp/golden.rs": {
@@ -786,7 +802,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/src/positional.rs": {
-      "sha256": "868a8498a18317a505c5163cb537f34a329cd432e347e60c90a93327605b0dbf",
+      "sha256": "4e93fae165c4f328c8a8409e9871dadb806ed712a96e4c75aaecb70f2ba4f652",
       "executable": false
     },
     "crates/pgokf-verifier/src/positional_builders.rs": {
@@ -798,7 +814,11 @@
       "executable": false
     },
     "crates/pgokf-verifier/src/process.rs": {
-      "sha256": "2ec34f74038413e6e9a0f9c9b75dbc47739a737b36b357de7c166afe2b5a2986",
+      "sha256": "5bc64597c20966712f18980d4d350236fd8ec80b797889c79ecedc46089a3394",
+      "executable": false
+    },
+    "crates/pgokf-verifier/src/process/launchd.rs": {
+      "sha256": "7f3769405ccc3a51c8963a5e37120e3c18c92988230fcf3a3c52d9c46a815547",
       "executable": false
     },
     "crates/pgokf-verifier/src/provider.rs": {
@@ -806,15 +826,15 @@
       "executable": false
     },
     "crates/pgokf-verifier/src/reconciliation.rs": {
-      "sha256": "6bc4f9dea8664398704e908e5294c3feac4efc8b78b1f19ba3ccf3edbc12a878",
+      "sha256": "caa361a810821fbc48ee60920018852ac259ec7426b0ee9b562927f4ec94c6e9",
       "executable": false
     },
     "crates/pgokf-verifier/src/reconciliation_mutations.rs": {
-      "sha256": "efd35cee46f732bca37e8e05db640e4b16b0e289ae1c32943fda33b3edd8d2cf",
+      "sha256": "b72d434302ff33f58189b480ed399d47c60ec9e24ed9da470fa264921ce91937",
       "executable": false
     },
     "crates/pgokf-verifier/src/release.rs": {
-      "sha256": "d5dc952de15dbe82d821a9d2ca8164159c64aab3ee96a8b4bb7fd7fda3560c18",
+      "sha256": "cab609130e5d063028d4ed957b48bbed663bd42f4c1bfd1b8bba1f8d3e39b9dd",
       "executable": false
     },
     "crates/pgokf-verifier/src/release_identity.rs": {
@@ -834,7 +854,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/src/service.rs": {
-      "sha256": "1190d46fbf71b3af0a622dd0c0aa54d4208122e9c5d8bbe2de0cc69e2a3b4936",
+      "sha256": "2b77c4c37082410ae78422aa7c8286a41ae7432dc2415a3292ca2ca354201133",
       "executable": false
     },
     "crates/pgokf-verifier/src/source.rs": {
@@ -846,7 +866,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/src/upgrade.rs": {
-      "sha256": "e7b69442f5b64c009d57b0cbdb3fac2d737a1ea96612619190f60e4ea762fa0d",
+      "sha256": "b9906319f81da8c7dd7b0439d481a7347d294f7f11dfb561f26c0f8e51b360cc",
       "executable": false
     },
     "crates/pgokf-verifier/src/workflow.rs": {
@@ -866,7 +886,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/tests/environment_portability.rs": {
-      "sha256": "5be400f18f3ca6be4870b98102a856c924219b245ee11ce89ebc7eec4f3d277a",
+      "sha256": "c57b9ee78af9719eabe4abf592f59e6fd8aba40216bab1bab3f6dc1851ad6f2d",
       "executable": false
     },
     "crates/pgokf-verifier/tests/image_smoke_faults.rs": {
@@ -897,6 +917,10 @@
       "sha256": "a728e7deb963a47e721609bb1016c83880424acd73b194f15fdde6b686a15658",
       "executable": false
     },
+    "crates/pgokf-verifier/tests/process_launchd_limits.rs": {
+      "sha256": "8ae3ecbc80d3e5ee907c331738ac404be5837c295a23e660d6bd4fc7086463e9",
+      "executable": false
+    },
     "crates/pgokf-verifier/tests/release_history.rs": {
       "sha256": "03400940110bc33b51ec44772a0b4bab98192cb93d19e4ee965d02d0f91ba34b",
       "executable": false
@@ -906,7 +930,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/tests/service_limits.rs": {
-      "sha256": "4b6ba6129379f5d9325d6bcb5fe73733213cffe3b544b1adc4b5b4cb1a6f1c37",
+      "sha256": "303d64be7543b432a0273c1c09ebd6aa1a641e30b5344c6f9a7d860350830c3c",
       "executable": false
     },
     "crates/pgokf-verifier/tests/source_hygiene.rs": {
@@ -915,6 +939,14 @@
     },
     "crates/pgokf-verifier/tests/sql_source.rs": {
       "sha256": "6228ac85e0aa15a1d10389610f19f6121fbc7d14bdbcb12a1acb2e11b748fa0e",
+      "executable": false
+    },
+    "crates/pgokf-verifier/tests/startup_native_boundaries.rs": {
+      "sha256": "60690c689e81f2f939c43fad82f44fd8dc25e2d9882d782bfcccf8499cb432ce",
+      "executable": false
+    },
+    "crates/pgokf-verifier/tests/startup_supervision.rs": {
+      "sha256": "d71fc5e7c66755cabaf67f908eaf812ea8fa5c5b09a555063f8b0ec8f14cfa3f",
       "executable": false
     },
     "crates/pgokf-verifier/tests/support/policy_cases.rs": {
@@ -1426,7 +1458,7 @@
       "executable": false
     },
     "docs/rust-verification.md": {
-      "sha256": "c1f73d04e72c55e4f94c1ccc2dd8065cf14662343f462bc9e3ac13a6b767dbf9",
+      "sha256": "ca1a69f26d2753e30b0b78e2ec36ad8e0ac49e230678cc40dbc88aa462e35428",
       "executable": false
     },
     "docs/search-guide.md": {

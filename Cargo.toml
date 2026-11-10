@@ -8,6 +8,7 @@ members = [
     "crates/pgokf-ingest",
     "crates/pgokf-mcp",
     "crates/pgokf-pgconn",
+    "crates/pgokf-process-handle",
     "crates/pgokf-web",
     "crates/pgokf-workspace",
     "crates/pgokf-verifier",
