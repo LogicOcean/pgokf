@@ -5,7 +5,32 @@ use serde_json::json;
 use sha2::{Digest, Sha256, Sha512};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+use std::sync::{Mutex, MutexGuard};
 use std::{fmt::Write as _, fs, path::Path};
+
+/// Serialize every execution of the authenticated generator.
+///
+/// `notices::render_with_identity_and_provenance` copies the generator to a
+/// fresh tempfile, keeps it open for writing, closes it, and immediately
+/// execve's it. On Linux a forked child inherits that write-open file
+/// descriptor until the child itself execve's (close-on-exec only fires at
+/// the child's own exec), so the inode stays write-open even after the
+/// owner closes it and the immediate execve returns ETXTBSY ("Text file
+/// busy", os error 26) whenever it wins the race against another test
+/// thread's spawn child. macOS never shows the race, which is why the suite
+/// is green there but flaky in CI. Every exec in this suite goes through
+/// [`render_fixture`] or the gated production call below, so holding one
+/// gate across a full generator execution removes every concurrent fork
+/// source and makes the suite deterministic in parallel on Linux; the
+/// fixture trees are per-test tempdirs, so nothing else is shared.
+static EXEC_GATE: Mutex<()> = Mutex::new(());
+
+fn exec_gate() -> MutexGuard<'static, ()> {
+    match EXEC_GATE.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
 
 fn digest(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
@@ -252,6 +277,7 @@ fn fixture_provenance(root: &Path) -> String {
 }
 
 fn render_fixture(root: &Path, fake: &Path) -> Result<Vec<u8>, String> {
+    let _gate = exec_gate();
     let sha256 = digest(&fs::read(fake).unwrap());
     let provenance = fs::read_to_string(root.join("fixture-provenance.json"))
         .map_err(|error| error.to_string())?;
@@ -294,8 +320,19 @@ fn deterministic_render_binds_assets_components_and_exact_license_text() {
 #[test]
 fn production_render_rejects_an_unpinned_generator() {
     let (root, fake) = fixture();
-    let error = notices::render(root.path(), &fake).unwrap_err();
-    assert!(error.contains("cargo-about SHA-256 mismatch"), "{error}");
+    let error = {
+        let _gate = exec_gate();
+        notices::render(root.path(), &fake)
+    }
+    .unwrap_err();
+    // Both rejections fail closed: on platforms with a pinned generator the
+    // fixture's identity mismatch is detected, on unpinned platforms (e.g.
+    // linux aarch64 dev containers) the missing pin rejects the same call.
+    assert!(
+        error.contains("cargo-about SHA-256 mismatch")
+            || error.contains("cargo-about identity is not pinned"),
+        "{error}"
+    );
 }
 
 #[test]

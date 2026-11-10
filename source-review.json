@@ -46,7 +46,7 @@
       "executable": false
     },
     ".github/workflows/pgrx-test.yml": {
-      "sha256": "587c5c6adf8badc698070223ee0400ee58214a72f027c5649acc7b1d00e292b2",
+      "sha256": "c68cc11521853d39b0de7b36e2178a3b9b224f9a8f9f7dbc4bdf039ea707c4f2",
       "executable": false
     },
     ".gitignore": {
@@ -898,7 +898,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/tests/notices.rs": {
-      "sha256": "38ffa8e9c84f24f7b25f48a0fdbd66653d46d28e61771bea30d9cffcfb140315",
+      "sha256": "72852eb57a83946e504bb4f04f2831e33c1a7af7bbfc50936bce6ff9f1e2a412",
       "executable": false
     },
     "crates/pgokf-verifier/tests/ownership_correlated.rs": {
@@ -2750,7 +2750,7 @@
       "executable": false
     },
     "tests/workflow-contexts.json": {
-      "sha256": "59c9eabc9d095a6865c4770d2d6c275d34eeb0433415d426b6181f480fcb469a",
+      "sha256": "14e4d8ac6192e9992d609471fce63919925907166d199426caf234363e68f761",
       "executable": false
     },
     "third-party-notice-evidence/3d-force-graph-1.80.0/3d-force-graph.js.map": {

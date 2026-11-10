@@ -104,6 +104,25 @@ jobs:
         if: steps.pgdg.outputs.available == 'true'
         run: cargo clippy --locked -p pgokf --no-default-features --features pg${{ matrix.pg }} --all-targets -- -D warnings
 
+      # `cargo pgrx test` runs with no --locked: its inner cargo build/test
+      # is free to rewrite Cargo.lock (observed: the pg19 feature resolution
+      # reorders pgokf-verifier's lock entry), and cargo pgrx installs
+      # generated artifacts into the system PostgreSQL, never into the tree.
+      # The beta compatibility image gate proves the image is built from the
+      # unchanged pushed commit (image_source_commit: source identity + clean
+      # working tree + rev-parse), so it MUST run before any step that can
+      # dirty the checkout; the in-database test then builds on the same
+      # proven commit without affecting the gate. The committed
+      # sql/*.sql files are the canonical artifact (semantics re-proven per
+      # release by the packages `meta` job via compare-install-sql); the
+      # per-major schema regeneration happens outside the tree.
+      - name: Nonproduction PostgreSQL 19 RC 1 image compatibility
+        if: matrix.pg == 19
+        run: |
+          cargo run --locked --manifest-path release-tools/Cargo.toml -p pgokf-verifier -- compatibility-image . release-tools pgokf-beta-compat "$RUNNER_TEMP/beta-image.json"
+          version=$(sed -n "s/^default_version *= *'\([^']*\)'.*/\1/p" crates/extension/pgokf.control)
+          SMOKE_WITH_OPTIONAL=0 release-tools/packaging/docker/smoke-test.sh pgokf-beta-compat "$version"
+
       # `cargo pgrx test` resolves the extension crate from the working
       # directory and appends the `pg_test` feature itself.
       #
@@ -145,10 +164,3 @@ jobs:
         run: |
           cargo build --locked -p pgokf-mcp
           cargo run --locked -p pgokf-verifier -- mcp-golden . "$PGOKF_PG_CONFIG" "$PGOKF_MCP_BIN" "$RUNNER_TEMP/mcp-golden-evidence"
-
-      - name: Nonproduction PostgreSQL 19 RC 1 image compatibility
-        if: matrix.pg == 19
-        run: |
-          cargo run --locked --manifest-path release-tools/Cargo.toml -p pgokf-verifier -- compatibility-image . release-tools pgokf-beta-compat "$RUNNER_TEMP/beta-image.json"
-          version=$(sed -n "s/^default_version *= *'\([^']*\)'.*/\1/p" crates/extension/pgokf.control)
-          SMOKE_WITH_OPTIONAL=0 release-tools/packaging/docker/smoke-test.sh pgokf-beta-compat "$version"
