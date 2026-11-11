@@ -19,7 +19,7 @@
 #   docker run --rm ghcr.io/logicocean/pgokf-companions:<version> pgokf-embed --help
 #
 # Build from the repository root (.dockerignore keeps target/ and .git out):
-#   docker build -f packaging/docker/Dockerfile.companions -t pgokf-companions:0.4.0 .
+#   docker build -f packaging/docker/Dockerfile.companions -t pgokf-companions:0.5.0 .
 #
 # CI builds it natively on amd64 and arm64 and publishes a multi-architecture
 # manifest to ghcr.io/logicocean/pgokf-companions:<version> on version tags.
@@ -68,7 +68,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # --------------------------------------------------------------------------
 FROM debian:${DEBIAN_CODENAME}-slim
 
-ARG PGOKF_VERSION="0.4.0"
+ARG PGOKF_VERSION="0.5.0"
 
 LABEL org.opencontainers.image.title="pgokf-companions" \
       org.opencontainers.image.description="pgokf network companions: pgokf-ingest, pgokf-embed, pgokf-mcp, pgokf-web, pgokf-confluence" \

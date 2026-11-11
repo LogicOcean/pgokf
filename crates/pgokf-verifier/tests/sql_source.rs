@@ -83,7 +83,7 @@ fn install_binding_fresh_orders_and_drift_fixture() {
     use pgokf_verifier::release;
     let read = |path: &str| std::fs::read_to_string(root().join(path)).unwrap();
     release::check_install_binding(
-        &read("crates/extension/sql/pgokf--0.4.0.sql"),
+        &read("crates/extension/sql/pgokf--0.5.0.sql"),
         &read("crates/extension/src/lib.rs"),
     )
     .unwrap();

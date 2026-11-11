@@ -23,8 +23,8 @@
     }
   },
   "packages": {
-    "workflow": "cc021d6cfc760a940406ac7e1684b91f5854e044913a0f59a35f21b4464f4a4e",
-    "triggers": "2435315dff6ccfeeefc9efe9cc1635359095d4cef70ea2bfe291fe204dc305cb",
+    "workflow": "3e0218588f9c954298ae697e687454cccad804e35b82d4dd50577d1fbb766055",
+    "triggers": "ef05e07229243b0265469b7da57568af2bfcd1fbaa6f78690cc51c85208089b7",
     "permissions": "d8d6aceb1abc41990618a503082c3badcca8897feee0976f222af5b74e30bec2",
     "env": "4b54b06eca505534cdcbd3c2936a45f5442b41393415b9b8fd37eb42a7ac1184",
     "jobs": {

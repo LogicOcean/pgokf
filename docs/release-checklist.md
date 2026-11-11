@@ -152,7 +152,7 @@ script as `pgokf--<crate-version>.sql` and copies every upgrade script
 alongside it, so the update path is available without any manual step. The
 shipped chain runs one script per step from `0.1.0 → 0.1.1` through
 `0.1.16 → 0.2.0` and on through the point-versioned development line
-(`0.2.0 → … → 0.3.1 → 0.4.0-dev → … → 0.4.0-dev3 → 0.4.0`; see "Development point versions" in
+(`0.2.0 → … → 0.3.1 → 0.4.0-dev → … → 0.4.0-dev3 → 0.4.0 → 0.5.0`; see "Development point versions" in
 [api-stability.md](api-stability.md)) to the current `default_version`.
 
 > **0.1.3 was a breaking pre-release re-model.** The `pgokf.concept_provenance`
@@ -312,34 +312,34 @@ ${PG_BIN}/pg_ctl -D "$DATA" -w stop -m fast && rm -rf /tmp/pgokf-rel
 ## Homebrew formula and tap
 
 The source release and its consuming formula have separate lifecycles. The
-pre-tag 0.4.0 tree and immutable `v0.4.0` tag keep the runnable formula pinned
-to **v0.2.0**, its authenticated archive digest, and matching 0.2.0 test
-assertions. This is intentional: a formula cannot contain the digest of the
+pre-tag 0.5.0 tree and immutable `v0.5.0` tag keep the runnable formula pinned
+to **v0.4.0**, its authenticated archive digest, and matching 0.4.0 test
+assertions; the published 0.2.0 tuple remains the verified rollback target. This is intentional: a formula cannot contain the digest of the
 archive containing itself. The external distribution is
 [`LogicOcean/homebrew-pgokf`](https://github.com/LogicOcean/homebrew-pgokf).
 
 After all release gates and independent review, the release operator performs
 these steps in order (these are publication instructions, not local gates):
 
-1. Tag the reviewed source commit as `v0.4.0` and push that immutable tag.
-   Record `git rev-parse 'v0.4.0^{commit}'`. Never move this tag.
+1. Tag the reviewed source commit as `v0.5.0` and push that immutable tag.
+   Record `git rev-parse 'v0.5.0^{commit}'`. Never move this tag.
 2. Download and inspect its archive, failing on HTTP errors:
 
    ```bash
    curl --fail --location --retry 3 \
-     https://github.com/LogicOcean/pgokf/archive/refs/tags/v0.4.0.tar.gz \
-     --output /tmp/pgokf-v0.4.0.tar.gz
-   shasum -a 256 /tmp/pgokf-v0.4.0.tar.gz
-   tar -tzf /tmp/pgokf-v0.4.0.tar.gz
-   tar -xOf /tmp/pgokf-v0.4.0.tar.gz pgokf-0.4.0/crates/extension/pgokf.control
+     https://github.com/LogicOcean/pgokf/archive/refs/tags/v0.5.0.tar.gz \
+     --output /tmp/pgokf-v0.5.0.tar.gz
+   shasum -a 256 /tmp/pgokf-v0.5.0.tar.gz
+   tar -tzf /tmp/pgokf-v0.5.0.tar.gz
+   tar -xOf /tmp/pgokf-v0.5.0.tar.gz pgokf-0.5.0/crates/extension/pgokf.control
    ```
 
-   Verify archive root `pgokf-0.4.0`, control/workspace/PGXN version 0.4.0,
+   Verify archive root `pgokf-0.5.0`, control/workspace/PGXN version 0.5.0,
    and unpacked tracked contents against the tagged commit. Record the exact
    archive bytes and SHA256 in release evidence; do not hash a local repack.
 3. On **main after the tag**, update `packaging/homebrew/pgokf.rb` URL,
    SHA256, both `test do` version assertions, and its release-state comment
-   together. Add the authenticated `0.4.0` digest to `KNOWN_RELEASE_DIGESTS`
+   together. Add the authenticated `0.5.0` digest to `KNOWN_RELEASE_DIGESTS`
    in the Rust release-integrity tests in `pgokf-verifier` in the same commit. No placeholder is
    allowed. Run `cargo test --locked -p pgokf-verifier`. This commit consumes the earlier
    immutable tag; do not retag it.
@@ -352,7 +352,7 @@ these steps in order (these are publication instructions, not local gates):
    the main commit and then the tested external tap commit only after these
    checks pass. The formula inside the source tag remains the valid 0.2.0 pin.
 5. Verify the external tap fetches the recorded archive digest and the
-   installed extension reports 0.4.0. Record both main and tap commit SHAs.
+   installed extension reports 0.5.0. Record both main and tap commit SHAs.
 
 Rollback: before a valid archive exists, leave the old formula unchanged.
 If validation fails before pushing, correct the local post-tag changes or
@@ -364,13 +364,13 @@ a new release version. A checksum discrepancy requires investigation against
 the recorded archive and tag contents before any formula update.
 
 An authorized current-release retry may name only the exact current tag:
-`gh workflow run packages.yml --ref main -f release_tag=v0.4.0`.
+`gh workflow run packages.yml --ref main -f release_tag=v0.5.0`.
 Prep retains current resolver tooling separately, checks out the tag source,
 proves HEAD/tag/control/workspace/lock/PGXN identity, and passes the resolved
 commit SHA to all builds. Empty dispatch input is a non-publishing smoke run.
 A branch source cannot publish release image names. Historical catch-up is unsupported:
-0.2.0 remains the published package predecessor, 0.3.0 remains rejected,
-0.3.1 is the source predecessor, and 0.4.0 is the only next eligible release.
+0.4.0 is the published package and source predecessor, 0.3.0 remains
+rejected, and 0.5.0 is the only next eligible release.
 Current machinery refuses historical source
 before any package upload, image push, or manifest job can run.
 
@@ -378,11 +378,11 @@ Extract the exact GitHub release body, review it, and then create the release
 only after the publication gates:
 
 ```bash
-awk '/^## \[0\.4\.0\]/{emit=1; next} emit && /^## \[/{exit} emit {print}' \
-  CHANGELOG.md > /tmp/pgokf-0.4.0-release.md
+awk '/^## \[0\.5\.0\]/{emit=1; next} emit && /^## \[/{exit} emit {print}' \
+  CHANGELOG.md > /tmp/pgokf-0.5.0-release.md
 # Inspect the body and attach the verified per-major assets as appropriate.
-gh release create v0.4.0 --verify-tag --title 'pgokf 0.4.0' \
-  --notes-file /tmp/pgokf-0.4.0-release.md
+gh release create v0.5.0 --verify-tag --title 'pgokf 0.5.0' \
+  --notes-file /tmp/pgokf-0.5.0-release.md
 ```
 
 ## Quick gate summary

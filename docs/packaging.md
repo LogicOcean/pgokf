@@ -30,8 +30,8 @@ target/release/pgokf-pg18/
     ├── lib/postgresql/18/lib/pgokf.so                      # $(pg_config --pkglibdir)
     └── share/postgresql/18/extension/
         ├── pgokf.control
-        ├── pgokf--0.4.0.sql
-        └── pgokf--0.4.0-dev3--0.4.0.sql             # $(pg_config --sharedir)/extension
+        ├── pgokf--0.5.0.sql
+        └── pgokf--0.4.0--0.5.0.sql                  # $(pg_config --sharedir)/extension
 ```
 
 On PGDG RPM systems the same command against `/usr/pgsql-18/bin/pg_config`
@@ -72,9 +72,9 @@ and calls `dpkg-deb --root-owner-group --build`. Output defaults to
 Inspect and install:
 
 ```bash
-dpkg-deb -I postgresql-18-pgokf_0.4.0-1_amd64.deb   # control metadata
-dpkg-deb -c postgresql-18-pgokf_0.4.0-1_amd64.deb   # payload file list
-sudo apt install ./postgresql-18-pgokf_0.4.0-1_amd64.deb
+dpkg-deb -I postgresql-18-pgokf_0.5.0-1_amd64.deb   # control metadata
+dpkg-deb -c postgresql-18-pgokf_0.5.0-1_amd64.deb   # payload file list
+sudo apt install ./postgresql-18-pgokf_0.5.0-1_amd64.deb
 ```
 
 Building the `.deb` for a major requires that major's `postgresql-server-dev-N`
@@ -98,16 +98,16 @@ mock -r rocky-9-x86_64 --define 'pgmajorversion 16' \
 
 `%build` installs the pinned `cargo-pgrx` into a build-local root and runs the
 build primitive; `%install` copies the staged tree into `%{buildroot}`.
-`Source0` is a `pgokf-0.4.0.tar.gz` of the repository at the release tag.
+`Source0` is a `pgokf-0.5.0.tar.gz` of the repository at the release tag.
 
 ---
 
 ## PGXN (`META.json`)
 
 [`META.json`](https://github.com/LogicOcean/pgokf/blob/main/META.json) is a PGXN meta-spec v1.0.0 distribution manifest
-(`name` `pgokf`, `version` `0.4.0`, `provides.pgokf`, `prereqs` PostgreSQL
+(`name` `pgokf`, `version` `0.5.0`, `provides.pgokf`, `prereqs` PostgreSQL
 ≥ 15, `resources`, `AGPL-3.0-only` core license). `provides.pgokf.file` points at the generated
-`crates/extension/sql/pgokf--0.4.0.sql`, which the release bump commits into
+`crates/extension/sql/pgokf--0.5.0.sql`, which the release bump commits into
 the tree before the PGXN zip is built.
 
 Validate locally:
@@ -140,7 +140,7 @@ carries the `pgokf-backup` and `pgokf-restore` tools. Build from the **repositor
 ```bash
 docker build -f packaging/docker/Dockerfile \
   --build-arg PG_MAJOR=18 \
-  -t pgokf:0.4.0-pg18 .
+  -t pgokf:0.5.0-pg18 .
 ```
 
 A second Dockerfile,
@@ -197,7 +197,7 @@ commit and then the external tap; follow the exact
    (crate and control file, `META.json`, the rpm spec,
    the companions' path-dependency pins, the compose and Docker examples, and
    `Cargo.lock`).
-3. **Tag.** `git tag -a v0.4.0 -m "pgokf 0.4.0" && git push origin v0.4.0`. CI
+3. **Tag.** `git tag -a v0.5.0 -m "pgokf 0.5.0" && git push origin v0.5.0`. CI
    ([`.github/workflows/packages.yml`](https://github.com/LogicOcean/pgokf/blob/main/.github/workflows/packages.yml))
    builds the `.deb`s (uploaded as workflow artifacts), validates `META.json`,
    and builds and smoke-tests the Docker images per major without publishing.

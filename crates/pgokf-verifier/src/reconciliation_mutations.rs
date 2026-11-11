@@ -2427,7 +2427,7 @@ fn main() {{
             "pgokf--0.4.0-dev2--0.4.0-dev3.sql",
             "../extension/sql/pgokf--0.4.0-dev2--0.4.0-dev3.sql",
         ),
-        ("pgokf--0.4.0.sql", "../extension/sql/pgokf--0.4.0.sql"),
+        ("pgokf--0.5.0.sql", "../extension/sql/pgokf--0.5.0.sql"),
     ];
 
     /// The repo file a fixture edit path mutates, if it is a tracked

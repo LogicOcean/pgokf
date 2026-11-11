@@ -42,19 +42,19 @@ GNU Affero General Public License v3.0 only
 ================================================================================
 
 Used by:
-  - pgokf 0.4.0  (https://github.com/LogicOcean/pgokf)
-  - okf-parser 0.4.0  (https://github.com/LogicOcean/pgokf)
-  - okf-sync 0.4.0  (https://github.com/LogicOcean/pgokf)
-  - pgokf-companion 0.4.0  (https://github.com/LogicOcean/pgokf)
-  - pgokf-confluence 0.4.0  (https://github.com/LogicOcean/pgokf)
-  - pgokf-embed 0.4.0  (https://github.com/LogicOcean/pgokf)
-  - pgokf-ingest 0.4.0  (https://github.com/LogicOcean/pgokf)
-  - pgokf-mcp 0.4.0  (https://github.com/LogicOcean/pgokf)
-  - pgokf-pgconn 0.4.0  (https://github.com/LogicOcean/pgokf)
-  - pgokf-process-handle 0.4.0  (https://github.com/LogicOcean/pgokf)
-  - pgokf-verifier 0.4.0  (https://github.com/LogicOcean/pgokf)
-  - pgokf-web 0.4.0  (https://github.com/LogicOcean/pgokf)
-  - pgokf-workspace 0.4.0  (https://github.com/LogicOcean/pgokf)
+  - pgokf 0.5.0  (https://github.com/LogicOcean/pgokf)
+  - okf-parser 0.5.0  (https://github.com/LogicOcean/pgokf)
+  - okf-sync 0.5.0  (https://github.com/LogicOcean/pgokf)
+  - pgokf-companion 0.5.0  (https://github.com/LogicOcean/pgokf)
+  - pgokf-confluence 0.5.0  (https://github.com/LogicOcean/pgokf)
+  - pgokf-embed 0.5.0  (https://github.com/LogicOcean/pgokf)
+  - pgokf-ingest 0.5.0  (https://github.com/LogicOcean/pgokf)
+  - pgokf-mcp 0.5.0  (https://github.com/LogicOcean/pgokf)
+  - pgokf-pgconn 0.5.0  (https://github.com/LogicOcean/pgokf)
+  - pgokf-process-handle 0.5.0  (https://github.com/LogicOcean/pgokf)
+  - pgokf-verifier 0.5.0  (https://github.com/LogicOcean/pgokf)
+  - pgokf-web 0.5.0  (https://github.com/LogicOcean/pgokf)
+  - pgokf-workspace 0.5.0  (https://github.com/LogicOcean/pgokf)
 
 GNU AFFERO GENERAL PUBLIC LICENSE
 Version 3, 19 November 2007

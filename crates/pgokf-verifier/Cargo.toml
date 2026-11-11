@@ -39,7 +39,7 @@ sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 kqueue = "1.2"
-pgokf-process-handle = { version = "=0.4.0", path = "../pgokf-process-handle" }
+pgokf-process-handle = { version = "=0.5.0", path = "../pgokf-process-handle" }
 
 [lints]
 workspace = true

@@ -348,6 +348,7 @@ pub fn check_repository(root: &Path, version: &str) -> Result<(), String> {
     }
     let read = |name: &str| std::fs::read_to_string(dir.join(name)).map_err(|e| e.to_string());
     check_receipt(&read("pgokf--0.3.0--0.3.1.sql")?)?;
+    check_receipt(&read("pgokf--0.4.0-dev3--0.4.0.sql")?)?;
     if version.contains('-') {
         for (from, to) in development_chain(&names, version)? {
             let retired: &[&str] = if to == "0.4.0-dev2" {
@@ -519,16 +520,38 @@ mod graph_controls {
         std::fs::write(&frozen, format!("-- rewritten history\n{original}")).unwrap();
         assert!(check_repository(temporary.path(), env!("CARGO_PKG_VERSION")).is_err());
         std::fs::write(&frozen, original).unwrap();
-        let final_edge = target.join("pgokf--0.4.0-dev3--0.4.0.sql");
+        // The current release's own finalization edge, read from the shipped
+        // graph, so the control holds for every release without an edit.
+        let version = env!("CARGO_PKG_VERSION");
+        let names: Vec<String> = std::fs::read_dir(&target)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        let (from, _) = parse_edges(&names)
+            .unwrap()
+            .into_iter()
+            .find(|(_, to)| to == version)
+            .expect("the current release has a finalization edge");
+        let final_edge = target.join(format!("pgokf--{from}--{version}.sql"));
         let receipt = "SELECT pgokf_private.register_dump_relations();";
         std::fs::write(&final_edge, receipt).unwrap();
-        std::fs::write(target.join("pgokf--0.4.0.sql"), "-- install").unwrap();
-        check_repository(temporary.path(), "0.4.0").unwrap();
+        check_repository(temporary.path(), version).unwrap();
         std::fs::write(&final_edge, "SELECT 1;").unwrap();
-        assert!(check_repository(temporary.path(), "0.4.0").is_err());
+        assert!(check_repository(temporary.path(), version).is_err());
         std::fs::write(&final_edge, receipt).unwrap();
-        std::fs::write(target.join("pgokf--0.4.0-dev2--0.4.0.sql"), receipt).unwrap();
-        assert!(check_repository(temporary.path(), "0.4.0").is_err());
+        // A past finalization receipt stays an exact receipt.
+        let historical = target.join("pgokf--0.4.0-dev3--0.4.0.sql");
+        let historical_original = std::fs::read_to_string(&historical).unwrap();
+        std::fs::write(&historical, "SELECT 1;").unwrap();
+        assert!(check_repository(temporary.path(), version).is_err());
+        std::fs::write(&historical, historical_original).unwrap();
+        check_repository(temporary.path(), version).unwrap();
+        std::fs::write(
+            target.join(format!("pgokf--0.4.0-dev2--{version}.sql")),
+            receipt,
+        )
+        .unwrap();
+        assert!(check_repository(temporary.path(), version).is_err());
     }
     #[test]
     fn shipped_graph_and_frozen_history() {

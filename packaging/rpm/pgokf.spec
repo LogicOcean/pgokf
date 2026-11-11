@@ -33,7 +33,7 @@ Name:           %{sname}_%{pgmajorversion}
 # single source of truth for the extension version. build-deb.sh and the Docker
 # job read that file directly; a spec is parsed before Source0 is unpacked, so
 # this one cannot -- bump it by hand with every release.
-Version:        0.4.0
+Version:        0.5.0
 Release:        1%{?dist}
 Summary:        Materialized PostgreSQL catalog for Open Knowledge Format bundles
 
@@ -101,6 +101,9 @@ cp -a target/release/%{sname}-pg%{pgmajorversion}/. %{buildroot}/
 %{pginstdir}/share/extension/%{sname}--*--*.sql
 
 %changelog
+* Wed Nov 11 2026 David Saroka <david.saroka@gmail.com> - 0.5.0-1
+- Add the Confluence Cloud ingestion companion; --tls now requires TLS.
+
 * Sun Nov 08 2026 David Saroka <david.saroka@gmail.com> - 0.4.0-1
 - Finalize the MCP 0.4 source and preserve the additive dev3-to-stable upgrade.
 

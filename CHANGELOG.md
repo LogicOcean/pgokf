@@ -10,6 +10,16 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-11
+
+A companion release: the Confluence Cloud ingestion companion, an enforced
+`--tls` for every companion, and a supply-chain advisory fix. The catalog
+is unchanged - no SQL object or data differs from 0.4.0 - so the
+receipt-only `pgokf--0.4.0--0.5.0.sql` edge carries an installed 0.4.0
+catalog to 0.5.0 through an ordinary `ALTER EXTENSION pgokf UPDATE`, and
+the committed `pgokf--0.5.0.sql` install script is the 0.4.0 one
+regenerated under the new version.
+
 ### Added
 
 - **`pgokf-confluence`, a Confluence Cloud ingestion companion.** One run
@@ -1853,7 +1863,8 @@ queries, native full-text search, and link-graph traversal.
 - The `pgokf_private` schema and its `config` table are readable and writable
   only by the extension owner and `pgokf_admin`; readers cannot see policy.
 
-[Unreleased]: https://github.com/LogicOcean/pgokf/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/LogicOcean/pgokf/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/LogicOcean/pgokf/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/LogicOcean/pgokf/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/LogicOcean/pgokf/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/LogicOcean/pgokf/compare/v0.2.0...v0.3.0
