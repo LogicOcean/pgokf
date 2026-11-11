@@ -247,7 +247,7 @@ mod unix {
 
         impl Eq for IdentityHandle {}
 
-        /// pidfd_open reports a vanished pid as ESRCH. Kernels carrying the
+        /// `pidfd_open` reports a vanished pid as ESRCH. Kernels carrying the
         /// pidfs task-lookup series additionally report a pid whose task is in
         /// its exit window as ENOENT, or as EINVAL before that series settled
         /// (observed as os errors 2 and 22 on CI and container kernels). With
@@ -1356,9 +1356,13 @@ mod tests {
     }
 
     fn wait_for_pid_marker(path: &std::path::Path) -> Pid {
+        // The writer truncates the marker before writing the pid, so a read
+        // can observe an empty file first; retry until the content parses.
         for _ in 0..500 {
-            if let Ok(pid) = fs::read_to_string(path) {
-                return Pid::from_raw(pid.trim().parse().unwrap());
+            if let Ok(pid) = fs::read_to_string(path)
+                && let Ok(pid) = pid.trim().parse()
+            {
+                return Pid::from_raw(pid);
             }
             std::thread::sleep(Duration::from_millis(2));
         }

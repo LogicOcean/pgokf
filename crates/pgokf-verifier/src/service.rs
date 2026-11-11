@@ -570,9 +570,13 @@ mod tests {
     }
 
     fn wait_for_pid_marker(path: &Path) -> Pid {
+        // The writer truncates the marker before writing the pid, so a read
+        // can observe an empty file first; retry until the content parses.
         for _ in 0..500 {
-            if let Ok(pid) = std::fs::read_to_string(path) {
-                return Pid::from_raw(pid.trim().parse().unwrap());
+            if let Ok(pid) = std::fs::read_to_string(path)
+                && let Ok(pid) = pid.trim().parse()
+            {
+                return Pid::from_raw(pid);
             }
             std::thread::sleep(Duration::from_millis(2));
         }
