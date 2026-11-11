@@ -153,14 +153,14 @@ these values after measuring the corpus; a timed-out or failed crawl does not
 mean the last imported data has been removed. Alert on failed executions,
 missing successful imports and deletion/permission warnings.
 
-Back up the checkpoint together with the destination catalog's operational
-state. If a crash occurs between the database commit and checkpoint write,
-retain the checkpoint and rerun with the same source and destination. Recovery
-accepts only the expected source binding and an exact matching catalog
-projection, as described in the [integration guide](../../docs/confluence-integration.md#snapshot-and-deletion-rules).
-A source that changed again may require investigation and checkpoint restore.
-Do not wipe state or rename the bundle to evade ownership checks. Validate the persistent
-share and recovery procedure in the pilot before widening the audience.
+Back up the checkpoint, and any `.pending` file beside it, together with the
+destination catalog's operational state. If a crash occurs between the
+database commit and the checkpoint promotion, keep both files and let the next
+scheduled execution run: it settles the pending checkpoint against the
+catalog, as described in the [integration guide](../../docs/confluence-integration.md#snapshot-and-deletion-rules).
+Do not wipe state or rename the bundle to evade ownership checks. Validate the
+persistent share and recovery procedure in the pilot before widening the
+audience.
 
 Rotation changes Key Vault secrets and runtime configuration, not source
 files. Ensure the next execution receives the intended secret version and

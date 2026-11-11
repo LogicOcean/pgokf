@@ -260,6 +260,10 @@ fn fence(text: &str, language: &str) -> String {
 }
 
 fn inline_code(text: &str) -> String {
+    // A line ending inside a code span renders as a space anyway; keeping it
+    // would let a blank line end the span and the paragraph, so the rest of
+    // the "code" would be parsed as live Markdown and raw HTML.
+    let text = text.replace(['\r', '\n'], " ");
     let length = text
         .split(|character| character != '`')
         .map(str::len)
@@ -271,13 +275,26 @@ fn inline_code(text: &str) -> String {
     format!("{delimiter} {text} {delimiter}")
 }
 
+/// Join rendered Markdown onto one line for an inline-only context (heading
+/// text, a link label). A block construct there - a fence, a quote, a
+/// paragraph break - would end the context and let what follows be parsed as
+/// live Markdown. Joined, a fence becomes a code span with the same
+/// delimiter, which still holds its text literally.
+fn single_line(text: &str) -> String {
+    text.split(['\r', '\n'])
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn link(label: &str, target: &str) -> String {
     let target = target
         .replace('&', "&amp;")
         .replace('<', "%3C")
         .replace('>', "%3E")
         .replace(['\r', '\n'], "");
-    format!("[{}](<{target}>)", label.trim())
+    format!("[{}](<{target}>)", single_line(label))
 }
 
 struct PageIndex<'a> {
@@ -453,7 +470,7 @@ impl Renderer<'_, '_> {
                 block(&format!(
                     "{} {}",
                     "#".repeat(level),
-                    self.children(&element.children)?.trim()
+                    single_line(&self.children(&element.children)?)
                 ))
             }
             "strong" | "b" => format!("**{}**", self.children(&element.children)?),
@@ -897,6 +914,23 @@ fn table_cell(text: &str) -> String {
         .join("<br>")
 }
 
+/// Rewrite the characters YAML forbids in a document (DEL, the C1 controls,
+/// U+FFFE and U+FFFF) - NEL included, which YAML would otherwise fold to a
+/// space - as `\uXXXX` escapes, which a YAML double-quoted scalar decodes back
+/// to the same character. `serde_json` leaves all of them literal, and they can
+/// only occur inside its quoted strings, so rewriting the whole text is safe.
+fn yaml_safe(json: &str) -> String {
+    let mut output = String::with_capacity(json.len());
+    for character in json.chars() {
+        if matches!(character, '\u{7f}'..='\u{9f}' | '\u{fffe}' | '\u{ffff}') {
+            let _ = write!(output, "\\u{:04x}", u32::from(character));
+        } else {
+            output.push(character);
+        }
+    }
+    output
+}
+
 fn frontmatter(source: &SourceIdentity, page: &Page) -> Result<String> {
     // JSON values are valid YAML flow values. Escaped single-line values prevent
     // source titles from introducing delimiters, YAML keys, or trust metadata.
@@ -907,7 +941,7 @@ fn frontmatter(source: &SourceIdentity, page: &Page) -> Result<String> {
         ("tags", json!(["confluence"])),
         (
             "confluence",
-            json!({"site_url": source.site_url, "cloud_id": source.cloud_id, "space_id": source.space_id, "page_id": page.id, "parent_id": page.parent_id, "version": page.version, "modified_at": page.modified_at}),
+            json!({"site_url": source.site_url, "space_id": source.space_id, "page_id": page.id, "parent_id": page.parent_id, "version": page.version, "modified_at": page.modified_at}),
         ),
         ("converter_version", json!(env!("CARGO_PKG_VERSION"))),
         (
@@ -917,7 +951,11 @@ fn frontmatter(source: &SourceIdentity, page: &Page) -> Result<String> {
     ];
     let mut output = "---\n".to_owned();
     for (name, value) in fields {
-        writeln!(output, "{name}: {}", serde_json::to_string(&value)?)?;
+        writeln!(
+            output,
+            "{name}: {}",
+            yaml_safe(&serde_json::to_string(&value)?)
+        )?;
     }
     output.push_str("---\n\n");
     Ok(output)

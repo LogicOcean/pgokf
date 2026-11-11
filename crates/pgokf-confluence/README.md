@@ -54,9 +54,12 @@ The login still needs its normal database authentication; the example URL
 contains no password. `--apply` requires both a database URL and a persistent
 state file. Reuse that file for subsequent runs of the same source and bundle.
 The companion rejects adoption of an unrelated existing bundle. A failed or
-inconsistent crawl is not submitted. The checkpoint advances only after a
-successful catalog update. Preview never connects to PostgreSQL or updates the
-checkpoint. Pass the existing `--state-file` on later previews to obtain an
+inconsistent crawl is not submitted. The snapshot being committed is written
+to `<state-file>.pending` just before COMMIT and promoted to the checkpoint
+after it; if a run dies in between, the next `--apply` settles the pending
+file against the catalog before crawling (see the
+[integration guide](../../docs/confluence-integration.md#snapshot-and-deletion-rules)).
+Preview never connects to PostgreSQL or updates the checkpoint. Pass the existing `--state-file` on later previews to obtain an
 accurate `removed_page_ids` comparison; without it there is no deletion
 baseline. Removed page IDs block application by default. Review a fresh preview
 before using the boolean `--allow-deletions` flag on a deliberate apply run.
@@ -82,10 +85,11 @@ principal options are:
 | `--state-file` | — | Durable source-bound checkpoint; required for apply, supplies deletion baseline for preview |
 | `--output-dir` | — | Export converted OKF files and manifest to a directory that does not exist |
 | `--apply` | — | Enable the catalog write; omitted means preview |
-| `--allow-deletions` | — | Boolean flag authorizing the removed IDs reported by preview; default refuses any removal |
+| `--allow-deletions` | — | Permits every removal found at apply time - it is not an ID filter; review a fresh preview immediately before using it. Default refuses any removal |
 | `--max-pages` | — | Maximum pages per crawl; default 10,000 |
 | `--max-response-bytes` | — | Per-response bound; default 8 MiB |
 | `--max-retries` | — | Maximum retries per read request; default 3, maximum 10 |
+| `--max-snapshot-bytes` | — | Maximum converted space size (documents and paths), checked in preview and apply; default 512 MiB, maximum 960 MiB |
 
 The crawler inventories the space before and after fetching pages. It requires
 a nonempty, consistent inventory and sends one complete snapshot to

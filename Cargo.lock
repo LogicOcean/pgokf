@@ -2752,6 +2752,7 @@ dependencies = [
  "okf-parser",
  "pgokf-companion",
  "pgokf-pgconn",
+ "pulldown-cmark",
  "quick-xml",
  "rand",
  "reqwest",

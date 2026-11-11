@@ -6,7 +6,6 @@ use pgokf_confluence::types::{Document, Page, SourceIdentity};
 fn source() -> SourceIdentity {
     SourceIdentity {
         site_url: "https://example.atlassian.net".to_owned(),
-        cloud_id: Some("cloud-123".to_owned()),
         space_id: "100".to_owned(),
     }
 }
@@ -456,4 +455,154 @@ fn underline_keeps_its_text_without_a_warning() {
     let document = &documents[0];
     assert!(document.warnings.is_empty(), "{:?}", document.warnings);
     assert!(text(document).contains("Read carefully first\\."));
+}
+
+/// Everything a Markdown renderer would make live in `markdown`: raw HTML
+/// (block or inline) and link destinations, parsed exactly as the catalog's
+/// own parser does (`Options::all()`).
+fn live_markdown(markdown: &str) -> (Vec<String>, Vec<String>) {
+    use pulldown_cmark::{Event, Options, Parser, Tag};
+    let mut html = Vec::new();
+    let mut destinations = Vec::new();
+    for event in Parser::new_ext(markdown, Options::all()) {
+        match event {
+            Event::Html(raw) | Event::InlineHtml(raw) => html.push(raw.into_string()),
+            Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) => {
+                destinations.push(dest_url.into_string());
+            }
+            _ => {}
+        }
+    }
+    (html, destinations)
+}
+
+fn convert_one(storage: &str) -> Document {
+    convert_pages(&source(), &[page("50", "Untrusted", storage)])
+        .unwrap()
+        .remove(0)
+}
+
+/// Untrusted storage that tries to break out of a literal context.
+const BREAKOUTS: [&str; 6] = [
+    // An inline code span whose blank line would end the paragraph.
+    "<p>See <code>x\n&lt;script&gt;alert(document.cookie)&lt;/script&gt;\n\n[click me](javascript:alert(1))\n</code></p>",
+    // A code block inside a heading, whose fence the ATX line would consume.
+    "<h2><pre>[a](javascript:alert(2))\n</pre></h2><p>After.</p>",
+    // A code macro inside a link label.
+    "<p><a href=\"https://example.org/\"><ac:structured-macro ac:name=\"code\"><ac:plain-text-body><![CDATA[[a](javascript:alert(3))]]></ac:plain-text-body></ac:structured-macro></a></p>",
+    // A forged internal edge smuggled through a code span.
+    "<p><code>a\n\n[policy](../approved/policy.md)</code></p>",
+    // Raw HTML in ordinary text.
+    "<p>&lt;script&gt;alert(4)&lt;/script&gt; and &lt;img src=x onerror=alert(5)&gt;</p>",
+    // Teletype text with a line break before a link.
+    "<p><tt>x\r\n\r\n[t](javascript:alert(6))</tt></p>",
+];
+
+#[test]
+fn converted_markdown_never_contains_raw_html() {
+    for storage in BREAKOUTS {
+        // Arrange / Act
+        let document = convert_one(storage);
+        let (html, _) = live_markdown(text(&document));
+
+        // Assert
+        assert!(html.is_empty(), "{storage}: {html:?}");
+    }
+}
+
+#[test]
+fn converted_markdown_links_only_to_the_source_or_vetted_targets() {
+    for storage in BREAKOUTS {
+        // Arrange / Act
+        let document = convert_one(storage);
+        let (_, destinations) = live_markdown(text(&document));
+        let concept = parsed(&document);
+
+        // Assert: every live link is a vetted URL; nothing becomes an edge.
+        for destination in &destinations {
+            assert!(
+                destination.starts_with("https://"),
+                "{storage}: unexpected live link {destination}"
+            );
+        }
+        assert!(
+            concept.links.iter().all(|link| link.is_external),
+            "{storage}: forged internal edge {:?}",
+            concept.links
+        );
+    }
+}
+
+#[test]
+fn a_code_block_in_a_heading_keeps_the_rest_of_the_page_live() {
+    // Arrange
+    let storage = BREAKOUTS[1];
+
+    // Act
+    let document = convert_one(storage);
+
+    // Assert: the heading did not swallow the following paragraph or the
+    // trailing source link into a code block.
+    let (_, destinations) = live_markdown(text(&document));
+    assert!(
+        destinations
+            .iter()
+            .any(|destination| destination.ends_with("/pages/50")),
+        "{destinations:?}"
+    );
+    assert!(parsed(&document).body_text.contains("After."));
+}
+
+#[test]
+fn titles_with_yaml_forbidden_characters_round_trip_exactly() {
+    for title in [
+        "Delete\u{7f}me",
+        "C1\u{80}start",
+        "Next\u{85}line",
+        "C1\u{9f}end",
+        "Non\u{fffe}character",
+        "Non\u{ffff}character",
+    ] {
+        // Arrange
+        let pages = [page("60", title, "<p>Body.</p>")];
+
+        // Act
+        let documents = convert_pages(&source(), &pages).unwrap();
+        let concept = parse_concept(
+            &documents[0].bytes,
+            &documents[0].path,
+            ParserLimits::default(),
+        );
+
+        // Assert
+        let concept = concept.unwrap_or_else(|error| panic!("{title:?}: {error}"));
+        assert_eq!(concept.title, title);
+    }
+}
+
+#[test]
+fn storage_above_the_node_limit_fails_the_snapshot() {
+    // Arrange: 200,001 sibling elements, each one parser event, well under
+    // the byte limit ("<b/>" is 4 bytes).
+    let storage = "<b/>".repeat(200_001);
+    let pages = [page("70", "Nodes", &storage)];
+
+    // Act
+    let error = convert_pages(&source(), &pages).unwrap_err();
+
+    // Assert
+    assert!(format!("{error:#}").contains("node limit"), "{error:#}");
+}
+
+#[test]
+fn storage_at_the_node_limit_converts() {
+    // Arrange: 199,999 elements plus the end-of-input event.
+    let storage = "<b/>".repeat(199_999);
+    let pages = [page("71", "Nodes", &storage)];
+
+    // Act
+    let result = convert_pages(&source(), &pages);
+
+    // Assert
+    assert!(result.is_ok(), "{result:?}");
 }

@@ -106,8 +106,12 @@ The database URL above illustrates the host/login only; provide the database
 credential through the protected runtime environment when required.
 
 Scoped tokens require a Cloud ID and use Atlassian's API gateway. Classic
-API-token access uses the canonical site. The account's permissions and token
-scopes both constrain reads. See
+API-token access uses the canonical site. Before a scoped-token crawl, the
+companion reads the site's public tenant record (`/_edge/tenant_info`, without
+credentials) and refuses a Cloud ID that belongs to another site. The source
+identity is the site and the space alone, so moving the same space between a
+classic and a scoped token keeps its bundle and checkpoint. The account's
+permissions and token scopes both constrain reads. See
 [Atlassian's scoped-token documentation](https://support.atlassian.com/confluence/kb/scoped-api-tokens-in-confluence-cloud/).
 Data Center and corporate vanity-domain installations are not supported by
 this Cloud adapter.
@@ -169,15 +173,20 @@ initial/final consistency checks catch observed changes; they do not guarantee
 that a page cannot change immediately afterward. Retry a failed crawl and
 choose a schedule appropriate to the space's editing rate.
 
-If the database update succeeds but checkpoint persistence fails, preserve the
-state and retry with the same source, bundle, database identity and checkpoint
-path. Recovery requires the source binding to match and the current catalog
-projection to equal either the previous checkpoint or the exact newly fetched
-snapshot. First-commit recovery without a checkpoint requires the latter. If
-the source changed again and neither manifest matches, the importer refuses
-to overwrite the catalog; investigate and restore the appropriate checkpoint
-instead of bypassing that check. Do not assume a reported checkpoint failure
-means PostgreSQL rolled back an already completed call.
+Inside the verified transaction, immediately before COMMIT, the importer
+durably writes the snapshot it is committing to `<state-file>.pending`; after
+the commit it renames that file over the checkpoint. A crash, a full disk or a
+lost commit reply can leave the pending file behind. The next `--apply`
+settles it under the bundle lock before crawling: if the catalog holds the
+pending snapshot, the commit happened and the pending file becomes the
+checkpoint; if the catalog still holds the last checkpoint, the commit did not
+happen and the pending file is discarded. Either way the run continues and
+measures removals against what the catalog actually holds, even when pages
+changed in the meantime. The JSON result reports `pending_checkpoint` as
+`promoted`, `discarded`, or (in a preview, which cannot consult the catalog)
+`unresolved`. A catalog that matches neither snapshot changed outside the
+importer, and the run refuses it. Keep the pending file with the checkpoint;
+never delete either to bypass a refusal.
 
 ## Access control and retained content
 
@@ -230,7 +239,11 @@ including metadata, is limited to 4 MiB. A limit violation stops the complete
 import with a conversion error before any catalog write; it does not truncate
 or omit the offending page.
 
-The database's `pgokf.max_bundle_files` and `pgokf.max_file_bytes` limits also
-apply. Raise limits only after measuring the source and memory needs. Use
+The whole bundle travels to PostgreSQL in one protocol message, which the
+server caps at 1 GiB. `--max-snapshot-bytes` (default 512 MiB, at most
+960 MiB) bounds the converted space - document bytes plus paths - and is
+checked in previews too, so a dry run never reports a snapshot that apply
+could not register. The database's `pgokf.max_bundle_files` and
+`pgokf.max_file_bytes` limits also apply. Raise limits only after measuring the source and memory needs. Use
 conversion fixtures and a test space to assess suitability before widening
 the pilot's scope.

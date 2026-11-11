@@ -58,7 +58,7 @@
       "executable": false
     },
     "CHANGELOG.md": {
-      "sha256": "f83673088114c225d94163ef9bc419a28aa75fae34abb332c7eb76436324d9f3",
+      "sha256": "e9c8f6afdde1f3150cf6999121668362e48ca2da9ecab2174d6094164b030b9a",
       "executable": false
     },
     "CODE_OF_CONDUCT.md": {
@@ -74,7 +74,7 @@
       "executable": false
     },
     "Cargo.lock": {
-      "sha256": "5ea113982e22ea52b4bd074c7f97b0c472a3d6e7c88d1da6750ac4d7aed2cbe5",
+      "sha256": "8eb39ceaac7a603dfe1a6abe455dc61f6f35a88e552ee496a2d5c6b4d601a3b6",
       "executable": false
     },
     "Cargo.toml": {
@@ -530,19 +530,19 @@
       "executable": false
     },
     "crates/pgokf-confluence/Cargo.toml": {
-      "sha256": "5b462004f5123747d047da15c8df839e25a9a14471b7ba0477a715a997fb9ac1",
+      "sha256": "5d708bf9c0a118d57ba3ccd97cb41dccddd70fa8e7f8f07a8bef82e3281c520c",
       "executable": false
     },
     "crates/pgokf-confluence/README.md": {
-      "sha256": "ab30a049bb438f497d47f706429e9a3e7cd48309dbd725fe5586527efb19ca1a",
+      "sha256": "413f079b86dc5bb218a769992020336fcdfa8809df10969f7a09a24ca9c11db7",
       "executable": false
     },
     "crates/pgokf-confluence/src/client.rs": {
-      "sha256": "b6fff3e3f043758216413e991b7422f02167976ae876ffeb0a46069655b3d149",
+      "sha256": "ab4147112e4a8132a34b3b3d626abfbacd624b03a9cfcf754f743889cea321b2",
       "executable": false
     },
     "crates/pgokf-confluence/src/convert.rs": {
-      "sha256": "4ccf593d88afb67bd2d17255bada21156dfcabeb58a032c476768305f7e5596d",
+      "sha256": "8ae9f1b162712a85a3884feb14e106856bcd2afd6b2cf418c74136cefdca607c",
       "executable": false
     },
     "crates/pgokf-confluence/src/lib.rs": {
@@ -550,27 +550,27 @@
       "executable": false
     },
     "crates/pgokf-confluence/src/main.rs": {
-      "sha256": "84381dae4d8a2873720a0c7216bdb7082be0360270fdeec621503df05d2409c7",
+      "sha256": "9c6ec21d0d70674db46a7f3bb5717d5deb310b244f20976c236c02bc3b053a32",
       "executable": false
     },
     "crates/pgokf-confluence/src/sink.rs": {
-      "sha256": "46bcb299fc2e5e524b6ceb9b8de69ac9d1b1dd80bd61308455d8cef586795b19",
+      "sha256": "3cc998baee955873c02d7c5f7c7631bee7846b4a7e90b0ceb556806c43282f2c",
       "executable": false
     },
     "crates/pgokf-confluence/src/snapshot.rs": {
-      "sha256": "eab93703c6bd9e6db61c44766d41e034a4ac3a7357117593bb41aa30da90f522",
+      "sha256": "8a876e9ef4801c749eae818241140a2883be89a8ee87bfe4549ef9e30be099ea",
       "executable": false
     },
     "crates/pgokf-confluence/src/types.rs": {
-      "sha256": "52fc5fab551b24ae5ed970bd8a73a6a2d472ead339d0ff45f01de64208f09b62",
+      "sha256": "0c5588b7168c1288bc7b31aa72cb8aa54ab86ca0a3ea9888ae6b879acf9a2aa0",
       "executable": false
     },
     "crates/pgokf-confluence/tests/catalog.rs": {
-      "sha256": "e7e323e14ea104bad0fe0916af7350154549922eb184d999a7c222b95b20ccae",
+      "sha256": "9aba62c416e8b9ea12ce0f39c6c85430efae72cc8747e06e745328fc9d7b9975",
       "executable": false
     },
     "crates/pgokf-confluence/tests/conversion.rs": {
-      "sha256": "a3945aa767a135c011a52e6deac6e82f0935134299be6fcc5834ba99973788dd",
+      "sha256": "c0ba4b5eb29e4a0db14bea93eb915e33d85f9d48793fba7401b813235974bcf7",
       "executable": false
     },
     "crates/pgokf-confluence/tests/fixtures/rich-storage.xml": {
@@ -1426,7 +1426,7 @@
       "executable": false
     },
     "deploy/confluence/README.md": {
-      "sha256": "5567e67fd09105cb6ccd55a67e142fcaefa678f0f8efff4ff69725b954ec2f7e",
+      "sha256": "0deda9c30395cae59824840b4a66795cb4e12750ae2d8e8b15a38f72be77c674",
       "executable": false
     },
     "deploy/confluence/azure-job.yaml.example": {
@@ -1454,7 +1454,7 @@
       "executable": false
     },
     "docs/confluence-integration.md": {
-      "sha256": "d453a1f9685f6eafa785441262ed01a2156ee0cef8af84300625a96235f329b2",
+      "sha256": "e8545562e45111d31ad46a46cda1bd179a590292aa32fb7ea728742fa2523860",
       "executable": false
     },
     "docs/deployment-topologies.md": {

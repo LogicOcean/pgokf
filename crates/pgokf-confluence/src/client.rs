@@ -39,8 +39,12 @@ pub struct ClientConfig {
 /// Authenticated read-only client. Credentials are confined to sensitive headers.
 pub struct Client {
     http: reqwest::Client,
+    /// Credential-free client for the site's public tenant record.
+    public_http: reqwest::Client,
     site: Url,
     api: Url,
+    tenant_info: Url,
+    cloud_id: Option<String>,
     max_retries: u32,
     max_response_bytes: usize,
 }
@@ -137,10 +141,16 @@ impl Client {
             site.join("wiki/api/v2/").context("invalid API base")?
         };
         let http = build_http(&config.email, &config.token)?;
+        let tenant_info = site
+            .join("_edge/tenant_info")
+            .context("invalid tenant record URL")?;
         let client = Self {
             http,
+            public_http: build_public_http()?,
             site,
             api,
+            tenant_info,
+            cloud_id: config.cloud_id.clone(),
             max_retries: config.max_retries,
             max_response_bytes: config.max_response_bytes,
         };
@@ -163,6 +173,7 @@ impl Client {
     pub async fn crawl_space(&self, space_id: &str, max_pages: usize) -> Result<Vec<Page>> {
         validate_id(space_id)?;
         ensure!(max_pages > 0, "max_pages must be positive");
+        self.verify_cloud_id().await?;
         self.check_space(space_id).await?;
         let inventory = self.inventory(space_id, max_pages).await?;
         ensure!(
@@ -196,6 +207,30 @@ impl Client {
             "space inventory changed during crawl; retry the complete crawl"
         );
         Ok(pages)
+    }
+
+    /// With a scoped token every request goes through Atlassian's gateway by
+    /// cloud ID, not to the configured site. Confirm - without credentials,
+    /// from the site's public tenant record - that the cloud ID belongs to
+    /// that site, so a mistyped or foreign cloud ID can never import another
+    /// site's content under this site's identity.
+    async fn verify_cloud_id(&self) -> Result<()> {
+        let Some(expected) = &self.cloud_id else {
+            return Ok(());
+        };
+        let response = self
+            .fetch(&self.public_http, self.tenant_info.clone())
+            .await?;
+        let actual = response
+            .value
+            .get("cloudId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("Confluence site tenant record has no cloud ID"))?;
+        ensure!(
+            actual.eq_ignore_ascii_case(expected),
+            "the Confluence cloud ID does not belong to the configured site"
+        );
+        Ok(())
     }
 
     async fn check_space(&self, space_id: &str) -> Result<()> {
@@ -427,9 +462,13 @@ impl Client {
     }
 
     async fn get_json(&self, url: Url) -> Result<ApiResponse> {
+        self.fetch(&self.http, url).await
+    }
+
+    async fn fetch(&self, http: &reqwest::Client, url: Url) -> Result<ApiResponse> {
         let mut slept = Duration::ZERO;
         for attempt in 0..=self.max_retries {
-            match self.try_request(url.clone()).await {
+            match self.try_request(http, url.clone()).await {
                 Ok(response) => return Ok(response),
                 Err(AttemptError::Fatal(error)) => return Err(error),
                 Err(AttemptError::Retry { reason, after }) => {
@@ -446,9 +485,12 @@ impl Client {
         unreachable!("all request attempts return or exhaust retries")
     }
 
-    async fn try_request(&self, url: Url) -> std::result::Result<ApiResponse, AttemptError> {
-        let mut response = self
-            .http
+    async fn try_request(
+        &self,
+        http: &reqwest::Client,
+        url: Url,
+    ) -> std::result::Result<ApiResponse, AttemptError> {
+        let mut response = http
             .get(url)
             .send()
             .await
@@ -529,14 +571,30 @@ fn build_http(email: &str, token: &str) -> Result<reqwest::Client> {
     let mut headers = HeaderMap::new();
     headers.insert(AUTHORIZATION, authorization);
     headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
-    reqwest::Client::builder()
+    http_builder()
         .default_headers(headers)
+        .build()
+        .map_err(|_| anyhow!("could not initialize Confluence HTTP client"))
+}
+
+/// A client that carries no credentials, for public site records.
+fn build_public_http() -> Result<reqwest::Client> {
+    let mut headers = HeaderMap::new();
+    headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+    http_builder()
+        .default_headers(headers)
+        .build()
+        .map_err(|_| anyhow!("could not initialize Confluence HTTP client"))
+}
+
+/// The transport policy every Confluence request shares: no redirects,
+/// bounded connect and request time, and an identifying user agent.
+fn http_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
         .timeout(REQUEST_TIMEOUT)
         .user_agent(concat!("pgokf-confluence/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|_| anyhow!("could not initialize Confluence HTTP client"))
 }
 
 fn validate_site(raw: &str) -> Result<Url> {
@@ -765,6 +823,108 @@ mod tests {
                 "https://example.atlassian.net/wiki/api/v2/"
             );
         }
+    }
+
+    const CLOUD_ID: &str = "12345678-1234-1234-1234-123456789abc";
+
+    /// A scoped-token client whose gateway and tenant record are the mock.
+    fn scoped_mock_client(server: &MockServer) -> Client {
+        let mut settings = config();
+        settings.cloud_id = Some(CLOUD_ID.into());
+        let mut client = Client::new(settings).unwrap();
+        client.api = Url::parse(&format!("{}/wiki/api/v2/", server.uri())).unwrap();
+        client.tenant_info = Url::parse(&format!("{}/_edge/tenant_info", server.uri())).unwrap();
+        client
+    }
+
+    async fn mount_tenant(server: &MockServer, cloud_id: &str) {
+        Mock::given(method("GET"))
+            .and(path("/_edge/tenant_info"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"cloudId": cloud_id})))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn verify_cloud_id_accepts_the_sites_own_cloud_id_in_any_case() {
+        // Arrange
+        let server = MockServer::start().await;
+        mount_tenant(&server, &CLOUD_ID.to_ascii_uppercase()).await;
+        let client = scoped_mock_client(&server);
+
+        // Act
+        let result = client.verify_cloud_id().await;
+
+        // Assert
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn verify_cloud_id_refuses_a_cloud_id_of_another_site() {
+        // Arrange
+        let server = MockServer::start().await;
+        mount_tenant(&server, "ffffffff-ffff-ffff-ffff-ffffffffffff").await;
+        let client = scoped_mock_client(&server);
+
+        // Act
+        let error = client.verify_cloud_id().await.unwrap_err();
+
+        // Assert
+        assert!(error.to_string().contains("does not belong"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn verify_cloud_id_refuses_a_tenant_record_without_one() {
+        // Arrange
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/_edge/tenant_info"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+        let client = scoped_mock_client(&server);
+
+        // Act
+        let result = client.verify_cloud_id().await;
+
+        // Assert
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn verify_cloud_id_never_sends_credentials_to_the_public_record() {
+        // Arrange
+        let server = MockServer::start().await;
+        mount_tenant(&server, CLOUD_ID).await;
+        let client = scoped_mock_client(&server);
+
+        // Act
+        client.verify_cloud_id().await.unwrap();
+
+        // Assert
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(!requests[0].headers.contains_key("authorization"));
+    }
+
+    #[tokio::test]
+    async fn verify_cloud_id_makes_no_request_for_a_classic_token() {
+        // Arrange
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/_edge/tenant_info"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let mut client = mock_client(&server);
+        client.tenant_info = Url::parse(&format!("{}/_edge/tenant_info", server.uri())).unwrap();
+
+        // Act
+        let result = client.verify_cloud_id().await;
+
+        // Assert: the mock's expect(0) is verified when the server drops.
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -1096,22 +1256,100 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_empty_duplicate_and_over_limit_inventories() {
-        for (pages, max_pages) in [
-            (vec![], 10),
-            (vec![page("1", 1), page("1", 1)], 10),
-            (vec![page("1", 1), page("2", 1)], 1),
-        ] {
-            let server = MockServer::start().await;
-            mount_space(&server).await;
-            mount_list(&server, pages).await;
-            assert!(
-                mock_client(&server)
-                    .crawl_space("42", max_pages)
-                    .await
-                    .is_err()
-            );
-        }
+    async fn crawl_refuses_an_empty_space() {
+        // Arrange
+        let server = MockServer::start().await;
+        mount_space(&server).await;
+        mount_list(&server, vec![]).await;
+
+        // Act
+        let error = mock_client(&server)
+            .crawl_space("42", 10)
+            .await
+            .unwrap_err();
+
+        // Assert
+        assert!(
+            error.to_string().contains("no visible current pages"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn crawl_refuses_a_duplicate_page_id() {
+        // Arrange
+        let server = MockServer::start().await;
+        mount_space(&server).await;
+        mount_list(&server, vec![page("1", 1), page("1", 1)]).await;
+
+        // Act
+        let error = mock_client(&server)
+            .crawl_space("42", 10)
+            .await
+            .unwrap_err();
+
+        // Assert
+        assert!(error.to_string().contains("duplicate page ID"), "{error}");
+    }
+
+    /// A two-page space with every body available, so only the page limit
+    /// can explain a refusal.
+    async fn two_page_space() -> MockServer {
+        let server = MockServer::start().await;
+        mount_space(&server).await;
+        mount_list(&server, vec![page("1", 1), page("2", 1)]).await;
+        mount_page(&server, page("1", 1)).await;
+        mount_page(&server, page("2", 1)).await;
+        server
+    }
+
+    #[tokio::test]
+    async fn crawl_refuses_a_space_above_max_pages() {
+        // Arrange
+        let server = two_page_space().await;
+
+        // Act
+        let error = mock_client(&server).crawl_space("42", 1).await.unwrap_err();
+
+        // Assert
+        assert!(error.to_string().contains("max_pages"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn crawl_accepts_a_space_exactly_at_max_pages() {
+        // Arrange
+        let server = two_page_space().await;
+
+        // Act
+        let pages = mock_client(&server).crawl_space("42", 2).await.unwrap();
+
+        // Assert
+        assert_eq!(pages.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn crawl_refuses_space_metadata_for_another_space() {
+        // Arrange
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/wiki/api/v2/spaces/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "43"})))
+            .mount(&server)
+            .await;
+        mount_list(&server, vec![page("1", 1)]).await;
+        mount_page(&server, page("1", 1)).await;
+
+        // Act
+        let error = mock_client(&server)
+            .crawl_space("42", 10)
+            .await
+            .unwrap_err();
+
+        // Assert
+        assert!(
+            error.to_string().contains("unexpected space metadata"),
+            "{error}"
+        );
     }
 
     #[tokio::test]

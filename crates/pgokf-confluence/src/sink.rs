@@ -2,7 +2,7 @@
 //! Transactional catalog writes with ownership and exact-snapshot verification.
 use std::collections::BTreeMap;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 use tokio_postgres::{Client, GenericClient};
@@ -36,6 +36,16 @@ pub struct ImportReport {
     pub removed: i32,
     pub unchanged: i32,
     pub total: i32,
+}
+
+/// What a pending checkpoint - recorded just before a commit whose checkpoint
+/// was never promoted - turned out to be, judged against the catalog.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PendingOutcome {
+    /// The catalog holds the pending snapshot: the commit happened.
+    Committed,
+    /// The catalog still holds the last checkpoint: the commit did not happen.
+    NotCommitted,
 }
 
 /// A database connection holding pgokf's native per-bundle lock for the run.
@@ -103,7 +113,39 @@ impl Catalog {
         &self.fingerprint
     }
 
+    /// Decide a pending checkpoint left by an earlier run: did its import
+    /// commit? The answer is read from the catalog under this connection's
+    /// bundle lock, so no other writer can change it meanwhile.
+    ///
+    /// # Errors
+    /// Refuses a pending checkpoint for another destination or endpoint, one
+    /// that is not a successor of `previous`, and a catalog that matches
+    /// neither snapshot.
+    pub async fn resolve_pending(
+        &self,
+        pending: &Snapshot,
+        previous: Option<&Snapshot>,
+    ) -> Result<PendingOutcome> {
+        ensure!(
+            pending.tenant == self.tenant && pending.bundle_name == self.bundle_name,
+            "pending checkpoint belongs to a different bundle or tenant"
+        );
+        ensure!(
+            pending.database_fingerprint.as_deref() == Some(self.fingerprint()),
+            "pending checkpoint belongs to a different database endpoint"
+        );
+        if let Some(previous) = previous {
+            pending.check_previous(previous)?;
+        }
+        let current = read_catalog(&self.client, &pending.bundle_name, &pending.tenant).await?;
+        decide_pending(pending, previous, current.as_ref())
+    }
+
     /// Check ownership and atomically replace the complete bundle, then verify hashes.
+    ///
+    /// `before_commit` runs inside the verified transaction, immediately
+    /// before COMMIT, with the snapshot about to be committed (its bundle ID
+    /// set); it records the pending checkpoint. An error from it rolls back.
     ///
     /// # Errors
     /// Refuses foreign or changed bundles, unapproved deletions, or partial projections.
@@ -114,6 +156,7 @@ impl Catalog {
         previous: Option<&Snapshot>,
         docs: &[Document],
         allow_deletions: bool,
+        before_commit: impl FnOnce(&Snapshot) -> Result<()>,
     ) -> Result<ImportReport> {
         ensure!(
             next.tenant == self.tenant && next.bundle_name == self.bundle_name,
@@ -187,11 +230,11 @@ impl Catalog {
             after.binding == Some(binding),
             "catalog source binding changed; rolling back"
         );
-        transaction
-            .commit()
-            .await
-            .context("committing catalog import; rerun if the commit outcome is uncertain")?;
         next.bundle_id = Some(report.bundle_id);
+        before_commit(next).context("recording the pending checkpoint; rolling back")?;
+        transaction.commit().await.context(
+            "committing catalog import; the pending checkpoint lets the next run tell whether it committed",
+        )?;
         Ok(report)
     }
 }
@@ -286,6 +329,39 @@ fn check_catalog(
     Ok(())
 }
 
+/// Judge a pending checkpoint against the catalog's current projection.
+fn decide_pending(
+    pending: &Snapshot,
+    previous: Option<&Snapshot>,
+    current: Option<&CatalogState>,
+) -> Result<PendingOutcome> {
+    let binding = Binding {
+        schema_version: 1,
+        source: pending.source.clone(),
+    };
+    match current {
+        Some(state)
+            if state.binding.as_ref() == Some(&binding)
+                && pending.bundle_id == Some(state.bundle_id)
+                && state.hashes == pending.hashes() =>
+        {
+            Ok(PendingOutcome::Committed)
+        }
+        Some(state)
+            if previous.is_some_and(|previous| {
+                previous.bundle_id == Some(state.bundle_id) && state.hashes == previous.hashes()
+            }) =>
+        {
+            Ok(PendingOutcome::NotCommitted)
+        }
+        None if previous.is_none() => Ok(PendingOutcome::NotCommitted),
+        _ => bail!(
+            "pending checkpoint matches neither the catalog nor the last checkpoint; \
+             the catalog changed outside this importer"
+        ),
+    }
+}
+
 fn bundle_lock_key(name: &str) -> i64 {
     let digest = blake3::hash(format!("pgokf.bundle:content:{name}").as_bytes());
     let mut first = [0_u8; 8];
@@ -318,7 +394,6 @@ mod tests {
             schema_version: 1,
             source: SourceIdentity {
                 site_url: "https://test.atlassian.net".into(),
-                cloud_id: None,
                 space_id: "1".into(),
             },
             bundle_name: "wiki".into(),
@@ -368,6 +443,90 @@ mod tests {
         old.documents.get_mut("pages/1.md").unwrap().hash = "b".repeat(64);
         assert!(check_catalog(&state, Some(&old), Some(&actual)).is_ok());
         assert!(check_catalog(&old, None, Some(&actual)).is_err());
+    }
+
+    #[test]
+    fn decide_pending_reports_committed_when_the_catalog_holds_it() {
+        // Arrange
+        let pending = snapshot();
+        let current = catalog(&pending);
+
+        // Act
+        let outcome = decide_pending(&pending, None, Some(&current)).unwrap();
+
+        // Assert
+        assert_eq!(outcome, PendingOutcome::Committed);
+    }
+
+    #[test]
+    fn decide_pending_reports_not_committed_when_the_catalog_holds_the_checkpoint() {
+        // Arrange
+        let previous = snapshot();
+        let mut pending = previous.clone();
+        pending.documents.get_mut("pages/1.md").unwrap().hash = "b".repeat(64);
+        let current = catalog(&previous);
+
+        // Act
+        let outcome = decide_pending(&pending, Some(&previous), Some(&current)).unwrap();
+
+        // Assert
+        assert_eq!(outcome, PendingOutcome::NotCommitted);
+    }
+
+    #[test]
+    fn decide_pending_reports_not_committed_for_a_first_import_that_never_landed() {
+        // Arrange
+        let pending = snapshot();
+
+        // Act
+        let outcome = decide_pending(&pending, None, None).unwrap();
+
+        // Assert
+        assert_eq!(outcome, PendingOutcome::NotCommitted);
+    }
+
+    #[test]
+    fn decide_pending_refuses_a_catalog_matching_neither_snapshot() {
+        // Arrange
+        let previous = snapshot();
+        let mut pending = previous.clone();
+        pending.documents.get_mut("pages/1.md").unwrap().hash = "b".repeat(64);
+        let mut current = catalog(&previous);
+        current.hashes.insert("pages/1.md".into(), "c".repeat(64));
+
+        // Act
+        let result = decide_pending(&pending, Some(&previous), Some(&current));
+
+        // Assert
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn decide_pending_refuses_a_bundle_bound_to_another_source() {
+        // Arrange
+        let pending = snapshot();
+        let mut current = catalog(&pending);
+        current.binding = None;
+
+        // Act
+        let result = decide_pending(&pending, None, Some(&current));
+
+        // Assert
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn check_catalog_refuses_a_bundle_other_than_the_checkpoints() {
+        // Arrange
+        let state = snapshot();
+        let mut current = catalog(&state);
+        current.bundle_id = 8;
+
+        // Act
+        let result = check_catalog(&state, Some(&state), Some(&current));
+
+        // Assert
+        assert!(result.is_err());
     }
 
     #[test]

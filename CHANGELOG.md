@@ -28,7 +28,16 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
   to one source, bundle, tenant and database endpoint, refuses foreign or
   externally modified bundles, and turns page removals into an explicit,
   reviewed `--allow-deletions`; the per-bundle advisory lock spans the crawl
-  and the transaction. Each import records producer provenance
+  and the transaction. The snapshot being committed is recorded in a
+  `.pending` checkpoint just before COMMIT and promoted after it, so a run
+  that dies in between is settled against the catalog by the next one even
+  when pages changed meanwhile. Untrusted storage cannot produce live
+  Markdown: code text stays inside its code span, headings and link labels
+  stay on one line, and frontmatter escapes the characters YAML forbids. A
+  whole-snapshot byte budget (`--max-snapshot-bytes`) keeps one import within
+  a single PostgreSQL message, and a scoped token's cloud ID is verified
+  against the site's public tenant record; the source identity is the site
+  and space alone. Each import records producer provenance
   (`producer` `pgokf-confluence`, the space as `origin`, a manifest hash, and
   a source generation over page versions) in the change-event outbox and a
   new bundle's freshness row. It follows the shared companion conventions

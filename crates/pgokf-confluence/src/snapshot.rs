@@ -185,6 +185,34 @@ impl Snapshot {
     }
 }
 
+/// Upper bound for a snapshot byte budget. The whole bundle travels to the
+/// database in one protocol message, which the server caps at 1 GiB, so a
+/// larger snapshot could never be registered; the margin covers the paths,
+/// the other parameters and the message framing.
+pub const MAX_SNAPSHOT_BYTES_LIMIT: usize = 960 * 1024 * 1024;
+
+/// Total bytes a snapshot submits (document bytes plus paths), refused above
+/// `max_bytes`. Checked in a preview too, so a dry run never reports a
+/// snapshot that `--apply` could not register.
+///
+/// # Errors
+/// Returns an error when the total exceeds `max_bytes`.
+pub fn ensure_snapshot_size(docs: &[Document], max_bytes: usize) -> Result<usize> {
+    let total = docs
+        .iter()
+        .try_fold(0_usize, |sum, doc| {
+            sum.checked_add(doc.bytes.len())?
+                .checked_add(doc.path.len())
+        })
+        .unwrap_or(usize::MAX);
+    ensure!(
+        total <= max_bytes,
+        "converted space is {total} bytes, above --max-snapshot-bytes ({max_bytes}); \
+         one import must fit a single PostgreSQL message"
+    );
+    Ok(total)
+}
+
 /// Domain separators: a manifest hash can never equal a source generation.
 const MANIFEST_DOMAIN: &str = "pgokf-confluence.manifest.v1";
 const GENERATION_DOMAIN: &str = "pgokf-confluence.source-generation.v1";
@@ -247,11 +275,67 @@ pub fn read_checkpoint(path: &Path) -> Result<Option<Snapshot>> {
     }
 }
 
-/// Persist a checkpoint atomically after its database transaction committed.
+/// Persist a checkpoint atomically.
 ///
 /// # Errors
 /// Returns an error on filesystem or serialization failure; leaves the old file intact until rename.
 pub fn write_checkpoint(path: &Path, snapshot: &Snapshot) -> Result<()> {
+    write_atomically(path, snapshot).context("writing checkpoint")
+}
+
+/// The pending checkpoint beside a checkpoint: the snapshot of an import
+/// whose transaction is about to commit, or committed without the
+/// checkpoint being promoted (a crash, a full disk, a lost commit reply).
+#[must_use]
+pub fn pending_path(state_path: &Path) -> PathBuf {
+    let mut name = state_path.as_os_str().to_os_string();
+    name.push(".pending");
+    PathBuf::from(name)
+}
+
+/// Read a pending checkpoint; absent means the last import was promoted.
+///
+/// # Errors
+/// Returns an error on a malformed or unreadable pending checkpoint.
+pub fn read_pending(state_path: &Path) -> Result<Option<Snapshot>> {
+    read_checkpoint(&pending_path(state_path)).context("reading pending checkpoint")
+}
+
+/// Durably record the snapshot an import is about to commit. Written inside
+/// the transaction, before COMMIT, so whatever happens to the commit or the
+/// process afterwards, the next run can tell which snapshot the catalog holds.
+///
+/// # Errors
+/// Returns an error on filesystem or serialization failure.
+pub fn write_pending(state_path: &Path, snapshot: &Snapshot) -> Result<()> {
+    write_atomically(&pending_path(state_path), snapshot).context("writing pending checkpoint")
+}
+
+/// Make a committed pending checkpoint the checkpoint, atomically.
+///
+/// # Errors
+/// Returns an error when the rename or the directory sync fails.
+pub fn promote_pending(state_path: &Path) -> Result<()> {
+    fs::rename(pending_path(state_path), state_path)
+        .and_then(|()| sync_parent(state_path))
+        .context("promoting the pending checkpoint")
+}
+
+/// Drop a pending checkpoint whose import did not commit.
+///
+/// # Errors
+/// Returns an error when the file exists but cannot be removed.
+pub fn discard_pending(state_path: &Path) -> Result<()> {
+    match fs::remove_file(pending_path(state_path)) {
+        Ok(()) => sync_parent(state_path).context("discarding the pending checkpoint"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("discarding the pending checkpoint"),
+    }
+}
+
+/// Write `snapshot` to `path` through a synced temporary file and a rename,
+/// so a reader sees the old file or the complete new one, never a torn one.
+fn write_atomically(path: &Path, snapshot: &Snapshot) -> Result<()> {
     let parent = parent_dir(path);
     fs::create_dir_all(parent)?;
     let tmp = parent.join(format!(
@@ -264,16 +348,22 @@ pub fn write_checkpoint(path: &Path, snapshot: &Snapshot) -> Result<()> {
         file.write_all(b"\n")?;
         file.sync_all()?;
         fs::rename(&tmp, path)?;
-        #[cfg(unix)]
-        File::open(parent)?.sync_all()?;
+        sync_parent(path)?;
         Ok(())
     })();
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
     }
-    result.context(
-        "writing checkpoint after database commit; rerun with the same source to reconcile",
-    )
+    result
+}
+
+/// Persist a rename or removal in `path`'s directory.
+fn sync_parent(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    File::open(parent_dir(path))?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 /// Export a complete snapshot to a new directory, never mixing in old files.
@@ -329,7 +419,6 @@ mod tests {
         Snapshot::new(
             SourceIdentity {
                 site_url: "https://test.atlassian.net".into(),
-                cloud_id: None,
                 space_id: "42".into(),
             },
             "wiki".into(),
@@ -434,6 +523,130 @@ mod tests {
 
         // Act / Assert
         assert_ne!(state.manifest_hash(), state.source_generation());
+    }
+
+    fn document(id: &str, size: usize) -> Document {
+        Document {
+            path: format!("pages/{id}.md"),
+            bytes: vec![b'x'; size],
+            page_id: id.into(),
+            version: 1,
+            warnings: vec![],
+        }
+    }
+
+    #[test]
+    fn ensure_snapshot_size_counts_bytes_and_paths() {
+        // Arrange
+        let docs = [document("1", 100), document("22", 50)];
+
+        // Act
+        let total = ensure_snapshot_size(&docs, 1_000).unwrap();
+
+        // Assert: 150 bytes of content plus "pages/1.md" and "pages/22.md".
+        assert_eq!(total, 150 + 10 + 11);
+    }
+
+    #[test]
+    fn ensure_snapshot_size_accepts_exactly_the_budget() {
+        // Arrange
+        let docs = [document("1", 90)];
+
+        // Act / Assert
+        assert!(ensure_snapshot_size(&docs, 100).is_ok());
+    }
+
+    #[test]
+    fn ensure_snapshot_size_refuses_one_byte_over_the_budget() {
+        // Arrange
+        let docs = [document("1", 91)];
+
+        // Act
+        let error = ensure_snapshot_size(&docs, 100).unwrap_err();
+
+        // Assert
+        assert!(
+            error.to_string().contains("--max-snapshot-bytes"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn check_previous_refuses_a_checkpoint_from_another_database_endpoint() {
+        // Arrange
+        let mut previous = snapshot(&["1"]);
+        previous.database_fingerprint = Some("a".repeat(64));
+        let mut next = snapshot(&["1"]);
+        next.database_fingerprint = Some("b".repeat(64));
+
+        // Act
+        let result = next.check_previous(&previous);
+
+        // Assert
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn pending_checkpoint_is_separate_until_promoted() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let committed = snapshot(&["1"]);
+        let committing = snapshot(&["1", "2"]);
+        write_checkpoint(&state, &committed).unwrap();
+
+        // Act
+        write_pending(&state, &committing).unwrap();
+
+        // Assert
+        assert_eq!(read_checkpoint(&state).unwrap(), Some(committed));
+        assert_eq!(read_pending(&state).unwrap(), Some(committing));
+    }
+
+    #[test]
+    fn promote_pending_replaces_the_checkpoint_and_clears_pending() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let committing = snapshot(&["1", "2"]);
+        write_checkpoint(&state, &snapshot(&["1"])).unwrap();
+        write_pending(&state, &committing).unwrap();
+
+        // Act
+        promote_pending(&state).unwrap();
+
+        // Assert
+        assert_eq!(read_checkpoint(&state).unwrap(), Some(committing));
+        assert!(read_pending(&state).unwrap().is_none());
+    }
+
+    #[test]
+    fn discard_pending_keeps_the_checkpoint_and_tolerates_absence() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let committed = snapshot(&["1"]);
+        write_checkpoint(&state, &committed).unwrap();
+        write_pending(&state, &snapshot(&["1", "2"])).unwrap();
+
+        // Act
+        discard_pending(&state).unwrap();
+        let second = discard_pending(&state);
+
+        // Assert
+        assert!(read_pending(&state).unwrap().is_none());
+        assert_eq!(read_checkpoint(&state).unwrap(), Some(committed));
+        assert!(second.is_ok());
+    }
+
+    #[test]
+    fn promote_pending_fails_without_a_pending_checkpoint() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+
+        // Act / Assert
+        assert!(promote_pending(&state).is_err());
     }
 
     #[test]

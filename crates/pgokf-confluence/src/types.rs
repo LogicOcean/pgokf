@@ -16,10 +16,13 @@ pub struct Page {
 }
 
 /// Stable identity of the Confluence space, without credentials.
+///
+/// Keyed on the site and the space alone: a scoped token's cloud ID is only a
+/// route to the same site (verified against the site before any import), so
+/// moving between classic and scoped tokens never changes ownership.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SourceIdentity {
     pub site_url: String,
-    pub cloud_id: Option<String>,
     pub space_id: String,
 }
 

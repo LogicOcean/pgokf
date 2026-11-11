@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
 use pgokf_confluence::convert::convert_pages;
-use pgokf_confluence::sink::{Catalog, PRODUCER};
-use pgokf_confluence::snapshot::Snapshot;
+use pgokf_confluence::sink::{Catalog, PRODUCER, PendingOutcome};
+use pgokf_confluence::snapshot::{self, Snapshot};
 use pgokf_confluence::types::{Document, Page, SourceIdentity};
 use tokio::task::JoinHandle;
 use tokio_postgres::Client;
@@ -47,7 +47,6 @@ impl TestDatabase {
 fn source() -> SourceIdentity {
     SourceIdentity {
         site_url: "https://integration-test.atlassian.net".into(),
-        cloud_id: None,
         space_id: "42".into(),
     }
 }
@@ -158,7 +157,13 @@ async fn check_parser_failure_rolls_back(
     let mut invalid = snapshot(catalog, name, &invalid_docs)?;
     assert!(
         catalog
-            .apply(&mut invalid, Some(previous), &invalid_docs, false)
+            .apply(
+                &mut invalid,
+                Some(previous),
+                &invalid_docs,
+                false,
+                record_nothing
+            )
             .await
             .is_err()
     );
@@ -172,7 +177,9 @@ async fn check_lifecycle_and_recovery(db: &TestDatabase) -> Result<()> {
     let docs = documents(1)?;
     check_native_lock(db, &name, &docs).await?;
     let mut first = snapshot(&catalog, &name, &docs)?;
-    let report = catalog.apply(&mut first, None, &docs, false).await?;
+    let report = catalog
+        .apply(&mut first, None, &docs, false, record_nothing)
+        .await?;
     assert_eq!(
         (report.added, report.updated, report.removed, report.total),
         (2, 0, 0, 2)
@@ -183,7 +190,7 @@ async fn check_lifecycle_and_recovery(db: &TestDatabase) -> Result<()> {
 
     let mut unchanged = snapshot(&catalog, &name, &docs)?;
     let report = catalog
-        .apply(&mut unchanged, Some(&first), &docs, false)
+        .apply(&mut unchanged, Some(&first), &docs, false, record_nothing)
         .await?;
     assert_eq!(
         (
@@ -198,7 +205,13 @@ async fn check_lifecycle_and_recovery(db: &TestDatabase) -> Result<()> {
     let updated_docs = documents(2)?;
     let mut updated = snapshot(&catalog, &name, &updated_docs)?;
     let report = catalog
-        .apply(&mut updated, Some(&unchanged), &updated_docs, false)
+        .apply(
+            &mut updated,
+            Some(&unchanged),
+            &updated_docs,
+            false,
+            record_nothing,
+        )
         .await?;
     assert_eq!((report.updated, report.total), (2, 2));
     assert_projection(&db.native, bundle_id, &updated).await?;
@@ -208,13 +221,25 @@ async fn check_lifecycle_and_recovery(db: &TestDatabase) -> Result<()> {
     let reduced_docs = &updated_docs[..1];
     let mut reduced = snapshot(&catalog, &name, reduced_docs)?;
     let error = catalog
-        .apply(&mut reduced, Some(&updated), reduced_docs, false)
+        .apply(
+            &mut reduced,
+            Some(&updated),
+            reduced_docs,
+            false,
+            record_nothing,
+        )
         .await
         .unwrap_err();
     assert!(error.to_string().contains("pages disappeared"));
     assert_projection(&db.native, bundle_id, &updated).await?;
     let report = catalog
-        .apply(&mut reduced, Some(&updated), reduced_docs, true)
+        .apply(
+            &mut reduced,
+            Some(&updated),
+            reduced_docs,
+            true,
+            record_nothing,
+        )
         .await?;
     // Native total counts all plan buckets, including removed documents.
     assert_eq!((report.removed, report.unchanged, report.total), (1, 1, 2));
@@ -225,14 +250,14 @@ async fn check_lifecycle_and_recovery(db: &TestDatabase) -> Result<()> {
     let mut recovered = snapshot(&catalog, &name, reduced_docs)?;
     assert!(recovered.bundle_id.is_none());
     let report = catalog
-        .apply(&mut recovered, None, reduced_docs, false)
+        .apply(&mut recovered, None, reduced_docs, false, record_nothing)
         .await?;
     assert_eq!((report.bundle_id, report.unchanged), (bundle_id, 1));
     assert_eq!(recovered.bundle_id, Some(bundle_id));
     let changed_docs = documents(3)?;
     let mut different = snapshot(&catalog, &name, &changed_docs)?;
     let error = catalog
-        .apply(&mut different, None, &changed_docs, false)
+        .apply(&mut different, None, &changed_docs, false, record_nothing)
         .await
         .unwrap_err();
     assert!(error.to_string().contains("no matching checkpoint"));
@@ -247,7 +272,7 @@ async fn check_foreign_bundle(db: &TestDatabase) -> Result<()> {
     let mut catalog = Catalog::connect(&db.url, false, "default", &name).await?;
     let mut next = snapshot(&catalog, &name, &docs)?;
     let error = catalog
-        .apply(&mut next, None, &docs, false)
+        .apply(&mut next, None, &docs, false, record_nothing)
         .await
         .unwrap_err();
     assert!(
@@ -277,7 +302,13 @@ async fn check_out_of_band_changes(db: &TestDatabase) -> Result<()> {
     let proposed_docs = documents(3)?;
     let mut next = snapshot(&catalog, &name, &proposed_docs)?;
     let error = catalog
-        .apply(&mut next, Some(&previous), &proposed_docs, false)
+        .apply(
+            &mut next,
+            Some(&previous),
+            &proposed_docs,
+            false,
+            record_nothing,
+        )
         .await
         .unwrap_err();
     assert!(
@@ -294,6 +325,144 @@ async fn check_out_of_band_changes(db: &TestDatabase) -> Result<()> {
     Ok(())
 }
 
+/// A `before_commit` hook for imports that keep no state file.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the before_commit hook signature returns a Result"
+)]
+fn record_nothing(_: &Snapshot) -> Result<()> {
+    Ok(())
+}
+
+/// The reviewed crash: S1 commits but its checkpoint is never promoted, a
+/// page changes, and the next run must still import S2 - measuring removals
+/// against S1, which the catalog holds, not the outdated S0 checkpoint.
+async fn check_commit_without_promotion_recovers(db: &TestDatabase) -> Result<()> {
+    let name = bundle_name("pending");
+    let directory = tempfile::tempdir()?;
+    let state = directory.path().join("state.json");
+    let record = |committing: &Snapshot| snapshot::write_pending(&state, committing);
+    let mut catalog = Catalog::connect(&db.url, false, "default", &name).await?;
+    let s0_docs = documents(1)?;
+    let mut s0 = snapshot(&catalog, &name, &s0_docs)?;
+    catalog
+        .apply(&mut s0, None, &s0_docs, false, record)
+        .await?;
+    snapshot::promote_pending(&state)?;
+    let s1_docs = documents(2)?;
+    let mut s1 = snapshot(&catalog, &name, &s1_docs)?;
+    catalog
+        .apply(&mut s1, Some(&s0), &s1_docs, false, record)
+        .await?;
+    drop(catalog); // the process dies before promoting S1
+
+    let mut catalog = Catalog::connect(&db.url, false, "default", &name).await?;
+    let checkpoint = snapshot::read_checkpoint(&state)?;
+    assert_eq!(checkpoint.as_ref(), Some(&s0), "checkpoint still names S0");
+    let s2_docs = documents(3)?;
+    let mut outdated = snapshot(&catalog, &name, &s2_docs)?;
+    let error = catalog
+        .apply(&mut outdated, checkpoint.as_ref(), &s2_docs, false, record)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("changed outside this checkpoint")
+    );
+
+    let pending = snapshot::read_pending(&state)?.context("pending checkpoint recorded")?;
+    assert_eq!(pending, s1);
+    assert_eq!(
+        catalog
+            .resolve_pending(&pending, checkpoint.as_ref())
+            .await?,
+        PendingOutcome::Committed
+    );
+    snapshot::promote_pending(&state)?;
+    let previous = snapshot::read_checkpoint(&state)?.context("S1 promoted")?;
+    assert_eq!(previous, s1);
+    // S2 edits page 1 and drops page 2: a removal measured against S1.
+    let reduced = &s2_docs[..1];
+    let mut s2 = snapshot(&catalog, &name, reduced)?;
+    let error = catalog
+        .apply(&mut s2, Some(&previous), reduced, false, record)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("pages disappeared"));
+    catalog
+        .apply(&mut s2, Some(&previous), reduced, true, record)
+        .await?;
+    snapshot::promote_pending(&state)?;
+    assert_projection(&db.native, previous.bundle_id.unwrap(), &s2).await?;
+    Ok(())
+}
+
+/// A pending checkpoint whose import never committed is discarded, and the
+/// catalog keeps the last promoted snapshot.
+async fn check_uncommitted_pending_is_discarded(db: &TestDatabase) -> Result<()> {
+    let name = bundle_name("uncommitted");
+    let catalog_docs = documents(1)?;
+    let mut catalog = Catalog::connect(&db.url, false, "default", &name).await?;
+    let mut s0 = snapshot(&catalog, &name, &catalog_docs)?;
+    catalog
+        .apply(&mut s0, None, &catalog_docs, false, record_nothing)
+        .await?;
+    let mut never_committed = snapshot(&catalog, &name, &documents(2)?)?;
+    never_committed.bundle_id = s0.bundle_id;
+    assert_eq!(
+        catalog.resolve_pending(&never_committed, Some(&s0)).await?,
+        PendingOutcome::NotCommitted
+    );
+    assert_projection(&db.native, s0.bundle_id.unwrap(), &s0).await?;
+    Ok(())
+}
+
+/// Guards that refuse before any catalog write: a snapshot bound to another
+/// database, documents that differ from the snapshot, and a disabled bundle.
+async fn check_destination_guards(db: &TestDatabase) -> Result<()> {
+    let name = bundle_name("guards");
+    let docs = documents(1)?;
+    let mut catalog = Catalog::connect(&db.url, false, "default", &name).await?;
+
+    let mut foreign = snapshot(&catalog, &name, &docs)?;
+    foreign.database_fingerprint = Some("another-endpoint".into());
+    let error = catalog
+        .apply(&mut foreign, None, &docs, false, record_nothing)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("database binding mismatch"));
+
+    let mut mismatched = snapshot(&catalog, &name, &docs)?;
+    let other_docs = documents(2)?;
+    let error = catalog
+        .apply(&mut mismatched, None, &other_docs, false, record_nothing)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("do not match complete snapshot"));
+
+    let mut first = snapshot(&catalog, &name, &docs)?;
+    catalog
+        .apply(&mut first, None, &docs, false, record_nothing)
+        .await?;
+    // Release the importer's bundle lock so another writer can disable it.
+    drop(catalog);
+    db.native
+        .execute(
+            "SELECT pgokf.set_bundle_enabled($1, false)",
+            &[&first.bundle_id.unwrap()],
+        )
+        .await?;
+    let mut catalog = Catalog::connect(&db.url, false, "default", &name).await?;
+    let mut again = snapshot(&catalog, &name, &docs)?;
+    let error = catalog
+        .apply(&mut again, Some(&first), &docs, false, record_nothing)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("disabled or retired"));
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires explicit PGOKF_CONFLUENCE_TEST_DATABASE_URL for a disposable pgokf database"]
 async fn catalog_import_guards_and_recovery() -> Result<()> {
@@ -301,5 +470,8 @@ async fn catalog_import_guards_and_recovery() -> Result<()> {
     check_lifecycle_and_recovery(&database).await?;
     check_foreign_bundle(&database).await?;
     check_out_of_band_changes(&database).await?;
+    check_commit_without_promotion_recovers(&database).await?;
+    check_uncommitted_pending_is_discarded(&database).await?;
+    check_destination_guards(&database).await?;
     Ok(())
 }

@@ -28,7 +28,7 @@ use clap::Parser;
 use pgokf_companion::cli::non_empty;
 use pgokf_confluence::client::{Client, ClientConfig};
 use pgokf_confluence::convert::convert_pages;
-use pgokf_confluence::sink::Catalog;
+use pgokf_confluence::sink::{Catalog, PendingOutcome};
 use pgokf_confluence::snapshot::{self, Snapshot, StateLock};
 use pgokf_confluence::types::SourceIdentity;
 use serde_json::json;
@@ -40,6 +40,8 @@ const DEFAULT_TENANT: &str = "default";
 const MAX_RETRIES_LIMIT: u32 = 10;
 /// Largest token file accepted; Atlassian API tokens are far smaller.
 const MAX_TOKEN_FILE_BYTES: u64 = 64 * 1024;
+/// Default `--max-snapshot-bytes`: half the protocol-bounded maximum.
+const DEFAULT_SNAPSHOT_BYTES: usize = 512 * 1024 * 1024;
 
 /// Import the pages visible to one token from a shared-audience Confluence Cloud space.
 #[derive(Parser)]
@@ -100,6 +102,10 @@ struct Cli {
     /// Maximum retries for each read request (at most 10).
     #[arg(long, default_value_t = 3)]
     max_retries: u32,
+    /// Maximum total bytes of the converted space (documents and paths); the
+    /// whole bundle is sent in one PostgreSQL message (at most 960 MiB).
+    #[arg(long, default_value_t = DEFAULT_SNAPSHOT_BYTES)]
+    max_snapshot_bytes: usize,
 }
 
 impl Cli {
@@ -121,15 +127,27 @@ async fn main() -> Result<()> {
     run(Cli::parse().normalized()).await
 }
 
-async fn run(cli: Cli) -> Result<()> {
+/// Refuse limits that are zero or beyond what one import can carry, before
+/// any network access.
+fn validate_limits(cli: &Cli) -> Result<()> {
     ensure!(
-        cli.max_pages > 0 && cli.max_response_bytes > 0,
-        "page and response limits must be positive"
+        cli.max_pages > 0 && cli.max_response_bytes > 0 && cli.max_snapshot_bytes > 0,
+        "page, response and snapshot limits must be positive"
     );
     ensure!(
         cli.max_retries <= MAX_RETRIES_LIMIT,
         "--max-retries cannot exceed {MAX_RETRIES_LIMIT}"
     );
+    ensure!(
+        cli.max_snapshot_bytes <= snapshot::MAX_SNAPSHOT_BYTES_LIMIT,
+        "--max-snapshot-bytes cannot exceed {}",
+        snapshot::MAX_SNAPSHOT_BYTES_LIMIT
+    );
+    Ok(())
+}
+
+async fn run(cli: Cli) -> Result<()> {
+    validate_limits(&cli)?;
     let (client, source) = confluence_client(&cli)?;
     let tenant = cli
         .tenant
@@ -143,15 +161,14 @@ async fn run(cli: Cli) -> Result<()> {
         !cli.bundle_name.trim().is_empty() && !cli.bundle_name.contains('\0'),
         "bundle name must be nonempty and contain no NUL"
     );
-    let _lock = cli
-        .state_file
-        .as_deref()
-        .map(StateLock::acquire)
-        .transpose()?;
-    let previous = cli
-        .state_file
-        .as_deref()
+    let state_file = cli.state_file.as_deref();
+    let _lock = state_file.map(StateLock::acquire).transpose()?;
+    let checkpoint = state_file
         .map(snapshot::read_checkpoint)
+        .transpose()?
+        .flatten();
+    let pending = state_file
+        .map(snapshot::read_pending)
         .transpose()?
         .flatten();
     let mut catalog = if cli.apply {
@@ -163,8 +180,11 @@ async fn run(cli: Cli) -> Result<()> {
     } else {
         None
     };
+    let (previous, pending_status) =
+        settle_pending(catalog.as_ref(), state_file, checkpoint, pending).await?;
     let pages = client.crawl_space(&cli.space_id, cli.max_pages).await?;
     let documents = convert_pages(&source, &pages)?;
+    let snapshot_bytes = snapshot::ensure_snapshot_size(&documents, cli.max_snapshot_bytes)?;
     let mut next = Snapshot::new(source, cli.bundle_name.clone(), tenant, &documents)?;
     if let Some(catalog) = &catalog {
         next.database_fingerprint = Some(catalog.fingerprint().into());
@@ -184,7 +204,9 @@ async fn run(cli: Cli) -> Result<()> {
         "bundle_name": next.bundle_name,
         "tenant": next.tenant,
         "page_count": documents.len(),
+        "snapshot_bytes": snapshot_bytes,
         "deletion_baseline": if previous.is_some() { "checkpoint" } else { "none" },
+        "pending_checkpoint": pending_status,
         "removed_page_ids": removed,
         "deletions_require_approval": !removed.is_empty() && !cli.allow_deletions,
         "warnings": warnings,
@@ -193,24 +215,56 @@ async fn run(cli: Cli) -> Result<()> {
         snapshot::export(path, &next, &documents)?;
     }
     if let Some(catalog) = &mut catalog {
+        let state_file = state_file.context("--apply requires --state-file")?;
         let report = catalog
             .apply(
                 &mut next,
                 previous.as_ref(),
                 &documents,
                 cli.allow_deletions,
+                |committing| snapshot::write_pending(state_file, committing),
             )
             .await?;
-        snapshot::write_checkpoint(
-            cli.state_file
-                .as_deref()
-                .context("--apply requires --state-file")?,
-            &next,
+        snapshot::promote_pending(state_file).context(
+            "the import committed but its checkpoint was not promoted; the next --apply promotes it",
         )?;
         result["catalog"] = serde_json::to_value(report)?;
     }
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
+}
+
+/// Settle a pending checkpoint - an import recorded just before its commit
+/// but never promoted - before this run measures anything against the last
+/// checkpoint. With a catalog connection (apply) it is promoted when that
+/// import committed and discarded when it did not. A preview cannot tell, so
+/// it keeps the last promoted checkpoint as its baseline and reports the
+/// pending one as unresolved.
+async fn settle_pending(
+    catalog: Option<&Catalog>,
+    state_file: Option<&Path>,
+    checkpoint: Option<Snapshot>,
+    pending: Option<Snapshot>,
+) -> Result<(Option<Snapshot>, Option<&'static str>)> {
+    let (Some(pending), Some(state_file)) = (pending, state_file) else {
+        return Ok((checkpoint, None));
+    };
+    let Some(catalog) = catalog else {
+        return Ok((checkpoint, Some("unresolved")));
+    };
+    match catalog
+        .resolve_pending(&pending, checkpoint.as_ref())
+        .await?
+    {
+        PendingOutcome::Committed => {
+            snapshot::promote_pending(state_file)?;
+            Ok((Some(pending), Some("promoted")))
+        }
+        PendingOutcome::NotCommitted => {
+            snapshot::discard_pending(state_file)?;
+            Ok((checkpoint, Some("discarded")))
+        }
+    }
 }
 
 fn confluence_client(cli: &Cli) -> Result<(Client, SourceIdentity)> {
@@ -230,7 +284,6 @@ fn confluence_client(cli: &Cli) -> Result<(Client, SourceIdentity)> {
     let canonical = url::Url::parse(&cli.site_url).context("invalid Confluence site URL")?;
     let source = SourceIdentity {
         site_url: canonical.origin().ascii_serialization(),
-        cloud_id: cli.cloud_id.clone(),
         space_id: cli.space_id.clone(),
     };
     Ok((client, source))
@@ -352,6 +405,50 @@ mod tests {
             cli.cloud_id.as_deref(),
             Some("abcdef01-2345-6789-abcd-ef0123456789")
         );
+    }
+
+    #[test]
+    fn validate_limits_accepts_the_defaults() {
+        // Arrange
+        let cli = Cli::try_parse_from(REQUIRED).expect("parses");
+
+        // Act / Assert
+        assert!(validate_limits(&cli).is_ok());
+    }
+
+    #[test]
+    fn validate_limits_refuses_a_snapshot_budget_beyond_one_message() {
+        // Arrange
+        let too_large = (snapshot::MAX_SNAPSHOT_BYTES_LIMIT + 1).to_string();
+        let args = REQUIRED
+            .into_iter()
+            .chain(["--max-snapshot-bytes", too_large.as_str()]);
+        let cli = Cli::try_parse_from(args).expect("parses");
+
+        // Act
+        let error = validate_limits(&cli).unwrap_err();
+
+        // Assert
+        assert!(
+            error.to_string().contains("--max-snapshot-bytes"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn validate_limits_refuses_zero_limits() {
+        for flag in [
+            "--max-pages",
+            "--max-response-bytes",
+            "--max-snapshot-bytes",
+        ] {
+            // Arrange
+            let args = REQUIRED.into_iter().chain([flag, "0"]);
+            let cli = Cli::try_parse_from(args).expect("parses");
+
+            // Act / Assert
+            assert!(validate_limits(&cli).is_err(), "{flag}");
+        }
     }
 
     #[test]
