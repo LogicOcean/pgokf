@@ -145,8 +145,8 @@ docker build -f packaging/docker/Dockerfile \
 
 A second Dockerfile,
 [`packaging/docker/Dockerfile.companions`](https://github.com/LogicOcean/pgokf/blob/main/packaging/docker/Dockerfile.companions),
-packages the three network companions (`pgokf-ingest`, `pgokf-embed`,
-`pgokf-mcp`) into one non-root image.
+packages the network companions (`pgokf-ingest`, `pgokf-embed`,
+`pgokf-mcp`, `pgokf-web`, `pgokf-confluence`) into one non-root image.
 
 CI builds and smoke-tests both images **natively on amd64 and arm64** for every
 supported major on every packaging change and version-tag push. Those events are

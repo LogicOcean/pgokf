@@ -1,0 +1,22 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<h2>How &amp; why</h2>
+<p>Write <strong>clear</strong>, <em>useful</em> text.&nbsp;Use &mdash; and &#x1F680; and literal &amp;lt;tag&amp;gt;.</p>
+<ul><li>First item<ul><li>Nested item</li></ul></li><li>Second item</li></ul>
+<ol start="3"><li>Third item</li><li>Fourth item</li></ol>
+<blockquote><p>A quoted <code>literal `value`</code>.</p></blockquote>
+<table>
+  <tbody>
+    <tr><th>Name</th><th>Expression</th></tr>
+    <tr><td>A | B</td><td><code>a|b</code><br/>next line</td></tr>
+  </tbody>
+</table>
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">rust</ac:parameter>
+  <ac:plain-text-body><![CDATA[let example = "```";
+println!("<literal> & value");
+]]></ac:plain-text-body>
+</ac:structured-macro>
+<ac:structured-macro ac:name="note">
+  <ac:parameter ac:name="title">Read first</ac:parameter>
+  <ac:rich-text-body><p>A helpful note.</p></ac:rich-text-body>
+</ac:structured-macro>

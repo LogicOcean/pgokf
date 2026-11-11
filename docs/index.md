@@ -40,7 +40,8 @@ needs no external file store.
 - **Companions:** `pgokf-ingest` (mountless S3 ingestion, one-shot or
   `--watch`), `pgokf-embed` (embedding sidecar for semantic search),
   `pgokf-mcp` (an MCP server exposing the catalog to AI agents, over stdio
-  or HTTP), `pgokf-web` (the web UI, JSON API and agent plugin builder)
+  or HTTP), `pgokf-web` (the web UI, JSON API and agent plugin builder),
+  `pgokf-confluence` (one-shot Confluence Cloud space ingestion)
 - **License:** AGPL-3.0-only, with a commercial license available (see
   [`LICENSING.md`](https://github.com/LogicOcean/pgokf/blob/main/LICENSING.md))
 
@@ -121,6 +122,7 @@ your first real bundle - start with [Getting started](getting-started.md).
 | [OKF authoring](okf-authoring.md) | How to structure a bundle: concepts, frontmatter, the reserved `index.md`, provenance families, the actor convention. |
 | [Search guide](search-guide.md) | Writing effective `concept_search` queries, ranking and headlines, structured filters, keyset pagination, facets, and the optional BM25, semantic, and hybrid backends. |
 | [Deployment topologies](deployment-topologies.md) | The two storage tiers, data-lake vs self-contained installs, bucket mounts vs mountless ingestion, and where the files live. |
+| [Confluence integration](confluence-integration.md) | Importing a Confluence Cloud space: content mapping, provenance, permission limits, individual setup, and Azure Container Apps Jobs. |
 | [Docker Compose deployment](compose-deployment.md) | The reference single-host production stack: the multi-arch server image with pgvector, pg_cron, and pg_textsearch, the embedding daemon, verified backups, and optional ingestion and MCP services. |
 | [Operations](operations.md) | Running pgokf in production: monitoring, audit logs, retirement, sync scheduling, exports, backup, and upgrades. |
 | [Multi-tenancy](multi-tenancy.md) | Opt-in row-level tenant isolation keyed on the `pgokf.tenant` session GUC, and what it does and does not guarantee. |

@@ -4,6 +4,7 @@ members = [
     "crates/okf-parser",
     "crates/okf-sync",
     "crates/pgokf-companion",
+    "crates/pgokf-confluence",
     "crates/pgokf-embed",
     "crates/pgokf-ingest",
     "crates/pgokf-mcp",

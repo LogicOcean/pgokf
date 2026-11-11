@@ -164,3 +164,13 @@ jobs:
         run: |
           cargo build --locked -p pgokf-mcp
           cargo run --locked -p pgokf-verifier -- mcp-golden . "$PGOKF_PG_CONFIG" "$PGOKF_MCP_BIN" "$RUNNER_TEMP/mcp-golden-evidence"
+
+      # The Confluence companion's catalog workflow (import, resync, reviewed
+      # deletions, ownership and out-of-band refusals, checkpoint recovery,
+      # rollback, provenance) against a private scratch cluster with this
+      # checkout's extension, installed on this leg by the parity step above.
+      - name: Confluence companion catalog workflow
+        if: steps.pgdg.outputs.available == 'true' && matrix.pg == 18
+        env:
+          PGOKF_TEST_PG_CONFIG: /usr/lib/postgresql/18/bin/pg_config
+        run: scripts/test-confluence-catalog.sh

@@ -1,0 +1,50 @@
+[package]
+name = "pgokf-confluence"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Confluence Cloud ingestion companion: imports one space as a complete, checkpointed OKF content bundle into pgokf through register_bundle_content_with_context."
+homepage.workspace = true
+documentation.workspace = true
+# Overrides the workspace default: this member carries its own README covering
+# the binary's CLI, safety model, and deployment, so it renders on its page.
+readme = "README.md"
+keywords.workspace = true
+# Overrides the workspace default: this member ships a binary, not a library.
+categories = ["database", "command-line-utilities"]
+
+[lib]
+name = "pgokf_confluence"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pgokf-confluence"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+base64 = "0.22"
+blake3.workspace = true
+clap = { version = "4.5", features = ["derive", "env"] }
+httpdate = "1.0"
+pgokf-companion = { version = "=0.4.0", path = "../pgokf-companion" }
+pgokf-pgconn = { version = "=0.4.0", path = "../pgokf-pgconn" }
+quick-xml = { version = "0.41", features = ["escape-html"] }
+rand = "0.10"
+# rustls only, matching the rest of the workspace: no OpenSSL/native-tls.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "query"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "time"] }
+tokio-postgres = "0.7"
+url = "2"
+
+[dev-dependencies]
+okf-parser = { version = "=0.4.0", path = "../okf-parser" }
+tempfile = "3"
+wiremock = "0.6"
+
+[lints]
+workspace = true

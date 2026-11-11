@@ -533,6 +533,15 @@ fn validate_optional(extensions: &[&str], major: &str, optional: bool) -> Result
     }
     Ok(())
 }
+/// Every executable the companions image ships; each must answer `--help`.
+const COMPANION_BINARIES: [&str; 5] = [
+    "pgokf-ingest",
+    "pgokf-embed",
+    "pgokf-mcp",
+    "pgokf-web",
+    "pgokf-confluence",
+];
+
 /// Exercise every companion executable, early invalid-interval refusal and the
 /// image's unprivileged UID. All containers have durable ownership receipts.
 /// # Errors
@@ -543,7 +552,7 @@ pub fn companions(docker: &mut impl DockerApi, evidence: &Path, image: &str) -> 
     let run = uuid::Uuid::new_v4().simple().to_string();
     let mut owned = Vec::new();
     let result = (|| {
-        for binary in ["pgokf-ingest", "pgokf-embed", "pgokf-mcp", "pgokf-web"] {
+        for binary in COMPANION_BINARIES {
             let id = create(
                 docker,
                 &evidence,
@@ -618,7 +627,7 @@ pub fn companions(docker: &mut impl DockerApi, evidence: &Path, image: &str) -> 
     result?;
     owned_docker::publish(
         &evidence.join("companions.json"),
-        &serde_json::json!({"image":image,"help_commands":4,"interval_refusal":true,"uid":10001}),
+        &serde_json::json!({"image":image,"help_commands":COMPANION_BINARIES.len(),"interval_refusal":true,"uid":10001}),
     )
 }
 

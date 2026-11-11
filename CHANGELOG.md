@@ -10,6 +10,36 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 ## [Unreleased]
 
+### Added
+
+- **`pgokf-confluence`, a Confluence Cloud ingestion companion.** One run
+  reads every current page visible to one token in one selected space,
+  converts the complete space to OKF Markdown (`pages/<page-id>.md`, so
+  renames keep concept identity; links between imported pages become
+  relative links and graph edges), and - only with `--apply` - replaces a
+  dedicated content bundle in one transaction through
+  `register_bundle_content_with_context`. Without `--apply` it is a read-only
+  preview that never connects to PostgreSQL and can export the converted
+  bundle for review. Safety model: the token comes only from a file or
+  `CONFLUENCE_API_TOKEN`, never an argument; the crawl inventories the space
+  before and after reading bodies and refuses an empty, changing, partial or
+  over-limit snapshot; conversion is bounded per page (input bytes, depth,
+  nodes, table cells, rendered size); a durable, locked checkpoint binds runs
+  to one source, bundle, tenant and database endpoint, refuses foreign or
+  externally modified bundles, and turns page removals into an explicit,
+  reviewed `--allow-deletions`; the per-bundle advisory lock spans the crawl
+  and the transaction. Each import records producer provenance
+  (`producer` `pgokf-confluence`, the space as `origin`, a manifest hash, and
+  a source generation over page versions) in the change-event outbox and a
+  new bundle's freshness row. It follows the shared companion conventions
+  (`OKF_PG_URL`, `OKF_BUNDLE_NAME`, `OKF_TENANT`, `OKF_PG_TLS`; empty means
+  unset). Shared-audience only: Confluence page restrictions are not
+  reproduced. The companions image now ships the binary, the companions smoke
+  test runs it, CI runs its catalog workflow against PostgreSQL 18, and
+  [docs/confluence-integration.md](docs/confluence-integration.md) plus
+  `deploy/confluence/` cover individual setup and a scheduled Azure Container
+  Apps Job.
+
 ### Security
 
 - **`--tls` (`OKF_PG_TLS`) can no longer fall back to plaintext.** Every

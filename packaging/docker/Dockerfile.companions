@@ -8,6 +8,9 @@
 #   pgokf-mcp      Model Context Protocol server, over stdio or over HTTP
 #                  (--http, with bearer tokens and roles)
 #   pgokf-web      the web UI and JSON API, and the agent plugin builder
+#   pgokf-confluence  one-shot import of a Confluence Cloud space as a complete
+#                  OKF content bundle (dry run unless --apply; run it on a
+#                  schedule, for example as a cron-triggered container job)
 #
 # The extension performs no network I/O; these do, and talk to the catalog only
 # through its public SQL surface (see docs/deployment-topologies.md). The image
@@ -25,7 +28,7 @@ ARG RUST_VERSION=1.96.0
 ARG DEBIAN_CODENAME=trixie
 
 # --------------------------------------------------------------------------
-# Stage 1: compile the four binaries with the pinned toolchain
+# Stage 1: compile the five binaries with the pinned toolchain
 # --------------------------------------------------------------------------
 FROM rust:${RUST_VERSION}-slim-${DEBIAN_CODENAME} AS builder
 
@@ -53,10 +56,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     set -eux; \
     cargo build --release --locked \
-        -p pgokf-ingest -p pgokf-embed -p pgokf-mcp -p pgokf-web; \
+        -p pgokf-ingest -p pgokf-embed -p pgokf-mcp -p pgokf-web \
+        -p pgokf-confluence; \
     install -d /out; \
     install -m 0755 target/release/pgokf-ingest target/release/pgokf-embed \
-        target/release/pgokf-mcp target/release/pgokf-web /out/
+        target/release/pgokf-mcp target/release/pgokf-web \
+        target/release/pgokf-confluence /out/
 
 # --------------------------------------------------------------------------
 # Stage 2: minimal runtime
@@ -66,13 +71,14 @@ FROM debian:${DEBIAN_CODENAME}-slim
 ARG PGOKF_VERSION="0.4.0"
 
 LABEL org.opencontainers.image.title="pgokf-companions" \
-      org.opencontainers.image.description="pgokf network companions: pgokf-ingest, pgokf-embed, pgokf-mcp, pgokf-web" \
+      org.opencontainers.image.description="pgokf network companions: pgokf-ingest, pgokf-embed, pgokf-mcp, pgokf-web, pgokf-confluence" \
       org.opencontainers.image.source="https://github.com/LogicOcean/pgokf" \
       org.opencontainers.image.version="${PGOKF_VERSION}" \
       org.opencontainers.image.licenses="AGPL-3.0-only"
 
 # ca-certificates: the rustls trust store for TLS to PostgreSQL, object stores,
-# and embedding endpoints. A dedicated unprivileged user runs the binaries.
+# embedding endpoints, and Confluence Cloud. A dedicated unprivileged user runs
+# the binaries.
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends ca-certificates; \

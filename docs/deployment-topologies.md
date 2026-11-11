@@ -314,6 +314,24 @@ PostgreSQL by default, with the same opt-in verified-TLS session (`--tls` or
 
 ---
 
+## Confluence Cloud ingestion
+
+The `pgokf-confluence` companion converts a selected Confluence Cloud space into
+a complete OKF content bundle and ingests it through the same mountless API,
+labelled with its producer provenance. It runs once per invocation, defaults
+to a read-only preview, and requires an explicit `--apply` plus a durable
+checkpoint for catalog writes. Confluence remains the source of truth; the
+extension performs no HTTP calls, and the Confluence token never reaches
+PostgreSQL. It uses the same `pgokf-pgconn` helper and `--tls` policy as the
+other companions.
+
+It requires a shared audience between source content and catalog readers: it
+does not reproduce Confluence page ACLs. See
+[Confluence integration](confluence-integration.md) for individual setup,
+content limits, and the Azure Container Apps Job deployment example.
+
+---
+
 ## Scaling reads with replicas
 
 Search and graph traversal are read-only. `concept_search` and

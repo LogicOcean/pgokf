@@ -6,7 +6,7 @@ as the build context (`.dockerignore` keeps `target/` and `.git/` out):
 | Image | Dockerfile | Contents |
 | ----- | ---------- | -------- |
 | `ghcr.io/logicocean/pgokf:<version>-pg<major>` | [`Dockerfile`](Dockerfile) | The official `postgres:<major>` image plus **pgokf**, and the optional extensions it lights up: **pgvector** (semantic / hybrid search), **pg_cron** (scheduled refresh), and a BM25 provider - **Tiger Data pg_textsearch** (PostgreSQL license) on the 17 and 18 images by default, or **ParadeDB pg_search** when opted in. First-init hooks create the extensions, least-privilege login roles, and the catalog policy from the environment. Ships the `pgokf-backup` / `pgokf-restore` tools. |
-| `ghcr.io/logicocean/pgokf-companions:<version>` | [`Dockerfile.companions`](Dockerfile.companions) | The four network companions - `pgokf-ingest`, `pgokf-embed`, `pgokf-mcp`, `pgokf-web` - in one small non-root image. |
+| `ghcr.io/logicocean/pgokf-companions:<version>` | [`Dockerfile.companions`](Dockerfile.companions) | The five network companions - `pgokf-ingest`, `pgokf-embed`, `pgokf-mcp`, `pgokf-web`, `pgokf-confluence` - in one small non-root image. |
 
 Both are **multi-architecture** (`linux/amd64` + `linux/arm64`): CI
 ([`.github/workflows/packages.yml`](../../.github/workflows/packages.yml))
@@ -208,7 +208,7 @@ packaging/docker/smoke-test-companions.sh pgokf-companions:0.4.0
 ```
 
 The image has no entrypoint: name the binary as the command. It runs as an
-unprivileged user (uid 10001) and carries only the four binaries and a CA
+unprivileged user (uid 10001) and carries only the five binaries and a CA
 bundle for TLS. Configuration is entirely by environment variables (see each
 companion's README under [`crates/`](../../crates)); the compose stack wires
 them up.

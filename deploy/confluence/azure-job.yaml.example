@@ -1,0 +1,70 @@
+# Copy outside the repository and replace every <...> placeholder.
+# Starts as a scheduled DRY RUN. Add --apply only after reviewing an execution.
+# Key Vault contains secret values; this file contains references only.
+location: <azure-region>
+identity:
+  type: UserAssigned
+  userAssignedIdentities:
+    /subscriptions/<subscription-id>/resourceGroups/<identity-resource-group>/providers/Microsoft.ManagedIdentity/userAssignedIdentities/<identity-name>: {}
+properties:
+  environmentId: /subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.App/managedEnvironments/<environment-name>
+  configuration:
+    triggerType: Schedule
+    replicaTimeout: 1800
+    replicaRetryLimit: 0
+    scheduleTriggerConfig:
+      cronExpression: '0 * * * *'
+      parallelism: 1
+      replicaCompletionCount: 1
+    registries:
+      - server: <registry-name>.azurecr.io
+        identity: /subscriptions/<subscription-id>/resourceGroups/<identity-resource-group>/providers/Microsoft.ManagedIdentity/userAssignedIdentities/<identity-name>
+    secrets:
+      - name: confluence-api-token
+        keyVaultUrl: https://<vault-name>.vault.azure.net/secrets/confluence-api-token
+        identity: /subscriptions/<subscription-id>/resourceGroups/<identity-resource-group>/providers/Microsoft.ManagedIdentity/userAssignedIdentities/<identity-name>
+      - name: pg-url
+        keyVaultUrl: https://<vault-name>.vault.azure.net/secrets/pgokf-confluence-pg-url
+        identity: /subscriptions/<subscription-id>/resourceGroups/<identity-resource-group>/providers/Microsoft.ManagedIdentity/userAssignedIdentities/<identity-name>
+  template:
+    containers:
+      - name: confluence-ingest
+        # The companions image has no entrypoint: the command names the binary.
+        image: <registry-name>.azurecr.io/pgokf-companions@sha256:<image-digest>
+        command:
+          - pgokf-confluence
+        args:
+          - --state-file
+          - /state/team-wiki.json
+          # Add --apply after a successful, reviewed dry run.
+        env:
+          - name: CONFLUENCE_URL
+            value: https://<site>.atlassian.net
+          - name: CONFLUENCE_EMAIL
+            value: <service-account-email>
+          - name: CONFLUENCE_CLOUD_ID
+            value: <cloud-uuid>
+          - name: CONFLUENCE_SPACE_ID
+            value: '<space-id>'
+          - name: OKF_BUNDLE_NAME
+            value: confluence-team-wiki
+          # Require certificate-verified TLS to PostgreSQL (never plaintext).
+          - name: OKF_PG_TLS
+            value: 'true'
+          - name: CONFLUENCE_API_TOKEN
+            secretRef: confluence-api-token
+          - name: OKF_PG_URL
+            secretRef: pg-url
+        resources:
+          cpu: 0.5
+          memory: 1Gi
+        volumeMounts:
+          - volumeName: confluence-state
+            mountPath: /state
+    volumes:
+      - name: confluence-state
+        storageType: AzureFile
+        # Existing storage definition attached to the Container Apps environment.
+        storageName: confluence-state
+        # The image runs as UID/GID 10001. Match the share's access policy.
+        mountOptions: uid=10001,gid=10001,dir_mode=0700,file_mode=0600

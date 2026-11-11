@@ -46,7 +46,7 @@
       "executable": false
     },
     ".github/workflows/pgrx-test.yml": {
-      "sha256": "c68cc11521853d39b0de7b36e2178a3b9b224f9a8f9f7dbc4bdf039ea707c4f2",
+      "sha256": "7cf63e1414450f45646665e5f9a386477aae8394a355a27cf524e52333d3eec1",
       "executable": false
     },
     ".gitignore": {
@@ -58,7 +58,7 @@
       "executable": false
     },
     "CHANGELOG.md": {
-      "sha256": "3b44c256600918de8414d76aa4037c48d3e9167edba3c294f9fd513cfe9edb77",
+      "sha256": "17889d0ab76aa49828a74a9d8880d1f2a9d20abe10332d8e5be9b2b4520c247d",
       "executable": false
     },
     "CODE_OF_CONDUCT.md": {
@@ -74,11 +74,11 @@
       "executable": false
     },
     "Cargo.lock": {
-      "sha256": "8205436486669985edeca6df907bf9a663b592f85ea17300dd369347c8d93657",
+      "sha256": "5ea113982e22ea52b4bd074c7f97b0c472a3d6e7c88d1da6750ac4d7aed2cbe5",
       "executable": false
     },
     "Cargo.toml": {
-      "sha256": "70bc0477c0b8991d23720c42dd6694253df252f1cda7bdefa95906342b64a82a",
+      "sha256": "accd259dc0cbfb516339a79d458150743a1c020d0f5652400011cbd6b87c7c3c",
       "executable": false
     },
     "LICENSE": {
@@ -94,7 +94,7 @@
       "executable": false
     },
     "README.md": {
-      "sha256": "86410a0e601fead9547dc95b6b54d08f4a9806dda038f4a97427b814355af595",
+      "sha256": "bafe42212b9367c92ce1437154e8bbad069666ad3c0c89f43b9ec46f4fc02c18",
       "executable": false
     },
     "SECURITY.md": {
@@ -102,7 +102,7 @@
       "executable": false
     },
     "THIRD-PARTY-NOTICES.txt": {
-      "sha256": "96035d6012d434082ad0f13faf7de84a1c5dfdb1eed9fadbde9b0e4cb77a518e",
+      "sha256": "f927773da559e22e059407645f4f9527f41630c89904b01c572e094ba24a27a1",
       "executable": false
     },
     "about.hbs": {
@@ -529,6 +529,54 @@
       "sha256": "3f268a054132331d923d6ee3d599fe16ff5b3ed08e76d9befc5d475760e4ae88",
       "executable": false
     },
+    "crates/pgokf-confluence/Cargo.toml": {
+      "sha256": "5b462004f5123747d047da15c8df839e25a9a14471b7ba0477a715a997fb9ac1",
+      "executable": false
+    },
+    "crates/pgokf-confluence/README.md": {
+      "sha256": "ab30a049bb438f497d47f706429e9a3e7cd48309dbd725fe5586527efb19ca1a",
+      "executable": false
+    },
+    "crates/pgokf-confluence/src/client.rs": {
+      "sha256": "b6fff3e3f043758216413e991b7422f02167976ae876ffeb0a46069655b3d149",
+      "executable": false
+    },
+    "crates/pgokf-confluence/src/convert.rs": {
+      "sha256": "4ccf593d88afb67bd2d17255bada21156dfcabeb58a032c476768305f7e5596d",
+      "executable": false
+    },
+    "crates/pgokf-confluence/src/lib.rs": {
+      "sha256": "46479f8b43c59686a520cb0bac24307f549bc275a05ec29518b364012926a136",
+      "executable": false
+    },
+    "crates/pgokf-confluence/src/main.rs": {
+      "sha256": "84381dae4d8a2873720a0c7216bdb7082be0360270fdeec621503df05d2409c7",
+      "executable": false
+    },
+    "crates/pgokf-confluence/src/sink.rs": {
+      "sha256": "46bcb299fc2e5e524b6ceb9b8de69ac9d1b1dd80bd61308455d8cef586795b19",
+      "executable": false
+    },
+    "crates/pgokf-confluence/src/snapshot.rs": {
+      "sha256": "eab93703c6bd9e6db61c44766d41e034a4ac3a7357117593bb41aa30da90f522",
+      "executable": false
+    },
+    "crates/pgokf-confluence/src/types.rs": {
+      "sha256": "52fc5fab551b24ae5ed970bd8a73a6a2d472ead339d0ff45f01de64208f09b62",
+      "executable": false
+    },
+    "crates/pgokf-confluence/tests/catalog.rs": {
+      "sha256": "e7e323e14ea104bad0fe0916af7350154549922eb184d999a7c222b95b20ccae",
+      "executable": false
+    },
+    "crates/pgokf-confluence/tests/conversion.rs": {
+      "sha256": "a3945aa767a135c011a52e6deac6e82f0935134299be6fcc5834ba99973788dd",
+      "executable": false
+    },
+    "crates/pgokf-confluence/tests/fixtures/rich-storage.xml": {
+      "sha256": "2d630f7e08a52c74c5f281279730a0dfd2847423a71e9a09ee9cd5e1b435d313",
+      "executable": false
+    },
     "crates/pgokf-embed/Cargo.toml": {
       "sha256": "4a094df29ff5cf3fed1cdc826a32c595656b2d25e4fdcb5535974074e0d9b20b",
       "executable": false
@@ -702,7 +750,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/src/image_smoke.rs": {
-      "sha256": "b16e6dd5d94302bcc5cf16f2d2bd15b086f76d635132d1f7731c6cee09e29b89",
+      "sha256": "512459fbb6d1055478fdeb985c39e22c43b7323889368d23f341bc467f598d97",
       "executable": false
     },
     "crates/pgokf-verifier/src/json.rs": {
@@ -1377,12 +1425,20 @@
       "sha256": "ad5679af8dc01c2f36a79c9d02bd23153a5c400ababcbaff35f81c2b07245597",
       "executable": false
     },
+    "deploy/confluence/README.md": {
+      "sha256": "5567e67fd09105cb6ccd55a67e142fcaefa678f0f8efff4ff69725b954ec2f7e",
+      "executable": false
+    },
+    "deploy/confluence/azure-job.yaml.example": {
+      "sha256": "b82faee0459360c4c0a47511247cfb48e8a2f0cefe222613e9f8c0ab74eba7b1",
+      "executable": false
+    },
     "docs/api-stability.md": {
       "sha256": "553eb4f22a24633b19af73b73aa70f40f16f6e56ba29142301ec4bfdc1b15f12",
       "executable": false
     },
     "docs/architecture.md": {
-      "sha256": "02da34ebf074e18ce4e88b01d348b2ad7ed0af0eafc287007a2d381f91d5d3d9",
+      "sha256": "777885b8cadae6947e0c0fd151ac8102aeac440bb11355c3ace1e69a7f5dc773",
       "executable": false
     },
     "docs/benchmarks.md": {
@@ -1397,8 +1453,12 @@
       "sha256": "3986a667d028c4dcf99dd160b883ddb1f30a828059aea4ba13271a1f0e101c6b",
       "executable": false
     },
+    "docs/confluence-integration.md": {
+      "sha256": "d453a1f9685f6eafa785441262ed01a2156ee0cef8af84300625a96235f329b2",
+      "executable": false
+    },
     "docs/deployment-topologies.md": {
-      "sha256": "187071f58da1f617d74ea3978d958fbd3cbe6b92e0f77c8ced16ba853640e682",
+      "sha256": "94ff59612d4174bc48d0454b2ccb6ad35df67b470d89a143904c356af2e67f68",
       "executable": false
     },
     "docs/faq.md": {
@@ -1414,7 +1474,7 @@
       "executable": false
     },
     "docs/index.md": {
-      "sha256": "4771a66d26a6fc3e34e8cb1ca95292a0c092418a2568d453918ea7cfe834e0e8",
+      "sha256": "d64fc2236a88b5e079f75992c8ac339bc16c02f71171d3e78011e295b93d76ed",
       "executable": false
     },
     "docs/mcp-0.4-development.md": {
@@ -1438,7 +1498,7 @@
       "executable": false
     },
     "docs/packaging.md": {
-      "sha256": "a2ae3c55b1aaf6a6a86f7fee63d358afe9c1ca5119b399722aaee6d5b974c9ac",
+      "sha256": "e18094cc5d52ca72a8d2d92697642d435c5a1fd4902823a4cb45747aa22d8e74",
       "executable": false
     },
     "docs/release-checklist.md": {
@@ -1514,7 +1574,7 @@
       "executable": false
     },
     "mkdocs.yml": {
-      "sha256": "bdf2a7da3eb5e6175d33837b0b44dc30e5a7a1187c2de5a275f66fce79561616",
+      "sha256": "cfa722cc1ee61098135114af76b14915ed980c0b82132838a9d5c015eba4664a",
       "executable": false
     },
     "packaging/check-beta-image.sh": {
@@ -1538,11 +1598,11 @@
       "executable": false
     },
     "packaging/docker/Dockerfile.companions": {
-      "sha256": "b5f8e0a16465a95be10cc0c906bf94093f2b5801d26f2999e0951e7c6ac9584b",
+      "sha256": "df2fc32bb3ae0c42f1fb90585d4926a896cf1f018d82de934feb81dbbf878be8",
       "executable": false
     },
     "packaging/docker/README.md": {
-      "sha256": "ddab5bddb5890ff2927a89d36ac0074e860737b7c044a9b4471a317cfca932f1",
+      "sha256": "7b382b83532fca52fa0aeb1800d61869b1317f797e5eb20dbb86656a34745259",
       "executable": false
     },
     "packaging/docker/bin/pgokf-backup": {
@@ -1644,6 +1704,10 @@
     "scripts/pages-deploy-policy.sh": {
       "sha256": "5e5c9f7dadb091813a9b2d472d9fef6b2e51e76601bd44948c18b52bfabb6432",
       "executable": false
+    },
+    "scripts/test-confluence-catalog.sh": {
+      "sha256": "f80075cf3b52268f05bdbe7a9c0628497cf728990b612c5df2162b8736a7a01c",
+      "executable": true
     },
     "scripts/test-homebrew-environment.rb": {
       "sha256": "015a5dd408e2b0f7a05339c7e810dc72ccfbc1c49384295f4f3a3ef5e2b4829f",
@@ -2750,7 +2814,7 @@
       "executable": false
     },
     "tests/workflow-contexts.json": {
-      "sha256": "e3bafa45b6759f6c3703fabd3edae7073edc492df3fc803c21078936c7607686",
+      "sha256": "762a1f7e9ca9e4b870bc916d107bd313c1ad6b504a7e45a1e426179df2cabbaf",
       "executable": false
     },
     "third-party-notice-evidence/3d-force-graph-1.80.0/3d-force-graph.js.map": {
