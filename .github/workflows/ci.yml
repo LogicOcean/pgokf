@@ -3,6 +3,11 @@ name: CI
 on:
   push:
   pull_request:
+  # Manual re-run at the current HEAD. After a platform incident leaves a
+  # queued run with no dispatched jobs, it can be neither cancelled nor
+  # re-run; this trigger is the recovery path that avoids a placeholder
+  # commit just to re-fire CI.
+  workflow_dispatch:
 
 permissions:
   contents: read
