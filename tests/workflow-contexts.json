@@ -1,7 +1,7 @@
 {
   "CI": {
-    "workflow": "a61a407d74e93153333da33c9539ac6b74adb96d2615a5cb9b9b04921f594abb",
-    "triggers": "5eea4cd05ba564fc3d479ab09857e14e45afd9c554afb345feaa2cf7d8e16ccc",
+    "workflow": "dbe00640fd1aaccf24bf782b9647d0842cf8f0e8935b730e3d53f04f71575a3b",
+    "triggers": "362389aa5489276e11e4131bb1509112807d7bddf32272ac0b1ce197e654748f",
     "permissions": "d8d6aceb1abc41990618a503082c3badcca8897feee0976f222af5b74e30bec2",
     "env": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
     "jobs": {
