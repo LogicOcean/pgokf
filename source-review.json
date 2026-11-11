@@ -74,7 +74,7 @@
       "executable": false
     },
     "Cargo.lock": {
-      "sha256": "7529282da8ff8007387587ab2ed819fcdfb391eda93b76fd3be9c99497559840",
+      "sha256": "8205436486669985edeca6df907bf9a663b592f85ea17300dd369347c8d93657",
       "executable": false
     },
     "Cargo.toml": {
@@ -102,7 +102,7 @@
       "executable": false
     },
     "THIRD-PARTY-NOTICES.txt": {
-      "sha256": "d69e0f2c733edbfda0892899774681d482a30b6a6d3a508ab625116c8f1e2d4c",
+      "sha256": "96035d6012d434082ad0f13faf7de84a1c5dfdb1eed9fadbde9b0e4cb77a518e",
       "executable": false
     },
     "about.hbs": {

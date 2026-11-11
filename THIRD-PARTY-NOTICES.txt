@@ -1364,7 +1364,7 @@ Apache License 2.0
 
 Used by:
   - linux-raw-sys 0.12.1  (https://github.com/sunfishcode/linux-raw-sys)
-  - rustix 1.1.4  (https://github.com/bytecodealliance/rustix)
+  - rustix 1.1.6  (https://github.com/bytecodealliance/rustix)
   - wasi 0.11.1+wasi-snapshot-preview1  (https://github.com/bytecodealliance/wasi)
   - wasi 0.14.7+wasi-0.2.4  (https://github.com/bytecodealliance/wasi-rs)
   - wasip2 1.0.4+wasi-0.2.12  (https://github.com/bytecodealliance/wasi-rs)
@@ -6244,7 +6244,7 @@ Used by:
   - regex 1.13.1  (https://github.com/rust-lang/regex)
   - ring 0.17.14  (https://github.com/briansmith/ring)
   - rustc_version 0.4.1  (https://github.com/djc/rustc-version-rs)
-  - rustix 1.1.4  (https://github.com/bytecodealliance/rustix)
+  - rustix 1.1.6  (https://github.com/bytecodealliance/rustix)
   - rustls-native-certs 0.8.4  (https://github.com/rustls/rustls-native-certs)
   - rustls 0.23.46  (https://github.com/rustls/rustls)
   - scopeguard 1.2.0  (https://github.com/bluss/scopeguard)
