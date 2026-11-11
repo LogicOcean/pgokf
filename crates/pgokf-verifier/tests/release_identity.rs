@@ -112,17 +112,26 @@ fn target_internal_pins_and_vulnerable_dependency_are_checked() {
 #[test]
 fn formula_authenticated_forward_and_rollback_tuples() {
     let source = std::fs::read_to_string(root().join("packaging/homebrew/pgokf.rb")).unwrap();
-    let tuple = formula_tuple(&source).unwrap();
+    // Post-tag, the formula consumes the current release; the last verified
+    // published 0.2.0 tuple remains the authenticated rollback target.
+    let current = formula_tuple(&source).unwrap();
+    assert_eq!(current.version, env!("CARGO_PKG_VERSION"));
     let mut records = published_digests();
-    authenticate_formula(&tuple, &records).unwrap();
-    let mut current = tuple.clone();
-    current.version = env!("CARGO_PKG_VERSION").into();
-    current.assertions = vec![current.version.clone(); 2];
-    current.sha256 = "a".repeat(64);
-    assert!(authenticate_formula(&current, &records).is_err());
-    records.insert(current.version.clone(), current.sha256.clone());
     authenticate_formula(&current, &records).unwrap();
+    let tuple = FormulaTuple {
+        version: "0.2.0".into(),
+        sha256: PUBLISHED_DIGEST.into(),
+        assertions: vec!["0.2.0".into(); 2],
+    };
     authenticate_formula(&tuple, &records).unwrap();
+    let mut unrecorded = records.clone();
+    unrecorded.remove(&current.version);
+    assert!(authenticate_formula(&current, &unrecorded).is_err());
+    let forged = FormulaTuple {
+        sha256: "a".repeat(64),
+        ..current.clone()
+    };
+    assert!(authenticate_formula(&forged, &records).is_err());
     for bad in [
         FormulaTuple {
             sha256: tuple.sha256.clone(),
@@ -156,8 +165,9 @@ fn formula_authenticated_forward_and_rollback_tuples() {
 #[test]
 fn formula_observation_expectations_are_independent_and_unique() {
     let source = std::fs::read_to_string(root().join("packaging/homebrew/pgokf.rb")).unwrap();
+    let version = formula_tuple(&source).unwrap().version;
     for field in ["expected_control_version", "expected_extension_version"] {
-        let declaration = format!("{field} = \"0.2.0\"");
+        let declaration = format!("{field} = \"{version}\"");
         assert!(formula_tuple(&source.replace(&declaration, "")).is_err());
         assert!(formula_tuple(&format!("{source}\n{declaration}\n")).is_err());
         let changed =
@@ -315,10 +325,8 @@ fn workspace_members_cannot_silently_drop_a_local_gate() {
 #[test]
 fn dynamic_formula_declaration_suffix_is_refused() {
     let source = std::fs::read_to_string(root().join("packaging/homebrew/pgokf.rb")).unwrap();
-    let bad = source.replace(
-        "v0.2.0.tar.gz\"",
-        "v0.2.0.tar.gz\" + ENV.fetch(\"HOSTILE_URL\")",
-    );
+    let archive = format!("v{}.tar.gz\"", formula_tuple(&source).unwrap().version);
+    let bad = source.replace(&archive, &format!("{archive} + ENV.fetch(\"HOSTILE_URL\")"));
     assert!(formula_tuple(&bad).is_err());
 }
 #[test]

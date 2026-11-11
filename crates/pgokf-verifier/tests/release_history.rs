@@ -12,6 +12,15 @@ fn git(root: &Path, args: &[&str]) -> String {
         .trim()
         .into()
 }
+/// Post-tag, the in-tree formula consumes the current release; rollback targets
+/// the last verified published 0.2.0 tuple.
+fn rollback_formula() -> pgokf_verifier::release_identity::FormulaTuple {
+    pgokf_verifier::release_identity::FormulaTuple {
+        version: "0.2.0".into(),
+        sha256: pgokf_verifier::release_identity::PUBLISHED_DIGEST.into(),
+        assertions: vec!["0.2.0".into(); 2],
+    }
+}
 #[test]
 fn real_history_absent_moved_and_retired_sources_fail() {
     history_check(&root()).unwrap();
@@ -145,10 +154,7 @@ fn typed_rollback_contract_rejects_mutable_or_incompatible_images() {
         postgres_image_tag: "18".into(),
         tooling_commit: "c".repeat(40),
     };
-    let formula = pgokf_verifier::release_identity::formula_tuple(
-        &std::fs::read_to_string(root().join("packaging/homebrew/pgokf.rb")).unwrap(),
-    )
-    .unwrap();
+    let formula = rollback_formula();
     let contract = RollbackManifest {
         schema_version: 1,
         from: image.clone(),
@@ -187,10 +193,7 @@ fn rollback_rejects_correlated_source_and_provider_forgery() {
         postgres_image_tag: "18".into(),
         tooling_commit: "c".repeat(40),
     };
-    let formula = pgokf_verifier::release_identity::formula_tuple(
-        &std::fs::read_to_string(root().join("packaging/homebrew/pgokf.rb")).unwrap(),
-    )
-    .unwrap();
+    let formula = rollback_formula();
     let mut contract = RollbackManifest {
         schema_version: 1,
         from: image.clone(),

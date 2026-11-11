@@ -990,10 +990,13 @@ mod contract_tests {
             postgres_image_tag: "18".into(),
             tooling_commit: head,
         };
-        let formula = crate::release_identity::formula_tuple(
-            &std::fs::read_to_string(root.join("packaging/homebrew/pgokf.rb")).unwrap(),
-        )
-        .unwrap();
+        // Post-tag, the in-tree formula consumes the current release; rollback
+        // targets the last verified published 0.2.0 tuple.
+        let formula = crate::release_identity::FormulaTuple {
+            version: "0.2.0".into(),
+            sha256: crate::release_identity::PUBLISHED_DIGEST.into(),
+            assertions: vec!["0.2.0".into(); 2],
+        };
         let contract = RollbackManifest {
             schema_version: 1,
             from,

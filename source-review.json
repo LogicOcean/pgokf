@@ -838,11 +838,11 @@
       "executable": false
     },
     "crates/pgokf-verifier/src/release_identity.rs": {
-      "sha256": "f800281373a434ab88f27d386e60546a3ac55316105daa003ac992735e94b7da",
+      "sha256": "58b7c936dec6209271f6fbe3e4279a05b8c15a20375de9989f74f3c6dfea9741",
       "executable": false
     },
     "crates/pgokf-verifier/src/release_runtime.rs": {
-      "sha256": "479bd7fdf3333783b62dd14758bffcb957261d595e1de4cb150632893fc2f5a9",
+      "sha256": "7add942908b0a17b5ace87ce92dda387a461050a49a242d2501b1ba20528e44d",
       "executable": false
     },
     "crates/pgokf-verifier/src/scratch.rs": {
@@ -922,11 +922,11 @@
       "executable": false
     },
     "crates/pgokf-verifier/tests/release_history.rs": {
-      "sha256": "03400940110bc33b51ec44772a0b4bab98192cb93d19e4ee965d02d0f91ba34b",
+      "sha256": "9851ff8e0c40687b5b1b10186286f7342ab59d995c1645247dc6e5df3c8fc8de",
       "executable": false
     },
     "crates/pgokf-verifier/tests/release_identity.rs": {
-      "sha256": "ae5e730e219e750b67cc85e2e7c20ca046259956fb3b6e14589b6007a8ae05a0",
+      "sha256": "c242a97292f1cc0b96f73adaaf95662c96de1f953debdbb10f9dd43b285d19bc",
       "executable": false
     },
     "crates/pgokf-verifier/tests/service_limits.rs": {
@@ -1606,7 +1606,7 @@
       "executable": true
     },
     "packaging/homebrew/pgokf.rb": {
-      "sha256": "674da254977d5ad8d7253cbcaef4ebfee1e8f8e73b7062ecc8f32503bea557d1",
+      "sha256": "e7015f81ca1189a85d90fd8fa5b5155021c1c354f9eb3b0b84af29ca19e1c4ef",
       "executable": false
     },
     "packaging/install-postgres.sh": {
