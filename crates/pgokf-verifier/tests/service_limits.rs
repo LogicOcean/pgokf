@@ -69,6 +69,17 @@ fn detached_spec(marker: &std::path::Path) -> CommandSpec {
         .insert(DETACHED_MARKER.into(), marker.as_os_str().into());
     spec.env
         .insert("PGOKF_PROCESS_OWNER".into(), "caller-forgery".into());
+    // The descendant deliberately strips the ownership tag (spawn below does
+    // `env_remove(PGOKF_PROCESS_OWNER)`) and escapes the session (`setsid`),
+    // so the only detection channel left is lineage sampling while its parent
+    // chain is intact. The non-macOS monitor polls /proc (5 ms sleeps between
+    // full scans), so the leader must hold the parent link open for many
+    // sampling periods; after the leader exits the orphan is reparented and
+    // undiscoverable by design. One second covers dozens of scan cycles even
+    // under parallel-suite load (the timeout test below uses the same window
+    // through its 1 s deadline and is the deterministic-detection precedent).
+    spec.env
+        .insert(DETACHED_LEADER_SLEEP_MS.into(), "1000".into());
     spec.timeout = Duration::from_secs(5);
     spec
 }
@@ -142,6 +153,11 @@ fn service_stop_terminates_a_detached_closed_pipe_descendant() {
         std::thread::sleep(Duration::from_millis(2));
     }
     assert!(marker.exists(), "detached descendant marker missing");
+    // Let the lineage monitor finish sampling while the leader still holds the
+    // parent link; stop()'s SIGTERM ends the link, and a descendant sampled
+    // only inside a sub-scan-cycle window would turn the refusal into a
+    // coverage-dependent coin flip.
+    std::thread::sleep(Duration::from_secs(1));
     let result = service.stop();
     let alive = cleanup_detached(&marker);
     let stopped: serde_json::Value =
@@ -177,6 +193,9 @@ fn repeated_service_stop_preserves_detached_descendant_result() {
         std::thread::sleep(Duration::from_millis(2));
     }
     assert!(marker.exists(), "detached descendant marker missing");
+    // Same sampling window as the single-stop test: the repeated stop must
+    // preserve the same refusal, which requires the descendant to be tracked.
+    std::thread::sleep(Duration::from_secs(1));
     let first = service.stop();
     let second = service.stop();
     let alive = cleanup_detached(&marker);
@@ -230,6 +249,10 @@ fn service_stop_preserves_output_failure_while_containing_descendant() {
         std::thread::sleep(Duration::from_millis(2));
     }
     assert!(output_marker.exists(), "leader output marker missing");
+    // The output cap already refuses on its own; this test additionally proves
+    // the containment refusal is preserved in the same error. Give the
+    // lineage monitor its sampling window before stop() ends the parent link.
+    std::thread::sleep(Duration::from_secs(1));
     let first = service.stop().unwrap_err();
     let second = service.stop().unwrap_err();
     let alive = cleanup_detached(&marker);
