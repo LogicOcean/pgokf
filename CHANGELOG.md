@@ -10,6 +10,19 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 ## [Unreleased]
 
+### Security
+
+- **`--tls` (`OKF_PG_TLS`) can no longer fall back to plaintext.** Every
+  companion (`pgokf-ingest`, `pgokf-embed`, `pgokf-mcp`, and `pgokf-web`'s
+  connection pool) chose a TLS connector under `--tls` but kept the connection
+  string's `sslmode`. Under `prefer` - the default when no `sslmode` is given -
+  a server that declined TLS received a plaintext startup message and
+  authentication exchange; under `disable` TLS was never requested. The new
+  `pgokf_pgconn::connection_config` raises a weaker `sslmode` to `require`
+  whenever TLS is forced, and every connection and pool is built from it, so a
+  declining server is refused before any startup data is sent. Connections
+  without `--tls` are unchanged.
+
 ## [0.4.0] - 2026-11-08
 
 - Add the 0.4 development MCP Tools registry, structured results, strict schemas,

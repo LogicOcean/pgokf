@@ -33,5 +33,11 @@ rustls = "0.23"
 rustls-native-certs = "0.8"
 tokio-postgres-rustls = "0.13"
 
+[dev-dependencies]
+# The plaintext-fallback regression test plays a TLS-declining server on a
+# local socket; declared explicitly rather than borrowed through feature
+# unification with tokio-postgres.
+tokio = { version = "1.40", features = ["io-util", "macros", "net", "rt", "time"] }
+
 [lints]
 workspace = true

@@ -718,7 +718,7 @@ impl Db {
     /// Build the pool. Each new connection is scoped to the tenant (when one
     /// is configured) and given the statement timeout before it is handed out.
     pub(crate) fn connect(config: &DbConfig<'_>) -> Result<Self> {
-        let pg = pgokf_pgconn::parse_config(config.database_url)?;
+        let pg = pgokf_pgconn::connection_config(config.database_url, config.force_tls)?;
         let manager_config = ManagerConfig {
             recycling_method: RecyclingMethod::Fast,
         };
