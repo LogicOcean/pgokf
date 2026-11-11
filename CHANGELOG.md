@@ -52,6 +52,10 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
   whenever TLS is forced, and every connection and pool is built from it, so a
   declining server is refused before any startup data is sent. Connections
   without `--tls` are unchanged.
+- **`rustix` 1.1.6 for RUSTSEC-2026-0486** (extended-attribute buffers marked
+  initialized when empty). Only the release verifier and test tooling link
+  `rustix`; no shipped extension or companion binary does. The lockfile
+  changes that one entry, so `cargo deny check` passes again.
 
 ## [0.4.0] - 2026-11-08
 
