@@ -18,7 +18,7 @@
 //!    panel/note/info/tip/warning macros and the unsupported-macro fallback),
 //!    `list()` (list items) and `table_cell()` (table cells) - all re-emit
 //!    line-by-line using `str::lines()`, which splits ONLY on `\n`.
-//! 4. A lone `\r` therefore lands inside an emitted line. CommonMark (and the
+//! 4. A lone `\r` therefore lands inside an emitted line. `CommonMark` (and the
 //!    catalog's parser, pulldown-cmark `Options::all()`) treats a lone `\r` as
 //!    a line ending, so everything after it starts a NEW line at the
 //!    container's outer level. Because the innermost open block is a fenced
