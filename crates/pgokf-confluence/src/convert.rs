@@ -91,10 +91,24 @@ fn xml_element(start: &BytesStart<'_>, reader: &Reader<&[u8]>) -> Result<Element
 }
 
 fn push_text(parent: &mut Element, text: &str) {
-    if let Some(Node::Text(previous)) = parent.children.last_mut() {
-        previous.push_str(text);
+    // XML 1.0 requires end-of-line normalization in parsed content, but
+    // quick-xml's `BytesText::decode()` deliberately skips it, and the
+    // `Event::GeneralRef` arm unescapes `&#13;` back to a raw carriage
+    // return. A lone `\r` is a CommonMark line ending, so any `\r` that
+    // reaches a text node could end an emitted line early - closing a
+    // fenced code block inside a quote, list, or panel container and
+    // letting the remainder of the raw fence body render as live Markdown.
+    // Normalize every EOL to `\n` at this single text entry point so no
+    // `\r` survives conversion from untrusted storage.
+    let normalized = if text.contains('\r') {
+        text.replace("\r\n", "\n").replace('\r', "\n")
     } else {
-        parent.children.push(Node::Text(text.to_owned()));
+        text.to_owned()
+    };
+    if let Some(Node::Text(previous)) = parent.children.last_mut() {
+        previous.push_str(&normalized);
+    } else {
+        parent.children.push(Node::Text(normalized));
     }
 }
 

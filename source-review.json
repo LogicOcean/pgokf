@@ -550,7 +550,7 @@
       "executable": false
     },
     "crates/pgokf-confluence/src/convert.rs": {
-      "sha256": "8ae9f1b162712a85a3884feb14e106856bcd2afd6b2cf418c74136cefdca607c",
+      "sha256": "a606ff6e830eaedd72554e86d2fdc735430567f1137ecd3e48ee65ad0eeb3981",
       "executable": false
     },
     "crates/pgokf-confluence/src/lib.rs": {
@@ -1510,7 +1510,7 @@
       "executable": false
     },
     "docs/release-checklist.md": {
-      "sha256": "29d0ed85d565e4fa337612ed171ca1dcbe77dd271897c352da2a11bc9d26076f",
+      "sha256": "8a2806ab4d45497b3552dba8a29ee9e70a47d5c70b06f1f7651e8adbfec03bc4",
       "executable": false
     },
     "docs/releases/0.3.0-partial-ghcr.json": {
@@ -3395,6 +3395,10 @@
     },
     "vendored-notices.toml": {
       "sha256": "dbaeaf3afb5ce371a6580e32084b52ca615bf3bd5accb869a2950ace702dea1f",
+      "executable": false
+    },
+    "crates/pgokf-confluence/tests/injection_survivors.rs": {
+      "sha256": "59c6cdf4866f4efee90ee5388e004c70d81f9d89edd32a8b5dfdb29821ee32b0",
       "executable": false
     }
   }

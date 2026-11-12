@@ -350,7 +350,7 @@ these steps in order (these are publication instructions, not local gates):
    `brew test logicocean/pgokf/pgokf`. The formula test creates an isolated
    cluster and checks the installed control and extension version. Publish
    the main commit and then the tested external tap commit only after these
-   checks pass. The formula inside the source tag remains the valid 0.2.0 pin.
+   checks pass. The formula inside the source tag remains the valid v0.4.0 pin.
 5. Verify the external tap fetches the recorded archive digest and the
    installed extension reports 0.5.0. Record both main and tap commit SHAs.
 
