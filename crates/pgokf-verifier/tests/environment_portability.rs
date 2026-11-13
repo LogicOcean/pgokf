@@ -140,7 +140,12 @@ fn environment_worker() {
         fs::create_dir_all(isolated.join("scripts")).unwrap();
         // Record the real Formulary result before executing all original cases.
         let observation = serde_json::to_string(&evidence.join("loaded-path")).unwrap();
-        let script = script.replace("formula = Formulary.factory(ARGV.fetch(0))", &format!("formula = Formulary.factory(ARGV.fetch(0))\nFile.write({observation}, formula.path.realpath.to_s)"));
+        let anchor = "formula.define_singleton_method(:buildpath)";
+        assert_eq!(script.matches(anchor).count(), 1);
+        let script = script.replace(
+            anchor,
+            &format!("File.write({observation}, formula.path.realpath.to_s)\n{anchor}"),
+        );
         fs::write(
             isolated.join("scripts/test-homebrew-environment.rb"),
             script,

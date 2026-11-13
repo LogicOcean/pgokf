@@ -4,7 +4,15 @@ require "formula"
 require "extend/ENV/shared"
 require "json"
 ENV.extend(SharedEnvExtension)
-formula = Formulary.factory(ARGV.fetch(0))
+reference = ARGV.fetch(0)
+formula = if Pathname.new(reference).absolute?
+  raise "local formula paths explicitly prohibited" unless ENV.fetch("HOMEBREW_FORBID_PACKAGES_FROM_PATHS", "").empty?
+
+  # New Homebrew separates explicit source loading from name resolution.
+  Formulary.respond_to?(:from_path) ? Formulary.from_path(reference) : Formulary.factory(reference)
+else
+  Formulary.factory(reference)
+end
 formula.define_singleton_method(:buildpath) { formula.path.dirname/"build" }
 formula.define_singleton_method(:system) { |*| throw :environment_ready, :environment_ready }
 cases = [

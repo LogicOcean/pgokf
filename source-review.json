@@ -978,7 +978,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/tests/environment_portability.rs": {
-      "sha256": "c57b9ee78af9719eabe4abf592f59e6fd8aba40216bab1bab3f6dc1851ad6f2d",
+      "sha256": "2f866acafc651eeb0c2cdfb1619191e9ee82a9d2e27c349cea029b518d0dc8b0",
       "executable": false
     },
     "crates/pgokf-verifier/tests/image_smoke_faults.rs": {
@@ -1762,7 +1762,7 @@
       "executable": true
     },
     "scripts/test-homebrew-environment.rb": {
-      "sha256": "015a5dd408e2b0f7a05339c7e810dc72ccfbc1c49384295f4f3a3ef5e2b4829f",
+      "sha256": "ed7134b92c9a73e657c73b80a368a802c9725216cc8063a5f588574c059c5871",
       "executable": false
     },
     "scripts/test-workspace.sh": {
