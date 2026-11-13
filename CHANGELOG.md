@@ -10,6 +10,13 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- Advance required nonproduction PostgreSQL 19 compatibility from RC 1 to
+  RC 2 after PGDG's candidate changed. Pin the official `postgres:19rc2`
+  image index and require RC 2 server and development packages. Stable
+  distribution remains PostgreSQL 15–18; no stable PG19 artifact is published.
+
 ## [0.6.0] - 2026-11-13
 
 A companion release: pushed Confluence events through a private Forge app,

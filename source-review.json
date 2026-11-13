@@ -10,7 +10,7 @@
       "executable": false
     },
     ".github/ISSUE_TEMPLATE/bug_report.yml": {
-      "sha256": "0c0643d8acab79965be6aa7be5f9a3704f7d2998eee39839d7b10522c029fe1c",
+      "sha256": "b59deb5f14199f1330320f49b189f4c4837510e50e37acff1892cdd7a0115c6e",
       "executable": false
     },
     ".github/ISSUE_TEMPLATE/commercial_license.yml": {
@@ -46,7 +46,7 @@
       "executable": false
     },
     ".github/workflows/pgrx-test.yml": {
-      "sha256": "7cf63e1414450f45646665e5f9a386477aae8394a355a27cf524e52333d3eec1",
+      "sha256": "711d06b610723f395309f258a592d316f2393bcd829600246b51024e8fa19063",
       "executable": false
     },
     ".gitignore": {
@@ -58,7 +58,7 @@
       "executable": false
     },
     "CHANGELOG.md": {
-      "sha256": "f4ba8434b16058ee71c1773fd90003cbcc52d2fed1f7e90e2e684e78de107add",
+      "sha256": "950b7be87a5f395b99b0e2f43749cf485fd75f62876bcd575525e354d0357cf3",
       "executable": false
     },
     "CODE_OF_CONDUCT.md": {
@@ -94,7 +94,7 @@
       "executable": false
     },
     "README.md": {
-      "sha256": "e2e49d507a551b077d7a91cdbc69e3d3b919f621d8675fb3fd66a295b79fcb34",
+      "sha256": "43086416285a1363386b12cfce94d86dec9ea12e2da8a57362cd6e3de6924a26",
       "executable": false
     },
     "SECURITY.md": {
@@ -902,7 +902,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/src/postgres_pin.rs": {
-      "sha256": "5d779be8b64b5ccd0cf4895f493c564cabd16821c1c31341e8be3cef32a398a9",
+      "sha256": "7189a90e24197c80745a5e57a293671408f0bee259400cee678c020d98dec59e",
       "executable": false
     },
     "crates/pgokf-verifier/src/process.rs": {
@@ -934,7 +934,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/src/release_runtime.rs": {
-      "sha256": "7add942908b0a17b5ace87ce92dda387a461050a49a242d2501b1ba20528e44d",
+      "sha256": "ce8c9a0e64a5ed39d89c62c29da92b4f143845f1f2d916f0e8d629e74842297a",
       "executable": false
     },
     "crates/pgokf-verifier/src/scratch.rs": {
@@ -962,7 +962,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/src/workflow.rs": {
-      "sha256": "2bacc9dbf660056ed7ff9256c69dacf6eb65cdefccfee1f4c7ab2a1dca6effb2",
+      "sha256": "7b8236b14beeeda7a6ebdc0d95a522c2232a484a8a82b55d1bba62d08fd751cd",
       "executable": false
     },
     "crates/pgokf-verifier/tests/artifact_smoke.rs": {
@@ -1002,7 +1002,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/tests/postgres_pin.rs": {
-      "sha256": "32f5d42a0ecfb487c8017db142b6a79d09c170dd576d8b296c6fb69040dbcff7",
+      "sha256": "2693abd29c08d55b557a9e6e8f745f4e3037021274ebb8c9422fd9f4a00b2119",
       "executable": false
     },
     "crates/pgokf-verifier/tests/process_environment.rs": {
@@ -1014,7 +1014,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/tests/release_history.rs": {
-      "sha256": "9851ff8e0c40687b5b1b10186286f7342ab59d995c1645247dc6e5df3c8fc8de",
+      "sha256": "bae44e5e84460deb76d600fdf86a85143c574777631e0eae58e431eaa8514c5a",
       "executable": false
     },
     "crates/pgokf-verifier/tests/release_identity.rs": {
@@ -1042,11 +1042,11 @@
       "executable": false
     },
     "crates/pgokf-verifier/tests/support/policy_cases.rs": {
-      "sha256": "7c8db7623f80b36cd3c52b22c8e3d3ad34e74d4fb9c8f1010b67052e4c1196af",
+      "sha256": "9a017a1d1f815144897ff206f54be2bcc8665df54108ec2fd5366dede887f8a7",
       "executable": false
     },
     "crates/pgokf-verifier/tests/workflow.rs": {
-      "sha256": "f7a660ac5cfa67e26dd2cfb323a76229a3247892b5f4b796f1350c76df5d46c6",
+      "sha256": "ef9e293453155d1b96aefaa8e3329a8d03f2ea65c2dcfad2dbc1e085c7710f41",
       "executable": false
     },
     "crates/pgokf-web/Cargo.toml": {
@@ -1518,7 +1518,7 @@
       "executable": false
     },
     "docs/index.md": {
-      "sha256": "37dd94e3189ba11dc479cef11df1106c7cda9382c1c649e4845c825e78d72aff",
+      "sha256": "0bef0aa8f6c36eae8cac63bd49d14a88eac5d758ad7d860cc2ee1ed26945beb1",
       "executable": false
     },
     "docs/mcp-0.4-development.md": {
@@ -1542,11 +1542,11 @@
       "executable": false
     },
     "docs/packaging.md": {
-      "sha256": "c56a1b2d362b5f2a7b89f4a2e43178663e47316b32cbf42a1cc37470a8b8ae0b",
+      "sha256": "3047c112ebb5fed1d544819b9843e03b7c3b1fbaeeed8d755d2441de1af0b8c3",
       "executable": false
     },
     "docs/release-checklist.md": {
-      "sha256": "687204a71978dc1643c0437c758ba70b5be3c4d2ee2a82de6662f7ed35e7283e",
+      "sha256": "1fa358392c1d8670dc9dfd21a026b089e1fbe5b6bff26659133674e96304282b",
       "executable": false
     },
     "docs/releases/0.3.0-partial-ghcr.json": {
@@ -1654,7 +1654,7 @@
       "executable": false
     },
     "packaging/docker/README.md": {
-      "sha256": "94eb3e4136eb27e6ee604ac702931c39f50bdbab3d5d60ab6a1347135c1a34f1",
+      "sha256": "c71a5654a3c5be9fbb0bcc774c47095315ad8dd653eb26c9d4316fd8da1506c7",
       "executable": false
     },
     "packaging/docker/bin/pgokf-backup": {
@@ -1722,7 +1722,7 @@
       "executable": false
     },
     "packaging/install-postgres.sh": {
-      "sha256": "522b3fe72b3ea8c1deecd0f6f3c54de4ac6e2686d82d6e3b3fa77e386688e43b",
+      "sha256": "b41a2ca951ce68f5d74bec3f53e12d0354248a993d10c28619321ab2f041441e",
       "executable": true
     },
     "packaging/resolve-release.sh": {
@@ -2866,7 +2866,7 @@
       "executable": false
     },
     "tests/workflow-contexts.json": {
-      "sha256": "78bb7aee37b64927f3e17a0b84e30234236dbff382a332946f32d73faba2e19c",
+      "sha256": "6485918ddc68774375cf5ea761af3ca890b5742ce09d8bedaa11f07bc2e58be4",
       "executable": false
     },
     "third-party-notice-evidence/3d-force-graph-1.80.0/3d-force-graph.js.map": {

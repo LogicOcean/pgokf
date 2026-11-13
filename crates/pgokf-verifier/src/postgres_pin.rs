@@ -2,13 +2,15 @@
 use crate::owned_docker::DockerApi;
 use crate::process::CommandSpec;
 
+// Docker Official Image postgres:19rc2 multi-architecture index, verified via
+// Docker Hub tag metadata and buildx imagetools inspect on 2026-11-13.
 pub const BETA_DIGEST: &str =
-    "sha256:4b3e4b2edcf554492dd1c5e008237208c1d6e6faf2f15c24bf5fc5c4bcf0a21d";
+    "sha256:3c5f322ffe97481b51a1ebee693f58d0c081514d2bc3026500a9400b7428bea9";
 /// # Errors
 /// Unreviewed major/tag pairs fail before provisioning.
 pub fn target(major: u32, image_tag: &str) -> Result<(), String> {
     if !((15..=18).contains(&major) && image_tag == major.to_string()
-        || major == 19 && image_tag == "19rc1")
+        || major == 19 && image_tag == "19rc2")
     {
         return Err(format!(
             "unreviewed PostgreSQL major/base transition: {major}:{image_tag}"
@@ -32,7 +34,7 @@ pub fn base_image(major: u32, image_tag: &str) -> Result<String, String> {
 pub fn package(major: u32, image_tag: &str, version: &str) -> Result<(), String> {
     target(major, image_tag)?;
     let prefix = if major == 19 {
-        "19~rc1-".into()
+        "19~rc2-".into()
     } else {
         format!("{major}.")
     };
@@ -76,7 +78,7 @@ pub fn versions(major: u32, image_tag: &str, server: &str, headers: &str) -> Res
 /// Empty, changed or nonliteral image-index digests fail.
 pub fn digest(actual: &str) -> Result<(), String> {
     if actual.trim() != BETA_DIGEST {
-        return Err("postgres:19rc1 immutable index digest changed or disappeared".into());
+        return Err("postgres:19rc2 immutable index digest changed or disappeared".into());
     }
     Ok(())
 }
@@ -88,7 +90,7 @@ pub fn beta_image(docker: &mut impl DockerApi) -> Result<(), String> {
             "buildx",
             "imagetools",
             "inspect",
-            "postgres:19rc1",
+            "postgres:19rc2",
             "--format",
             "{{.Manifest.Digest}}",
         ]
@@ -110,47 +112,47 @@ mod tests {
     #[test]
     fn beta_build_reference_is_immutable() {
         assert_eq!(base_image(18, "18").unwrap(), "postgres:18");
-        let reference = base_image(19, "19rc1").unwrap();
+        let reference = base_image(19, "19rc2").unwrap();
         assert_eq!(
             reference.split_once('@'),
-            Some(("postgres:19rc1", BETA_DIGEST))
+            Some(("postgres:19rc2", BETA_DIGEST))
         );
         assert!(base_image(19, "19").is_err());
     }
     #[test]
     fn runtime_and_headers_are_independent() {
-        versions(19, "19rc1", "19~rc1-1", "19~rc1-1").unwrap();
-        assert!(versions(19, "19rc1", "19~rc2-1", "19~rc1-1").is_err());
-        assert!(versions(19, "19rc1", "19~rc1-1", "19~rc2-1").is_err());
+        versions(19, "19rc2", "19~rc2-1", "19~rc2-1").unwrap();
+        assert!(versions(19, "19rc2", "19~rc1-1", "19~rc2-1").is_err());
+        assert!(versions(19, "19rc2", "19~rc2-1", "19~rc1-1").is_err());
     }
     #[test]
     fn reviewed_targets_and_versions_are_exact() {
         for major in 15..=18 {
             package(major, &major.to_string(), &format!("{major}.4-1.pgdg")).unwrap();
-            for version in ["", "(none)", "19~rc1-1", "18~rc1-1"] {
+            for version in ["", "(none)", "19~rc2-1", "18~rc1-1"] {
                 assert!(package(major, &major.to_string(), version).is_err());
             }
         }
-        package(19, "19rc1", "19~rc1-1.pgdg13+1").unwrap();
+        package(19, "19rc2", "19~rc2-1.pgdg13+1").unwrap();
         for (major, tag) in [
             (14, "14"),
             (20, "20"),
             (19, "19"),
             (19, "19beta3"),
-            (19, "19rc2"),
-            (18, "19rc1"),
+            (19, "19rc1"),
+            (18, "19rc2"),
         ] {
             assert!(target(major, tag).is_err());
         }
         for version in [
             "19~beta2-1",
             "19~beta3-1",
-            "19~rc2-1",
+            "19~rc1-1",
             "19.0-1",
-            "19~rc1-",
+            "19~rc2-",
             "",
         ] {
-            assert!(package(19, "19rc1", version).is_err());
+            assert!(package(19, "19rc2", version).is_err());
         }
     }
     #[test]

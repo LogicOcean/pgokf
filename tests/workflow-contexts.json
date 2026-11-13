@@ -45,12 +45,12 @@
     }
   },
   "pgrx test": {
-    "workflow": "7b3e9670d17898202af8f8db3a4cbcb253fb3afe68479bcc6fef9f3e467c0881",
+    "workflow": "05bfb493c2c80b6ef16e9f19628f81c9ce8513022a300799a18a5c0a6c2733e9",
     "triggers": "979e3f31734d99342a9469d8eba17f5b4ce114ebb93ffe35efd80ea4dd38dd49",
     "permissions": "d8d6aceb1abc41990618a503082c3badcca8897feee0976f222af5b74e30bec2",
     "env": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
     "jobs": {
-      "test": "77629d3d26d88925bc74c2b90a63e2020cc418e44f89e276f3833c6dcd0a0e6b"
+      "test": "b5f7d5ac9012fb816f6242985cb5b96a0ea59cf553f5ad10ccb40964035ea269"
     }
   }
 }

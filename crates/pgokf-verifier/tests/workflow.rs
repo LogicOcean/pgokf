@@ -411,7 +411,13 @@ fn boundary_mutations() {
                 .any(|e| e.starts_with("stable GA boundary"))
         );
     }
-    for include in [json!([]), json!([{"pg":19,"image_tag":"19"}]), Value::Null] {
+    for include in [
+        json!([]),
+        json!([{"pg":19,"image_tag":"19"}]),
+        json!([{"pg":19,"image_tag":"19rc1"}]),
+        json!([{"pg":19,"image_tag":"19rc3"}]),
+        Value::Null,
+    ] {
         let mut bad = pgrx.clone();
         bad["jobs"]["test"]["strategy"]["matrix"]["include"] = include;
         let errors = check_support(&packages, &bad, &c);

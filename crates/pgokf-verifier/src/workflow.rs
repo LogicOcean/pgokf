@@ -474,7 +474,7 @@ pub fn check_support(packages: &Value, pgrx: &Value, contexts: &Contexts) -> Vec
     }
     let beta = BTreeMap::from([
         ("pg".into(), json!(19)),
-        ("image_tag".into(), json!("19rc1")),
+        ("image_tag".into(), json!("19rc2")),
     ]);
     match matrix(pgrx, "test") {
         Ok(m) => {
@@ -1108,11 +1108,11 @@ mod tests {
     #[test]
     fn effective_matrix_exclusion_then_include_and_nulls() {
         let m = matrix_yaml(
-            "pg: [18]\narch: [amd64, arm64]\nexclude: [{arch: arm64}]\ninclude: [{pg: 18, runner: linux}, {pg: 19, image_tag: 19rc1}]",
+            "pg: [18]\narch: [amd64, arm64]\nexclude: [{arch: arm64}]\ninclude: [{pg: 18, runner: linux}, {pg: 19, image_tag: 19rc2}]",
         );
         assert_eq!(
             serde_json::to_value(effective_matrix(&m)).unwrap(),
-            json!([{"pg":18,"arch":"amd64","runner":"linux"},{"pg":19,"image_tag":"19rc1"}])
+            json!([{"pg":18,"arch":"amd64","runner":"linux"},{"pg":19,"image_tag":"19rc2"}])
         );
         assert_eq!(
             effective_matrix(&matrix_yaml("include: [{arch: amd64}, {arch: arm64}]")).len(),

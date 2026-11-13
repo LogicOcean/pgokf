@@ -1,7 +1,7 @@
 # Packaging & Distribution
 
 How pgokf is packaged and released for every supported channel. Supported
-PostgreSQL majors: **15, 16, 17, 18**. PostgreSQL 19 RC 1 is required nonpublishing compatibility testing, not production support. Every stable major is a
+PostgreSQL majors: **15, 16, 17, 18**. PostgreSQL 19 RC 2 is required nonpublishing compatibility testing, not production support. Every stable major is a
 **required** leg of the test and packaging matrices: missing PGDG packages,
 failed provisioning, or absent base images fail the workflow rather than
 skipping coverage.
@@ -187,7 +187,7 @@ commit and then the external tap; follow the exact
 
 ## Release process
 
-`PGVER` ranges over 15-18; every stable major is a required CI and packaging leg. PostgreSQL 19 RC 1 is a separate required, nonpublishing compatibility leg.
+`PGVER` ranges over 15-18; every stable major is a required CI and packaging leg. PostgreSQL 19 RC 2 is a separate required, nonpublishing compatibility leg.
 
 1. **Gate.** Complete [release-checklist.md](release-checklist.md) (static,
    supply-chain, schema, and per-major live smoke gates). Confirm

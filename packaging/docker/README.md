@@ -232,19 +232,32 @@ services:
       - ./examples/sample-bundle:/bundles/sample:ro
 ```
 
-### PostgreSQL 19 RC 1 compatibility (non-production)
+### PostgreSQL 19 RC 2 compatibility (non-production)
 
-`PG_MAJOR=19` selects pgrx's `pg19` feature; `PG_IMAGE_TAG=19rc1` selects
+`PG_MAJOR=19` selects pgrx's `pg19` feature; `PG_IMAGE_TAG=19rc2` selects
 an explicitly prerelease base. CI requires this nonpublishing test, including
 strict Clippy, pgrx database tests, and smoke/backup/restore. Optional provider
 packages are disabled for this leg. There is no stable `0.6.0-pg19` image or
-PG19 .deb. The PGDG `19` component and both server/dev RC 1 versions are
+PG19 .deb. The PGDG `19` component and both server/dev RC 2 versions are
 verified; missing or changed packages fail closed. GA promotion requires a
 reviewed update to provisioning, matrices, guards, and documentation.
 
+The [official RC 2 announcement](https://www.postgresql.org/about/news/postgresql-187-1712-1616-1520-1425-and-19-rc-2-released-3442/)
+was published on November 12, 2026. On November 13, Docker Hub's
+[`19rc2` metadata](https://hub.docker.com/v2/repositories/library/postgres/tags/19rc2)
+and `docker buildx imagetools inspect postgres:19rc2` both identified the
+multi-architecture index
+`sha256:3c5f322ffe97481b51a1ebee693f58d0c081514d2bc3026500a9400b7428bea9`.
+The [PGDG Noble 19 index](https://apt.postgresql.org/pub/repos/apt/dists/noble-pgdg/19/binary-amd64/Packages.gz)
+listed both server and development packages as `19~rc2-1.pgdg24.04+1`.
+The verifier checks the tag's index identity and builds use the immutable
+reference directly; a later prerelease requires another reviewed update.
+
 ```bash
 docker build -f packaging/docker/Dockerfile --build-arg PG_MAJOR=19 \
-  --build-arg PG_IMAGE_TAG=19rc1 --build-arg WITH_PGVECTOR=0 \
+  --build-arg PG_IMAGE_TAG=19rc2 \
+  --build-arg PG_BASE_IMAGE=postgres:19rc2@sha256:3c5f322ffe97481b51a1ebee693f58d0c081514d2bc3026500a9400b7428bea9 \
+  --build-arg WITH_PGVECTOR=0 \
   --build-arg WITH_PG_CRON=0 --build-arg WITH_PG_TEXTSEARCH=0 \
   -t pgokf-local-beta-test .
 SMOKE_WITH_OPTIONAL=0 packaging/docker/smoke-test.sh pgokf-local-beta-test 0.6.0

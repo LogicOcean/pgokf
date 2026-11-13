@@ -258,7 +258,7 @@ pub fn apply(w: &mut Value, name: &str) {
             let (job, named) = match name {
                 "masked-beta-build" => (
                     "test",
-                    "Nonproduction PostgreSQL 19 RC 1 image compatibility",
+                    "Nonproduction PostgreSQL 19 RC 2 image compatibility",
                 ),
                 "commented-pgrx" | "test-success-mask" => ("test", "Test"),
                 _ => (

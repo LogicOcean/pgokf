@@ -43,7 +43,7 @@ body:
     id: pg-version
     attributes:
       label: PostgreSQL major version
-      options: ["15", "16", "17", "18", "19 Beta 3 (non-production compatibility)", "other (note below)"]
+      options: ["15", "16", "17", "18", "19 RC 2 (non-production compatibility)", "other (note below)"]
     validations:
       required: true
   - type: checkboxes
