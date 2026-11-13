@@ -534,12 +534,13 @@ fn validate_optional(extensions: &[&str], major: &str, optional: bool) -> Result
     Ok(())
 }
 /// Every executable the companions image ships; each must answer `--help`.
-const COMPANION_BINARIES: [&str; 5] = [
+const COMPANION_BINARIES: [&str; 6] = [
     "pgokf-ingest",
     "pgokf-embed",
     "pgokf-mcp",
     "pgokf-web",
     "pgokf-confluence",
+    "pgokf-confluence-events",
 ];
 
 /// Exercise every companion executable, early invalid-interval refusal and the

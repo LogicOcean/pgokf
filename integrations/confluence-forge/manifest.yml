@@ -1,0 +1,74 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Forge app that pushes Confluence Cloud page, comment, and task events to a
+# pgokf deployment through Forge Remote. It contains no functions: Forge
+# delivers each event directly to the remote endpoint with a Forge Invocation
+# Token (FIT) for authentication and an app system token so the backend can
+# read Confluence as the app. See README.md for registration and deployment.
+app:
+  # Replaced by `forge register`; this all-zero value is a placeholder.
+  id: ari:cloud:ecosystem::app/00000000-0000-0000-0000-000000000000
+  # Forge requires a runtime even though this app ships no functions.
+  runtime:
+    name: nodejs24.x
+
+modules:
+  # Forge's `ignoreSelf` trigger filter supports only Jira events, so every
+  # Confluence event is delivered and the receiver drops the ones whose
+  # `selfGenerated` flag shows the app caused them (publishing approved
+  # changes, adding approval tasks), so they never echo back as new work.
+  trigger:
+    - key: pgokf-confluence-page-events
+      endpoint: pgokf-confluence-events
+      events:
+        - avi:confluence:created:page
+        - avi:confluence:updated:page
+        - avi:confluence:moved:page
+        - avi:confluence:copied:page
+        - avi:confluence:archived:page
+        - avi:confluence:unarchived:page
+        - avi:confluence:trashed:page
+        - avi:confluence:restored:page
+        - avi:confluence:deleted:page
+        - avi:confluence:permissions_updated:page
+    - key: pgokf-confluence-comment-events
+      endpoint: pgokf-confluence-events
+      events:
+        - avi:confluence:created:comment
+        - avi:confluence:updated:comment
+        - avi:confluence:deleted:comment
+    - key: pgokf-confluence-task-events
+      endpoint: pgokf-confluence-events
+      events:
+        - avi:confluence:created:task
+        - avi:confluence:updated:task
+        - avi:confluence:removed:task
+
+  endpoint:
+    - key: pgokf-confluence-events
+      remote: pgokf
+      route:
+        path: /forge/confluence/events
+      auth:
+        appSystemToken:
+          enabled: true
+
+remotes:
+  - key: pgokf
+    # The public HTTPS address of this deployment's event receiver. Set it
+    # before `forge deploy`; see README.md.
+    baseUrl: https://pgokf-events.example.invalid
+
+permissions:
+  scopes:
+    # The app system token delivered with each event.
+    - read:app-system-token
+    # Page, comment, and permission events, and reading page bodies.
+    - read:confluence-content.summary
+    # Task events.
+    - read:confluence-content.all
+    # Required by Forge for trashed and deleted page events; also used to
+    # publish approved changes.
+    - write:confluence-content
+    # Resolve the acting user's email for `human:<email>` attribution.
+    - read:email-address:confluence

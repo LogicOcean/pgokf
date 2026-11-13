@@ -222,13 +222,27 @@ Begin with the supplied dry-run configuration, inspect an execution, and add
 checkpoint path for subsequent executions. Monitor failures and stale data;
 a scheduled job is not a guarantee that every scheduled ingestion succeeded.
 
+## Pushed events
+
+`pgokf-confluence-events`, the crate's second binary, receives the page,
+comment, and task events a private Forge app has Confluence Cloud push as they
+happen. It accepts a delivery only when its Forge Invocation Token verifies
+against Atlassian's published keys and names the configured app and no site
+but the configured one, drops the events the app caused itself, and writes the
+rest to standard output as JSON lines, each with a key that is identical for
+redeliveries. Events are not yet recorded in the catalog: the snapshot import
+above remains how content reaches pgokf. Setup, scopes, and delivery limits
+are in the repository's
+[Forge app README](https://github.com/LogicOcean/pgokf/tree/main/integrations/confluence-forge).
+
 ## Pilot limits
 
 - Cloud, one selected space and one complete nonempty snapshot per invocation.
 - Shared-audience access only; no per-user Confluence ACL enforcement.
 - Basic storage-format conversion, macro warnings and attachment links.
 - Full source reads on each run, bounded by page/response limits and available
-  memory; no incremental fetch cache or webhook processing.
+  memory; no incremental fetch cache, and pushed events are not yet applied to
+  the catalog.
 - Read-only Confluence operations; no publication, page creation or two-way sync.
 
 The converter limits each page to 100,000 rendered table cells, counted across

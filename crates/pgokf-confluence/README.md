@@ -12,7 +12,8 @@ This is a **shared-audience pilot**: use a space whose content may be read by
 all readers of the destination catalog. The companion does not reproduce
 Confluence page permissions. Attachments remain links; supported macro content
 is converted and unsupported macros produce warnings. There is no Data Center
-adapter, continuous watcher, or publishing back to Confluence.
+adapter or publishing back to Confluence; changes can be pushed as events (see
+[Pushed events](#pushed-events)).
 
 ## Build and preview
 
@@ -115,6 +116,17 @@ mapping, permissions, failure handling and individual operation. The
 [container deployment example](../../deploy/confluence/README.md) includes an
 Azure Container Apps Job with persistent state and Key Vault secret references.
 
+## Pushed events
+
+The crate's second binary, `pgokf-confluence-events`, receives the page,
+comment, and task events a private Forge app has Confluence push as they
+happen, so nothing has to poll for changes. It accepts a delivery only when
+the Forge Invocation Token verifies against Atlassian's published keys and
+names the configured app (`FORGE_APP_ID`) and no Confluence site but the
+configured one (`CONFLUENCE_CLOUD_ID`), and writes accepted events to standard
+output as JSON lines. Setup, scopes, and limits are in the
+[Forge app's README](../../integrations/confluence-forge/README.md).
+
 ## Tests
 
 Run the offline client, converter, checkpoint and CLI suite from the repository root:
@@ -122,6 +134,12 @@ Run the offline client, converter, checkpoint and CLI suite from the repository 
 ```bash
 cargo test --locked -p pgokf-confluence
 ```
+
+That includes the event receiver's suites: `tests/forge_receiver.rs` drives
+the HTTP router with invocation tokens signed by throwaway keys (signatures,
+key selection and rotation, app and site, self-caused events, redelivery
+keys, malformed bodies, methods and media types, and the JSON lines), and
+`tests/events_binary.rs` runs the binary itself. Neither reaches Atlassian.
 
 The catalog workflow is ignored by that command because it needs PostgreSQL
 with this checkout's pgokf extension installed. This runner creates a private

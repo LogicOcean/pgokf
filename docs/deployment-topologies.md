@@ -330,6 +330,12 @@ does not reproduce Confluence page ACLs. See
 [Confluence integration](confluence-integration.md) for individual setup,
 content limits, and the Azure Container Apps Job deployment example.
 
+The same crate's `pgokf-confluence-events` receives the page, comment, and
+task events a private Forge app has Confluence push through Forge Remote. It
+speaks plain HTTP, so Forge reaches it over HTTPS through a TLS-terminating
+proxy or ingress; it writes accepted events as JSON lines and does not yet
+touch the catalog.
+
 ---
 
 ## Scaling reads with replicas

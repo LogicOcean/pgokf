@@ -41,7 +41,9 @@ needs no external file store.
   `--watch`), `pgokf-embed` (embedding sidecar for semantic search),
   `pgokf-mcp` (an MCP server exposing the catalog to AI agents, over stdio
   or HTTP), `pgokf-web` (the web UI, JSON API and agent plugin builder),
-  `pgokf-confluence` (one-shot Confluence Cloud space ingestion)
+  `pgokf-confluence` (one-shot Confluence Cloud space ingestion),
+  `pgokf-confluence-events` (receives the Confluence events a Forge app
+  pushes)
 - **License:** AGPL-3.0-only, with a commercial license available (see
   [`LICENSING.md`](https://github.com/LogicOcean/pgokf/blob/main/LICENSING.md))
 

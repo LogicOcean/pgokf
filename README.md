@@ -77,6 +77,7 @@ Standalone binaries (in [`crates/`](crates)) that pair with the extension - cred
 | ---- | ------------ |
 | [`pgokf-ingest`](crates/pgokf-ingest) | Mountless ingestion: reads an S3/MinIO/SeaweedFS bucket and streams it into the catalog. `--watch` re-syncs on change. |
 | [`pgokf-confluence`](crates/pgokf-confluence) | Confluence Cloud ingestion: previews or imports one shared-audience space as a complete OKF bundle; one-shot with explicit `--apply`, a durable checkpoint, and reviewed deletions. |
+| [`pgokf-confluence-events`](crates/pgokf-confluence#pushed-events) | Receives the page, comment, and task events a private [Forge app](integrations/confluence-forge) has Confluence Cloud push, accepting only deliveries whose invocation token verifies and names the configured app and site, and writes them as JSON lines. |
 | [`pgokf-embed`](crates/pgokf-embed) | Reference embedder: computes vectors via any OpenAI-compatible `/v1/embeddings` endpoint and stores them. `--watch` keeps up with new content. |
 | [`pgokf-mcp`](crates/pgokf-mcp) | A Model Context Protocol server exposing `concept_search` / `find_similar` / `concept_neighbors` as agent tools, over stdio or over HTTP with bearer tokens and roles. |
 | [`pgokf-web`](crates/pgokf-web) | The web UI and JSON API: search, browsing, concept pages, link graphs, the agent plugin builder, and operations - read-only until a writer connection and an identity mode turn on upload, edit and review. |

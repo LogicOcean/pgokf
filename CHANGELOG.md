@@ -10,6 +10,24 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 ## [Unreleased]
 
+### Added
+
+- **Pushed Confluence events.** A private Forge app
+  (`integrations/confluence-forge`) has Confluence Cloud push page, comment,
+  and task events through Forge Remote to a new receiver,
+  `pgokf-confluence-events`, in the companions image. The receiver accepts a
+  delivery only when its Forge Invocation Token verifies against Atlassian's
+  published keys and names the configured app and no Confluence site but the
+  configured one, drops events the app caused itself, and writes accepted
+  events as JSON lines with a key that is identical for redeliveries. A
+  delivery whose signing key cannot be read yet, or whose sink is slow or
+  failing, is answered `503` so Forge retries it; a body declared as anything
+  but JSON, a body that is not the documented envelope, and an event naming a
+  page, space, or comment by anything but a canonical Confluence ID are
+  refused, and refusal reasons are logged one line each. The companions
+  smoke test runs the new binary. Recording events in the catalog is not part
+  of this change.
+
 ## [0.5.0] - 2026-11-11
 
 A companion release: the Confluence Cloud ingestion companion, an enforced

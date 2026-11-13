@@ -638,29 +638,37 @@ fn validate_site(raw: &str) -> Result<Url> {
 }
 
 fn validate_cloud_id(id: &str) -> Result<()> {
-    ensure!(
-        id.len() == 36
-            && id.bytes().enumerate().all(|(index, byte)| {
-                if matches!(index, 8 | 13 | 18 | 23) {
-                    byte == b'-'
-                } else {
-                    byte.is_ascii_hexdigit()
-                }
-            }),
-        "Confluence cloud ID must be a UUID"
-    );
+    ensure!(is_uuid(id), "Confluence cloud ID must be a UUID");
     Ok(())
+}
+
+/// Whether `id` is a UUID in its hyphenated text form, in either case.
+pub(crate) fn is_uuid(id: &str) -> bool {
+    id.len() == 36
+        && id.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
 }
 
 fn validate_id(id: &str) -> Result<()> {
     ensure!(
-        !id.is_empty()
-            && id.len() <= 32
-            && id.bytes().all(|byte| byte.is_ascii_digit())
-            && !id.starts_with('0'),
+        is_confluence_id(id),
         "Confluence IDs must be positive canonical decimal strings"
     );
     Ok(())
+}
+
+/// Whether `id` is a Confluence ID in canonical form: a positive decimal
+/// number of at most 32 digits, without leading zeros.
+pub(crate) fn is_confluence_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 32
+        && id.bytes().all(|byte| byte.is_ascii_digit())
+        && !id.starts_with('0')
 }
 
 fn validate_page(page: &ApiPage, space_id: &str) -> Result<()> {
