@@ -124,7 +124,7 @@ RUST_TEST_THREADS=1 cargo pgrx test pg18 --no-default-features --features pg18 #
 
 ## Project status
 
-Pre-1.0 (`0.5.0` source; latest published release `0.4.0`). The enumerated SQL surface is treated as stable and every change ships an upgrade script verified `upgrade == fresh`, but per SemVer a `0.MINOR` bump may still carry a breaking change (called out in [CHANGELOG.md](CHANGELOG.md)). Reaching `1.0.0` is a deliberate decision, not an automatic bump.
+Pre-1.0 (`0.6.0` source; latest published release `0.5.0`). The enumerated SQL surface is treated as stable and every change ships an upgrade script verified `upgrade == fresh`, but per SemVer a `0.MINOR` bump may still carry a breaking change (called out in [CHANGELOG.md](CHANGELOG.md)). Reaching `1.0.0` is a deliberate decision, not an automatic bump.
 
 Published stable artifacts target PostgreSQL 15–18 on amd64 and arm64. Source/CI compatibility is also required on **PostgreSQL 19 RC 1** (`pg19`, explicit `postgres:19rc1`, PGDG component `19`), for non-production testing only. No stable PG19 image or .deb is published. A missing or changed prerelease fails CI; GA promotion requires an explicit reviewed matrix, provisioning, and documentation change.
 

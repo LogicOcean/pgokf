@@ -40,9 +40,9 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "ammonia"
-version = "4.1.8"
+version = "4.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f6660fb4ff692ef4937b1b4e74ab3d378653d8588389587d91f96a296907ea0"
+checksum = "935c841d86ee68ba89a983ea6e4255436f769ab1e2b701574653baf4b30739ce"
 dependencies = [
  "cssparser",
  "html5ever",
@@ -2568,7 +2568,7 @@ dependencies = [
 
 [[package]]
 name = "okf-parser"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "pulldown-cmark",
  "serde",
@@ -2580,7 +2580,7 @@ dependencies = [
 
 [[package]]
 name = "okf-sync"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "blake3",
  "globset",
@@ -2713,7 +2713,7 @@ dependencies = [
 
 [[package]]
 name = "pgokf"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "arrow",
  "okf-parser",
@@ -2727,7 +2727,7 @@ dependencies = [
 
 [[package]]
 name = "pgokf-companion"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -2742,7 +2742,7 @@ dependencies = [
 
 [[package]]
 name = "pgokf-confluence"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -2772,7 +2772,7 @@ dependencies = [
 
 [[package]]
 name = "pgokf-embed"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2787,7 +2787,7 @@ dependencies = [
 
 [[package]]
 name = "pgokf-ingest"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2802,7 +2802,7 @@ dependencies = [
 
 [[package]]
 name = "pgokf-mcp"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2825,7 +2825,7 @@ dependencies = [
 
 [[package]]
 name = "pgokf-pgconn"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "rustls",
@@ -2837,11 +2837,11 @@ dependencies = [
 
 [[package]]
 name = "pgokf-process-handle"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "pgokf-verifier"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "flate2",
@@ -2868,7 +2868,7 @@ dependencies = [
 
 [[package]]
 name = "pgokf-web"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "ammonia",
  "anyhow",
@@ -2899,7 +2899,7 @@ dependencies = [
 
 [[package]]
 name = "pgokf-workspace"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "serde",

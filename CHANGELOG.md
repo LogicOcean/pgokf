@@ -10,6 +10,15 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-13
+
+A companion release: pushed Confluence events through a private Forge app,
+and a supply-chain advisory fix. The catalog is unchanged - no SQL object or
+data differs from 0.5.0 - so the receipt-only `pgokf--0.5.0--0.6.0.sql`
+edge carries an installed 0.5.0 catalog to 0.6.0 through an ordinary
+`ALTER EXTENSION pgokf UPDATE`, and the committed `pgokf--0.6.0.sql`
+install script is the 0.5.0 one regenerated under the new version.
+
 ### Added
 
 - **Pushed Confluence events.** A private Forge app
@@ -27,6 +36,14 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
   refused, and refusal reasons are logged one line each. The companions
   smoke test runs the new binary. Recording events in the catalog is not part
   of this change.
+
+### Security
+
+- **`ammonia` 4.1.9 for RUSTSEC-2026-0533** (mutation XSS through embedded
+  SVG and MathML). The advisory concerns sanitizers that allow a raw-text
+  element such as `script` or `style`; `pgokf-web` allows none (ammonia's
+  defaults plus heading ids and one `span` class), so it was not exploitable.
+  The lockfile changes that one entry, so `cargo deny check` passes again.
 
 ## [0.5.0] - 2026-11-11
 
@@ -1881,7 +1898,8 @@ queries, native full-text search, and link-graph traversal.
 - The `pgokf_private` schema and its `config` table are readable and writable
   only by the extension owner and `pgokf_admin`; readers cannot see policy.
 
-[Unreleased]: https://github.com/LogicOcean/pgokf/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/LogicOcean/pgokf/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/LogicOcean/pgokf/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/LogicOcean/pgokf/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/LogicOcean/pgokf/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/LogicOcean/pgokf/compare/v0.3.0...v0.3.1

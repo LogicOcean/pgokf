@@ -349,6 +349,7 @@ pub fn check_repository(root: &Path, version: &str) -> Result<(), String> {
     let read = |name: &str| std::fs::read_to_string(dir.join(name)).map_err(|e| e.to_string());
     check_receipt(&read("pgokf--0.3.0--0.3.1.sql")?)?;
     check_receipt(&read("pgokf--0.4.0-dev3--0.4.0.sql")?)?;
+    check_receipt(&read("pgokf--0.4.0--0.5.0.sql")?)?;
     if version.contains('-') {
         for (from, to) in development_chain(&names, version)? {
             let retired: &[&str] = if to == "0.4.0-dev2" {
@@ -539,13 +540,18 @@ mod graph_controls {
         std::fs::write(&final_edge, "SELECT 1;").unwrap();
         assert!(check_repository(temporary.path(), version).is_err());
         std::fs::write(&final_edge, receipt).unwrap();
-        // A past finalization receipt stays an exact receipt.
-        let historical = target.join("pgokf--0.4.0-dev3--0.4.0.sql");
-        let historical_original = std::fs::read_to_string(&historical).unwrap();
-        std::fs::write(&historical, "SELECT 1;").unwrap();
-        assert!(check_repository(temporary.path(), version).is_err());
-        std::fs::write(&historical, historical_original).unwrap();
-        check_repository(temporary.path(), version).unwrap();
+        // A past release's receipt stays an exact receipt.
+        for past in ["pgokf--0.4.0-dev3--0.4.0.sql", "pgokf--0.4.0--0.5.0.sql"] {
+            let historical = target.join(past);
+            let historical_original = std::fs::read_to_string(&historical).unwrap();
+            std::fs::write(&historical, "SELECT 1;").unwrap();
+            assert!(
+                check_repository(temporary.path(), version).is_err(),
+                "{past} rewritten without refusal"
+            );
+            std::fs::write(&historical, historical_original).unwrap();
+            check_repository(temporary.path(), version).unwrap();
+        }
         std::fs::write(
             target.join(format!("pgokf--0.4.0-dev2--{version}.sql")),
             receipt,

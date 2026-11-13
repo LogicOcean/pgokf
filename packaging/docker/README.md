@@ -16,7 +16,7 @@ nonpublishing. An explicit `workflow_dispatch` whose `release_tag` is proven to
 name the current immutable release tag publishes image digests and merges them
 into one manifest per tag - so the same tag runs on x86 servers, arm64 servers,
 and Apple Silicon. Between releases there is nothing new to pull; build
-locally as below. `0.5.0` in the examples is the extension version, read from
+locally as below. `0.6.0` in the examples is the extension version, read from
 `crates/extension/pgokf.control` - the single source of truth CI and
 `packaging/deb/build-deb.sh` both resolve at build time.
 
@@ -32,10 +32,10 @@ Stable distribution: one image per PostgreSQL major (15-18), selected at build t
 
 | Tag             | PostgreSQL                    |
 | --------------- | ----------------------------- |
-| `0.5.0-pg15`   | 15 (no BM25 provider: `pg_textsearch` ships for 17 and 18 only) |
-| `0.5.0-pg16`   | 16 (no BM25 provider)         |
-| `0.5.0-pg17`   | 17 (+ `pg_textsearch`)        |
-| `0.5.0-pg18`   | 18 (+ `pg_textsearch`; the `PG_MAJOR` default) |
+| `0.6.0-pg15`   | 15 (no BM25 provider: `pg_textsearch` ships for 17 and 18 only) |
+| `0.6.0-pg16`   | 16 (no BM25 provider)         |
+| `0.6.0-pg17`   | 17 (+ `pg_textsearch`)        |
+| `0.6.0-pg18`   | 18 (+ `pg_textsearch`; the `PG_MAJOR` default) |
 
 ### Build
 
@@ -43,7 +43,7 @@ Stable distribution: one image per PostgreSQL major (15-18), selected at build t
 docker build -f packaging/docker/Dockerfile \
   --build-arg PG_MAJOR=18 \
   --build-arg PGOKF_VERSION="$(sed -n "s/^default_version *= *'\([^']*\)'.*/\1/p" crates/extension/pgokf.control)" \
-  -t pgokf:0.5.0-pg18 .
+  -t pgokf:0.6.0-pg18 .
 ```
 
 The build runs natively for the daemon's architecture. To build for an arm64
@@ -105,7 +105,7 @@ packaging/docker/update-pg-search-checksums.sh 0.25.6
 
 ```bash
 docker run --rm -e POSTGRES_PASSWORD=postgres \
-  pgokf:0.5.0-pg18 \
+  pgokf:0.6.0-pg18 \
   postgres -c shared_preload_libraries=pgokf,pg_cron,pg_textsearch
 ```
 
@@ -170,10 +170,10 @@ and pg_cron's objects when the target is not `cron.database_name`). Both use the
 # on the server's network (here the compose network), as the superuser
 docker run --rm --network pgokf-net \
   -e PGHOST=pgokf-db -e PGUSER=postgres -e PGPASSWORD=... -e PGDATABASE=okf \
-  -v /srv/pgokf/backups:/backups pgokf:0.5.0-pg18 pgokf-backup
+  -v /srv/pgokf/backups:/backups pgokf:0.6.0-pg18 pgokf-backup
 docker run --rm --network pgokf-net \
   -e PGHOST=pgokf-db -e PGUSER=postgres -e PGPASSWORD=... -e PGDATABASE=okf \
-  -v /srv/pgokf/backups:/backups pgokf:0.5.0-pg18 pgokf-restore /backups/okf-<stamp>.dump
+  -v /srv/pgokf/backups:/backups pgokf:0.6.0-pg18 pgokf-restore /backups/okf-<stamp>.dump
 ```
 
 Dump as a superuser (or a role with `pg_read_all_data` and `BYPASSRLS`); the
@@ -190,8 +190,8 @@ The same script CI runs, usable against any daemon (the sample bundle is
 copied in with `docker cp`, so no daemon-side path is needed):
 
 ```bash
-packaging/docker/smoke-test.sh pgokf:0.5.0-pg18            # local daemon
-DOCKER="docker --context <remote>" packaging/docker/smoke-test.sh pgokf:0.5.0-pg18
+packaging/docker/smoke-test.sh pgokf:0.6.0-pg18            # local daemon
+DOCKER="docker --context <remote>" packaging/docker/smoke-test.sh pgokf:0.6.0-pg18
 ```
 
 It preloads every optional extension, applies env-driven roles and policy,
@@ -202,9 +202,9 @@ a second fresh container with `pgokf-restore`.
 ## Companions image
 
 ```bash
-docker build -f packaging/docker/Dockerfile.companions -t pgokf-companions:0.5.0 .
-docker run --rm pgokf-companions:0.5.0 pgokf-embed --help
-packaging/docker/smoke-test-companions.sh pgokf-companions:0.5.0
+docker build -f packaging/docker/Dockerfile.companions -t pgokf-companions:0.6.0 .
+docker run --rm pgokf-companions:0.6.0 pgokf-embed --help
+packaging/docker/smoke-test-companions.sh pgokf-companions:0.6.0
 ```
 
 The image has no entrypoint: name the binary as the command. It runs as an
@@ -220,7 +220,7 @@ The minimal shape (the full stack is in [`deploy/compose/`](../../deploy/compose
 ```yaml
 services:
   db:
-    image: ghcr.io/logicocean/pgokf:0.5.0-pg18
+    image: ghcr.io/logicocean/pgokf:0.6.0-pg18
     command: ["postgres", "-c", "shared_preload_libraries=pgokf,pg_cron,pg_textsearch"]
     environment:
       POSTGRES_PASSWORD: postgres
@@ -237,7 +237,7 @@ services:
 `PG_MAJOR=19` selects pgrx's `pg19` feature; `PG_IMAGE_TAG=19rc1` selects
 an explicitly prerelease base. CI requires this nonpublishing test, including
 strict Clippy, pgrx database tests, and smoke/backup/restore. Optional provider
-packages are disabled for this leg. There is no stable `0.5.0-pg19` image or
+packages are disabled for this leg. There is no stable `0.6.0-pg19` image or
 PG19 .deb. The PGDG `19` component and both server/dev RC 1 versions are
 verified; missing or changed packages fail closed. GA promotion requires a
 reviewed update to provisioning, matrices, guards, and documentation.
@@ -247,5 +247,5 @@ docker build -f packaging/docker/Dockerfile --build-arg PG_MAJOR=19 \
   --build-arg PG_IMAGE_TAG=19rc1 --build-arg WITH_PGVECTOR=0 \
   --build-arg WITH_PG_CRON=0 --build-arg WITH_PG_TEXTSEARCH=0 \
   -t pgokf-local-beta-test .
-SMOKE_WITH_OPTIONAL=0 packaging/docker/smoke-test.sh pgokf-local-beta-test 0.5.0
+SMOKE_WITH_OPTIONAL=0 packaging/docker/smoke-test.sh pgokf-local-beta-test 0.6.0
 ```

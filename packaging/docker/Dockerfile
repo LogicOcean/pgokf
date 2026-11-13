@@ -18,7 +18,7 @@
 # installed where its publisher ships a package - pg_textsearch on 17 and 18):
 #   docker build -f packaging/docker/Dockerfile \
 #     --build-arg PG_MAJOR=18 \
-#     -t pgokf:0.5.0-pg18 .
+#     -t pgokf:0.6.0-pg18 .
 #
 # The build context MUST be the repository root (it copies the source tree;
 # .dockerignore keeps target/ and .git out). The build is DRY: it delegates the
@@ -48,7 +48,7 @@ ARG PG_TEXTSEARCH_VERSION=1.4.0
 ARG PG_SEARCH_VERSION=0.25.6
 # Extension version for the OCI label; CI passes the value read from
 # crates/extension/pgokf.control. Purely informational.
-ARG PGOKF_VERSION="0.5.0"
+ARG PGOKF_VERSION="0.6.0"
 
 # --------------------------------------------------------------------------
 # Stage 1: build the extension against the matching PostgreSQL server-dev files

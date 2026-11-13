@@ -203,17 +203,17 @@
         "path": "pgokf--0.4.0-dev1.sql",
         "before": null,
         "after": null,
-        "copy_from": "pgokf--0.5.0.sql"
+        "copy_from": "pgokf--0.6.0.sql"
       },
       {
-        "path": "pgokf--0.5.0.sql",
+        "path": "pgokf--0.6.0.sql",
         "before": null,
         "after": null,
         "delete": true
       },
       {
         "path": "pgokf.control",
-        "before": "stgreSQL catalog for Open Knowledge Format bundles'\ndefault_version = '0.5.0'\nmodule_pathname = '$libdir/pgokf'\nrelocatable = false\nsuperuser = true\ntrusted",
+        "before": "stgreSQL catalog for Open Knowledge Format bundles'\ndefault_version = '0.6.0'\nmodule_pathname = '$libdir/pgokf'\nrelocatable = false\nsuperuser = true\ntrusted",
         "after": "stgreSQL catalog for Open Knowledge Format bundles'\ndefault_version = '0.4.0-dev1'\nmodule_pathname = '$libdir/pgokf'\nrelocatable = false\nsuperuser = true\ntrusted"
       }
     ],
@@ -241,7 +241,7 @@
         "path": "pgokf--0.4.0-dev1.sql",
         "before": null,
         "after": null,
-        "copy_from": "pgokf--0.5.0.sql"
+        "copy_from": "pgokf--0.6.0.sql"
       },
       {
         "path": "pgokf--0.4.0-dev2--0.4.0-dev3.sql",
@@ -250,14 +250,14 @@
         "delete": true
       },
       {
-        "path": "pgokf--0.5.0.sql",
+        "path": "pgokf--0.6.0.sql",
         "before": null,
         "after": null,
         "delete": true
       },
       {
         "path": "pgokf.control",
-        "before": "stgreSQL catalog for Open Knowledge Format bundles'\ndefault_version = '0.5.0'\nmodule_pathname = '$libdir/pgokf'\nrelocatable = false\nsuperuser = true\ntrusted",
+        "before": "stgreSQL catalog for Open Knowledge Format bundles'\ndefault_version = '0.6.0'\nmodule_pathname = '$libdir/pgokf'\nrelocatable = false\nsuperuser = true\ntrusted",
         "after": "stgreSQL catalog for Open Knowledge Format bundles'\ndefault_version = '0.4.0-dev1'\nmodule_pathname = '$libdir/pgokf'\nrelocatable = false\nsuperuser = true\ntrusted"
       }
     ],
@@ -378,17 +378,17 @@
         "path": "pgokf--0.4.0-dev2.sql",
         "before": null,
         "after": null,
-        "copy_from": "pgokf--0.5.0.sql"
+        "copy_from": "pgokf--0.6.0.sql"
       },
       {
-        "path": "pgokf--0.5.0.sql",
+        "path": "pgokf--0.6.0.sql",
         "before": null,
         "after": null,
         "delete": true
       },
       {
         "path": "pgokf.control",
-        "before": "stgreSQL catalog for Open Knowledge Format bundles'\ndefault_version = '0.5.0'\nmodule_pathname = '$libdir/pgokf'\nrelocatable = false\nsuperuser = true\ntrusted",
+        "before": "stgreSQL catalog for Open Knowledge Format bundles'\ndefault_version = '0.6.0'\nmodule_pathname = '$libdir/pgokf'\nrelocatable = false\nsuperuser = true\ntrusted",
         "after": "stgreSQL catalog for Open Knowledge Format bundles'\ndefault_version = '0.4.0-dev2'\nmodule_pathname = '$libdir/pgokf'\nrelocatable = false\nsuperuser = true\ntrusted"
       }
     ],
@@ -416,17 +416,17 @@
         "path": "pgokf--0.4.0-dev2.sql",
         "before": null,
         "after": null,
-        "copy_from": "pgokf--0.5.0.sql"
+        "copy_from": "pgokf--0.6.0.sql"
       },
       {
-        "path": "pgokf--0.5.0.sql",
+        "path": "pgokf--0.6.0.sql",
         "before": null,
         "after": null,
         "delete": true
       },
       {
         "path": "pgokf.control",
-        "before": "stgreSQL catalog for Open Knowledge Format bundles'\ndefault_version = '0.5.0'\nmodule_pathname = '$libdir/pgokf'\nrelocatable = false\nsuperuser = true\ntrusted",
+        "before": "stgreSQL catalog for Open Knowledge Format bundles'\ndefault_version = '0.6.0'\nmodule_pathname = '$libdir/pgokf'\nrelocatable = false\nsuperuser = true\ntrusted",
         "after": "stgreSQL catalog for Open Knowledge Format bundles'\ndefault_version = '0.4.0-dev2'\nmodule_pathname = '$libdir/pgokf'\nrelocatable = false\nsuperuser = true\ntrusted"
       }
     ],
