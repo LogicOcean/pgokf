@@ -570,7 +570,7 @@
       "executable": false
     },
     "crates/pgokf-confluence/src/forge/event.rs": {
-      "sha256": "ebbc0f4b1ef8af3a15ffa6342b8cf561f7ff6bb6c454ec7a8766bdbe209d5184",
+      "sha256": "7acbdb9de25beffc78bdac4c8d1823eaaeb18dc48615d3d61c8a62609a69d414",
       "executable": false
     },
     "crates/pgokf-confluence/src/forge/fit.rs": {

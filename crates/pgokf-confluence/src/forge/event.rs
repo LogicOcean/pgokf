@@ -167,8 +167,8 @@ impl Event {
     /// differs between events, so a consumer can drop redeliveries. Forge
     /// assigns events no ID of their own; the kind of change, the page and
     /// its version, the comment or task and its state, and Confluence's own
-    /// event time together identify one. The key is a BLAKE3 digest of
-    /// those fields, length-prefixed so no two field lists collide.
+    /// event time, and actor together identify one. The key is a BLAKE3 digest
+    /// of those fields, length-prefixed so no two field lists collide.
     #[must_use]
     pub fn dedupe_key(&self) -> String {
         let version = self.page.version.map(|v| v.to_string()).unwrap_or_default();
@@ -186,6 +186,7 @@ impl Event {
                 }
             ),
         };
+        let actor = self.actor.clone().unwrap_or_default();
         let mut hasher = blake3::Hasher::new();
         for field in [
             self.kind.name(),
@@ -193,6 +194,7 @@ impl Event {
             &version,
             &self.occurred_at,
             &detail,
+            &actor,
         ] {
             hasher.update(&(field.len() as u64).to_le_bytes());
             hasher.update(field.as_bytes());
@@ -226,10 +228,12 @@ pub fn decode_delivery(body: &[u8]) -> Result<Decoded, DecodeError> {
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| DecodeError("the payload has no `eventType`".into()))?
         .to_owned();
+    // `selfGenerated` must be a boolean when present. A value of any other
+    // JSON type is treated as self-generated so a malformed flag can never
+    // fail open into the echo path the filter exists to close.
     if payload
         .get("selfGenerated")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
+        .is_some_and(|flag| !flag.is_boolean() || flag.as_bool().unwrap_or(true))
     {
         return Ok(Decoded::SelfGenerated);
     }
@@ -751,6 +755,52 @@ mod tests {
         // Assert
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn a_non_boolean_self_generated_flag_is_treated_as_self_generated() {
+        // Arrange: a truthy value of the wrong JSON type must not fail open
+        // into the echo path (the review's `evt_self_generated_string` probe).
+        for value in [json!("true"), json!(1), json!(null), json!(["true"])] {
+            let mut event = page_event("avi:confluence:updated:page", 7);
+            event["payload"]["selfGenerated"] = value.clone();
+
+            // Act
+            let decoded = decode_delivery(&body(&event)).unwrap();
+
+            // Assert
+            assert!(
+                matches!(decoded, Decoded::SelfGenerated),
+                "{value:?} decoded as {decoded:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dedupe_key_separates_events_that_differ_only_by_actor() {
+        // Arrange: two versionless events on the same page in the same
+        // millisecond, caused by different people (the review's
+        // `evt_dedupe_distinct_events` probe).
+        let event = |actor: &str| {
+            let mut event = page_event("avi:confluence:updated:page", 7);
+            event["payload"]["content"]
+                .as_object_mut()
+                .unwrap()
+                .remove("version");
+            event["payload"]["atlassianId"] = json!(actor);
+            event
+        };
+        let key = |value: &Value| match decode_delivery(&body(value)).unwrap() {
+            Decoded::Event(delivery) => delivery.event.dedupe_key(),
+            other => panic!("{other:?}"),
+        };
+        let alice = key(&event("5f1a2b3c:alice"));
+        let bob = key(&event("5f1a2b3c:bob"));
+        let alice_again = key(&event("5f1a2b3c:alice"));
+
+        // Act & Assert
+        assert_ne!(alice, bob);
+        assert_eq!(alice, alice_again);
     }
 
     #[test]
