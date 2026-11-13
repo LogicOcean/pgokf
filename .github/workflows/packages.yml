@@ -153,7 +153,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install checksum-pinned cargo-about
         run: release-tools/scripts/install-cargo-about.sh "$RUNNER_TEMP/cargo-about"
       # cargo-about resolves the complete release-source workspace under
@@ -256,7 +256,7 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Validate PGXN metadata in Rust
         run: cargo run --locked --manifest-path release-tools/Cargo.toml -p pgokf-verifier -- pgxn-check META.json
@@ -342,7 +342,7 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Install PostgreSQL ${{ matrix.pg }} server + dev files (PGDG)
         id: pgdg
@@ -403,7 +403,7 @@ jobs:
 
       - name: Upload .deb artifact
         if: steps.pgdg.outputs.available == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pgokf-deb-pg${{ matrix.pg }}-${{ matrix.arch }}
           path: target/packaging/deb/*.deb
@@ -458,7 +458,7 @@ jobs:
       - name: Exclude verification checkout from selected-source build context
         run: printf '\nrelease-tools/\n' >> .dockerignore
 
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Check base-image availability
         id: base
@@ -472,7 +472,7 @@ jobs:
 
       - name: Build image (native ${{ matrix.arch }})
         if: steps.base.outputs.available == 'true'
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: packaging/docker/Dockerfile
@@ -499,7 +499,7 @@ jobs:
 
       - name: Upload the smoke-tested image
         if: steps.base.outputs.available == 'true' && needs.prep.outputs.publish == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image-server-pg${{ matrix.pg }}-${{ matrix.arch }}
           path: ${{ runner.temp }}/server-image.tar
@@ -529,14 +529,14 @@ jobs:
       LOCAL_TAG: pgokf:${{ needs.prep.outputs.version }}-pg${{ matrix.pg }}
     steps:
       - name: Download smoke-tested image
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: image-server-pg${{ matrix.pg }}-${{ matrix.arch }}
           path: /tmp/image
       - name: Load smoke-tested image
         run: docker load --input /tmp/image/server-image.tar
       - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -556,7 +556,7 @@ jobs:
           touch "$DIGEST_DIRECTORY/${digest#sha256:}"
           echo "pushed ${reference} (${{ matrix.arch }}, pg${{ matrix.pg }})"
       - name: Upload digest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: digests-server-pg${{ matrix.pg }}-${{ matrix.arch }}
           path: /tmp/digests/*
@@ -585,16 +585,16 @@ jobs:
       TAG: ghcr.io/logicocean/pgokf:${{ needs.prep.outputs.version }}-pg${{ matrix.pg }}
     steps:
       - name: Download per-arch digests
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: digests-server-pg${{ matrix.pg }}-*
           path: /tmp/digests
           merge-multiple: true
 
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -653,10 +653,10 @@ jobs:
       - name: Exclude verification checkout from selected-source build context
         run: printf '\nrelease-tools/\n' >> .dockerignore
 
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Build image (native ${{ matrix.arch }})
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: packaging/docker/Dockerfile.companions
@@ -675,7 +675,7 @@ jobs:
 
       - name: Upload the smoke-tested image
         if: needs.prep.outputs.publish == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image-companions-${{ matrix.arch }}
           path: ${{ runner.temp }}/companions-image.tar
@@ -702,14 +702,14 @@ jobs:
       LOCAL_TAG: pgokf-companions:${{ needs.prep.outputs.version }}
     steps:
       - name: Download smoke-tested image
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: image-companions-${{ matrix.arch }}
           path: /tmp/image
       - name: Load smoke-tested image
         run: docker load --input /tmp/image/companions-image.tar
       - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -729,7 +729,7 @@ jobs:
           touch "$DIGEST_DIRECTORY/${digest#sha256:}"
           echo "pushed ${reference} (${{ matrix.arch }})"
       - name: Upload digest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: digests-companions-${{ matrix.arch }}
           path: /tmp/digests/*
@@ -748,16 +748,16 @@ jobs:
       TAG: ghcr.io/logicocean/pgokf-companions:${{ needs.prep.outputs.version }}
     steps:
       - name: Download per-arch digests
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: digests-companions-*
           path: /tmp/digests
           merge-multiple: true
 
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
