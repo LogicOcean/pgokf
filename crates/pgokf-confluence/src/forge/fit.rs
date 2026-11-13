@@ -403,8 +403,8 @@ pub(crate) mod testing {
 
     use super::{FitError, KeySource};
 
-    pub const APP_ID: &str = "ari:cloud:ecosystem::app/8db33809-1f32-48bb-8c52-5877dab48107";
-    pub const CLOUD_ID: &str = "f349edd6-f44e-48b8-b6ed-61150c06d9c5";
+    pub const APP_ID: &str = "ari:cloud:ecosystem::app/44444444-4444-4444-8444-444444444444";
+    pub const CLOUD_ID: &str = "33333333-3333-4333-8333-333333333333";
     pub const KID: &str = "forge/invocation-token/wf-test-key";
 
     /// A throwaway signing key and the key set that publishes it.
@@ -471,14 +471,14 @@ pub(crate) mod testing {
         let now = now();
         json!({
             "app": {
-                "installationId": "ari:cloud:ecosystem::installation/0a3a7799-53ae-4a5b-9e7e-03338980abb5",
+                "installationId": "ari:cloud:ecosystem::installation/55555555-5555-4555-8555-555555555555",
                 "apiBaseUrl": format!("https://api.atlassian.com/ex/confluence/{CLOUD_ID}"),
                 "id": APP_ID,
                 "version": "1",
                 "environment": {"type": "DEVELOPMENT", "id": "e-1"},
                 "module": {"type": "core:endpoint", "key": "pgokf-confluence-events"},
                 "installation": {
-                    "id": "ari:cloud:ecosystem::installation/0a3a7799-53ae-4a5b-9e7e-03338980abb5",
+                    "id": "ari:cloud:ecosystem::installation/55555555-5555-4555-8555-555555555555",
                     "contexts": [{
                         "name": "confluence",
                         "apiBaseUrl": format!("https://api.atlassian.com/ex/confluence/{CLOUD_ID}"),
@@ -543,7 +543,7 @@ mod tests {
         // Assert
         assert_eq!(
             invocation.installation_id,
-            "ari:cloud:ecosystem::installation/0a3a7799-53ae-4a5b-9e7e-03338980abb5"
+            "ari:cloud:ecosystem::installation/55555555-5555-4555-8555-555555555555"
         );
         assert_eq!(
             invocation.api_base_url.as_str(),
@@ -718,7 +718,7 @@ mod tests {
         // Arrange
         let signer = Signer::new(KID);
         let mut claims = claims();
-        claims["icLabel"] = json!("orange");
+        claims["icLabel"] = json!("yellow");
         let token = signer.sign(&signer.header(), &claims);
 
         // Act
@@ -776,7 +776,7 @@ mod tests {
 
         // Act
         let accepted = Trust::new(good_app, &good_cloud);
-        let bad_app = Trust::new("8db33809-1f32-48bb-8c52-5877dab48107", CLOUD_ID);
+        let bad_app = Trust::new("44444444-4444-4444-8444-444444444444", CLOUD_ID);
         let bad_cloud = Trust::new(APP_ID, "not-a-uuid");
 
         // Assert

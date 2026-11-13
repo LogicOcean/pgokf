@@ -31,12 +31,12 @@ use pgokf_confluence::forge::receiver::{
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-const APP_ID: &str = "ari:cloud:ecosystem::app/8db33809-1f32-48bb-8c52-5877dab48107";
+const APP_ID: &str = "ari:cloud:ecosystem::app/44444444-4444-4444-8444-444444444444";
 const OTHER_APP_ID: &str = "ari:cloud:ecosystem::app/11111111-1111-4111-8111-111111111111";
-const CLOUD_ID: &str = "f349edd6-f44e-48b8-b6ed-61150c06d9c5";
+const CLOUD_ID: &str = "33333333-3333-4333-8333-333333333333";
 const OTHER_CLOUD_ID: &str = "22222222-2222-4222-8222-222222222222";
 const INSTALLATION_ID: &str =
-    "ari:cloud:ecosystem::installation/0a3a7799-53ae-4a5b-9e7e-03338980abb5";
+    "ari:cloud:ecosystem::installation/55555555-5555-4555-8555-555555555555";
 const SYSTEM_TOKEN: &str = "forge-app-system-token-7f3c9d1e5b";
 const SYSTEM_TOKEN_HEADER: &str = "x-forge-oauth-system";
 const PAGE_ID: &str = "838205441";
@@ -386,9 +386,9 @@ fn task_event(event_type: &str, status: &str) -> Value {
         "eventType": event_type,
         "atlassianId": "557058:approver",
         "eventCreatedDate": "2026-11-12T07:00:00Z",
-        "task": {"id": 12, "uuid": "e0a0e71d-5575-4185-bf33-61364fb0960e",
+        "task": {"id": 12, "uuid": "66666666-6666-4666-8666-666666666666",
                  "status": status, "assignee": "557058:approver"},
-        "oldTask": {"id": 12, "uuid": "e0a0e71d-5575-4185-bf33-61364fb0960e",
+        "oldTask": {"id": 12, "uuid": "66666666-6666-4666-8666-666666666666",
                     "status": "incomplete", "assignee": "557058:approver"},
         "content": {"id": PAGE_ID, "type": "page", "status": "current", "title": "A page",
                     "space": {"id": 827_392_002}}
@@ -796,10 +796,10 @@ fn the_configured_identity_must_take_its_documented_forms() {
     assert!(Trust::new(APP_ID, CLOUD_ID).is_ok());
     assert!(Trust::new(APP_ID, &CLOUD_ID.to_uppercase()).is_ok());
     for (app_id, cloud_id) in [
-        ("8db33809-1f32-48bb-8c52-5877dab48107", CLOUD_ID),
+        ("44444444-4444-4444-8444-444444444444", CLOUD_ID),
         ("ari:cloud:ecosystem::app/not-a-uuid", CLOUD_ID),
         (
-            "ari:cloud:ecosystem::installation/8db33809-1f32-48bb-8c52-5877dab48107",
+            "ari:cloud:ecosystem::installation/44444444-4444-4444-8444-444444444444",
             CLOUD_ID,
         ),
         (APP_ID, "not-a-uuid"),
@@ -1607,7 +1607,7 @@ async fn a_task_event_line_carries_the_task_and_its_previous_state() {
     assert_eq!(line["event"], "task:updated");
     assert_eq!(
         line["task"],
-        json!({"id": 12, "uuid": "e0a0e71d-5575-4185-bf33-61364fb0960e", "complete": true,
+        json!({"id": 12, "uuid": "66666666-6666-4666-8666-666666666666", "complete": true,
                "assignee": "557058:approver", "was_complete": false})
     );
     assert_eq!(line["page_version"], Value::Null);

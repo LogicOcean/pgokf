@@ -548,10 +548,10 @@ mod tests {
             "eventType": "avi:confluence:updated:task",
             "atlassianId": "reviewer-account",
             "eventCreatedDate": "2026-11-12T07:00:00Z",
-            "task": {"id": 1, "uuid": "e0a0e71d-5575-4185-bf33-61364fb0960e",
+            "task": {"id": 1, "uuid": "66666666-6666-4666-8666-666666666666",
                      "status": "complete", "statusAsString": "CHECKED",
                      "assignee": "reviewer-account", "dueDate": null},
-            "oldTask": {"id": 1, "uuid": "e0a0e71d-5575-4185-bf33-61364fb0960e",
+            "oldTask": {"id": 1, "uuid": "66666666-6666-4666-8666-666666666666",
                         "status": "incomplete", "statusAsString": "UNCHECKED",
                         "assignee": "reviewer-account", "dueDate": null},
             "content": {"id": "838205441", "type": "page", "status": "current",
@@ -577,7 +577,7 @@ mod tests {
         assert!(task.complete);
         assert_eq!(
             task.uuid.as_deref(),
-            Some("e0a0e71d-5575-4185-bf33-61364fb0960e")
+            Some("66666666-6666-4666-8666-666666666666")
         );
         assert_eq!(task.assignee.as_deref(), Some("reviewer-account"));
         assert!(

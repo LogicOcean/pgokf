@@ -14,8 +14,8 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 const BINARY: &str = env!("CARGO_BIN_EXE_pgokf-confluence-events");
-const APP_ID: &str = "ari:cloud:ecosystem::app/8db33809-1f32-48bb-8c52-5877dab48107";
-const CLOUD_ID: &str = "f349edd6-f44e-48b8-b6ed-61150c06d9c5";
+const APP_ID: &str = "ari:cloud:ecosystem::app/44444444-4444-4444-8444-444444444444";
+const CLOUD_ID: &str = "33333333-3333-4333-8333-333333333333";
 
 /// The binary with this test's configuration, on an ephemeral loopback port.
 fn command(app_id: &str) -> Command {
@@ -161,7 +161,7 @@ fn the_binary_refuses_unverifiable_deliveries_and_logs_each_on_one_line() {
 #[test]
 fn the_binary_will_not_start_for_an_app_id_in_another_form() {
     // Act
-    let output = command("8db33809-1f32-48bb-8c52-5877dab48107")
+    let output = command("44444444-4444-4444-8444-444444444444")
         .stderr(Stdio::piped())
         .output()
         .expect("the binary runs");

@@ -562,7 +562,7 @@
       "executable": false
     },
     "crates/pgokf-confluence/src/events_main.rs": {
-      "sha256": "42f44f753c6d3d6c40d8adf732831701bedddd70b4320a5b256ad6249f960bff",
+      "sha256": "73f75abefe790206eef68223da7f493a415936b121b4f59ae9163c8ad9d0b17c",
       "executable": false
     },
     "crates/pgokf-confluence/src/forge.rs": {
@@ -570,11 +570,11 @@
       "executable": false
     },
     "crates/pgokf-confluence/src/forge/event.rs": {
-      "sha256": "7acbdb9de25beffc78bdac4c8d1823eaaeb18dc48615d3d61c8a62609a69d414",
+      "sha256": "2dbab0b5bf88be2ef209f0598c1893647d1ffed714c39b05096df1bccee5c5d8",
       "executable": false
     },
     "crates/pgokf-confluence/src/forge/fit.rs": {
-      "sha256": "0bfd8392ce54a87bf700c5c05ad60ddfac5a52319d2052d5aa8335e74043525b",
+      "sha256": "bf9d704a4e7c0c6a283e3520f8acdabfcea02078a8497d4704d0dfa94b28a250",
       "executable": false
     },
     "crates/pgokf-confluence/src/forge/receiver.rs": {
@@ -610,7 +610,7 @@
       "executable": false
     },
     "crates/pgokf-confluence/tests/events_binary.rs": {
-      "sha256": "70fe092e94dd8203b3186ea8ea00974863a84f098c10d6ee6fc20caff78b7f2b",
+      "sha256": "83dbfaf041015f0e455e7bbc7fd5c6e338fa919acd62ab6ac975b786bc1bae13",
       "executable": false
     },
     "crates/pgokf-confluence/tests/fixtures/rich-storage.xml": {
@@ -618,7 +618,7 @@
       "executable": false
     },
     "crates/pgokf-confluence/tests/forge_receiver.rs": {
-      "sha256": "94e2a6f675b7078862db11e798a47c1c92fc0e6632433f1370e548b9d641b83c",
+      "sha256": "1b7be88086b8a503e387cb34f519822daf90d92e707aa708c612fa30a201e045",
       "executable": false
     },
     "crates/pgokf-embed/Cargo.toml": {

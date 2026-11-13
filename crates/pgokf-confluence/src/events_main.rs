@@ -88,8 +88,8 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
 
-    const APP_ID: &str = "ari:cloud:ecosystem::app/8db33809-1f32-48bb-8c52-5877dab48107";
-    const CLOUD_ID: &str = "f349edd6-f44e-48b8-b6ed-61150c06d9c5";
+    const APP_ID: &str = "ari:cloud:ecosystem::app/44444444-4444-4444-8444-444444444444";
+    const CLOUD_ID: &str = "33333333-3333-4333-8333-333333333333";
 
     #[test]
     fn cli_defaults_to_a_loopback_listener() {
