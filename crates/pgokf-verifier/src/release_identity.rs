@@ -14,6 +14,10 @@ pub const PUBLISHED_0_4_0_DIGEST: &str =
 /// the post-tag formula (tag object `fb8522a8`, commit `36307da`).
 pub const PUBLISHED_0_5_0_DIGEST: &str =
     "8e0beb9c543147e9f7c690b3b6f904709c3249060ac3928c30c7d94d25b0cf0b";
+/// SHA256 of the authenticated immutable `v0.6.0` GitHub tag archive consumed by
+/// the post-tag formula (tag object `137609e8`, commit `5d16ef7`).
+pub const PUBLISHED_0_6_0_DIGEST: &str =
+    "f92041aa98d22a63a73405afe4d554b1d1ee9b755a0b7f45ad3b4b1966e4f7f1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -355,6 +359,7 @@ pub fn published_digests() -> BTreeMap<String, String> {
         ("0.2.0".into(), PUBLISHED_DIGEST.into()),
         ("0.4.0".into(), PUBLISHED_0_4_0_DIGEST.into()),
         ("0.5.0".into(), PUBLISHED_0_5_0_DIGEST.into()),
+        ("0.6.0".into(), PUBLISHED_0_6_0_DIGEST.into()),
     ])
 }
 

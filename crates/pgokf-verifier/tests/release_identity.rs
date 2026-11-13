@@ -112,28 +112,28 @@ fn target_internal_pins_and_vulnerable_dependency_are_checked() {
 #[test]
 fn formula_authenticated_forward_and_rollback_tuples() {
     let source = std::fs::read_to_string(root().join("packaging/homebrew/pgokf.rb")).unwrap();
-    // Pre-tag, the formula keeps consuming the last authenticated release: a
-    // formula cannot carry the digest of the archive that contains it. The
-    // crate's own version authenticates only once its digest is recorded, and
-    // the published 0.2.0 tuple remains the authenticated rollback target.
-    let tuple = formula_tuple(&source).unwrap();
-    assert_ne!(tuple.version, env!("CARGO_PKG_VERSION"));
+    // Post-tag, the formula consumes the current release; the last verified
+    // published 0.2.0 tuple remains the authenticated rollback target.
+    let current = formula_tuple(&source).unwrap();
+    assert_eq!(current.version, env!("CARGO_PKG_VERSION"));
     let mut records = published_digests();
-    authenticate_formula(&tuple, &records).unwrap();
-    let rollback = FormulaTuple {
+    authenticate_formula(&current, &records).unwrap();
+    let tuple = FormulaTuple {
         version: "0.2.0".into(),
         sha256: PUBLISHED_DIGEST.into(),
         assertions: vec!["0.2.0".into(); 2],
     };
-    authenticate_formula(&rollback, &records).unwrap();
-    let mut current = tuple.clone();
-    current.version = env!("CARGO_PKG_VERSION").into();
-    current.assertions = vec![current.version.clone(); 2];
-    current.sha256 = "a".repeat(64);
-    assert!(authenticate_formula(&current, &records).is_err());
-    records.insert(current.version.clone(), current.sha256.clone());
-    authenticate_formula(&current, &records).unwrap();
     authenticate_formula(&tuple, &records).unwrap();
+    let mut unrecorded = records.clone();
+    unrecorded.remove(&current.version);
+    assert!(authenticate_formula(&current, &unrecorded).is_err());
+    let forged = FormulaTuple {
+        sha256: "a".repeat(64),
+        ..current.clone()
+    };
+    assert!(authenticate_formula(&forged, &records).is_err());
+    let rollback = tuple.clone();
+    authenticate_formula(&rollback, &records).unwrap();
     for bad in [
         FormulaTuple {
             sha256: tuple.sha256.clone(),

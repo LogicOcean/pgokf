@@ -930,7 +930,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/src/release_identity.rs": {
-      "sha256": "fb30c6a357b5914720daa3252756b87ba9325c729677dea2e09049d6f2678225",
+      "sha256": "3788443e507a497af65eb29d2f11e1a13582809bf7d79abd166e037d84996654",
       "executable": false
     },
     "crates/pgokf-verifier/src/release_runtime.rs": {
@@ -1018,7 +1018,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/tests/release_identity.rs": {
-      "sha256": "0913a02b2b46c93ec6b279efb96842e715cc011cdde49b5b78844b5fec656e0e",
+      "sha256": "79cf6a9391ae0cd54a4f0bb51a02f6cdb06ad9781bad51b85dda68805421def9",
       "executable": false
     },
     "crates/pgokf-verifier/tests/service_limits.rs": {
@@ -1718,7 +1718,7 @@
       "executable": true
     },
     "packaging/homebrew/pgokf.rb": {
-      "sha256": "bf4bf523d5d775d39749a09355d844fa9905f070ce7e7e9e8731581ec79a4f69",
+      "sha256": "a2c7d96760be5fbb7f0b470a90fccb59686d04165d57d2e587434a69102374d0",
       "executable": false
     },
     "packaging/install-postgres.sh": {

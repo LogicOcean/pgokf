@@ -14,13 +14,12 @@
 class Pgokf < Formula
   desc "Materialized PostgreSQL catalog for Open Knowledge Format bundles"
   homepage "https://github.com/LogicOcean/pgokf"
-  # RELEASE STATE: pre-tag 0.6.0. Keep consuming the authenticated immutable
-  # v0.5.0 tag archive; advance to 0.6.0 only after its immutable tag archive is
-  # authenticated. The published 0.2.0 tuple remains the last verified rollback
-  # target.
+  # RELEASE STATE: post-tag 0.6.0. Consume the authenticated immutable v0.6.0
+  # tag archive (tag object 137609e8, commit 5d16ef7). The published 0.2.0
+  # tuple remains the last verified rollback target.
   # v0.3.0 is an immutable, unpublished failed candidate; never consume it.
-  url "https://github.com/LogicOcean/pgokf/archive/refs/tags/v0.5.0.tar.gz"
-  sha256 "8e0beb9c543147e9f7c690b3b6f904709c3249060ac3928c30c7d94d25b0cf0b"
+  url "https://github.com/LogicOcean/pgokf/archive/refs/tags/v0.6.0.tar.gz"
+  sha256 "f92041aa98d22a63a73405afe4d554b1d1ee9b755a0b7f45ad3b4b1966e4f7f1"
   license "AGPL-3.0-only"
   head "https://github.com/LogicOcean/pgokf.git", branch: "main"
 
@@ -111,8 +110,8 @@ class Pgokf < Formula
     # The control file must be discoverable in the extension sharedir.
     control = share/"postgresql@#{pg_major}/extension/pgokf.control"
     control = share/"postgresql/extension/pgokf.control" unless control.exist?
-    expected_control_version = "0.5.0"
-    expected_extension_version = "0.5.0"
+    expected_control_version = "0.6.0"
+    expected_extension_version = "0.6.0"
 
     # End-to-end: initialize a throwaway cluster and CREATE EXTENSION.
     pg_bin = pg.opt_bin
