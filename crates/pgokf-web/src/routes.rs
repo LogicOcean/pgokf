@@ -10805,7 +10805,10 @@ mod tests {
             _ => "localhost".to_owned(),
         };
         let user = base.get_user().unwrap_or("postgres").to_owned();
-        let url = format!("host={host} dbname={REFRESH_SCRATCH_DB} user={user}");
+        // The scratch server's port too: without it the pool would reach
+        // whatever listens on the default port instead.
+        let port = base.get_ports().first().copied().unwrap_or(5432);
+        let url = format!("host={host} port={port} dbname={REFRESH_SCRATCH_DB} user={user}");
         let db = crate::db::Db::connect(&crate::db::DbConfig {
             database_url: &url,
             force_tls: false,

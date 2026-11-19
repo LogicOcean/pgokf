@@ -15,13 +15,11 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use deadpool_postgres::{
-    Hook, HookError, Manager, ManagerConfig, Object, Pool, PoolError, RecyclingMethod, Runtime,
-};
+use pgokf_pgconn::{Borrowed, Pool, PoolError, PoolSettings, Session};
 use serde::Serialize;
 use serde_json::Value;
+use tokio_postgres::Row;
 use tokio_postgres::types::{FromSql, ToSql};
-use tokio_postgres::{NoTls, Row};
 
 /// Pool settings.
 pub(crate) struct DbConfig<'a> {
@@ -718,40 +716,18 @@ impl Db {
     /// Build the pool. Each new connection is scoped to the tenant (when one
     /// is configured) and given the statement timeout before it is handed out.
     pub(crate) fn connect(config: &DbConfig<'_>) -> Result<Self> {
-        let pg = pgokf_pgconn::connection_config(config.database_url, config.force_tls)?;
-        let manager_config = ManagerConfig {
-            recycling_method: RecyclingMethod::Fast,
-        };
-        let manager = if pgokf_pgconn::should_use_tls(pg.get_ssl_mode(), config.force_tls) {
-            Manager::from_config(pg, pgokf_pgconn::rustls_connector()?, manager_config)
-        } else {
-            Manager::from_config(pg, NoTls, manager_config)
-        };
-        let tenant = config.tenant.map(str::to_owned);
-        let timeout = config.statement_timeout_ms;
-        let pool = Pool::builder(manager)
-            .max_size(config.pool_size)
-            .wait_timeout(Some(POOL_WAIT))
-            .runtime(Runtime::Tokio1)
-            .post_create(Hook::async_fn(move |client, _| {
-                let tenant = tenant.clone();
-                Box::pin(async move {
-                    // statement_timeout takes no parameter, so the integer
-                    // is formatted from a validated u64, never from input.
-                    client
-                        .batch_execute(&format!("SET statement_timeout = {timeout}"))
-                        .await
-                        .map_err(|error| HookError::message(error.to_string()))?;
-                    if let Some(tenant) = tenant {
-                        pgokf_pgconn::set_tenant(client, &tenant)
-                            .await
-                            .map_err(|error| HookError::message(error.to_string()))?;
-                    }
-                    Ok(())
-                })
-            }))
-            .build()
-            .context("building the PostgreSQL connection pool")?;
+        let mut session = Session::default()
+            .statement_timeout(Duration::from_millis(config.statement_timeout_ms));
+        if let Some(tenant) = config.tenant {
+            session = session.tenant(tenant);
+        }
+        let pool = Pool::new(PoolSettings {
+            database_url: config.database_url,
+            force_tls: config.force_tls,
+            max_size: config.pool_size,
+            wait_timeout: Some(POOL_WAIT),
+            session,
+        })?;
         Ok(Self { pool })
     }
 
@@ -764,15 +740,7 @@ impl Db {
     }
 
     async fn client(&self) -> Result<Borrowed> {
-        let object = self
-            .pool
-            .get()
-            .await
-            .context("checking out a PostgreSQL connection")?;
-        Ok(Borrowed {
-            object: Some(object),
-            done: false,
-        })
+        self.pool.checkout().await
     }
 
     /// Run one statement and return the rows it affected. Like every helper
@@ -781,7 +749,7 @@ impl Db {
     pub(crate) async fn execute(&self, sql: &str, params: &[&(dyn ToSql + Sync)]) -> Result<u64> {
         let mut client = self.client().await?;
         let affected = client
-            .get()
+            .client()
             .execute(sql, params)
             .await
             .context("catalog statement failed");
@@ -803,7 +771,7 @@ impl Db {
     ) -> Result<Vec<Row>> {
         let mut client = self.client().await?;
         let rows = client
-            .get()
+            .client()
             .query(sql, params)
             .await
             .context("catalog query failed");
@@ -818,7 +786,7 @@ impl Db {
     ) -> Result<Option<Row>> {
         let mut client = self.client().await?;
         let row = client
-            .get()
+            .client()
             .query_opt(sql, params)
             .await
             .context("catalog query failed");
@@ -2441,58 +2409,6 @@ impl ContentLock {
     }
 }
 
-/// A pooled connection for one statement. A statement that completes (or
-/// fails) hands the connection back to the pool; one that is abandoned
-/// mid-flight (the request timed out or the client went away) takes the
-/// connection out of the pool and closes it instead, so the server aborts
-/// the statement and no later request queues behind it.
-pub(crate) struct Borrowed {
-    object: Option<Object>,
-    done: bool,
-}
-
-impl Borrowed {
-    fn get(&self) -> &Object {
-        self.object
-            .as_ref()
-            .expect("a borrowed connection is present until finish or drop")
-    }
-
-    /// The underlying client, for callers that run their own statements.
-    pub(crate) fn client(&self) -> &tokio_postgres::Client {
-        self.get()
-    }
-
-    /// The underlying client mutably, for a caller that opens a transaction
-    /// (the plugin builder's one-snapshot build). A holder that finishes
-    /// with a transaction still open is dropped, not returned to the pool:
-    /// `finish` is for work that left the connection in autocommit.
-    pub(crate) fn client_mut(&mut self) -> &mut tokio_postgres::Client {
-        use std::ops::DerefMut as _;
-        self.object
-            .as_mut()
-            .expect("a borrowed connection is present until finish or drop")
-            .deref_mut()
-    }
-
-    /// Mark the work complete so the connection returns to the pool.
-    pub(crate) fn finish(&mut self) {
-        self.done = true;
-    }
-}
-
-impl Drop for Borrowed {
-    fn drop(&mut self) {
-        if !self.done
-            && let Some(object) = self.object.take()
-        {
-            // Detach from the pool and drop the client: closing the socket
-            // is what makes the server cancel the running statement.
-            drop(Object::take(object));
-        }
-    }
-}
-
 fn graph_node(r: &Row) -> Result<GraphNode> {
     Ok(GraphNode {
         bundle_id: col(r, 0)?,
@@ -2785,6 +2701,8 @@ pub(crate) fn dead_db() -> Db {
 
 #[cfg(test)]
 mod tests {
+    use tokio_postgres::NoTls;
+
     use super::*;
 
     /// The registry tenant predicate, pinned once here and asserted into
@@ -2821,7 +2739,7 @@ mod tests {
     #[test]
     fn classify_recognises_pool_timeouts_and_plain_errors() {
         // Arrange
-        let busy = anyhow::Error::new(PoolError::Timeout(deadpool_postgres::TimeoutType::Wait))
+        let busy = anyhow::Error::new(PoolError::Timeout(pgokf_pgconn::TimeoutType::Wait))
             .context("checking out a PostgreSQL connection");
         let other = anyhow!("template rendering failed");
 

@@ -19,7 +19,6 @@
 //! pointing at an authorization server.
 
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -31,7 +30,6 @@ use axum::response::{IntoResponse, Response as HttpResponse};
 use axum::routing::{get, post};
 use axum::{Json, Router, middleware};
 use serde_json::json;
-use tokio::task::JoinHandle;
 use tower::limit::GlobalConcurrencyLimitLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::timeout::RequestBodyTimeoutLayer;
@@ -54,7 +52,7 @@ const BODY_TIMEOUT: Duration = Duration::from_secs(15);
 /// Bound on a statement in the catalog, under [`REQUEST_TIMEOUT`] so the
 /// database gives up before the transport does. Dropping the future does
 /// not cancel the query; this does.
-const STATEMENT_TIMEOUT: Duration = Duration::from_secs(50);
+pub(crate) const STATEMENT_TIMEOUT: Duration = Duration::from_secs(50);
 /// How long a browser may cache a preflight answer.
 const CORS_MAX_AGE: Duration = Duration::from_mins(10);
 /// How often the health probe really asks the catalog, so an anonymous
@@ -114,12 +112,11 @@ impl Server {
         }
     }
 
-    /// Why the catalog is not answering, if it is not - on either
-    /// connection, the work one or the token lookups', since a server that
-    /// cannot authenticate anyone is as down as one that cannot answer. The
-    /// links are never re-established, so a health probe that reports this
-    /// lets a supervisor restart the process rather than leave it up and
-    /// failing.
+    /// Why the catalog is not answering, if it is not - for the work or the
+    /// token lookups, since a server that cannot authenticate anyone is as
+    /// down as one that cannot answer. A closed connection is replaced on
+    /// the next request, so this reports a catalog that cannot be reached
+    /// now, not one whose old connection dropped.
     async fn catalog_failure(&self) -> Option<String> {
         let mut seen = self.health.lock().await;
         if let Some(check) = seen.as_ref()
@@ -236,11 +233,6 @@ impl Admission {
         self.tokens.check().await
     }
 
-    /// The lookup connection's driver, to stop with when it ends.
-    pub fn take_driver(&mut self) -> Option<JoinHandle<()>> {
-        self.tokens.take_driver()
-    }
-
     /// Who a request is from, by its bearer token, or the response that
     /// turns it away: the shape check first (no lookup for a string that
     /// cannot be a token), then one bounded lookup, then the tenant rule.
@@ -334,20 +326,11 @@ type Shared = Arc<Server>;
 ///
 /// # Errors
 ///
-/// An allowed origin is not a valid header value, the statement timeout
-/// cannot be set, the address cannot be bound, or the server fails while
+/// An allowed origin is not a valid header value, the catalog cannot answer
+/// a token lookup, the address cannot be bound, or the server fails while
 /// running.
-pub async fn serve(mut server: Server, bind: SocketAddr) -> Result<()> {
+pub async fn serve(server: Server, bind: SocketAddr) -> Result<()> {
     let cors = cors_layer(&server.allowed_origins)?;
-    server
-        .catalog
-        .set_statement_timeout(STATEMENT_TIMEOUT)
-        .await?;
-    // Nothing re-establishes either link, so when a driver ends the server
-    // stops rather than answering every later call with the same failure.
-    let driver = server.catalog.take_driver();
-    let writer_driver = server.catalog.take_writer_driver();
-    let lookups_driver = server.admission.take_driver();
     // A socket is opened on the strength of the catalog's token lookup, so
     // a catalog that cannot answer it is a startup error, not a 503 later.
     server.admission.check().await?;
@@ -388,50 +371,22 @@ pub async fn serve(mut server: Server, bind: SocketAddr) -> Result<()> {
         );
     }
     let shutdown = pgokf_companion::daemon::shutdown_signal()?;
-    let lost = Arc::new(AtomicBool::new(false));
-    let noticed = Arc::clone(&lost);
+    // A dropped link to PostgreSQL does not stop the server: every catalog
+    // connection comes from a pool that replaces a closed one on the next
+    // request, and the health probe reports the catalog unreachable only
+    // while it really is.
     axum::serve(
         listener,
         router.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(async move {
-        tokio::select! {
-            asked = shutdown => {
-                if let Err(error) = asked {
-                    eprintln!("pgokf-mcp: shutdown signal error: {error}");
-                }
-            }
-            () = catalog_lost([driver, writer_driver, lookups_driver]) => {
-                noticed.store(true, Ordering::Relaxed);
-            }
+        if let Err(error) = shutdown.await {
+            eprintln!("pgokf-mcp: shutdown signal error: {error}");
         }
     })
     .await
     .context("serving HTTP")?;
-    if lost.load(Ordering::Relaxed) {
-        bail!("the link to PostgreSQL closed; stopping so a supervisor can start again");
-    }
     Ok(())
-}
-
-/// Resolve when any catalog connection's driver ends - the reader, the
-/// writer, or the token lookups - or never when there is none to wait on.
-async fn catalog_lost(drivers: [Option<JoinHandle<()>>; 3]) {
-    let [work, writer, lookups] = drivers;
-    tokio::select! {
-        () = driver_ended(work) => {}
-        () = driver_ended(writer) => {}
-        () = driver_ended(lookups) => {}
-    }
-}
-
-async fn driver_ended(driver: Option<JoinHandle<()>>) {
-    match driver {
-        Some(driver) => {
-            let _ = driver.await;
-        }
-        None => std::future::pending().await,
-    }
 }
 
 /// The browser rules, from the origins the operator named. A browser needs
@@ -717,7 +672,7 @@ pub fn parse_origins(list: &str) -> Result<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use pgokf_companion::mcp_token::new_token;
 
@@ -740,10 +695,6 @@ mod tests {
 
         fn check(&self) -> BoxFuture<'_, Result<()>> {
             Box::pin(async { Ok(()) })
-        }
-
-        fn take_driver(&mut self) -> Option<JoinHandle<()>> {
-            None
         }
     }
 

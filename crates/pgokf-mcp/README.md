@@ -112,9 +112,11 @@ revision requires.
 `GET /healthz` needs no token and answers `{"status":"ok"}`, or **503**
 `{"status":"degraded"}` when the catalog has stopped answering or the tokens
 file is no longer being believed - what is wrong goes to the log, not to
-whoever found the port. The connection to PostgreSQL is never re-established,
-so wire this to a container health check and let the supervisor restart the
-process.
+whoever found the port. A connection PostgreSQL or a proxy closes - an idle
+timeout, a restart, a failover - is replaced on the next request, so the
+server keeps running; `/healthz` reports 503 only while the catalog really
+cannot be reached, and a container health check wired to it restarts the
+process only then.
 
 Over stdio the client launched the server and already holds the connection
 string, so there is nothing to authenticate. Over HTTP the server is
