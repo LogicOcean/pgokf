@@ -46,9 +46,14 @@ research, not a release gate or a certification claim.
 ## 2. Supply-chain gates
 
 ```bash
-cargo deny check          # licenses, bans, advisories, sources (deny.toml)
-cargo audit               # RUSTSEC advisories against Cargo.lock
+cargo deny check             # licenses, bans, advisories, sources (deny.toml)
+cargo audit --deny warnings  # RUSTSEC advisories against Cargo.lock (.cargo/audit.toml)
 ```
+
+`deny.toml` and `.cargo/audit.toml` ignore the same two unmaintained-crate
+notices (RUSTSEC-2026-0543 `chrono`, RUSTSEC-2026-0542 `humantime`); the
+reasons live in `deny.toml`. Change both files together, and only for a
+notice that no available upgrade clears.
 
 ## 3. Schema generation
 

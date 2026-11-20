@@ -20,6 +20,25 @@ installed 0.6.0 catalog to 0.7.0 through an ordinary
 `ALTER EXTENSION pgokf UPDATE`, and the committed `pgokf--0.7.0.sql` install
 script is the 0.6.0 one regenerated under the new version.
 
+### Security
+
+- **`quinn-proto` 0.11.19 and `quinn-udp` 0.5.16 for RUSTSEC-2026-0523,
+  RUSTSEC-2026-0524 and RUSTSEC-2026-0538** (a peer opening streams beyond
+  the stream limit, a long Retry token that can panic or exhaust a client's
+  memory, and a receive loop that can spin on a truncated datagram).
+  `quinn` is in the lockfile only through `reqwest`'s optional HTTP/3
+  support, which no pgokf crate enables, so no pgokf binary links it. The
+  lockfile changes those two entries, so `cargo audit` passes again.
+- **Two unmaintained-crate notices are accepted, not fixed.**
+  RUSTSEC-2026-0543 marks `chrono` unmaintained and RUSTSEC-2026-0542
+  marks `humantime` unmaintained; neither reports a vulnerability. `chrono`
+  comes in through arrow and parquet (the extension's Parquet export) and
+  `humantime` through `object_store` (`pgokf-ingest`), and the latest
+  releases of both still require them. `deny.toml` and the new
+  `.cargo/audit.toml` ignore exactly those two IDs, each with its reason,
+  so `cargo deny check` and `cargo audit` pass again and any other advisory
+  still fails.
+
 ### Fixed
 
 - **`pgokf-mcp` reconnects instead of exiting.** It held its catalog

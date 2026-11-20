@@ -1,6 +1,10 @@
 {
   "version": 1,
   "files": {
+    ".cargo/audit.toml": {
+      "sha256": "231c37f2d93fa30a64565c5fffd3c4f5d9ea9ec3d15e9389de2c34058499794d",
+      "executable": false
+    },
     ".dockerignore": {
       "sha256": "32cfaa8749b3da2cad96494a133596a7062d04dd34c8fbfa531d6543eb178d19",
       "executable": false
@@ -58,7 +62,7 @@
       "executable": false
     },
     "CHANGELOG.md": {
-      "sha256": "f7493c32019eb33ca9a5d499ac15739f4f9b8a5294756784d6cc9577ed060145",
+      "sha256": "d0d7968901bca50d6bdba86365a7b0b4c94e9f76a3ed9fbe8a4d8405ed5da174",
       "executable": false
     },
     "CODE_OF_CONDUCT.md": {
@@ -74,7 +78,7 @@
       "executable": false
     },
     "Cargo.lock": {
-      "sha256": "55ac179a17aa59d014cd213e88bec72de15077737c1c3007a3e52e04898c3187",
+      "sha256": "c16b4fa83a8f4a450a94630c48cf5e2b2a4edc742c0482bc219c1376d3d600c8",
       "executable": false
     },
     "Cargo.toml": {
@@ -1466,7 +1470,7 @@
       "executable": false
     },
     "deny.toml": {
-      "sha256": "30944d85eec871066b34145b1a0af06141715d42b2096c7a77e5bcd37d6c042d",
+      "sha256": "739b332444e2dfcb6c220e8c4e19913cd82e6e9b6eb0688b3b6f856faa71b8e9",
       "executable": false
     },
     "deploy/compose/.env.example": {
@@ -1558,7 +1562,7 @@
       "executable": false
     },
     "docs/release-checklist.md": {
-      "sha256": "52fd6a98d4bb983bd54a714c99e1f5ab76f2c222488692ff48fced5d0c10d853",
+      "sha256": "6a346fa241eed543cc01d17009072626649dbc664784b2322783ffa5f5371812",
       "executable": false
     },
     "docs/releases/0.3.0-partial-ghcr.json": {
