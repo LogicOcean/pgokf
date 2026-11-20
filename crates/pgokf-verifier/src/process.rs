@@ -1670,7 +1670,12 @@ mod tests {
             "PGOKF_DELAYED_WRITER_READY".into(),
             ready.as_os_str().into(),
         );
-        spec.timeout = Duration::from_secs(1);
+        // The bound has to cover starting two test-binary processes, which on
+        // a loaded host (a parallel suite, other work) takes well over a
+        // second; with one second the leader itself could time out before
+        // the behaviour under test - capturing, or draining, a descendant's
+        // late write - ever happened.
+        spec.timeout = Duration::from_secs(10);
         match spec.run() {
             Ok(output) => assert!(
                 output

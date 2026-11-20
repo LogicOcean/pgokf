@@ -10,6 +10,65 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-20
+
+A companion release: one pooled connection lifecycle shared by the
+long-running companions, so `pgokf-mcp` survives a dropped link to
+PostgreSQL. The catalog is unchanged - no SQL object or data differs from
+0.6.0 - so the receipt-only `pgokf--0.6.0--0.7.0.sql` edge carries an
+installed 0.6.0 catalog to 0.7.0 through an ordinary
+`ALTER EXTENSION pgokf UPDATE`, and the committed `pgokf--0.7.0.sql` install
+script is the 0.6.0 one regenerated under the new version.
+
+### Security
+
+- **`quinn-proto` 0.11.19 and `quinn-udp` 0.5.16 for RUSTSEC-2026-0523,
+  RUSTSEC-2026-0524 and RUSTSEC-2026-0538** (a peer opening streams beyond
+  the stream limit, a long Retry token that can panic or exhaust a client's
+  memory, and a receive loop that can spin on a truncated datagram).
+  `quinn` is in the lockfile only through `reqwest`'s optional HTTP/3
+  support, which no pgokf crate enables, so no pgokf binary links it. The
+  lockfile changes those two entries, so `cargo audit` passes again.
+- **Two unmaintained-crate notices are accepted, not fixed.**
+  RUSTSEC-2026-0543 marks `chrono` unmaintained and RUSTSEC-2026-0542
+  marks `humantime` unmaintained; neither reports a vulnerability. `chrono`
+  comes in through arrow and parquet (the extension's Parquet export) and
+  `humantime` through `object_store` (`pgokf-ingest`), and the latest
+  releases of both still require them. `deny.toml` and the new
+  `.cargo/audit.toml` ignore exactly those two IDs, each with its reason,
+  so `cargo deny check` and `cargo audit` pass again and any other advisory
+  still fails.
+
+### Fixed
+
+- **`pgokf-mcp` reconnects instead of exiting.** It held its catalog
+  connections for its whole life and stopped when any of them closed,
+  leaving the restart to a supervisor. Anything that closes idle
+  connections turned that into a restart loop with a growing back-off:
+  Azure Container Apps' TCP ingress closes a connection idle for 300
+  seconds, so an idle server exited every five minutes. Its reader, writer
+  and token-lookup connections now come from pools that replace a closed
+  connection on the next request; `/healthz` reports 503 only while the
+  catalog cannot be reached.
+
+### Changed
+
+- **`pgokf-pgconn` owns the connection lifecycle.** Besides the connect
+  step and TLS policy it now provides `Session` (tenant, statement and lock
+  bounds applied to every new connection), `Pool` (the pool `pgokf-web`
+  used, set up from a `Session`) and `Borrowed` (the guard that closes a
+  connection whose work was abandoned mid-flight instead of returning it).
+  `pgokf-web` and `pgokf-mcp` build their pools through it, and
+  `pgokf-confluence` sets its import session up through `Session`.
+- `pgokf-mcp`'s plugin builds no longer queue behind one another: each
+  borrows a reader connection of its own. Writes still run one at a time.
+- **PostgreSQL 19 is tested as the GA 19.0.** PostgreSQL 19.0 shipped on
+  2026-11-20 and the pinned 19 RC 2 base image and packages no longer
+  exist, so CI's PG19 leg (clippy, the in-database suite, an image smoke
+  test) now builds from `postgres:19` and PGDG's `19.x` packages exactly as
+  15-18 do, and the verifier refuses a prerelease tag or package for any
+  major. PG19 packages and images are still not published.
+
 ## [0.6.0] - 2026-11-13
 
 A companion release: pushed Confluence events through a private Forge app,
@@ -1905,7 +1964,8 @@ queries, native full-text search, and link-graph traversal.
 - The `pgokf_private` schema and its `config` table are readable and writable
   only by the extension owner and `pgokf_admin`; readers cannot see policy.
 
-[Unreleased]: https://github.com/LogicOcean/pgokf/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/LogicOcean/pgokf/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/LogicOcean/pgokf/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/LogicOcean/pgokf/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/LogicOcean/pgokf/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/LogicOcean/pgokf/compare/v0.3.1...v0.4.0

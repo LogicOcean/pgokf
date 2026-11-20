@@ -1195,7 +1195,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2568,7 +2568,7 @@ dependencies = [
 
 [[package]]
 name = "okf-parser"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "pulldown-cmark",
  "serde",
@@ -2580,7 +2580,7 @@ dependencies = [
 
 [[package]]
 name = "okf-sync"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "blake3",
  "globset",
@@ -2713,7 +2713,7 @@ dependencies = [
 
 [[package]]
 name = "pgokf"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "arrow",
  "okf-parser",
@@ -2727,7 +2727,7 @@ dependencies = [
 
 [[package]]
 name = "pgokf-companion"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -2742,7 +2742,7 @@ dependencies = [
 
 [[package]]
 name = "pgokf-confluence"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -2772,7 +2772,7 @@ dependencies = [
 
 [[package]]
 name = "pgokf-embed"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2787,7 +2787,7 @@ dependencies = [
 
 [[package]]
 name = "pgokf-ingest"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2802,7 +2802,7 @@ dependencies = [
 
 [[package]]
 name = "pgokf-mcp"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2825,9 +2825,10 @@ dependencies = [
 
 [[package]]
 name = "pgokf-pgconn"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
+ "deadpool-postgres",
  "rustls",
  "rustls-native-certs",
  "tokio",
@@ -2837,11 +2838,11 @@ dependencies = [
 
 [[package]]
 name = "pgokf-process-handle"
-version = "0.6.0"
+version = "0.7.0"
 
 [[package]]
 name = "pgokf-verifier"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "base64 0.22.1",
  "flate2",
@@ -2868,7 +2869,7 @@ dependencies = [
 
 [[package]]
 name = "pgokf-web"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "ammonia",
  "anyhow",
@@ -2878,7 +2879,6 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "clap",
- "deadpool-postgres",
  "getrandom 0.4.3",
  "hmac",
  "jsonwebtoken",
@@ -2899,7 +2899,7 @@ dependencies = [
 
 [[package]]
 name = "pgokf-workspace"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -3219,9 +3219,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-proto"
-version = "0.11.18"
+version = "0.11.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9746dbde176634f4f2f1faf2404e30a31b2bc1e9cafb5329c95d8177a18c9fc"
+checksum = "0e750cca55fe4f0439a15d0bb529da9651e79993e8e72c61a899a36d462befbe"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -3242,16 +3242,16 @@ dependencies = [
 
 [[package]]
 name = "quinn-udp"
-version = "0.5.15"
+version = "0.5.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35a133f956daabe89a61a685c2649f13d82d5aa4bd5d12d1277e1072a21c0694"
+checksum = "af66907df18639dcf4db56ca65490cabc4b27a97dbadd96f2926cca73298f016"
 dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3472,7 +3472,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3530,7 +3530,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4027,10 +4027,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4807,7 +4807,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

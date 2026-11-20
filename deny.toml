@@ -1,7 +1,16 @@
 [advisories]
-# No ignored advisories. pgrx is vendored (vendor/pgrx, see its VENDORING.md)
-# with the unmaintained serde_cbor dependency removed, so the resolved graph
-# carries no advisory.
+# pgrx is vendored (vendor/pgrx, see its VENDORING.md) with the unmaintained
+# serde_cbor dependency removed.
+#
+# Two unmaintained notices are accepted, not fixed. Neither reports a
+# vulnerability, no pgokf crate depends on either crate directly, and the
+# latest releases of the crates that pull them in still require them.
+# .cargo/audit.toml carries the same two IDs for `cargo audit`; change both
+# together. Any other advisory still fails.
+ignore = [
+  { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained; arrow and parquet (59.x and 60.x), used by the extension's Parquet export, require it" },
+  { id = "RUSTSEC-2026-0542", reason = "humantime is unmaintained; object_store 0.14, used by pgokf-ingest, requires it" },
+]
 
 [bans]
 multiple-versions = "warn"

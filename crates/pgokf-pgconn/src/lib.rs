@@ -1,12 +1,22 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Shared PostgreSQL connection helper for the `pgokf` companions.
 //!
-//! The three companions (`pgokf-ingest`, `pgokf-embed`, `pgokf-mcp`) all open a
-//! single `tokio-postgres` connection and drive its protocol future on a
-//! background task. Historically each hard-coded `NoTls`, so an operator who
-//! required an encrypted link (`sslmode=require`) could not connect at all. This
-//! crate centralizes the connect step, adds **optional** TLS, and owns the one
-//! tenant-scoping step every companion applies ([`set_tenant`]):
+//! Every companion connects through this crate, in one of two ways:
+//!
+//! - **A pool** ([`Pool`]) for the long-running servers (`pgokf-web`,
+//!   `pgokf-mcp`): each request borrows a connection, a connection the server
+//!   or a proxy closed is replaced on the next checkout instead of handed out
+//!   again, and every new connection is set up from one [`Session`] (tenant,
+//!   statement and lock bounds) before it is used.
+//! - **A single connection** ([`connect`]) for work that runs and ends
+//!   (`pgokf-ingest`, `pgokf-embed`, one connection per pass) or that must
+//!   keep one session for its whole run (`pgokf-confluence`, which holds a
+//!   session-level bundle lock), set up from the same [`Session`].
+//!
+//! Historically each companion hard-coded `NoTls`, so an operator who
+//! required an encrypted link (`sslmode=require`) could not connect at all.
+//! This crate centralizes the connect step, adds **optional** TLS, and owns
+//! the one tenant-scoping step every companion applies ([`set_tenant`]):
 //!
 //! - **`NoTls` stays the default** - a local Unix-socket or trusted-network
 //!   deployment is unchanged and links in plaintext, negotiating no TLS.
@@ -35,6 +45,11 @@ use tokio_postgres::config::SslMode;
 use tokio_postgres::tls::{MakeTlsConnect, TlsConnect};
 use tokio_postgres::{Client, Config, NoTls, Socket};
 use tokio_postgres_rustls::MakeRustlsConnect;
+
+mod pool;
+
+pub use deadpool_postgres::{PoolError, TimeoutType};
+pub use pool::{Borrowed, Pool, PoolSettings, Session};
 
 /// Scope the session to one pgokf tenant: sets the `pgokf.tenant` GUC for the
 /// connection (session-wide, not transaction-local), so every later catalog
@@ -277,28 +292,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// The PostgreSQL `SSLRequest` packet: length 8, request code 80877103.
-    const SSL_REQUEST: [u8; 8] = [0, 0, 0, 8, 4, 210, 22, 47];
-
-    /// Accept one connection, decline its TLS request the way a server without
-    /// TLS does (a single `N`), and report whether the client then sent
-    /// anything - a startup message would mean a plaintext fallback.
-    async fn decline_tls_once(listener: tokio::net::TcpListener) -> bool {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let (mut stream, _) = listener.accept().await.expect("client connects");
-        let mut request = [0_u8; 8];
-        stream
-            .read_exact(&mut request)
-            .await
-            .expect("client sends a request");
-        assert_eq!(request, SSL_REQUEST, "first packet must be SSLRequest");
-        stream.write_all(b"N").await.expect("decline TLS");
-        let mut next = [0_u8; 1];
-        let sent_more = stream.read(&mut next).await.expect("read after decline");
-        sent_more > 0
-    }
-
     #[tokio::test]
     async fn connect_with_tls_refuses_a_server_that_declines_encryption() {
         for mode in ["prefer", "disable"] {
@@ -308,7 +301,7 @@ mod tests {
                 .await
                 .expect("bind a local port");
             let port = listener.local_addr().expect("bound address").port();
-            let server = tokio::spawn(decline_tls_once(listener));
+            let server = tokio::spawn(test_support::decline_tls_once(listener));
             let url = format!(
                 "host=localhost hostaddr=127.0.0.1 port={port} user=writer dbname=catalog \
                  sslmode={mode} connect_timeout=5"
@@ -326,5 +319,31 @@ mod tests {
                 .expect("server task completes");
             assert!(!sent_plaintext, "sslmode={mode} sent a plaintext startup");
         }
+    }
+}
+
+/// What the connection tests in this crate share.
+#[cfg(test)]
+mod test_support {
+    /// The PostgreSQL `SSLRequest` packet: length 8, request code 80877103.
+    const SSL_REQUEST: [u8; 8] = [0, 0, 0, 8, 4, 210, 22, 47];
+
+    /// Accept one connection, decline its TLS request the way a server without
+    /// TLS does (a single `N`), and report whether the client then sent
+    /// anything - a startup message would mean a plaintext fallback.
+    pub(crate) async fn decline_tls_once(listener: tokio::net::TcpListener) -> bool {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (mut stream, _) = listener.accept().await.expect("client connects");
+        let mut request = [0_u8; 8];
+        stream
+            .read_exact(&mut request)
+            .await
+            .expect("client sends a request");
+        assert_eq!(request, SSL_REQUEST, "first packet must be SSLRequest");
+        stream.write_all(b"N").await.expect("decline TLS");
+        let mut next = [0_u8; 1];
+        let sent_more = stream.read(&mut next).await.expect("read after decline");
+        sent_more > 0
     }
 }

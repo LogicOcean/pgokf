@@ -50,8 +50,8 @@ attach to it.
   native to the daemon's architecture; see [packaging/docker/README.md](https://github.com/LogicOcean/pgokf/blob/main/packaging/docker/README.md)):
 
   ```bash
-  docker build -f packaging/docker/Dockerfile --build-arg PG_MAJOR=18 -t pgokf:0.6.0-pg18 .
-  docker build -f packaging/docker/Dockerfile.companions -t pgokf-companions:0.6.0 .
+  docker build -f packaging/docker/Dockerfile --build-arg PG_MAJOR=18 -t pgokf:0.7.0-pg18 .
+  docker build -f packaging/docker/Dockerfile.companions -t pgokf-companions:0.7.0 .
   ```
 
 - An OpenAI-compatible embeddings endpoint if you want semantic / hybrid
@@ -361,9 +361,9 @@ catalog whose digest that is (`pgokf.mcp_token_bearer`, the one thing a
 reader may ask about tokens), so revoking a token on the Admin page (or with
 `pgokf-web mcp-token revoke --name fleet`) takes effect with the next request,
 with no restart; `pgokf-web mcp-token list` shows what exists. `GET /healthz`
-needs no token and answers 503 when the catalog has stopped answering, and
-the service stops outright if its link to PostgreSQL closes, which
-`restart: unless-stopped` then heals.
+needs no token and answers 503 while the catalog cannot be reached. A
+connection PostgreSQL closes is replaced on the next request, so a database
+restart costs the service a reconnect, not a restart.
 
 One process serves one tenant: `OKF_MCP_TENANT` scopes its single catalog
 session, and a token is minted for the tenant of the UI (or `pgokf-web

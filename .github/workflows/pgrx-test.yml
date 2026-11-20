@@ -26,10 +26,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg: [15, 16, 17, 18]
-        include:
-          - pg: 19
-            image_tag: 19rc2
+        pg: [15, 16, 17, 18, 19]
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -54,10 +51,6 @@ jobs:
         run: cargo run --locked --manifest-path release-tools/Cargo.toml -p pgokf-verifier -- compatibility-source .
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-
-      - name: Verify immutable RC 2 base
-        if: matrix.pg == 19
-        run: release-tools/packaging/check-beta-image.sh
 
       - name: Install PostgreSQL ${{ matrix.pg }} development files
         id: pgdg
@@ -108,7 +101,7 @@ jobs:
       # is free to rewrite Cargo.lock (observed: the pg19 feature resolution
       # reorders pgokf-verifier's lock entry), and cargo pgrx installs
       # generated artifacts into the system PostgreSQL, never into the tree.
-      # The beta compatibility image gate proves the image is built from the
+      # The PostgreSQL 19 image gate proves the image is built from the
       # unchanged pushed commit (image_source_commit: source identity + clean
       # working tree + rev-parse), so it MUST run before any step that can
       # dirty the checkout; the in-database test then builds on the same
@@ -116,12 +109,12 @@ jobs:
       # sql/*.sql files are the canonical artifact (semantics re-proven per
       # release by the packages `meta` job via compare-install-sql); the
       # per-major schema regeneration happens outside the tree.
-      - name: Nonproduction PostgreSQL 19 RC 2 image compatibility
+      - name: PostgreSQL 19 image compatibility (not published)
         if: matrix.pg == 19
         run: |
-          cargo run --locked --manifest-path release-tools/Cargo.toml -p pgokf-verifier -- compatibility-image . release-tools pgokf-beta-compat "$RUNNER_TEMP/beta-image.json"
+          cargo run --locked --manifest-path release-tools/Cargo.toml -p pgokf-verifier -- compatibility-image . release-tools pgokf-pg19-compat "$RUNNER_TEMP/pg19-image.json"
           version=$(sed -n "s/^default_version *= *'\([^']*\)'.*/\1/p" crates/extension/pgokf.control)
-          SMOKE_WITH_OPTIONAL=0 release-tools/packaging/docker/smoke-test.sh pgokf-beta-compat "$version"
+          SMOKE_WITH_OPTIONAL=0 release-tools/packaging/docker/smoke-test.sh pgokf-pg19-compat "$version"
 
       # `cargo pgrx test` resolves the extension crate from the working
       # directory and appends the `pg_test` feature itself.

@@ -20,10 +20,10 @@
 //! token really is unguessable, so a hand-chosen one is refused rather than
 //! silently protected by a fast hash.
 //!
-//! The lookup has a connection of its own ([`CatalogTokens`]): it is a
-//! microsecond index probe, and on the pipelined work connection it would
-//! wait behind every tool call in flight, so authentication would queue
-//! behind work. A token also names the tenant it was minted for, and the
+//! The lookup has connections of its own ([`CatalogTokens`]): it is a
+//! microsecond index probe, and sharing the work connections it would wait
+//! behind every tool call in flight, so authentication would queue behind
+//! work. A token also names the tenant it was minted for, and the
 //! transport admits only tokens minted for the tenant it serves - one
 //! process serves one tenant, with tokens of its own.
 
@@ -34,13 +34,15 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 pub use pgokf_companion::mcp_token::Role;
 use pgokf_companion::mcp_token::{digest_of, is_minted_token};
-use tokio::task::JoinHandle;
-use tokio_postgres::Client;
+use pgokf_pgconn::{Pool, PoolSettings, Session};
 
 /// Bound on one lookup in the catalog: an index probe that takes longer
 /// than this is a fault, not work, and the request budget is far too long
 /// for one.
 const LOOKUP_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
+/// The most lookup connections open at once. A lookup is one index probe,
+/// so a few serve every request; the transport bounds how many wait.
+const LOOKUP_CONNECTIONS: usize = 2;
 
 /// The bearer of a token: what to call them in the log, what they may do,
 /// and the tenant the token was minted for.
@@ -117,56 +119,54 @@ pub trait TokenLookups: Send + Sync {
     /// The function is missing (a catalog older than 0.2.0), this role may
     /// not execute it, or the connection is gone.
     fn check(&self) -> BoxFuture<'_, Result<()>>;
-
-    /// The lookup connection's driver, to stop with when it ends; `None`
-    /// when there is nothing to wait on, or it was already taken.
-    fn take_driver(&mut self) -> Option<JoinHandle<()>>;
 }
 
-/// The catalog's answer, over a connection of its own (see the module doc).
+/// The catalog's answer, over connections of its own (see the module doc).
+/// A connection the server closed is replaced on the next lookup.
 pub struct CatalogTokens {
-    client: Client,
-    driver: Option<JoinHandle<()>>,
+    pool: Pool,
 }
 
 impl CatalogTokens {
-    /// Open the lookup connection: the catalog's reader URL, without a
+    /// Build the lookup connections: the catalog's reader URL, without a
     /// tenant - the lookup reads a table no tenant scopes - and with a short
-    /// statement budget of its own.
+    /// statement budget of their own. None is opened until the first lookup
+    /// or [`TokenLookups::check`].
     ///
     /// # Errors
     ///
-    /// The connection cannot be made, or the budget cannot be set.
-    pub async fn connect(database_url: &str, force_tls: bool) -> Result<Self> {
-        let (client, driver) = pgokf_pgconn::connect(database_url, force_tls)
-            .await
-            .context("connecting to PostgreSQL for token lookups")?;
-        let millis = i32::try_from(LOOKUP_STATEMENT_TIMEOUT.as_millis()).unwrap_or(i32::MAX);
-        client
-            .execute(
-                "SELECT set_config('statement_timeout', $1, false)",
-                &[&millis.to_string()],
-            )
-            .await
-            .context("setting the token lookup's statement timeout")?;
-        Ok(Self {
-            client,
-            driver: Some(driver),
+    /// The connection string cannot be parsed, or the TLS trust store
+    /// cannot be built.
+    pub fn connect(database_url: &str, force_tls: bool) -> Result<Self> {
+        let pool = Pool::new(PoolSettings {
+            database_url,
+            force_tls,
+            max_size: LOOKUP_CONNECTIONS,
+            wait_timeout: None,
+            session: Session::default().statement_timeout(LOOKUP_STATEMENT_TIMEOUT),
         })
+        .context("preparing the token lookup connections")?;
+        Ok(Self { pool })
     }
 }
 
 impl TokenLookups for CatalogTokens {
     fn lookup<'a>(&'a self, digest: &'a str) -> BoxFuture<'a, Result<Lookup>> {
         Box::pin(async move {
-            let row = self
-                .client
+            let mut connection = self
+                .pool
+                .checkout()
+                .await
+                .context("looking a token up in the catalog")?;
+            let found = connection
+                .client()
                 .query_opt(
                     "SELECT name, role, tenant FROM pgokf.mcp_token_bearer($1)",
                     &[&digest],
                 )
-                .await
-                .context("looking a token up in the catalog")?;
+                .await;
+            connection.finish();
+            let row = found.context("looking a token up in the catalog")?;
             let Some(row) = row else {
                 return Ok(Lookup::Unknown);
             };
@@ -188,19 +188,22 @@ impl TokenLookups for CatalogTokens {
     fn check(&self) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
             let nobody = "0".repeat(64);
-            self.client
-                .query("SELECT 1 FROM pgokf.mcp_token_bearer($1)", &[&nobody])
+            let mut connection = self
+                .pool
+                .checkout()
                 .await
-                .context(
-                    "the catalog does not answer pgokf.mcp_token_bearer(): the pgokf extension \
+                .context("reaching the catalog for token lookups")?;
+            let answered = connection
+                .client()
+                .query("SELECT 1 FROM pgokf.mcp_token_bearer($1)", &[&nobody])
+                .await;
+            connection.finish();
+            answered.context(
+                "the catalog does not answer pgokf.mcp_token_bearer(): the pgokf extension \
                      must be at 0.2.0 or later, and the connection must be a pgokf_reader",
-                )?;
+            )?;
             Ok(())
         })
-    }
-
-    fn take_driver(&mut self) -> Option<JoinHandle<()>> {
-        self.driver.take()
     }
 }
 

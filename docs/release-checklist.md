@@ -46,9 +46,14 @@ research, not a release gate or a certification claim.
 ## 2. Supply-chain gates
 
 ```bash
-cargo deny check          # licenses, bans, advisories, sources (deny.toml)
-cargo audit               # RUSTSEC advisories against Cargo.lock
+cargo deny check             # licenses, bans, advisories, sources (deny.toml)
+cargo audit --deny warnings  # RUSTSEC advisories against Cargo.lock (.cargo/audit.toml)
 ```
+
+`deny.toml` and `.cargo/audit.toml` ignore the same two unmaintained-crate
+notices (RUSTSEC-2026-0543 `chrono`, RUSTSEC-2026-0542 `humantime`); the
+reasons live in `deny.toml`. Change both files together, and only for a
+notice that no available upgrade clears.
 
 ## 3. Schema generation
 
@@ -65,7 +70,7 @@ table (the `version_comment` finalize block is the last entity emitted).
 All declared PG15–18 CI and packaging legs are required. Missing PGDG packages,
 failed provisioning or absent base images fail the workflow; there is no
 advisory success or skipped-coverage green. PG19 coverage is not established
-until its pinned **19 RC 2**, nonpublishing actual clippy and in-database test steps complete. A provisioning
+until its GA **19**, nonpublishing actual clippy, in-database test and image smoke steps complete. A provisioning
 failure blocks the support/release gate, even when other majors pass.
 `cargo test --locked -p pgokf-verifier` executes the missing-package
 failed-install and missing-image branches with local stubs and requires nonzero exits.
@@ -152,7 +157,7 @@ script as `pgokf--<crate-version>.sql` and copies every upgrade script
 alongside it, so the update path is available without any manual step. The
 shipped chain runs one script per step from `0.1.0 → 0.1.1` through
 `0.1.16 → 0.2.0` and on through the point-versioned development line
-(`0.2.0 → … → 0.3.1 → 0.4.0-dev → … → 0.4.0-dev3 → 0.4.0 → 0.5.0 → 0.6.0`; see "Development point versions" in
+(`0.2.0 → … → 0.3.1 → 0.4.0-dev → … → 0.4.0-dev3 → 0.4.0 → 0.5.0 → 0.6.0 → 0.7.0`; see "Development point versions" in
 [api-stability.md](api-stability.md)) to the current `default_version`.
 
 > **0.1.3 was a breaking pre-release re-model.** The `pgokf.concept_provenance`
@@ -312,8 +317,8 @@ ${PG_BIN}/pg_ctl -D "$DATA" -w stop -m fast && rm -rf /tmp/pgokf-rel
 ## Homebrew formula and tap
 
 The source release and its consuming formula have separate lifecycles. The
-pre-tag 0.6.0 tree and immutable `v0.6.0` tag keep the runnable formula pinned
-to **v0.5.0**, its authenticated archive digest, and matching 0.5.0 test
+pre-tag 0.7.0 tree and immutable `v0.7.0` tag keep the runnable formula pinned
+to **v0.6.0**, its authenticated archive digest, and matching 0.6.0 test
 assertions; the published 0.2.0 tuple remains the verified rollback target. This is intentional: a formula cannot contain the digest of the
 archive containing itself. The external distribution is
 [`LogicOcean/homebrew-pgokf`](https://github.com/LogicOcean/homebrew-pgokf).
@@ -321,25 +326,25 @@ archive containing itself. The external distribution is
 After all release gates and independent review, the release operator performs
 these steps in order (these are publication instructions, not local gates):
 
-1. Tag the reviewed source commit as `v0.6.0` and push that immutable tag.
-   Record `git rev-parse 'v0.6.0^{commit}'`. Never move this tag.
+1. Tag the reviewed source commit as `v0.7.0` and push that immutable tag.
+   Record `git rev-parse 'v0.7.0^{commit}'`. Never move this tag.
 2. Download and inspect its archive, failing on HTTP errors:
 
    ```bash
    curl --fail --location --retry 3 \
-     https://github.com/LogicOcean/pgokf/archive/refs/tags/v0.6.0.tar.gz \
-     --output /tmp/pgokf-v0.6.0.tar.gz
-   shasum -a 256 /tmp/pgokf-v0.6.0.tar.gz
-   tar -tzf /tmp/pgokf-v0.6.0.tar.gz
-   tar -xOf /tmp/pgokf-v0.6.0.tar.gz pgokf-0.6.0/crates/extension/pgokf.control
+     https://github.com/LogicOcean/pgokf/archive/refs/tags/v0.7.0.tar.gz \
+     --output /tmp/pgokf-v0.7.0.tar.gz
+   shasum -a 256 /tmp/pgokf-v0.7.0.tar.gz
+   tar -tzf /tmp/pgokf-v0.7.0.tar.gz
+   tar -xOf /tmp/pgokf-v0.7.0.tar.gz pgokf-0.7.0/crates/extension/pgokf.control
    ```
 
-   Verify archive root `pgokf-0.6.0`, control/workspace/PGXN version 0.6.0,
+   Verify archive root `pgokf-0.7.0`, control/workspace/PGXN version 0.7.0,
    and unpacked tracked contents against the tagged commit. Record the exact
    archive bytes and SHA256 in release evidence; do not hash a local repack.
 3. On **main after the tag**, update `packaging/homebrew/pgokf.rb` URL,
    SHA256, both `test do` version assertions, and its release-state comment
-   together. Add the authenticated `0.6.0` digest to `KNOWN_RELEASE_DIGESTS`
+   together. Add the authenticated `0.7.0` digest to `KNOWN_RELEASE_DIGESTS`
    in the Rust release-integrity tests in `pgokf-verifier` in the same commit. No placeholder is
    allowed. Run `cargo test --locked -p pgokf-verifier`. This commit consumes the earlier
    immutable tag; do not retag it.
@@ -350,9 +355,9 @@ these steps in order (these are publication instructions, not local gates):
    `brew test logicocean/pgokf/pgokf`. The formula test creates an isolated
    cluster and checks the installed control and extension version. Publish
    the main commit and then the tested external tap commit only after these
-   checks pass. The formula inside the source tag remains the valid v0.5.0 pin.
+   checks pass. The formula inside the source tag remains the valid v0.6.0 pin.
 5. Verify the external tap fetches the recorded archive digest and the
-   installed extension reports 0.6.0. Record both main and tap commit SHAs.
+   installed extension reports 0.7.0. Record both main and tap commit SHAs.
 
 Rollback: before a valid archive exists, leave the old formula unchanged.
 If validation fails before pushing, correct the local post-tag changes or
@@ -364,13 +369,13 @@ a new release version. A checksum discrepancy requires investigation against
 the recorded archive and tag contents before any formula update.
 
 An authorized current-release retry may name only the exact current tag:
-`gh workflow run packages.yml --ref main -f release_tag=v0.6.0`.
+`gh workflow run packages.yml --ref main -f release_tag=v0.7.0`.
 Prep retains current resolver tooling separately, checks out the tag source,
 proves HEAD/tag/control/workspace/lock/PGXN identity, and passes the resolved
 commit SHA to all builds. Empty dispatch input is a non-publishing smoke run.
 A branch source cannot publish release image names. Historical catch-up is unsupported:
-0.5.0 is the published package and source predecessor, 0.3.0 remains
-rejected, and 0.6.0 is the only next eligible release.
+0.6.0 is the published package and source predecessor, 0.3.0 remains
+rejected, and 0.7.0 is the only next eligible release.
 Current machinery refuses historical source
 before any package upload, image push, or manifest job can run.
 
@@ -378,11 +383,11 @@ Extract the exact GitHub release body, review it, and then create the release
 only after the publication gates:
 
 ```bash
-awk '/^## \[0\.6\.0\]/{emit=1; next} emit && /^## \[/{exit} emit {print}' \
-  CHANGELOG.md > /tmp/pgokf-0.6.0-release.md
+awk '/^## \[0\.7\.0\]/{emit=1; next} emit && /^## \[/{exit} emit {print}' \
+  CHANGELOG.md > /tmp/pgokf-0.7.0-release.md
 # Inspect the body and attach the verified per-major assets as appropriate.
-gh release create v0.6.0 --verify-tag --title 'pgokf 0.6.0' \
-  --notes-file /tmp/pgokf-0.6.0-release.md
+gh release create v0.7.0 --verify-tag --title 'pgokf 0.7.0' \
+  --notes-file /tmp/pgokf-0.7.0-release.md
 ```
 
 ## Quick gate summary
@@ -438,6 +443,6 @@ policy jobs, and it alone receives `pages: write` and `id-token: write`.
 
 This is a validated workflow execution contract, not a runner sandbox: runner
 binaries, the pinned action implementations and called source scripts remain
-trusted. The regression executes actual provisioning/Beta bodies with failing
+trusted. The regression executes actual provisioning and PG19 image bodies with failing
 command boundaries under hostile PATH, BASH_ENV and ENV, including a symlinked
 masking wrapper; the step must fail before success outputs or smoke.

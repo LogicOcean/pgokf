@@ -33,7 +33,7 @@ Name:           %{sname}_%{pgmajorversion}
 # single source of truth for the extension version. build-deb.sh and the Docker
 # job read that file directly; a spec is parsed before Source0 is unpacked, so
 # this one cannot -- bump it by hand with every release.
-Version:        0.6.0
+Version:        0.7.0
 Release:        1%{?dist}
 Summary:        Materialized PostgreSQL catalog for Open Knowledge Format bundles
 
@@ -101,6 +101,9 @@ cp -a target/release/%{sname}-pg%{pgmajorversion}/. %{buildroot}/
 %{pginstdir}/share/extension/%{sname}--*--*.sql
 
 %changelog
+* Fri Nov 20 2026 David Saroka <david.saroka@gmail.com> - 0.7.0-1
+- Share one pooled connection lifecycle; pgokf-mcp reconnects instead of exiting.
+
 * Fri Nov 13 2026 David Saroka <david.saroka@gmail.com> - 0.6.0-1
 - Add the receiver for Confluence events pushed by the pgokf Forge app.
 

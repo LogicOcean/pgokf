@@ -26,7 +26,6 @@ const HELP: &str = r"pgokf-verifier commands:
   homebrew-policy ROOT [FORMULA]
   homebrew-observation LOG VERSION
   homebrew-packaging ROOT NEW_EVIDENCE
-  postgres-beta-image
   postgres-check MAJOR IMAGE_TAG
   postgres-target MAJOR IMAGE_TAG
   postgres-candidate MAJOR IMAGE_TAG VERSION
@@ -180,9 +179,6 @@ fn run() -> Result<(), String> {
                 version,
             )
         }
-        [command] if command == "postgres-beta-image" => pgokf_verifier::postgres_pin::beta_image(
-            &mut pgokf_verifier::owned_docker::Docker::default(),
-        ),
         [command, major, tag] if command == "postgres-check" || command == "postgres-target" => {
             let major = major.parse().map_err(|_| "invalid PostgreSQL major")?;
             if command == "postgres-check" {

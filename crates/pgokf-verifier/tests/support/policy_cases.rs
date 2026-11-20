@@ -13,7 +13,7 @@ pub const NAMES: [&str; 73] = [
     "manifest-bypass",
     "masked-shell-default",
     "disabled-tooling-checkout",
-    "masked-beta-build",
+    "masked-pg19-build",
     "waived-failure",
     "commented-pgrx",
     "exclude-pg18-flow",
@@ -252,14 +252,13 @@ pub fn apply(w: &mut Value, name: &str) {
         | "dead-execution"
         | "success-mask"
         | "removed-execution"
-        | "masked-beta-build"
+        | "masked-pg19-build"
         | "commented-pgrx"
         | "test-success-mask" => {
             let (job, named) = match name {
-                "masked-beta-build" => (
-                    "test",
-                    "Nonproduction PostgreSQL 19 RC 2 image compatibility",
-                ),
+                "masked-pg19-build" => {
+                    ("test", "PostgreSQL 19 image compatibility (not published)")
+                }
                 "commented-pgrx" | "test-success-mask" => ("test", "Test"),
                 _ => (
                     "homebrew-policy",

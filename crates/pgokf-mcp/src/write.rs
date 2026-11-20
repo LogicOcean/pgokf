@@ -36,8 +36,8 @@
 use crate::service::DomainError;
 use anyhow::{Context, Result, anyhow, bail};
 use pgokf_companion::documents::{Document, now_iso};
+use pgokf_pgconn::Pool;
 use serde_json::{Value, json};
-use tokio::sync::Mutex;
 use tokio_postgres::{Client, Transaction};
 
 /// The largest bundle a single document write will rewrite. A write reads
@@ -50,61 +50,21 @@ const MAX_SNAPSHOT_BYTES: i64 = 64 * 1024 * 1024;
 /// How much of a caller-supplied value an error message repeats back.
 const ECHO_MAX: usize = 96;
 
-/// A `pgokf_writer` connection. The client is behind a lock because a write
-/// runs in a transaction, which needs it exclusively - and because one
-/// connection serves every request.
+/// The most writer connections open at once: one, so writes run one at a
+/// time, as they always have. Writers of the same bundle in other processes
+/// are kept apart by the bundle lock, not by this.
+pub(crate) const WRITER_CONNECTIONS: usize = 1;
+
+/// The `pgokf_writer` connections. Each write borrows one for the single
+/// transaction it runs in; the pool sets each one's lock wait, statement
+/// bound and tenant before handing it out (see `Catalog::with_writer`).
 pub(crate) struct WriterConn {
-    client: Mutex<Client>,
+    pool: Pool,
 }
 
 impl WriterConn {
-    pub(crate) fn new(client: Client) -> Self {
-        Self {
-            client: Mutex::new(client),
-        }
-    }
-
-    /// Bound every statement this connection runs, as the reader's are
-    /// bounded: cancelling a request does not cancel its query, and this
-    /// connection is serialized, so one unbounded statement would hold up
-    /// every other write.
-    ///
-    /// # Errors
-    ///
-    /// The `SET` failing.
-    pub(crate) async fn set_statement_timeout(&self, millis: i32) -> Result<()> {
-        self.client
-            .lock()
-            .await
-            .execute(
-                "SELECT set_config('statement_timeout', $1, false)",
-                &[&millis.to_string()],
-            )
-            .await
-            .context("setting the writer's statement timeout")?;
-        Ok(())
-    }
-
-    /// Bound how long a write waits for another writer of the same bundle -
-    /// the web UI, or another instance of this server - so a wedged writer
-    /// holding the lock cannot hang this one for ever. Applied on every
-    /// transport, stdio included, since the lock is shared with processes
-    /// this one knows nothing about.
-    ///
-    /// # Errors
-    ///
-    /// The `SET` failing.
-    pub(crate) async fn set_lock_timeout(&self, millis: i32) -> Result<()> {
-        self.client
-            .lock()
-            .await
-            .execute(
-                "SELECT set_config('lock_timeout', $1, false)",
-                &[&millis.to_string()],
-            )
-            .await
-            .context("setting the writer's lock timeout")?;
-        Ok(())
+    pub(crate) fn new(pool: Pool) -> Self {
+        Self { pool }
     }
 }
 
@@ -179,8 +139,9 @@ pub(crate) async fn call(
 ) -> Result<Value> {
     // One transaction per call, so the read a write is based on and the
     // write itself cannot be separated by anyone else's.
-    let mut client = writer.client.lock().await;
-    let tx = client
+    let mut connection = writer.pool.checkout().await?;
+    let tx = connection
+        .client_mut()
         .transaction()
         .await
         .context("starting the write transaction")?;
@@ -192,14 +153,19 @@ pub(crate) async fn call(
         "set_bundle_state" => set_bundle_state(&tx, args).await,
         other => bail!("unknown tool '{}'", echo(other)),
     };
+    // The connection goes back to the pool only once its transaction has
+    // ended cleanly; otherwise it is closed, which ends the transaction too.
     match outcome {
         Ok(value) => {
             tx.commit().await.context("committing the write")?;
+            connection.finish();
             Ok(value)
         }
         // Nothing half-written survives a refusal.
         Err(error) => {
-            let _ = tx.rollback().await;
+            if tx.rollback().await.is_ok() {
+                connection.finish();
+            }
             Err(error)
         }
     }

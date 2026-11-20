@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Transactional catalog writes with ownership and exact-snapshot verification.
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -58,6 +59,11 @@ pub struct Catalog {
     bundle_name: String,
 }
 
+/// The bound on each statement an import runs.
+const IMPORT_STATEMENT_TIMEOUT: Duration = Duration::from_mins(2);
+/// How long an import waits for a lock another writer holds.
+const IMPORT_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+
 impl Drop for Catalog {
     fn drop(&mut self) {
         self.connection.abort();
@@ -88,11 +94,12 @@ impl Catalog {
             tenant: tenant.into(),
             bundle_name: bundle_name.into(),
         };
-        catalog
-            .client
-            .batch_execute("SET statement_timeout = '120s'; SET lock_timeout = '5s'")
+        pgokf_pgconn::Session::default()
+            .statement_timeout(IMPORT_STATEMENT_TIMEOUT)
+            .lock_timeout(IMPORT_LOCK_TIMEOUT)
+            .tenant(tenant)
+            .apply(&catalog.client)
             .await?;
-        pgokf_pgconn::set_tenant(&catalog.client, tenant).await?;
         // Match catalog::sync::advisory_lock_key, including its cross-tenant key.
         let key = bundle_lock_key(bundle_name);
         let locked: bool = catalog

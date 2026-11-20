@@ -197,10 +197,14 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let file = env_file_vars(cli.env_file.as_deref())?;
     let settings = resolve_settings(&cli, &file, &ambient_settings())?;
+    // Over HTTP every statement is bounded under the request budget, so the
+    // database gives up before the transport does; stdio sets no bound.
+    let statement_timeout = cli.http.map(|_| http::STATEMENT_TIMEOUT);
     let catalog = Catalog::connect(
         &settings.database_url,
         settings.tenant.as_deref(),
         settings.tls,
+        statement_timeout,
     )
     .await
     .context("failed to connect to the catalog")?;
@@ -213,10 +217,9 @@ async fn main() -> Result<()> {
     };
     match cli.http {
         Some(bind) => {
-            // Token lookups get a connection of their own (see `tokens`), on
+            // Token lookups get connections of their own (see `tokens`), on
             // the same reader URL, so authentication never waits behind work.
-            let lookups =
-                tokens::CatalogTokens::connect(&settings.database_url, settings.tls).await?;
+            let lookups = tokens::CatalogTokens::connect(&settings.database_url, settings.tls)?;
             let server = http::Server::new(
                 catalog,
                 http::Admission::new(Box::new(lookups), settings.tenant.clone()),

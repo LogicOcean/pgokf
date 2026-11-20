@@ -14,9 +14,10 @@
 class Pgokf < Formula
   desc "Materialized PostgreSQL catalog for Open Knowledge Format bundles"
   homepage "https://github.com/LogicOcean/pgokf"
-  # RELEASE STATE: post-tag 0.6.0. Consume the authenticated immutable v0.6.0
-  # tag archive (tag object 137609e8, commit 5d16ef7). The published 0.2.0
-  # tuple remains the last verified rollback target.
+  # RELEASE STATE: pre-tag 0.7.0. Keep consuming the authenticated immutable
+  # v0.6.0 tag archive; advance to 0.7.0 only after its immutable tag archive is
+  # authenticated. The published 0.2.0 tuple remains the last verified rollback
+  # target.
   # v0.3.0 is an immutable, unpublished failed candidate; never consume it.
   url "https://github.com/LogicOcean/pgokf/archive/refs/tags/v0.6.0.tar.gz"
   sha256 "f92041aa98d22a63a73405afe4d554b1d1ee9b755a0b7f45ad3b4b1966e4f7f1"

@@ -411,25 +411,37 @@ fn boundary_mutations() {
                 .any(|e| e.starts_with("stable GA boundary"))
         );
     }
-    for include in [
-        json!([]),
-        json!([{"pg":19,"image_tag":"19"}]),
-        json!([{"pg":19,"image_tag":"19rc1"}]),
-        json!([{"pg":19,"image_tag":"19rc3"}]),
-        Value::Null,
+    // Dropping PG19, adding an unreleased major, pinning a prerelease base
+    // back in, or excluding a leg each changes the GA compatibility matrix.
+    let ga = json!([15, 16, 17, 18, 19]);
+    for (axes, include, exclude) in [
+        (json!([15, 16, 17, 18]), Value::Null, Value::Null),
+        (json!([15, 16, 17, 18, 19, 20]), Value::Null, Value::Null),
+        (
+            ga.clone(),
+            json!([{"pg":19,"image_tag":"19rc2"}]),
+            Value::Null,
+        ),
+        (ga.clone(), json!([{"pg":20}]), Value::Null),
+        (ga.clone(), Value::Null, json!([{"pg":19}])),
     ] {
         let mut bad = pgrx.clone();
-        bad["jobs"]["test"]["strategy"]["matrix"]["include"] = include;
+        let matrix = &mut bad["jobs"]["test"]["strategy"]["matrix"];
+        matrix["pg"] = axes;
+        matrix["include"] = include;
+        matrix["exclude"] = exclude;
         let errors = check_support(&packages, &bad, &c);
         assert!(
             errors
                 .iter()
-                .any(|e| e == "required pinned beta compatibility")
+                .any(|e| e == "required GA compatibility majors"),
+            "{errors:?}"
         );
         assert!(
             errors
                 .iter()
-                .any(|e| e == "effective compatibility coverage changed")
+                .any(|e| e == "effective compatibility coverage changed"),
+            "{errors:?}"
         );
     }
 }
@@ -644,7 +656,7 @@ fn support_predicates_fail_independently_of_context_hashes() {
     let pgrx = workflow("pgrx-test");
     let c = contexts();
     for (case, diagnostic) in [
-        ("beta-disabled", "compatibility must fail closed"),
+        ("compatibility-disabled", "compatibility must fail closed"),
         ("compat-disabled", "compatibility source/dependency bypass"),
         ("compat-uses", "publication requires compatibility"),
         ("build-needs", "publication gate: docker"),
@@ -656,7 +668,7 @@ fn support_predicates_fail_independently_of_context_hashes() {
         let mut p = packages.clone();
         let mut x = pgrx.clone();
         match case {
-            "beta-disabled" => x["jobs"]["test"]["continue-on-error"] = json!(true),
+            "compatibility-disabled" => x["jobs"]["test"]["continue-on-error"] = json!(true),
             "compat-disabled" => p["jobs"]["compatibility"]["if"] = json!("false"),
             "compat-uses" => p["jobs"]["compatibility"]["uses"] = json!("wrong.yml"),
             "build-needs" => p["jobs"]["docker"]["needs"] = json!(["prep"]),

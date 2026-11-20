@@ -1,0 +1,10 @@
+# cargo audit configuration (the release checklist runs
+# `cargo audit --deny warnings`).
+#
+# These are the two unmaintained notices deny.toml accepts; its [advisories]
+# section gives the reasons. Change both files together.
+[advisories]
+ignore = [
+  "RUSTSEC-2026-0543", # chrono, via arrow and parquet
+  "RUSTSEC-2026-0542", # humantime, via object_store
+]

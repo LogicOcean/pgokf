@@ -10,14 +10,12 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
+use pgokf_pgconn::{Borrowed, Pool, PoolSettings, Session};
 use pgokf_workspace::{
     BuildOptions, Component, ConceptRef, CustomHarness, Direction, Profile, Selection, Shape,
     StalePolicy, TOKEN_ENV, Target, TokenRef,
 };
 use serde_json::{Value, json};
-use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
-use tokio_postgres::Client;
 use tokio_postgres::types::ToSql;
 
 use crate::write::{self, WriterConn};
@@ -29,107 +27,131 @@ const DEFAULT_SIMILAR_LIMIT: i32 = 10;
 /// Default `max_hops` for `concept_neighbors` when the caller omits it.
 const DEFAULT_MAX_HOPS: i32 = 2;
 /// How long a write waits for another writer of the same bundle before it
-/// gives up, in milliseconds.
-const WRITER_LOCK_WAIT_MS: i32 = 15_000;
-/// The bound on a writer's statements, in milliseconds, applied on every
-/// transport; the HTTP transport lowers it to its own request budget.
-const WRITER_STATEMENT_MS: i32 = 50_000;
+/// gives up.
+const WRITER_LOCK_WAIT: Duration = Duration::from_secs(15);
+/// The bound on a writer's statements on a transport that sets none of its
+/// own; the HTTP transport's own bound replaces it.
+const WRITER_STATEMENT: Duration = Duration::from_secs(50);
+/// The most reader connections open at once. Each request borrows one for
+/// its work, so this many run side by side and the rest wait their turn,
+/// bounded by the transport's own request limit.
+const READER_CONNECTIONS: usize = 8;
 
 /// Largest plugin whose file contents are returned inline (bytes); above
 /// it the caller is told to narrow the selection.
 const INLINE_PLUGIN_BYTES: usize = 1_048_576;
 
-/// A live catalog connection, optionally scoped to one tenant.
+/// The catalog's connections, optionally scoped to one tenant.
+///
+/// Every connection comes from a pool that replaces one the server has
+/// closed - an idle-timeout proxy, a restart, a failover - with a new one on
+/// the next request, so a dropped link costs a reconnect, not the process.
 pub struct Catalog {
-    client: Client,
+    /// The reader connections. Each request borrows one, so a transaction -
+    /// the repeatable-read snapshot a listing or a plugin build reads from -
+    /// lives on a connection of its own.
+    readers: Pool,
     cursor: crate::cursor::CursorCodec,
-    /// A second reader connection `build_workspace_plugin` holds for the
-    /// whole build: the build runs inside one repeatable-read transaction,
-    /// and the shared `client` pipelines requests from concurrent callers,
-    /// so the transaction cannot live there. The mutex serializes builds.
-    build: Mutex<Client>,
-    /// The build connection's driver, folded into [`Catalog::take_driver`].
-    build_driver: Option<JoinHandle<()>>,
-    /// A `pgokf_writer` connection, when the operator gave one: what the
-    /// `writer` and `admin` roles need, and what this server does without
-    /// entirely when it is not set.
+    /// The `pgokf_writer` connections, when the operator gave a writer URL:
+    /// what the `writer` and `admin` roles need, and what this server does
+    /// without entirely when it is not set.
     writer: Option<WriterConn>,
-    /// The writer connection's driver, waited on beside the reader's.
-    writer_driver: Option<JoinHandle<()>>,
     /// The database name, shown in plugin indexes as the catalog name.
     database_name: String,
     /// The session's tenant, carried into generated MCP configurations.
     tenant: Option<String>,
-    /// The connection driver. It finishes only when the link to PostgreSQL
-    /// is gone for good, and this connection is never re-established, so a
-    /// long-running transport takes it and stops when it ends.
-    driver: Option<JoinHandle<()>>,
+    /// The transport's bound on each statement, carried to the writer.
+    statement_timeout: Option<Duration>,
 }
 
 impl Catalog {
-    /// Connect to PostgreSQL and, when `tenant` is set, apply it as the
-    /// session's `pgokf.tenant` so tenant row-level security is enforced.
+    /// Connect to PostgreSQL. Every connection is scoped to `tenant`, when
+    /// set, so tenant row-level security is enforced, and bounded by
+    /// `statement_timeout`, when set: cancelling a request does not cancel
+    /// its query, and the server-side bound does.
     ///
     /// `force_tls` (the `--tls` flag) requires an encrypted link; TLS is also
-    /// negotiated for an `sslmode=require` connection URL. The connection
-    /// driver task is spawned by the shared helper; [`Catalog::take_driver`]
-    /// hands its handle to a transport that outlives one client.
+    /// negotiated for an `sslmode=require` connection URL. One connection is
+    /// opened now, so a catalog that cannot be reached is a startup error.
     ///
     /// # Errors
     ///
-    /// Returns an error if the connection or the tenant scoping fails.
+    /// Returns an error if the connection or its setup fails.
     pub async fn connect(
         database_url: &str,
         tenant: Option<&str>,
         force_tls: bool,
+        statement_timeout: Option<Duration>,
     ) -> Result<Self> {
-        let (client, driver) = pgokf_pgconn::connect(database_url, force_tls)
+        let mut session = Session::default();
+        if let Some(tenant) = tenant {
+            session = session.tenant(tenant);
+        }
+        if let Some(timeout) = statement_timeout {
+            session = session.statement_timeout(timeout);
+        }
+        let readers = Pool::new(PoolSettings {
+            database_url,
+            force_tls,
+            max_size: READER_CONNECTIONS,
+            wait_timeout: None,
+            session,
+        })?;
+        let mut reader = readers
+            .checkout()
             .await
             .context("connecting to PostgreSQL")?;
-
-        if let Some(tenant) = tenant {
-            pgokf_pgconn::set_tenant(&client, tenant).await?;
-        }
-        let (build_client, build_driver) = pgokf_pgconn::connect(database_url, force_tls)
-            .await
-            .context("connecting to PostgreSQL for plugin builds")?;
-        if let Some(tenant) = tenant {
-            pgokf_pgconn::set_tenant(&build_client, tenant).await?;
-        }
-        let database_name: String = client
+        let database_name: String = reader
+            .client()
             .query_one("SELECT current_database()", &[])
             .await
             .context("reading the database name")?
             .try_get(0)?;
+        reader.finish();
 
         Ok(Self {
             cursor: cursor_codec()?,
-            client,
-            build: Mutex::new(build_client),
-            build_driver: Some(build_driver),
+            readers,
             writer: None,
-            writer_driver: None,
             database_name,
             tenant: tenant.map(str::to_owned),
-            driver: Some(driver),
+            statement_timeout,
         })
     }
 
-    /// Add the writer connection the `writer` and `admin` roles need, on
+    /// Add the writer connections the `writer` and `admin` roles need, on
     /// `writer_url` - a `pgokf_writer`-capable role - scoped to the same
     /// tenant as the reader.
     ///
+    /// A write waits a bounded time for another writer of the same bundle,
+    /// on every transport, stdio included: that lock is shared with
+    /// processes this one knows nothing about, and a write that waits for
+    /// ever on one of them is worse than one that fails.
+    ///
     /// # Errors
     ///
-    /// Returns an error if the connection or the tenant scoping fails.
+    /// Returns an error if the connection or its setup fails, or the role
+    /// is not a writer.
     pub async fn with_writer(mut self, writer_url: &str, force_tls: bool) -> Result<Self> {
-        let (client, driver) = pgokf_pgconn::connect(writer_url, force_tls)
+        let mut session = Session::default()
+            .lock_timeout(WRITER_LOCK_WAIT)
+            .statement_timeout(self.statement_timeout.unwrap_or(WRITER_STATEMENT));
+        if let Some(tenant) = &self.tenant {
+            session = session.tenant(tenant.clone());
+        }
+        let writers = Pool::new(PoolSettings {
+            database_url: writer_url,
+            force_tls,
+            max_size: write::WRITER_CONNECTIONS,
+            wait_timeout: None,
+            session,
+        })?;
+        let mut writer = writers
+            .checkout()
             .await
             .context("connecting to PostgreSQL as the writer")?;
-        if let Some(tenant) = &self.tenant {
-            pgokf_pgconn::set_tenant(&client, tenant).await?;
-        }
-        let permitted: bool = client
+        let permitted: bool = writer
+            .client()
             .query_one(
                 "SELECT pg_has_role(current_user, 'pgokf_writer', 'USAGE')",
                 &[],
@@ -137,21 +159,15 @@ impl Catalog {
             .await
             .context("checking writer capability")?
             .try_get(0)?;
+        writer.finish();
         if !permitted {
             bail!("writer connection does not hold the required pgokf_writer privilege");
         }
-        let writer = WriterConn::new(client);
-        // Bounded on every transport, stdio included: the lock a write takes
-        // is shared with processes this one knows nothing about, and a write
-        // that waits for ever on one of them is worse than one that fails.
-        writer.set_lock_timeout(WRITER_LOCK_WAIT_MS).await?;
-        writer.set_statement_timeout(WRITER_STATEMENT_MS).await?;
-        self.writer = Some(writer);
-        self.writer_driver = Some(driver);
+        self.writer = Some(WriterConn::new(writers));
         Ok(self)
     }
 
-    /// The writer connection, or why there is none to use.
+    /// The writer connections, or why there are none to use.
     fn writer(&self) -> Result<&WriterConn> {
         self.writer.as_ref().context(
             "this MCP server has no writer connection, so it cannot change the catalog: start \
@@ -159,83 +175,26 @@ impl Catalog {
         )
     }
 
-    /// Take the connection driver, to wait on it.
-    ///
-    /// It finishes only when the link to PostgreSQL is gone, and nothing
-    /// re-establishes it, so a server that means to keep running takes this
-    /// and stops when it ends rather than answering every later call with
-    /// the same failure. A second call returns `None`. The build
-    /// connection's driver is folded in: the returned task ends when either
-    /// link does.
-    pub fn take_driver(&mut self) -> Option<JoinHandle<()>> {
-        match (self.driver.take(), self.build_driver.take()) {
-            (Some(reader), Some(build)) => Some(tokio::spawn(async move {
-                tokio::select! {
-                    _ = reader => {}
-                    _ = build => {}
-                }
-            })),
-            (reader, None) => reader,
-            (None, build) => build,
-        }
+    /// Borrow a reader connection for one piece of work.
+    async fn reader(&self) -> Result<Borrowed> {
+        self.readers.checkout().await
     }
 
-    /// Take the writer connection's driver, to wait on it beside the
-    /// reader's. A second call returns `None`.
-    pub fn take_writer_driver(&mut self) -> Option<JoinHandle<()>> {
-        self.writer_driver.take()
-    }
-
-    /// Bound every statement this session runs.
-    ///
-    /// One connection is shared by every in-flight request, so a query that
-    /// outlives the caller's patience would otherwise keep running and hold
-    /// up everything pipelined behind it. Cancelling the future does not
-    /// cancel the query; a server-side timeout does.
+    /// Whether the catalog answers now. A connection the server closed is
+    /// replaced on the next request, so this reports whether the catalog can
+    /// be reached, not whether one old connection survived.
     ///
     /// # Errors
     ///
-    /// The `SET` failing.
-    pub async fn set_statement_timeout(&self, timeout: Duration) -> Result<()> {
-        let millis = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
-        self.client
-            .execute(
-                "SELECT set_config('statement_timeout', $1, false)",
-                &[&millis.to_string()],
-            )
-            .await
-            .context("setting the statement timeout")?;
-        self.build
-            .lock()
-            .await
-            .execute(
-                "SELECT set_config('statement_timeout', $1, false)",
-                &[&millis.to_string()],
-            )
-            .await
-            .context("setting the build connection's statement timeout")?;
-        // The writer is one shared, serialized connection too: an unbounded
-        // statement on it would hold up every other write.
-        if let Some(writer) = &self.writer {
-            writer.set_statement_timeout(millis).await?;
-        }
-        Ok(())
-    }
-
-    /// Whether the catalog still answers.
-    ///
-    /// The connection is never re-established, so a link that has died stays
-    /// dead: a health probe that reports this lets a supervisor restart the
-    /// process instead of leaving it up and failing every call.
-    ///
-    /// # Errors
-    ///
-    /// The query failing, which means the link is gone.
+    /// No connection could be borrowed or opened, or it did not answer.
     pub async fn ping(&self) -> Result<()> {
-        self.client
+        let mut reader = self.reader().await.context("the catalog did not answer")?;
+        reader
+            .client()
             .query_one("SELECT 1", &[])
             .await
             .context("the catalog did not answer")?;
+        reader.finish();
         Ok(())
     }
 
@@ -258,8 +217,9 @@ impl Catalog {
     ) -> Result<Value, crate::service::DomainError> {
         use crate::service::DomainError;
         self.policy().authorize_read(principal)?;
-        let mut client = self.build.lock().await;
-        let tx = client
+        let mut reader = self.reader().await.map_err(|_| DomainError::internal())?;
+        let tx = reader
+            .client_mut()
             .build_transaction()
             .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
             .start()
@@ -300,6 +260,7 @@ impl Catalog {
             crate::resources::call(&tx, method, params).await?
         };
         tx.commit().await.map_err(|_| DomainError::internal())?;
+        reader.finish();
         Ok(value)
     }
 
@@ -309,8 +270,9 @@ impl Catalog {
         args: &Value,
     ) -> Result<(Value, Option<String>), crate::service::DomainError> {
         use crate::service::DomainError;
-        let mut client = self.build.lock().await;
-        let tx = client
+        let mut reader = self.reader().await.map_err(|_| DomainError::internal())?;
+        let tx = reader
+            .client_mut()
             .build_transaction()
             .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
             .start()
@@ -372,6 +334,7 @@ impl Catalog {
             None
         };
         tx.commit().await.map_err(|_| DomainError::internal())?;
+        reader.finish();
         Ok((rows, next))
     }
 
@@ -394,7 +357,13 @@ impl Catalog {
                 })
             })
             .collect();
-        crate::resources::tool_evidence(&self.client, &json!(identities)).await
+        let mut reader = self
+            .reader()
+            .await
+            .map_err(|_| crate::service::DomainError::internal())?;
+        let evidence = crate::resources::tool_evidence(reader.client(), &json!(identities)).await;
+        reader.finish();
+        evidence
     }
 
     pub(crate) fn policy(&self) -> crate::policy::PolicyService {
@@ -409,7 +378,12 @@ impl Catalog {
     ) -> Result<Value> {
         use crate::registry::Handler;
         match handler {
-            Handler::ListBundles => write::list_bundles(&self.client, arguments).await,
+            Handler::ListBundles => {
+                let mut reader = self.reader().await?;
+                let listed = write::list_bundles(reader.client(), arguments).await;
+                reader.finish();
+                listed
+            }
             Handler::ConceptSearch => self.concept_search(arguments).await,
             Handler::FindSimilar => self.find_similar(arguments).await,
             Handler::ConceptNeighbors => self.concept_neighbors(arguments).await,
@@ -556,11 +530,14 @@ impl Catalog {
         let bundle_id = opt_i64(args, "bundle_id")?
             .ok_or_else(|| anyhow!("missing required integer argument 'bundle_id'"))?;
         let concept_id = require_str(args, "concept_id")?;
-        let visible: bool = self.client.query_one(
+        let mut reader = self.reader().await?;
+        let visibility = reader.client().query_one(
             "SELECT EXISTS(SELECT 1 FROM pgokf.bundles b WHERE b.id=$1 AND b.enabled AND b.retired_at IS NULL
              AND ((nullif(current_setting('pgokf.tenant',true),'') IS NULL AND NOT pgokf.tenant_required())
                   OR b.tenant_id=current_setting('pgokf.tenant',true)))", &[&bundle_id],
-        ).await?.try_get(0)?;
+        ).await;
+        reader.finish();
+        let visible: bool = visibility?.try_get(0)?;
         if !visible {
             return Err(crate::service::DomainError::NotFound("object not found".into()).into());
         }
@@ -578,7 +555,10 @@ impl Catalog {
     /// per-bundle reasons.
     async fn check_workspace_plugin_freshness(&self, args: &Value) -> Result<Value> {
         let lock = require_str(args, "lock")?;
-        let check = pgokf_workspace::check_plugin_freshness(&self.client, lock).await?;
+        let mut reader = self.reader().await?;
+        let checked = pgokf_workspace::check_plugin_freshness(reader.client(), lock).await;
+        reader.finish();
+        let check = checked?;
         serde_json::to_value(check).context("rendering the freshness check")
     }
 
@@ -732,14 +712,19 @@ impl Catalog {
         })?;
         let selection = Self::selection_from_args(args)?;
         let options = self.options_from_args(args, target)?;
-        // The build holds one repeatable-read snapshot for its whole run, so
-        // it takes the dedicated connection: the shared client pipelines
-        // concurrent callers' statements, and a transaction cannot live
-        // there. The lock serializes builds.
+        // The build holds one repeatable-read snapshot for its whole run, on
+        // a reader connection of its own. Only a build that completed hands
+        // the connection back; one that failed part way closes it, so no
+        // later request inherits whatever state it was left in.
         let plugin = {
-            let mut build = self.build.lock().await;
-            match pgokf_workspace::build_in_transaction(&mut build, &options, &selection).await {
-                Ok(plugin) => plugin,
+            let mut build = self.reader().await?;
+            match pgokf_workspace::build_in_transaction(build.client_mut(), &options, &selection)
+                .await
+            {
+                Ok(plugin) => {
+                    build.finish();
+                    plugin
+                }
                 Err(error) => {
                     // A stale-policy or closure refusal is a normal answer,
                     // returned with the enumerations, not an error string.
@@ -820,12 +805,14 @@ impl Catalog {
     /// Run a query whose single row / single column is a `jsonb` aggregate, and
     /// return it as a `serde_json::Value`.
     async fn fetch_json(&self, sql: &str, params: &[&(dyn ToSql + Sync)]) -> Result<Value> {
-        let row = self
-            .client
+        let mut reader = self.reader().await?;
+        let row = reader
+            .client()
             .query_one(sql, params)
             .await
-            .context("catalog query failed")?;
-        Ok(row.get(0))
+            .context("catalog query failed");
+        reader.finish();
+        Ok(row?.get(0))
     }
 }
 
@@ -1296,5 +1283,81 @@ mod tests {
                 "{args} should fail"
             );
         }
+    }
+
+    /// The scratch server the live tests run against: `PGOKF_MCP_TEST_DB`
+    /// when set, else the local default. `None`, with a notice, when no
+    /// server answers, as pgokf-web's scratch tests do.
+    async fn scratch_url() -> Option<String> {
+        let url = std::env::var("PGOKF_MCP_TEST_DB").unwrap_or_else(|_| {
+            let user = std::env::var("USER").unwrap_or_else(|_| "postgres".to_owned());
+            format!("host=localhost dbname=postgres user={user}")
+        });
+        match pgokf_pgconn::connect(&url, false).await {
+            Ok(_) => Some(url),
+            Err(error) => {
+                eprintln!("skipping a catalog test: no scratch PostgreSQL answers ({error:#})");
+                None
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_catalog_answers_again_after_the_server_closes_its_connections() {
+        let Some(url) = scratch_url().await else {
+            return;
+        };
+        // Arrange: a catalog whose every connection the server then closes,
+        // as an idle-timeout proxy, a restart or a failover does.
+        let marked = format!("{url} application_name=pgokf-mcp-reconnect-test");
+        let catalog = Catalog::connect(&marked, None, false, None)
+            .await
+            .expect("connect the catalog");
+        catalog.ping().await.expect("the catalog answers at first");
+        let (admin, _driver) = pgokf_pgconn::connect(&url, false)
+            .await
+            .expect("admin connection");
+        let closed: i64 = admin
+            .query_one(
+                "SELECT count(pg_catalog.pg_terminate_backend(pid)) FROM pg_catalog.pg_stat_activity \
+                 WHERE application_name = 'pgokf-mcp-reconnect-test'",
+                &[],
+            )
+            .await
+            .expect("close the catalog's connections")
+            .get(0);
+        assert!(closed > 0, "the catalog held at least one connection");
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let left: i64 = admin
+                .query_one(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity \
+                     WHERE application_name = 'pgokf-mcp-reconnect-test'",
+                    &[],
+                )
+                .await
+                .expect("count the catalog's connections")
+                .get(0);
+            if left == 0 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the connections closed"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        // Let the client side read the close, as it has long since done by
+        // the time a request follows an idle cut.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Act
+        let answered = catalog.ping().await;
+
+        // Assert
+        assert!(
+            answered.is_ok(),
+            "the catalog reconnects instead of staying dead: {answered:?}"
+        );
     }
 }
