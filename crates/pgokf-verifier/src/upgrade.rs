@@ -1432,6 +1432,7 @@ fn routes(
         "0.4.0-dev3",
         "0.4.0",
         "0.5.0",
+        "0.6.0",
     ] {
         c.sql("postgres", "CREATE DATABASE point;")?;
         c.sql(

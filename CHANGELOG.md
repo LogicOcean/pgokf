@@ -10,6 +10,40 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-20
+
+A companion release: one pooled connection lifecycle shared by the
+long-running companions, so `pgokf-mcp` survives a dropped link to
+PostgreSQL. The catalog is unchanged - no SQL object or data differs from
+0.6.0 - so the receipt-only `pgokf--0.6.0--0.7.0.sql` edge carries an
+installed 0.6.0 catalog to 0.7.0 through an ordinary
+`ALTER EXTENSION pgokf UPDATE`, and the committed `pgokf--0.7.0.sql` install
+script is the 0.6.0 one regenerated under the new version.
+
+### Fixed
+
+- **`pgokf-mcp` reconnects instead of exiting.** It held its catalog
+  connections for its whole life and stopped when any of them closed,
+  leaving the restart to a supervisor. Anything that closes idle
+  connections turned that into a restart loop with a growing back-off:
+  Azure Container Apps' TCP ingress closes a connection idle for 300
+  seconds, so an idle server exited every five minutes. Its reader, writer
+  and token-lookup connections now come from pools that replace a closed
+  connection on the next request; `/healthz` reports 503 only while the
+  catalog cannot be reached.
+
+### Changed
+
+- **`pgokf-pgconn` owns the connection lifecycle.** Besides the connect
+  step and TLS policy it now provides `Session` (tenant, statement and lock
+  bounds applied to every new connection), `Pool` (the pool `pgokf-web`
+  used, set up from a `Session`) and `Borrowed` (the guard that closes a
+  connection whose work was abandoned mid-flight instead of returning it).
+  `pgokf-web` and `pgokf-mcp` build their pools through it, and
+  `pgokf-confluence` sets its import session up through `Session`.
+- `pgokf-mcp`'s plugin builds no longer queue behind one another: each
+  borrows a reader connection of its own. Writes still run one at a time.
+
 ## [0.6.0] - 2026-11-13
 
 A companion release: pushed Confluence events through a private Forge app,
@@ -1905,7 +1939,8 @@ queries, native full-text search, and link-graph traversal.
 - The `pgokf_private` schema and its `config` table are readable and writable
   only by the extension owner and `pgokf_admin`; readers cannot see policy.
 
-[Unreleased]: https://github.com/LogicOcean/pgokf/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/LogicOcean/pgokf/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/LogicOcean/pgokf/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/LogicOcean/pgokf/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/LogicOcean/pgokf/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/LogicOcean/pgokf/compare/v0.3.1...v0.4.0
