@@ -918,7 +918,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/src/process.rs": {
-      "sha256": "3a230edf45daa92aa19c1042abdb19d2c0c6b5230961d019a03f0da473b9a9c5",
+      "sha256": "b62a6eac940dc1066ea92b8ccc996a5f486e7099ce19270e7d38a6ee421ccd2d",
       "executable": false
     },
     "crates/pgokf-verifier/src/process/launchd.rs": {
@@ -1034,7 +1034,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/tests/service_limits.rs": {
-      "sha256": "d8d8d5243ce01ea71dcfe6302fcde085dd2f61fbed487afe7184a9e790cbd5cb",
+      "sha256": "a3634939aea1d14476183feda89c217d5b4cf2fdeb9e7193a713b97bf184867c",
       "executable": false
     },
     "crates/pgokf-verifier/tests/source_hygiene.rs": {

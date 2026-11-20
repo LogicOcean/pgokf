@@ -75,12 +75,12 @@ fn detached_spec(marker: &std::path::Path) -> CommandSpec {
     // chain is intact. The non-macOS monitor polls /proc (5 ms sleeps between
     // full scans), so the leader must hold the parent link open for many
     // sampling periods; after the leader exits the orphan is reparented and
-    // undiscoverable by design. One second covers dozens of scan cycles even
-    // under parallel-suite load (the timeout test below uses the same window
-    // through its 1 s deadline and is the deterministic-detection precedent).
+    // undiscoverable by design. The leader holds the link for three seconds
+    // after its descendant is running: hundreds of scan cycles, with room for
+    // a monitor thread a loaded host schedules late.
     spec.env
-        .insert(DETACHED_LEADER_SLEEP_MS.into(), "1000".into());
-    spec.timeout = Duration::from_secs(5);
+        .insert(DETACHED_LEADER_SLEEP_MS.into(), "3000".into());
+    spec.timeout = Duration::from_secs(10);
     spec
 }
 
@@ -123,7 +123,12 @@ fn timed_out_command_terminates_detached_descendant() {
     let mut spec = detached_spec(&marker);
     spec.env
         .insert(DETACHED_LEADER_SLEEP_MS.into(), "30000".into());
-    spec.timeout = Duration::from_secs(1);
+    // Long enough for the leader and its descendant to start, and for the
+    // monitor to sample the intact lineage, on a loaded host - with one
+    // second the leader could be killed before its descendant was ever seen,
+    // which leaves an orphan undiscoverable by design - and still far short
+    // of the leader's 30 s sleep, so the command does time out.
+    spec.timeout = Duration::from_secs(10);
     let error = spec.run().unwrap_err();
     assert!(marker.exists(), "detached descendant marker missing");
     let alive = cleanup_detached(&marker);
