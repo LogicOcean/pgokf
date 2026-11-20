@@ -203,15 +203,15 @@ fn rollback_rejects_correlated_source_and_provider_forgery() {
     contract.to.source.version = "0.2.0".into();
     contract.to.source.distribution_version = "0.2.0".into();
     validate_rollback(&contract).unwrap();
-    let mut prerelease = contract.clone();
-    for image in [&mut prerelease.from, &mut prerelease.to] {
+    let mut newest = contract.clone();
+    for image in [&mut newest.from, &mut newest.to] {
         image.postgres_major = 19;
-        image.postgres_image_tag = "19rc2".into();
+        image.postgres_image_tag = "19".into();
     }
-    validate_rollback(&prerelease).unwrap();
-    for tag in ["19rc1", "19rc3", "19beta4", "19"] {
+    validate_rollback(&newest).unwrap();
+    for tag in ["19rc1", "19rc2", "19beta4", "18"] {
         for from in [true, false] {
-            let mut bad = prerelease.clone();
+            let mut bad = newest.clone();
             let image = if from { &mut bad.from } else { &mut bad.to };
             image.postgres_image_tag = tag.into();
             assert!(validate_rollback(&bad).is_err(), "{tag}, from={from}");

@@ -84,7 +84,7 @@ cargo run --locked -p pgokf-verifier -- checkout-shapes . evidence-checkouts
 cargo run --locked -p pgokf-verifier -- homebrew-policy .
 cargo run --locked -p pgokf-verifier -- homebrew-packaging . evidence-homebrew
 cargo run --locked -p pgokf-verifier -- homebrew-observation evidence-homebrew/test.log 0.7.0
-cargo run --locked -p pgokf-verifier -- compatibility-image . . pgokf-beta-compat beta-image.json
+cargo run --locked -p pgokf-verifier -- compatibility-image . . pgokf-pg19-compat pg19-image.json
 cargo run --locked -p pgokf-verifier -- image-smoke . IMAGE VERSION optional evidence-image
 cargo run --locked -p pgokf-verifier -- package-checksums 1.4.0 packaging/docker/pg_textsearch.sha256
 cargo run --locked -p pgokf-verifier -- rollback-check rollback.json
@@ -175,8 +175,9 @@ Docker observation and requires the relevant refusal while retaining owned clean
 receipts. These explicit live tests supplement the ordinary portable test suite.
 
 `postgres-target MAJOR IMAGE_TAG`, `postgres-candidate MAJOR IMAGE_TAG VERSION`,
-`postgres-check MAJOR IMAGE_TAG`, and `postgres-beta-image` own the reviewed
-PostgreSQL target, apt candidate, installed server/header, and Docker index checks.
+and `postgres-check MAJOR IMAGE_TAG` own the reviewed PostgreSQL target, apt
+candidate, and installed server/header checks: every major is a GA release,
+built from its own `postgres:<major>` tag and PGDG `<major>.x` packages.
 The packaging shell entry points only dispatch to these commands or provision the
 selected packages. For root provisioning, build the verifier first and supply its
 absolute executable path through `PGOKF_VERIFIER`; this is an executable path,

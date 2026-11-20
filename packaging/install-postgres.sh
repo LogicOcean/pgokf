@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# Run as root in CI. PG19 is compatibility-only, never a stable package leg.
+# Run as root in CI. Every tested major, PG19 included, is a GA release from
+# PGDG's main component; PG19 is tested but not yet a published package leg.
 set -euo pipefail
 major=${1:?PostgreSQL major required}
-component=main
 image_tag=$major
-if [[ "$major" == 19 ]]; then component='main 19'; image_tag=19rc2; fi
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 verifier() {
     if [[ -n "${PGOKF_VERIFIER:-}" ]]; then "$PGOKF_VERIFIER" "$@";
@@ -16,7 +15,7 @@ verifier postgres-target "$major" "$image_tag"
 install -d /usr/share/postgresql-common/pgdg
 curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
     | gpg --batch --yes --dearmor -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
-echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg $component" > /etc/apt/sources.list.d/pgdg.list
+echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" > /etc/apt/sources.list.d/pgdg.list
 apt-get update
 packages=()
 for package in "postgresql-$major" "postgresql-server-dev-$major"; do

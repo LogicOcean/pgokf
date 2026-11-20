@@ -450,7 +450,8 @@ pub fn check_pages_policy(docs: &Value, contexts: &Contexts) -> Vec<String> {
     errors
 }
 
-/// Stable packaging remains PG15–18; pinned PG19 compatibility is required.
+/// Stable packaging remains PG15–18; compatibility covers PG15–19, every one
+/// a GA major.
 /// Exact execution-context contracts bind all current commands and conditions.
 #[must_use]
 #[allow(clippy::too_many_lines)] // One support-matrix boundary checks every required leg.
@@ -472,22 +473,21 @@ pub fn check_support(packages: &Value, pgrx: &Value, contexts: &Contexts) -> Vec
             _ => errors.push(format!("stable GA boundary: {job}")),
         }
     }
-    let beta = BTreeMap::from([
-        ("pg".into(), json!(19)),
-        ("image_tag".into(), json!("19rc2")),
-    ]);
+    let tested: Vec<Value> = crate::postgres_pin::MAJORS
+        .map(|major| json!(major))
+        .collect();
     match matrix(pgrx, "test") {
         Ok(m) => {
-            if m.axes.get("pg") != Some(&stable)
-                || m.include.as_deref() != Some(std::slice::from_ref(&beta))
+            if m.axes.get("pg") != Some(&tested)
+                || m.include.as_deref().is_some_and(|rows| !rows.is_empty())
+                || m.exclude.as_deref().is_some_and(|rows| !rows.is_empty())
             {
-                errors.push("required pinned beta compatibility".into());
+                errors.push("required GA compatibility majors".into());
             }
-            let mut expected: Vec<Row> = stable
+            let expected: Vec<Row> = tested
                 .into_iter()
                 .map(|pg| BTreeMap::from([("pg".into(), pg)]))
                 .collect();
-            expected.push(beta);
             if effective_matrix(&m) != expected {
                 errors.push("effective compatibility coverage changed".into());
             }

@@ -37,43 +37,34 @@ fn root() -> PathBuf {
 }
 
 #[test]
-fn rc2_pgdg_candidate_replaces_rc1_without_accepting_other_releases() {
+fn ga_pgdg_candidate_is_accepted_and_prereleases_are_not() {
     use pgokf_verifier::postgres_pin::{base_image, package, target, versions};
-    let candidate = "19~rc2-1.pgdg24.04+1";
-    package(19, "19rc2", candidate).unwrap();
-    versions(19, "19rc2", candidate, candidate).unwrap();
-    assert_eq!(
-        base_image(19, "19rc2").unwrap(),
-        "postgres:19rc2@sha256:3c5f322ffe97481b51a1ebee693f58d0c081514d2bc3026500a9400b7428bea9"
-    );
-    for tag in ["19rc1", "19rc3", "19beta4", "19", "latest"] {
+    let candidate = "19.0-1.pgdg24.04+1";
+    package(19, "19", candidate).unwrap();
+    versions(19, "19", candidate, candidate).unwrap();
+    assert_eq!(base_image(19, "19").unwrap(), "postgres:19");
+    for tag in ["19rc1", "19rc2", "19beta4", "19.0", "latest"] {
         assert!(target(19, tag).is_err(), "{tag}");
     }
-    for version in [
-        "19~rc1-1",
-        "19~rc3-1",
-        "19~beta4-1",
-        "19.0-1",
-        "19~rc2-",
-        "",
-    ] {
-        assert!(package(19, "19rc2", version).is_err(), "{version}");
-        assert!(versions(19, "19rc2", version, candidate).is_err());
-        assert!(versions(19, "19rc2", candidate, version).is_err());
+    for version in ["19~rc1-1", "19~rc2-1", "19~beta4-1", "18.4-1", "19.", ""] {
+        assert!(package(19, "19", version).is_err(), "{version}");
+        assert!(versions(19, "19", version, candidate).is_err());
+        assert!(versions(19, "19", candidate, version).is_err());
     }
 }
 
 #[test]
-fn installed_beta_package_must_match_exact_release() {
+fn installed_package_must_be_a_ga_release() {
     for (version, expected) in [
-        ("19~rc2-1.pgdg13+1", true),
+        ("19.0-1.pgdg13+1", true),
+        ("19.1-1.pgdg13+1", true),
+        ("19~rc2-1.pgdg13+1", false),
         ("19~beta3-1.pgdg13+1", false),
-        ("19~rc1-1", false),
-        ("19.0-1", false),
+        ("18.4-1", false),
         ("", false),
     ] {
         assert_eq!(
-            pgokf_verifier::postgres_pin::package(19, "19rc2", version).is_ok(),
+            pgokf_verifier::postgres_pin::package(19, "19", version).is_ok(),
             expected,
             "{version}"
         );
@@ -81,29 +72,14 @@ fn installed_beta_package_must_match_exact_release() {
 }
 
 #[test]
-fn beta_image_must_have_exact_immutable_digest() {
-    for (digest, expected) in [
-        (pgokf_verifier::postgres_pin::BETA_DIGEST.to_owned(), true),
-        (format!("sha256:{}", "a".repeat(64)), false),
-        (String::new(), false),
-    ] {
-        assert_eq!(
-            pgokf_verifier::postgres_pin::digest(&digest).is_ok(),
-            expected,
-            "{digest}"
-        );
-    }
-}
-
-#[test]
-fn beta_provisioning_refuses_missing_drifted_and_failed_packages() {
+fn provisioning_refuses_missing_drifted_and_failed_packages() {
     let original = std::fs::read_to_string(root().join("packaging/install-postgres.sh")).unwrap();
     for (scenario, candidate, expected) in [
-        ("ok", "19~rc2-1.pgdg24.04+1", true),
+        ("ok", "19.0-1.pgdg24.04+1", true),
         ("missing", "(none)", false),
-        ("drift", "19~rc1-1", false),
-        ("ga", "19.0-1", false),
-        ("install-failure", "19~rc2-1", false),
+        ("prerelease", "19~rc2-1", false),
+        ("other-major", "18.4-1", false),
+        ("install-failure", "19.0-1", false),
     ] {
         let directory = tempfile::tempdir().unwrap();
         let target = |name| directory.path().join(name).to_str().unwrap().to_owned();
@@ -160,16 +136,15 @@ fn beta_provisioning_refuses_missing_drifted_and_failed_packages() {
             "{scenario}: {}",
             String::from_utf8_lossy(&result.stderr)
         );
-        assert!(
-            std::fs::read_to_string(target("pgdg.list"))
-                .unwrap()
-                .contains("noble-pgdg main 19")
-        );
+        // A GA major comes from PGDG's main component, never the
+        // prerelease component named after the major.
+        let list = std::fs::read_to_string(target("pgdg.list")).unwrap();
+        assert!(list.trim_end().ends_with("noble-pgdg main"), "{list}");
     }
 }
 
 #[test]
-fn missing_beta_image_fails_actual_workflow_step() {
+fn missing_base_image_fails_actual_workflow_step() {
     let source = std::fs::read_to_string(root().join(".github/workflows/packages.yml")).unwrap();
     let workflow = pgokf_verifier::workflow::parse(&source).unwrap();
     let step = workflow["jobs"]["docker"]["steps"]
@@ -202,7 +177,7 @@ fn missing_beta_image_fails_actual_workflow_step() {
     assert!(!spec.run().unwrap().status.success());
 }
 #[test]
-fn stable_deb_refuses_beta_before_building() {
+fn stable_deb_refuses_an_unpublished_major_before_building() {
     let mut spec = pgokf_verifier::process::CommandSpec::new("/bin/bash");
     spec.args = vec![
         root().join("packaging/deb/build-deb.sh").into_os_string(),
@@ -231,16 +206,16 @@ esac
     .unwrap();
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
     for (server, headers, failed, expected) in [
-        ("19~rc2-1", "19~rc2-1", "", true),
-        ("19~rc1-1", "19~rc2-1", "", false),
-        ("19~rc2-1", "19~rc1-1", "", false),
-        ("19~beta3-1", "19~rc2-1", "", false),
-        ("19~rc2-1", "19~rc2-1", "postgresql-19", false),
-        ("19~rc2-1", "19~rc2-1", "postgresql-server-dev-19", false),
+        ("19.0-1", "19.0-1", "", true),
+        ("19~rc2-1", "19.0-1", "", false),
+        ("19.0-1", "19~rc2-1", "", false),
+        ("18.4-1", "19.0-1", "", false),
+        ("19.0-1", "19.0-1", "postgresql-19", false),
+        ("19.0-1", "19.0-1", "postgresql-server-dev-19", false),
     ] {
         let mut command =
             pgokf_verifier::process::CommandSpec::new(env!("CARGO_BIN_EXE_pgokf-verifier"));
-        command.args = ["postgres-check", "19", "19rc2"]
+        command.args = ["postgres-check", "19", "19"]
             .into_iter()
             .map(Into::into)
             .collect();

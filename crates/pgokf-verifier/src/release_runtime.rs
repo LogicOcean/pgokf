@@ -172,13 +172,8 @@ pub fn validate_rollback(manifest: &RollbackManifest) -> Result<(), String> {
         if image.source.distribution_version != distribution || image.source.version == "0.3.0" {
             return Err("rollback source distribution identity mismatch".into());
         }
-        if !(15..=19).contains(&image.postgres_major)
-            || image.postgres_image_tag
-                != if image.postgres_major == 19 {
-                    "19rc2".into()
-                } else {
-                    image.postgres_major.to_string()
-                }
+        if !crate::postgres_pin::MAJORS.contains(&image.postgres_major)
+            || image.postgres_image_tag != crate::postgres_pin::image_tag(image.postgres_major)
         {
             return Err("unreviewed rollback PostgreSQL identity".into());
         }
@@ -346,13 +341,6 @@ fn image_feature(context: &Path, postgres_major: u32) -> Result<(), String> {
     Ok(())
 }
 
-fn verify_base(postgres_major: u32) -> Result<(), String> {
-    if postgres_major == 19 {
-        crate::postgres_pin::beta_image(&mut crate::owned_docker::Docker::default())?;
-    }
-    Ok(())
-}
-
 /// Build a local provenance-bearing image from current or authenticated published
 /// source. Historical builds are rollback artifacts, never release eligibility.
 /// # Errors
@@ -413,22 +401,17 @@ fn image_build_inner(
     command(&tooling, "git", &["diff", "--exit-code", "HEAD", "--"]).checked()?;
     let tooling_commit = output(&command(&tooling, "git", &["rev-parse", "HEAD"]))?;
     let tooling_archive = source_archive(&tooling, &tooling_commit)?;
-    verify_base(postgres_major)?;
     let source_commit = image_source_commit(&source, version)?;
     let archived = source_archive(&source, &source_commit)?;
     let context = archived.path();
     let identity = crate::release_identity::source_identity_version(context, version)?;
     image_feature(context, postgres_major)?;
-    let postgres_image_tag = if postgres_major == 19 {
-        "19rc2".into()
-    } else {
-        postgres_major.to_string()
-    };
+    let postgres_image_tag = crate::postgres_pin::image_tag(postgres_major);
     let recipe =
         std::fs::read_to_string(tooling_archive.path().join("packaging/docker/Dockerfile"))
             .map_err(|e| e.to_string())?;
     if recipe.matches("COPY . /verification").count() != 1 {
-        return Err("unique beta validation COPY required".into());
+        return Err("unique validation COPY required".into());
     }
     let work = tempfile::tempdir().map_err(|e| e.to_string())?;
     let path = work.path().join("Dockerfile");

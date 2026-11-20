@@ -65,7 +65,7 @@ table (the `version_comment` finalize block is the last entity emitted).
 All declared PG15–18 CI and packaging legs are required. Missing PGDG packages,
 failed provisioning or absent base images fail the workflow; there is no
 advisory success or skipped-coverage green. PG19 coverage is not established
-until its pinned **19 RC 2**, nonpublishing actual clippy and in-database test steps complete. A provisioning
+until its GA **19**, nonpublishing actual clippy, in-database test and image smoke steps complete. A provisioning
 failure blocks the support/release gate, even when other majors pass.
 `cargo test --locked -p pgokf-verifier` executes the missing-package
 failed-install and missing-image branches with local stubs and requires nonzero exits.
@@ -438,6 +438,6 @@ policy jobs, and it alone receives `pages: write` and `id-token: write`.
 
 This is a validated workflow execution contract, not a runner sandbox: runner
 binaries, the pinned action implementations and called source scripts remain
-trusted. The regression executes actual provisioning/Beta bodies with failing
+trusted. The regression executes actual provisioning and PG19 image bodies with failing
 command boundaries under hostile PATH, BASH_ENV and ENV, including a symlinked
 masking wrapper; the step must fail before success outputs or smoke.

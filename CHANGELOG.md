@@ -43,6 +43,12 @@ script is the 0.6.0 one regenerated under the new version.
   `pgokf-confluence` sets its import session up through `Session`.
 - `pgokf-mcp`'s plugin builds no longer queue behind one another: each
   borrows a reader connection of its own. Writes still run one at a time.
+- **PostgreSQL 19 is tested as the GA 19.0.** PostgreSQL 19.0 shipped on
+  2026-11-20 and the pinned 19 RC 2 base image and packages no longer
+  exist, so CI's PG19 leg (clippy, the in-database suite, an image smoke
+  test) now builds from `postgres:19` and PGDG's `19.x` packages exactly as
+  15-18 do, and the verifier refuses a prerelease tag or package for any
+  major. PG19 packages and images are still not published.
 
 ## [0.6.0] - 2026-11-13
 

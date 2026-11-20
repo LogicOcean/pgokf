@@ -72,12 +72,6 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # PGDG apt repo the official postgres image is already configured with.
 RUN set -eux; \
     dev_package="postgresql-server-dev-${PG_MAJOR}"; \
-    if [ "$PG_MAJOR" = 19 ]; then \
-        installed_version="$(dpkg-query -W -f='${Version}' postgresql-19)"; \
-        dev_package="postgresql-server-dev-19=${installed_version}"; \
-        . /etc/os-release; \
-        echo "deb [signed-by=/usr/local/share/keyrings/postgres.gpg.asc] http://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main 19" > /etc/apt/sources.list.d/pgdg.list; \
-    fi; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
         build-essential \

@@ -1,43 +1,42 @@
 //! Reviewed `PostgreSQL` package and Docker Official Image identities.
-use crate::owned_docker::DockerApi;
+//!
+//! Every major the source is built and tested against is a GA release: it is
+//! provisioned from its own `postgres:<major>` Docker Official Image tag and
+//! from PGDG `<major>.x` packages. A prerelease tag or package (`19rc2`,
+//! `19~rc2-1`) is refused, so a major enters the matrix only once it ships.
 use crate::process::CommandSpec;
 
-// Docker Official Image postgres:19rc2 multi-architecture index, verified via
-// Docker Hub tag metadata and buildx imagetools inspect on 2026-11-13.
-pub const BETA_DIGEST: &str =
-    "sha256:3c5f322ffe97481b51a1ebee693f58d0c081514d2bc3026500a9400b7428bea9";
+/// The `PostgreSQL` majors the source is built and tested against.
+pub const MAJORS: std::ops::RangeInclusive<u32> = 15..=19;
+
+/// The Docker Official Image tag a major is built from: the major itself.
+#[must_use]
+pub fn image_tag(major: u32) -> String {
+    major.to_string()
+}
+
 /// # Errors
 /// Unreviewed major/tag pairs fail before provisioning.
 pub fn target(major: u32, image_tag: &str) -> Result<(), String> {
-    if !((15..=18).contains(&major) && image_tag == major.to_string()
-        || major == 19 && image_tag == "19rc2")
-    {
+    if !(MAJORS.contains(&major) && image_tag == self::image_tag(major)) {
         return Err(format!(
             "unreviewed PostgreSQL major/base transition: {major}:{image_tag}"
         ));
     }
     Ok(())
 }
-/// Resolve the reviewed beta index into the build reference itself.
+/// The Docker Official Image reference a major is built from.
 /// # Errors
 /// Unreviewed major/tag pairs fail before any build.
 pub fn base_image(major: u32, image_tag: &str) -> Result<String, String> {
     target(major, image_tag)?;
-    if major == 19 {
-        Ok(format!("postgres:{image_tag}@{BETA_DIGEST}"))
-    } else {
-        Ok(format!("postgres:{image_tag}"))
-    }
+    Ok(format!("postgres:{image_tag}"))
 }
 /// # Errors
 /// Missing, drifted, prerelease or wrong-major package versions fail.
 pub fn package(major: u32, image_tag: &str, version: &str) -> Result<(), String> {
     target(major, image_tag)?;
-    let prefix = if major == 19 {
-        "19~rc2-".into()
-    } else {
-        format!("{major}.")
-    };
+    let prefix = format!("{major}.");
     if !version.starts_with(&prefix) || version.len() == prefix.len() {
         return Err(format!(
             "PostgreSQL package must start with {prefix}: {version}"
@@ -74,98 +73,50 @@ pub fn versions(major: u32, image_tag: &str, server: &str, headers: &str) -> Res
     package(major, image_tag, headers).map_err(|e| format!("headers: {e}"))?;
     Ok(())
 }
-/// # Errors
-/// Empty, changed or nonliteral image-index digests fail.
-pub fn digest(actual: &str) -> Result<(), String> {
-    if actual.trim() != BETA_DIGEST {
-        return Err("postgres:19rc2 immutable index digest changed or disappeared".into());
-    }
-    Ok(())
-}
-/// # Errors
-/// Docker lookup errors and changed immutable index identity fail closed.
-pub fn beta_image(docker: &mut impl DockerApi) -> Result<(), String> {
-    let result = docker.call(
-        &[
-            "buildx",
-            "imagetools",
-            "inspect",
-            "postgres:19rc2",
-            "--format",
-            "{{.Manifest.Digest}}",
-        ]
-        .into_iter()
-        .map(Into::into)
-        .collect::<Vec<_>>(),
-    )?;
-    digest(&result)
-}
 #[cfg(test)]
 mod tests {
     use super::*;
-    struct Missing;
-    impl DockerApi for Missing {
-        fn call(&mut self, _: &[String]) -> Result<String, String> {
-            Err("missing image".into())
-        }
-    }
     #[test]
-    fn beta_build_reference_is_immutable() {
+    fn every_major_builds_from_its_own_tag() {
         assert_eq!(base_image(18, "18").unwrap(), "postgres:18");
-        let reference = base_image(19, "19rc2").unwrap();
-        assert_eq!(
-            reference.split_once('@'),
-            Some(("postgres:19rc2", BETA_DIGEST))
-        );
-        assert!(base_image(19, "19").is_err());
+        assert_eq!(base_image(19, "19").unwrap(), "postgres:19");
+        assert!(base_image(19, "19rc2").is_err());
     }
     #[test]
     fn runtime_and_headers_are_independent() {
-        versions(19, "19rc2", "19~rc2-1", "19~rc2-1").unwrap();
-        assert!(versions(19, "19rc2", "19~rc1-1", "19~rc2-1").is_err());
-        assert!(versions(19, "19rc2", "19~rc2-1", "19~rc1-1").is_err());
+        versions(19, "19", "19.0-1", "19.0-1").unwrap();
+        assert!(versions(19, "19", "19~rc2-1", "19.0-1").is_err());
+        assert!(versions(19, "19", "19.0-1", "19~rc2-1").is_err());
     }
     #[test]
     fn reviewed_targets_and_versions_are_exact() {
-        for major in 15..=18 {
-            package(major, &major.to_string(), &format!("{major}.4-1.pgdg")).unwrap();
-            for version in ["", "(none)", "19~rc2-1", "18~rc1-1"] {
-                assert!(package(major, &major.to_string(), version).is_err());
+        for major in MAJORS {
+            let tag = major.to_string();
+            package(major, &tag, &format!("{major}.4-1.pgdg")).unwrap();
+            for version in [
+                String::new(),
+                "(none)".into(),
+                format!("{major}~rc2-1"),
+                format!("{major}~beta3-1"),
+                format!("{major}."),
+                format!("{}.4-1", major + 1),
+            ] {
+                assert!(
+                    package(major, &tag, &version).is_err(),
+                    "{major}: {version}"
+                );
             }
         }
-        package(19, "19rc2", "19~rc2-1.pgdg13+1").unwrap();
         for (major, tag) in [
             (14, "14"),
             (20, "20"),
-            (19, "19"),
             (19, "19beta3"),
             (19, "19rc1"),
-            (18, "19rc2"),
+            (19, "19rc2"),
+            (19, "latest"),
+            (18, "19"),
         ] {
-            assert!(target(major, tag).is_err());
+            assert!(target(major, tag).is_err(), "{major}:{tag}");
         }
-        for version in [
-            "19~beta2-1",
-            "19~beta3-1",
-            "19~rc1-1",
-            "19.0-1",
-            "19~rc2-",
-            "",
-        ] {
-            assert!(package(19, "19rc2", version).is_err());
-        }
-    }
-    #[test]
-    fn image_index_must_be_exact_and_lookup_must_succeed() {
-        digest(BETA_DIGEST).unwrap();
-        for value in [
-            "",
-            "sha256:wrong",
-            "sha256:f0056b553c58e4533ba81921d9bd5b49641d4fa176e1add956a678b034007ac4",
-            "prefix sha256:f0056b553c58e4533ba81921d9bd5b49641d4fa176e1add956a678b034007ac4",
-        ] {
-            assert!(digest(value).is_err());
-        }
-        assert!(beta_image(&mut Missing).is_err());
     }
 }
