@@ -747,7 +747,7 @@ impl Db {
     /// here, the connection goes back to the pool whether the statement
     /// succeeded or failed - a failed statement is not a broken connection.
     pub(crate) async fn execute(&self, sql: &str, params: &[&(dyn ToSql + Sync)]) -> Result<u64> {
-        let mut client = self.client().await?;
+        let client = self.client().await?;
         let affected = client
             .client()
             .execute(sql, params)
@@ -769,7 +769,7 @@ impl Db {
         sql: &str,
         params: &[&(dyn ToSql + Sync)],
     ) -> Result<Vec<Row>> {
-        let mut client = self.client().await?;
+        let client = self.client().await?;
         let rows = client
             .client()
             .query(sql, params)
@@ -784,7 +784,7 @@ impl Db {
         sql: &str,
         params: &[&(dyn ToSql + Sync)],
     ) -> Result<Option<Row>> {
-        let mut client = self.client().await?;
+        let client = self.client().await?;
         let row = client
             .client()
             .query_opt(sql, params)
@@ -2388,7 +2388,7 @@ impl ContentLock {
     /// Dropping the lock without this is safe - the connection closes and
     /// `PostgreSQL` releases a session lock with its session - it merely costs
     /// the pool a connection, so the callers release explicitly.
-    pub(crate) async fn release(mut self) {
+    pub(crate) async fn release(self) {
         // The bound was set on the session, and the pool hands this
         // connection on as it is, so it is put back as it was found.
         let released = self

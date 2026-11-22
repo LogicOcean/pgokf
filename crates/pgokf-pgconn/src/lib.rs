@@ -49,7 +49,7 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 mod pool;
 
 pub use deadpool_postgres::{PoolError, TimeoutType};
-pub use pool::{Borrowed, Pool, PoolSettings, Session};
+pub use pool::{Borrowed, Pool, PoolSettings, Session, TransactionError};
 
 /// Scope the session to one pgokf tenant: sets the `pgokf.tenant` GUC for the
 /// connection (session-wide, not transaction-local), so every later catalog

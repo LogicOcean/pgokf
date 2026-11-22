@@ -176,6 +176,14 @@ impl std::fmt::Display for DomainError {
 
 impl std::error::Error for DomainError {}
 
+/// A read transaction that would not open or commit is the server's failure,
+/// never the caller's, so it is answered as `internal`.
+impl From<pgokf_pgconn::TransactionError> for DomainError {
+    fn from(_: pgokf_pgconn::TransactionError) -> Self {
+        Self::internal()
+    }
+}
+
 /// Turn an `anyhow` chain into the domain error the wire carries.
 ///
 /// A [`DomainError`] anywhere in the chain (thrown at the site that knew

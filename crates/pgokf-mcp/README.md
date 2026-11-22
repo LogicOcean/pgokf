@@ -92,7 +92,8 @@ rather than on the command line.
 ## Serving it over HTTP
 
 Some clients cannot launch a subprocess: a hosted agent, a browser-based
-client, a fleet of agents that should share one connection to the catalog.
+client, a fleet of agents that should share one server and its connections
+to the catalog.
 `--http <addr>` serves the same JSON-RPC messages over HTTP - the same
 implementation answers both transports, so they cannot drift apart.
 
@@ -114,9 +115,17 @@ revision requires.
 file is no longer being believed - what is wrong goes to the log, not to
 whoever found the port. A connection PostgreSQL or a proxy closes - an idle
 timeout, a restart, a failover - is replaced on the next request, so the
-server keeps running; `/healthz` reports 503 only while the catalog really
-cannot be reached, and a container health check wired to it restarts the
-process only then.
+server keeps running. The health check asks the catalog on a connection of
+its own, so readers busy with long work do not make a reachable catalog look
+down: `/healthz` reports 503 only while the catalog really cannot be reached,
+and a container health check wired to it restarts the process only then.
+
+Each process opens at most twelve connections to the catalog: up to eight
+readers (one per request in flight, handed back before the request takes
+another, and a request waits at most a minute for one), one for the health
+check, up to two for token lookups, and one writer when `--writer-url` is
+set. Size `max_connections`, or the pooler in front of PostgreSQL, for that
+many per replica.
 
 Over stdio the client launched the server and already holds the connection
 string, so there is nothing to authenticate. Over HTTP the server is

@@ -135,6 +135,44 @@ impl CommandSpec {
 #[cfg(target_os = "macos")]
 pub(crate) mod launchd;
 
+/// Timing for the tests that start real processes.
+#[cfg(test)]
+mod test_timing {
+    use std::time::{Duration, Instant};
+
+    /// How long a test lets the processes it starts come up, report back or go
+    /// away. Starting one is a fork and exec, usually of this test binary,
+    /// behind the runner's gate and its scans of every process on the host. On
+    /// a busy host with thousands of processes, or beside the rest of this
+    /// suite, that takes seconds rather than the milliseconds an idle runner
+    /// needs. Every bound on start-up or teardown uses this one budget, so none
+    /// can expire before the behaviour under test has happened; it never
+    /// decides what a test proves.
+    pub(super) const STARTUP: Duration = Duration::from_secs(10);
+
+    /// How long a process that has to be cut off or removed runs if it is not.
+    /// It outlasts every start-up wait, so a containment failure still fails
+    /// the test instead of finishing inside the budget.
+    pub(super) const OUTLIVES: Duration = Duration::from_secs(30);
+
+    const _: () = assert!(OUTLIVES.as_secs() >= 3 * STARTUP.as_secs());
+
+    /// Poll `probe` until it yields a value, or `None` once `STARTUP` has run
+    /// out.
+    pub(super) fn within_startup<T>(mut probe: impl FnMut() -> Option<T>) -> Option<T> {
+        let deadline = Instant::now() + STARTUP;
+        loop {
+            if let Some(value) = probe() {
+                return Some(value);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+}
+
 #[cfg(unix)]
 #[cfg_attr(target_os = "macos", allow(dead_code, unused_imports))]
 mod unix {
@@ -1261,13 +1299,10 @@ mod unix {
             let child = command.spawn().unwrap();
             let group = Pid::from_raw(i32::try_from(child.id()).unwrap());
             let mut owned = OwnedChild::new(child, group);
-            for _ in 0..100 {
-                if owned.observe_exit().unwrap() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(2));
-            }
-            assert!(owned.observe_exit().unwrap());
+            let exited = crate::process::test_timing::within_startup(|| {
+                owned.observe_exit().unwrap().then_some(())
+            });
+            assert!(exited.is_some(), "the command did not exit");
             owned.reap().unwrap();
             let signals = owned.signals_sent;
             owned.signal_group(Signal::SIGKILL);
@@ -1325,6 +1360,7 @@ pub(crate) use unix::{ProcessMonitor, ProcessOwner};
 
 #[cfg(all(test, unix))]
 mod tests {
+    use super::test_timing::{OUTLIVES, STARTUP, within_startup};
     use super::*;
     use nix::{
         sys::signal::{Signal, kill},
@@ -1341,7 +1377,7 @@ mod tests {
     fn shell(source: &str) -> CommandSpec {
         let mut spec = CommandSpec::new("/bin/sh");
         spec.args = ["-c", source].map(OsString::from).to_vec();
-        spec.timeout = Duration::from_secs(2);
+        spec.timeout = STARTUP;
         spec
     }
 
@@ -1358,32 +1394,27 @@ mod tests {
     fn wait_for_pid_marker(path: &std::path::Path) -> Pid {
         // The writer truncates the marker before writing the pid, so a read
         // can observe an empty file first; retry until the content parses.
-        for _ in 0..500 {
-            if let Ok(pid) = fs::read_to_string(path)
-                && let Ok(pid) = pid.trim().parse()
-            {
-                return Pid::from_raw(pid);
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        panic!("owned descendant did not publish its pid");
+        within_startup(|| {
+            fs::read_to_string(path)
+                .ok()?
+                .trim()
+                .parse()
+                .ok()
+                .map(Pid::from_raw)
+        })
+        .expect("owned descendant did not publish its pid")
     }
 
     fn wait_until_gone(pid: Pid) -> bool {
-        for _ in 0..200 {
-            if kill(pid, None) == Err(nix::errno::Errno::ESRCH) {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        false
+        within_startup(|| (kill(pid, None) == Err(nix::errno::Errno::ESRCH)).then_some(()))
+            .is_some()
     }
 
     #[test]
     fn ordinary_exit_terminates_nested_owned_process_groups() {
         match std::env::var("PGOKF_ORDINARY_EXIT_MODE").as_deref() {
             Ok("descendant") => {
-                std::thread::sleep(Duration::from_secs(30));
+                std::thread::sleep(OUTLIVES);
                 return;
             }
             Ok("launcher") => {
@@ -1425,7 +1456,7 @@ mod tests {
                         std::env::var_os(name).expect("borrowed test control present"),
                     );
                 }
-                spec.timeout = Duration::from_secs(2);
+                spec.timeout = STARTUP;
                 let status = spec.run().unwrap().status;
                 std::process::exit(status.code().unwrap());
             }
@@ -1451,7 +1482,7 @@ mod tests {
             );
             spec.env
                 .insert("PGOKF_ORDINARY_EXIT_CODE".into(), code.to_string().into());
-            spec.timeout = Duration::from_secs(2);
+            spec.timeout = STARTUP;
 
             let result = spec.run();
             let descendant = wait_for_pid_marker(&marker);
@@ -1493,7 +1524,7 @@ mod tests {
         );
         spec.env
             .insert("PGOKF_ORDINARY_EXIT_CODE".into(), "17".into());
-        spec.timeout = Duration::from_secs(5);
+        spec.timeout = STARTUP;
         spec.delegate_nested_supervision = true;
 
         let result = spec.run();
@@ -1530,13 +1561,15 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let stdout = directory.path().join("stdout.partial");
         let stderr = directory.path().join("stderr.partial");
-        let mut spec = shell("printf partial-out; printf partial-err >&2; sleep 30");
-        spec.timeout = Duration::from_secs(5);
+        let mut spec = shell(&format!(
+            "printf partial-out; printf partial-err >&2; sleep {}",
+            OUTLIVES.as_secs()
+        ));
         spec.durable_stdout = Some(stdout.clone());
         spec.durable_stderr = Some(stderr.clone());
         let start = Instant::now();
         assert!(spec.run().unwrap_err().contains("timeout"));
-        assert!(start.elapsed() < Duration::from_secs(8));
+        assert!(start.elapsed() < OUTLIVES);
         assert_eq!(fs::read(stdout).unwrap(), b"partial-out");
         assert_eq!(fs::read(stderr).unwrap(), b"partial-err");
         for source in [
@@ -1552,9 +1585,9 @@ mod tests {
     #[test]
     fn inherited_pipes_cannot_extend_deadline() {
         let start = Instant::now();
-        let result = shell("sleep 30 & printf done").checked();
+        let result = shell(&format!("sleep {} & printf done", OUTLIVES.as_secs())).checked();
         assert!(result.is_ok(), "{result:?}");
-        assert!(start.elapsed() < Duration::from_secs(5));
+        assert!(start.elapsed() < OUTLIVES);
     }
 
     fn assert_nested_group_cleanup(directory: &std::path::Path) {
@@ -1574,24 +1607,17 @@ mod tests {
             "PGOKF_DELAYED_WRITER_READY".into(),
             cleanup_ready.as_os_str().into(),
         );
-        cleanup.timeout = Duration::from_secs(1);
+        cleanup.timeout = STARTUP;
         let error = cleanup.run().unwrap_err();
         assert!(error.contains("timeout exceeded"), "{error}");
         let nested = Pid::from_raw(
             fs::read_to_string(&cleanup_ready)
-                .unwrap()
+                .expect("the cleanup parent started its nested group before the timeout")
                 .trim()
                 .parse()
                 .unwrap(),
         );
-        let mut removed = false;
-        for _ in 0..100 {
-            if kill(nested, None) == Err(nix::errno::Errno::ESRCH) {
-                removed = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        let removed = wait_until_gone(nested);
         if !removed {
             let _ = kill(nested, Signal::SIGKILL);
         }
@@ -1638,19 +1664,17 @@ mod tests {
             let ready = PathBuf::from(std::env::var_os("PGOKF_DELAYED_WRITER_READY").unwrap());
             if cleanup {
                 write_pid_marker(&ready, detached.id());
-                std::thread::sleep(Duration::from_secs(30));
+                std::thread::sleep(OUTLIVES);
                 return;
             }
-            for _ in 0..100 {
-                if ready.exists() {
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(2));
-            }
-            panic!("detached writer did not start");
+            assert!(
+                within_startup(|| ready.exists().then_some(())).is_some(),
+                "detached writer did not start"
+            );
+            return;
         }
         if mode.as_deref() == Some("cleanup-grandchild") {
-            std::thread::sleep(Duration::from_secs(30));
+            std::thread::sleep(OUTLIVES);
             return;
         }
 
@@ -1670,12 +1694,7 @@ mod tests {
             "PGOKF_DELAYED_WRITER_READY".into(),
             ready.as_os_str().into(),
         );
-        // The bound has to cover starting two test-binary processes, which on
-        // a loaded host (a parallel suite, other work) takes well over a
-        // second; with one second the leader itself could time out before
-        // the behaviour under test - capturing, or draining, a descendant's
-        // late write - ever happened.
-        spec.timeout = Duration::from_secs(10);
+        spec.timeout = STARTUP;
         match spec.run() {
             Ok(output) => assert!(
                 output

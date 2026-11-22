@@ -16,6 +16,7 @@ use pgokf_workspace::{
     StalePolicy, TOKEN_ENV, Target, TokenRef,
 };
 use serde_json::{Value, json};
+use tokio_postgres::IsolationLevel;
 use tokio_postgres::types::ToSql;
 
 use crate::write::{self, WriterConn};
@@ -33,9 +34,17 @@ const WRITER_LOCK_WAIT: Duration = Duration::from_secs(15);
 /// own; the HTTP transport's own bound replaces it.
 const WRITER_STATEMENT: Duration = Duration::from_secs(50);
 /// The most reader connections open at once. Each request borrows one for
-/// its work, so this many run side by side and the rest wait their turn,
-/// bounded by the transport's own request limit.
+/// its work and gives it back before it borrows another, so this many run
+/// side by side and the rest wait their turn, for at most [`POOL_WAIT`].
 const READER_CONNECTIONS: usize = 8;
+/// The health check's own connection, so it reports whether the catalog can
+/// be reached, not whether every reader happens to be busy.
+const HEALTH_CONNECTIONS: usize = 1;
+/// How long a request waits for a free connection before it is refused: the
+/// minute the HTTP transport gives a whole request, so a pool that stays
+/// exhausted (or a request that waits on itself) fails instead of hanging,
+/// on stdio as well.
+pub(crate) const POOL_WAIT: Duration = Duration::from_mins(1);
 
 /// Largest plugin whose file contents are returned inline (bytes); above
 /// it the caller is told to narrow the selection.
@@ -51,6 +60,8 @@ pub struct Catalog {
     /// the repeatable-read snapshot a listing or a plugin build reads from -
     /// lives on a connection of its own.
     readers: Pool,
+    /// The health check's connection, set up like a reader.
+    health: Pool,
     cursor: crate::cursor::CursorCodec,
     /// The `pgokf_writer` connections, when the operator gave a writer URL:
     /// what the `writer` and `admin` roles need, and what this server does
@@ -83,21 +94,21 @@ impl Catalog {
         force_tls: bool,
         statement_timeout: Option<Duration>,
     ) -> Result<Self> {
-        let mut session = Session::default();
-        if let Some(tenant) = tenant {
-            session = session.tenant(tenant);
-        }
-        if let Some(timeout) = statement_timeout {
-            session = session.statement_timeout(timeout);
-        }
         let readers = Pool::new(PoolSettings {
             database_url,
             force_tls,
             max_size: READER_CONNECTIONS,
-            wait_timeout: None,
-            session,
+            wait_timeout: Some(POOL_WAIT),
+            session: reader_session(tenant, statement_timeout),
         })?;
-        let mut reader = readers
+        let health = Pool::new(PoolSettings {
+            database_url,
+            force_tls,
+            max_size: HEALTH_CONNECTIONS,
+            wait_timeout: Some(POOL_WAIT),
+            session: reader_session(tenant, statement_timeout),
+        })?;
+        let reader = readers
             .checkout()
             .await
             .context("connecting to PostgreSQL")?;
@@ -112,6 +123,7 @@ impl Catalog {
         Ok(Self {
             cursor: cursor_codec()?,
             readers,
+            health,
             writer: None,
             database_name,
             tenant: tenant.map(str::to_owned),
@@ -133,20 +145,14 @@ impl Catalog {
     /// Returns an error if the connection or its setup fails, or the role
     /// is not a writer.
     pub async fn with_writer(mut self, writer_url: &str, force_tls: bool) -> Result<Self> {
-        let mut session = Session::default()
-            .lock_timeout(WRITER_LOCK_WAIT)
-            .statement_timeout(self.statement_timeout.unwrap_or(WRITER_STATEMENT));
-        if let Some(tenant) = &self.tenant {
-            session = session.tenant(tenant.clone());
-        }
         let writers = Pool::new(PoolSettings {
             database_url: writer_url,
             force_tls,
             max_size: write::WRITER_CONNECTIONS,
-            wait_timeout: None,
-            session,
+            wait_timeout: Some(POOL_WAIT),
+            session: writer_session(self.tenant.as_deref(), self.statement_timeout),
         })?;
-        let mut writer = writers
+        let writer = writers
             .checkout()
             .await
             .context("connecting to PostgreSQL as the writer")?;
@@ -180,21 +186,27 @@ impl Catalog {
         self.readers.checkout().await
     }
 
-    /// Whether the catalog answers now. A connection the server closed is
-    /// replaced on the next request, so this reports whether the catalog can
-    /// be reached, not whether one old connection survived.
+    /// Whether the catalog answers now, on the health check's own connection:
+    /// readers all busy with work do not make a reachable catalog look down,
+    /// and a connection the server closed is replaced on the next check, so
+    /// this reports whether the catalog can be reached, not whether one old
+    /// connection survived.
     ///
     /// # Errors
     ///
     /// No connection could be borrowed or opened, or it did not answer.
     pub async fn ping(&self) -> Result<()> {
-        let mut reader = self.reader().await.context("the catalog did not answer")?;
-        reader
+        let connection = self
+            .health
+            .checkout()
+            .await
+            .context("the catalog did not answer")?;
+        connection
             .client()
             .query_one("SELECT 1", &[])
             .await
             .context("the catalog did not answer")?;
-        reader.finish();
+        connection.finish();
         Ok(())
     }
 
@@ -217,51 +229,44 @@ impl Catalog {
     ) -> Result<Value, crate::service::DomainError> {
         use crate::service::DomainError;
         self.policy().authorize_read(principal)?;
-        let mut reader = self.reader().await.map_err(|_| DomainError::internal())?;
-        let tx = reader
-            .client_mut()
-            .build_transaction()
-            .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
-            .start()
+        let reader = self.reader().await.map_err(|_| DomainError::internal())?;
+        reader
+            .transaction(Some(IsolationLevel::RepeatableRead), async |tx| {
+                if !matches!(method, "resources/list" | "skills/list") {
+                    return crate::resources::call(tx, method, params).await;
+                }
+                let generation = crate::resources::generation(tx).await?;
+                let role = principal.role.to_string();
+                let filter = filter_digest(params);
+                let binding = crate::cursor::CursorBinding {
+                    method,
+                    tenant: self.tenant.as_deref().unwrap_or(""),
+                    principal: &principal.principal_id,
+                    role: &role,
+                    filter: &filter,
+                    generation: &generation,
+                };
+                let now = epoch_seconds()?;
+                let after = match params.get("cursor") {
+                    None => Value::Null,
+                    Some(Value::String(token)) => self
+                        .cursor
+                        .validate(token, &binding, now)
+                        .map_err(cursor_error)?,
+                    Some(_) => return Err(DomainError::InvalidCursor("invalid_cursor".into())),
+                };
+                let page = crate::resources::list(tx, method, &after).await?;
+                let mut result = page.result;
+                if let Some(next) = page.next {
+                    result["nextCursor"] = json!(
+                        self.cursor
+                            .issue(&binding, next, now)
+                            .map_err(cursor_error)?
+                    );
+                }
+                Ok(result)
+            })
             .await
-            .map_err(|_| DomainError::internal())?;
-        let value = if matches!(method, "resources/list" | "skills/list") {
-            let generation = crate::resources::generation(&tx).await?;
-            let role = principal.role.to_string();
-            let filter = filter_digest(params);
-            let binding = crate::cursor::CursorBinding {
-                method,
-                tenant: self.tenant.as_deref().unwrap_or(""),
-                principal: &principal.principal_id,
-                role: &role,
-                filter: &filter,
-                generation: &generation,
-            };
-            let now = epoch_seconds()?;
-            let after = match params.get("cursor") {
-                None => Value::Null,
-                Some(Value::String(token)) => self
-                    .cursor
-                    .validate(token, &binding, now)
-                    .map_err(cursor_error)?,
-                Some(_) => return Err(DomainError::InvalidCursor("invalid_cursor".into())),
-            };
-            let page = crate::resources::list(&tx, method, &after).await?;
-            let mut result = page.result;
-            if let Some(next) = page.next {
-                result["nextCursor"] = json!(
-                    self.cursor
-                        .issue(&binding, next, now)
-                        .map_err(cursor_error)?
-                );
-            }
-            result
-        } else {
-            crate::resources::call(&tx, method, params).await?
-        };
-        tx.commit().await.map_err(|_| DomainError::internal())?;
-        reader.finish();
-        Ok(value)
     }
 
     pub(crate) async fn search_page(
@@ -270,72 +275,68 @@ impl Catalog {
         args: &Value,
     ) -> Result<(Value, Option<String>), crate::service::DomainError> {
         use crate::service::DomainError;
-        let mut reader = self.reader().await.map_err(|_| DomainError::internal())?;
-        let tx = reader
-            .client_mut()
-            .build_transaction()
-            .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
-            .start()
-            .await
-            .map_err(|_| DomainError::internal())?;
-        let generation = crate::resources::generation(&tx).await?;
-        let role = principal.role.to_string();
-        let filter = filter_digest(args);
-        let binding = crate::cursor::CursorBinding {
-            method: "concept_search",
-            tenant: self.tenant.as_deref().unwrap_or(""),
-            principal: &principal.principal_id,
-            role: &role,
-            filter: &filter,
-            generation: &generation,
-        };
-        let now = epoch_seconds()?;
-        let after = args
-            .get("cursor")
-            .map(|token| {
-                token
-                    .as_str()
-                    .ok_or_else(|| DomainError::InvalidCursor("invalid_cursor".into()))
-                    .and_then(|token| {
-                        self.cursor
-                            .validate(token, &binding, now)
-                            .map_err(cursor_error)
+        let reader = self.reader().await.map_err(|_| DomainError::internal())?;
+        reader
+            .transaction(Some(IsolationLevel::RepeatableRead), async |tx| {
+                let generation = crate::resources::generation(tx).await?;
+                let role = principal.role.to_string();
+                let filter = filter_digest(args);
+                let binding = crate::cursor::CursorBinding {
+                    method: "concept_search",
+                    tenant: self.tenant.as_deref().unwrap_or(""),
+                    principal: &principal.principal_id,
+                    role: &role,
+                    filter: &filter,
+                    generation: &generation,
+                };
+                let now = epoch_seconds()?;
+                let after = args
+                    .get("cursor")
+                    .map(|token| {
+                        token
+                            .as_str()
+                            .ok_or_else(|| DomainError::InvalidCursor("invalid_cursor".into()))
+                            .and_then(|token| {
+                                self.cursor
+                                    .validate(token, &binding, now)
+                                    .map_err(cursor_error)
+                            })
                     })
-            })
-            .transpose()?;
-        let limit = i32::try_from(args.get("limit").and_then(Value::as_i64).unwrap_or(20))
-            .map_err(|_| DomainError::InvalidArgument("invalid limit".into()))?;
-        let after = after.map(|key| search_position(&key)).transpose()?;
-        let rows = search_rows(&tx, args, limit, after.as_ref()).await?;
-        let next = if rows
-            .as_array()
-            .is_some_and(|rows| i32::try_from(rows.len()).ok() == Some(limit))
-        {
-            let last = rows
-                .as_array()
-                .and_then(|rows| rows.last())
-                .ok_or_else(DomainError::internal)?;
-            let key = json!({"rank":last["rank"],"bundle_id":last["bundle_id"],"concept_id":last["concept_id"]});
-            let more = search_rows(&tx, args, 1, Some(&key)).await?;
-            if more.as_array().is_some_and(|rows| !rows.is_empty()) {
-                Some(
-                    self.cursor
-                        .issue(
-                            &binding,
-                            json!([key["rank"], key["bundle_id"], key["concept_id"]]),
-                            now,
+                    .transpose()?;
+                let limit =
+                    i32::try_from(args.get("limit").and_then(Value::as_i64).unwrap_or(20))
+                        .map_err(|_| DomainError::InvalidArgument("invalid limit".into()))?;
+                let after = after.map(|key| search_position(&key)).transpose()?;
+                let rows = search_rows(tx, args, limit, after.as_ref()).await?;
+                let next = if rows
+                    .as_array()
+                    .is_some_and(|rows| i32::try_from(rows.len()).ok() == Some(limit))
+                {
+                    let last = rows
+                        .as_array()
+                        .and_then(|rows| rows.last())
+                        .ok_or_else(DomainError::internal)?;
+                    let key = json!({"rank":last["rank"],"bundle_id":last["bundle_id"],"concept_id":last["concept_id"]});
+                    let more = search_rows(tx, args, 1, Some(&key)).await?;
+                    if more.as_array().is_some_and(|rows| !rows.is_empty()) {
+                        Some(
+                            self.cursor
+                                .issue(
+                                    &binding,
+                                    json!([key["rank"], key["bundle_id"], key["concept_id"]]),
+                                    now,
+                                )
+                                .map_err(cursor_error)?,
                         )
-                        .map_err(cursor_error)?,
-                )
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        tx.commit().await.map_err(|_| DomainError::internal())?;
-        reader.finish();
-        Ok((rows, next))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                Ok((rows, next))
+            })
+            .await
     }
 
     /// A separate, explicitly generation-stamped observation of the returned
@@ -357,7 +358,7 @@ impl Catalog {
                 })
             })
             .collect();
-        let mut reader = self
+        let reader = self
             .reader()
             .await
             .map_err(|_| crate::service::DomainError::internal())?;
@@ -379,7 +380,7 @@ impl Catalog {
         use crate::registry::Handler;
         match handler {
             Handler::ListBundles => {
-                let mut reader = self.reader().await?;
+                let reader = self.reader().await?;
                 let listed = write::list_bundles(reader.client(), arguments).await;
                 reader.finish();
                 listed
@@ -530,7 +531,7 @@ impl Catalog {
         let bundle_id = opt_i64(args, "bundle_id")?
             .ok_or_else(|| anyhow!("missing required integer argument 'bundle_id'"))?;
         let concept_id = require_str(args, "concept_id")?;
-        let mut reader = self.reader().await?;
+        let reader = self.reader().await?;
         let visibility = reader.client().query_one(
             "SELECT EXISTS(SELECT 1 FROM pgokf.bundles b WHERE b.id=$1 AND b.enabled AND b.retired_at IS NULL
              AND ((nullif(current_setting('pgokf.tenant',true),'') IS NULL AND NOT pgokf.tenant_required())
@@ -555,7 +556,7 @@ impl Catalog {
     /// per-bundle reasons.
     async fn check_workspace_plugin_freshness(&self, args: &Value) -> Result<Value> {
         let lock = require_str(args, "lock")?;
-        let mut reader = self.reader().await?;
+        let reader = self.reader().await?;
         let checked = pgokf_workspace::check_plugin_freshness(reader.client(), lock).await;
         reader.finish();
         let check = checked?;
@@ -718,9 +719,10 @@ impl Catalog {
         // later request inherits whatever state it was left in.
         let plugin = {
             let mut build = self.reader().await?;
-            match pgokf_workspace::build_in_transaction(build.client_mut(), &options, &selection)
-                .await
-            {
+            let outcome =
+                pgokf_workspace::build_in_transaction(build.client_mut(), &options, &selection)
+                    .await;
+            match outcome {
                 Ok(plugin) => {
                     build.finish();
                     plugin
@@ -805,7 +807,7 @@ impl Catalog {
     /// Run a query whose single row / single column is a `jsonb` aggregate, and
     /// return it as a `serde_json::Value`.
     async fn fetch_json(&self, sql: &str, params: &[&(dyn ToSql + Sync)]) -> Result<Value> {
-        let mut reader = self.reader().await?;
+        let reader = self.reader().await?;
         let row = reader
             .client()
             .query_one(sql, params)
@@ -814,6 +816,33 @@ impl Catalog {
         reader.finish();
         Ok(row?.get(0))
     }
+}
+
+/// The setup every reader (and health check) connection gets: the catalog's
+/// tenant, when it is scoped to one, so row-level security applies, and the
+/// transport's statement bound, when it sets one.
+fn reader_session(tenant: Option<&str>, statement_timeout: Option<Duration>) -> Session {
+    let mut session = Session::default();
+    if let Some(tenant) = tenant {
+        session = session.tenant(tenant);
+    }
+    if let Some(timeout) = statement_timeout {
+        session = session.statement_timeout(timeout);
+    }
+    session
+}
+
+/// The setup every writer connection gets: the reader's tenant, a bounded
+/// wait for another writer's lock, and the transport's statement bound or,
+/// on a transport without one, [`WRITER_STATEMENT`].
+fn writer_session(tenant: Option<&str>, statement_timeout: Option<Duration>) -> Session {
+    let mut session = Session::default()
+        .lock_timeout(WRITER_LOCK_WAIT)
+        .statement_timeout(statement_timeout.unwrap_or(WRITER_STATEMENT));
+    if let Some(tenant) = tenant {
+        session = session.tenant(tenant);
+    }
+    session
 }
 
 /// The custom harness a `target: custom` build describes (`None` for a
@@ -1359,5 +1388,202 @@ mod tests {
             answered.is_ok(),
             "the catalog reconnects instead of staying dead: {answered:?}"
         );
+    }
+
+    #[test]
+    fn a_reader_is_scoped_to_the_tenant_and_bounded_by_the_transport() {
+        // Arrange
+        let bound = std::time::Duration::from_secs(50);
+
+        // Act
+        let session = reader_session(Some("acme"), Some(bound));
+
+        // Assert
+        assert_eq!(
+            session,
+            Session::default().tenant("acme").statement_timeout(bound)
+        );
+    }
+
+    #[test]
+    fn a_reader_on_a_transport_without_bounds_keeps_the_servers_defaults() {
+        // Arrange / Act
+        let session = reader_session(None, None);
+
+        // Assert
+        assert_eq!(session, Session::default());
+    }
+
+    #[test]
+    fn a_writer_is_scoped_to_the_tenant_and_waits_a_bounded_time_for_locks() {
+        // Arrange
+        let bound = std::time::Duration::from_secs(50);
+
+        // Act
+        let session = writer_session(Some("acme"), Some(bound));
+
+        // Assert
+        assert_eq!(
+            session,
+            Session::default()
+                .tenant("acme")
+                .lock_timeout(WRITER_LOCK_WAIT)
+                .statement_timeout(bound)
+        );
+    }
+
+    #[test]
+    fn a_writer_on_a_transport_without_a_statement_bound_gets_its_own() {
+        // Arrange / Act
+        let session = writer_session(None, None);
+
+        // Assert
+        assert_eq!(
+            session,
+            Session::default()
+                .lock_timeout(WRITER_LOCK_WAIT)
+                .statement_timeout(WRITER_STATEMENT)
+        );
+    }
+
+    /// How long a live test waits for the catalog before it calls the wait a
+    /// failure: far longer than any answer here takes, far shorter than a
+    /// hang.
+    const SETTLE: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// Just enough of the `pgokf` schema for `get_skill`: one visible bundle
+    /// and a skill function that answers at once.
+    const SKILL_SCHEMA: &str = "
+        CREATE SCHEMA pgokf;
+        CREATE TABLE pgokf.bundles (
+            id bigint PRIMARY KEY, enabled boolean NOT NULL,
+            retired_at timestamptz, tenant_id text);
+        INSERT INTO pgokf.bundles VALUES (1, true, NULL, NULL);
+        CREATE FUNCTION pgokf.tenant_required() RETURNS boolean
+            LANGUAGE sql AS 'SELECT false';
+        CREATE FUNCTION pgokf.get_skill(bigint, text)
+            RETURNS TABLE (concept_id text, skill_md bytea)
+            LANGUAGE sql AS $$ SELECT $2, convert_to('# skill', 'UTF8') $$;";
+
+    /// A database of a test's own on the scratch server, set up by a script
+    /// and dropped when the test ends, whether it passed or panicked.
+    struct ScratchDatabase {
+        server_url: String,
+        name: String,
+    }
+
+    impl ScratchDatabase {
+        async fn create(server_url: &str, setup: &str) -> Self {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let name = format!(
+                "pgokf_mcp_test_{}_{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            );
+            let (admin, _driver) = pgokf_pgconn::connect(server_url, false)
+                .await
+                .expect("admin connection");
+            admin
+                .batch_execute(&format!("CREATE DATABASE {name}"))
+                .await
+                .expect("create the scratch database");
+            let database = Self {
+                server_url: server_url.to_owned(),
+                name,
+            };
+            let (client, _driver) = pgokf_pgconn::connect(&database.url(), false)
+                .await
+                .expect("connect to the scratch database");
+            client
+                .batch_execute(setup)
+                .await
+                .expect("set the scratch database up");
+            database
+        }
+
+        /// The connection string, naming this database (the last `dbname`
+        /// in a connection string wins).
+        fn url(&self) -> String {
+            format!("{} dbname={}", self.server_url, self.name)
+        }
+    }
+
+    impl Drop for ScratchDatabase {
+        fn drop(&mut self) {
+            let server_url = self.server_url.clone();
+            let name = std::mem::take(&mut self.name);
+            // The test's own runtime may be shutting down; drop the database
+            // from a runtime of its own.
+            let _ = std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .ok()?;
+                runtime.block_on(async {
+                    let (admin, _driver) = pgokf_pgconn::connect(&server_url, false).await.ok()?;
+                    admin
+                        .batch_execute(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+                        .await
+                        .ok()
+                })
+            })
+            .join();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_skill_read_holds_one_reader_at_a_time() {
+        let Some(url) = scratch_url().await else {
+            return;
+        };
+        // Arrange: every reader but one is busy, so a read that holds one
+        // reader while it asks for another could never finish.
+        let database = ScratchDatabase::create(&url, SKILL_SCHEMA).await;
+        let catalog = Catalog::connect(&database.url(), None, false, None)
+            .await
+            .expect("connect the catalog");
+        let mut busy = Vec::new();
+        for _ in 1..READER_CONNECTIONS {
+            busy.push(catalog.readers.checkout().await.expect("hold a reader"));
+        }
+
+        // Act
+        let read = tokio::time::timeout(
+            SETTLE,
+            catalog.get_skill(&json!({"bundle_id": 1, "concept_id": "intro"})),
+        )
+        .await;
+
+        // Assert
+        let skill = read
+            .expect("the read finished with one reader free")
+            .expect("the skill is returned");
+        assert_eq!(skill["skill_md"], "# skill");
+        drop(busy);
+    }
+
+    #[tokio::test]
+    async fn the_health_check_answers_while_every_reader_is_busy() {
+        let Some(url) = scratch_url().await else {
+            return;
+        };
+        // Arrange: every reader is taken by work that is still running.
+        let catalog = Catalog::connect(&url, None, false, None)
+            .await
+            .expect("connect the catalog");
+        let mut busy = Vec::new();
+        for _ in 0..READER_CONNECTIONS {
+            busy.push(catalog.readers.checkout().await.expect("hold a reader"));
+        }
+
+        // Act
+        let answered = tokio::time::timeout(SETTLE, catalog.ping()).await;
+
+        // Assert
+        assert!(
+            matches!(answered, Ok(Ok(()))),
+            "the catalog can be reached, so the health check answers: {answered:?}"
+        );
+        drop(busy);
     }
 }

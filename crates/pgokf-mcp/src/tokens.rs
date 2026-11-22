@@ -41,8 +41,15 @@ use pgokf_pgconn::{Pool, PoolSettings, Session};
 /// for one.
 const LOOKUP_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
 /// The most lookup connections open at once. A lookup is one index probe,
-/// so a few serve every request; the transport bounds how many wait.
+/// so a few serve every request; the rest wait their turn, for at most
+/// [`crate::catalog::POOL_WAIT`].
 const LOOKUP_CONNECTIONS: usize = 2;
+
+/// The setup every lookup connection gets: no tenant - the lookup reads a
+/// table no tenant scopes - and the lookup's own short statement bound.
+fn lookup_session() -> Session {
+    Session::default().statement_timeout(LOOKUP_STATEMENT_TIMEOUT)
+}
 
 /// The bearer of a token: what to call them in the log, what they may do,
 /// and the tenant the token was minted for.
@@ -142,8 +149,8 @@ impl CatalogTokens {
             database_url,
             force_tls,
             max_size: LOOKUP_CONNECTIONS,
-            wait_timeout: None,
-            session: Session::default().statement_timeout(LOOKUP_STATEMENT_TIMEOUT),
+            wait_timeout: Some(crate::catalog::POOL_WAIT),
+            session: lookup_session(),
         })
         .context("preparing the token lookup connections")?;
         Ok(Self { pool })
@@ -153,7 +160,7 @@ impl CatalogTokens {
 impl TokenLookups for CatalogTokens {
     fn lookup<'a>(&'a self, digest: &'a str) -> BoxFuture<'a, Result<Lookup>> {
         Box::pin(async move {
-            let mut connection = self
+            let connection = self
                 .pool
                 .checkout()
                 .await
@@ -188,7 +195,7 @@ impl TokenLookups for CatalogTokens {
     fn check(&self) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
             let nobody = "0".repeat(64);
-            let mut connection = self
+            let connection = self
                 .pool
                 .checkout()
                 .await
@@ -212,6 +219,18 @@ mod tests {
     use pgokf_companion::mcp_token::{TOKEN_PREFIX, new_token};
 
     use super::*;
+
+    #[test]
+    fn a_lookup_has_no_tenant_and_its_own_short_statement_bound() {
+        // Arrange / Act
+        let session = lookup_session();
+
+        // Assert
+        assert_eq!(
+            session,
+            Session::default().statement_timeout(LOOKUP_STATEMENT_TIMEOUT)
+        );
+    }
 
     #[test]
     fn a_role_decides_every_tool_and_nothing_else() {

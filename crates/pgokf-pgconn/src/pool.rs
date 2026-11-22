@@ -9,6 +9,7 @@
 //! handing it out again, so a dropped link costs one reconnect, not a
 //! process restart.
 
+use std::fmt;
 use std::ops::DerefMut as _;
 use std::time::Duration;
 
@@ -16,12 +17,12 @@ use anyhow::{Context, Result};
 use deadpool_postgres::{
     Hook, HookError, Manager, ManagerConfig, Object, RecyclingMethod, Runtime,
 };
-use tokio_postgres::{Client, NoTls};
+use tokio_postgres::{Client, IsolationLevel, NoTls, Transaction};
 
 /// How every connection a [`Pool`] opens is set up before it is handed out:
 /// the tenant it is scoped to and the bounds on its statements and lock
 /// waits. A setting left unset keeps the server's default.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Session {
     tenant: Option<String>,
     statement_timeout: Option<Duration>,
@@ -172,14 +173,36 @@ impl Pool {
 /// A connection borrowed from a [`Pool`] for one piece of work.
 ///
 /// Work that completes (or fails) calls [`Borrowed::finish`] and the
-/// connection goes back to the pool. Work abandoned mid-flight - a request
-/// that timed out, or a client that went away - drops it unfinished, and the
-/// connection is taken out of the pool and closed instead: closing the socket
-/// is what makes the server cancel the running statement, and no later
-/// request inherits a connection in an unknown state.
+/// connection goes back to the pool at once; work in a transaction runs
+/// through [`Borrowed::transaction`], which does both. Work abandoned
+/// mid-flight - a request that timed out, or a client that went away - drops
+/// it unfinished, and the connection is taken out of the pool and closed
+/// instead: closing the socket is what makes the server cancel the running
+/// statement, and no later request inherits a connection in an unknown state.
 pub struct Borrowed {
     object: Option<Object>,
     done: bool,
+}
+
+/// Why [`Borrowed::transaction`] could not run or keep its work: the
+/// transaction did not open, or did not commit. Either way its connection
+/// was closed rather than returned to the pool.
+#[derive(Debug)]
+pub struct TransactionError {
+    stage: &'static str,
+    source: tokio_postgres::Error,
+}
+
+impl fmt::Display for TransactionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "could not {} the transaction", self.stage)
+    }
+}
+
+impl std::error::Error for TransactionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
 }
 
 /// Why a [`Borrowed`] always holds its connection: only `Drop` takes it out.
@@ -206,9 +229,64 @@ impl Borrowed {
         self.object.as_mut().expect(PRESENT).deref_mut()
     }
 
-    /// Mark the work complete, so the connection returns to the pool.
-    pub fn finish(&mut self) {
+    /// The work is complete: give the connection back to the pool now. It
+    /// takes the guard, so a finished connection cannot stay checked out
+    /// while the same work borrows another, and a transaction opened on it
+    /// has to have ended first.
+    pub fn finish(mut self) {
         self.done = true;
+    }
+
+    /// Run `work` in one transaction on this connection and end it: commit
+    /// once `work` succeeded, roll back once it returned an error. The
+    /// connection goes back to the pool only after the transaction has ended
+    /// cleanly, so an ordinary refusal costs no reconnect; if the commit or
+    /// rollback fails, or the work is abandoned mid-flight, it is closed
+    /// instead, which ends the transaction on the server as well.
+    ///
+    /// `isolation` replaces the server's default isolation level.
+    ///
+    /// # Errors
+    ///
+    /// The transaction did not open or commit ([`TransactionError`]), or
+    /// `work` failed, in which case its own error is returned after the
+    /// rollback.
+    pub async fn transaction<T, E>(
+        mut self,
+        isolation: Option<IsolationLevel>,
+        work: impl AsyncFnOnce(&Transaction<'_>) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<TransactionError>,
+    {
+        let mut builder = self.client_mut().build_transaction();
+        if let Some(level) = isolation {
+            builder = builder.isolation_level(level);
+        }
+        let transaction = builder.start().await.map_err(|source| TransactionError {
+            stage: "open",
+            source,
+        })?;
+        let outcome = work(&transaction).await;
+        match outcome {
+            Ok(value) => {
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|source| TransactionError {
+                        stage: "commit",
+                        source,
+                    })?;
+                self.finish();
+                Ok(value)
+            }
+            Err(error) => {
+                if transaction.rollback().await.is_ok() {
+                    self.finish();
+                }
+                Err(error)
+            }
+        }
     }
 }
 
@@ -290,7 +368,7 @@ mod tests {
         // Arrange: a one-connection pool whose connection the server closes,
         // as an idle-timeout proxy or a database restart does.
         let pool = Pool::new(settings(&url, 1, Session::default())).expect("build the pool");
-        let mut first = pool.checkout().await.expect("first checkout");
+        let first = pool.checkout().await.expect("first checkout");
         let closed_pid = backend_pid(&first).await;
         let (admin, _driver) = crate::connect(&url, false).await.expect("admin connection");
         admin
@@ -299,7 +377,6 @@ mod tests {
             .expect("terminate the pooled backend");
         wait_until(|| first.client().is_closed()).await;
         first.finish();
-        drop(first);
 
         // Act
         let second = pool.checkout().await.expect("checkout after the close");
@@ -372,16 +449,136 @@ mod tests {
         };
         // Arrange
         let pool = Pool::new(settings(&url, 1, Session::default())).expect("build the pool");
-        let mut finished = pool.checkout().await.expect("first checkout");
+        let finished = pool.checkout().await.expect("first checkout");
         let finished_pid = backend_pid(&finished).await;
 
         // Act
         finished.finish();
-        drop(finished);
         let next = pool.checkout().await.expect("second checkout");
 
         // Assert
         assert_eq!(backend_pid(&next).await, finished_pid);
+    }
+
+    /// A one-connection pool whose connection has a session-local table the
+    /// transaction tests write to, and that connection's backend pid.
+    async fn pool_with_scratch_table(url: &str) -> (Pool, i32) {
+        let pool = Pool::new(settings(url, 1, Session::default())).expect("build the pool");
+        let connection = pool.checkout().await.expect("first checkout");
+        connection
+            .client()
+            .batch_execute("CREATE TEMPORARY TABLE written (n int)")
+            .await
+            .expect("create the scratch table");
+        let pid = backend_pid(&connection).await;
+        connection.finish();
+        (pool, pid)
+    }
+
+    async fn rows_written(connection: &Borrowed) -> i64 {
+        connection
+            .client()
+            .query_one("SELECT count(*) FROM written", &[])
+            .await
+            .expect("count the scratch rows")
+            .get(0)
+    }
+
+    #[tokio::test]
+    async fn a_transaction_whose_work_succeeds_commits_and_returns_its_connection() {
+        let Some(url) = scratch_url().await else {
+            return;
+        };
+        // Arrange
+        let (pool, pid) = pool_with_scratch_table(&url).await;
+        let connection = pool.checkout().await.expect("checkout");
+
+        // Act
+        let answered: Result<&str> = connection
+            .transaction(None, async |transaction| {
+                transaction
+                    .execute("INSERT INTO written VALUES (1)", &[])
+                    .await?;
+                Ok("written")
+            })
+            .await;
+
+        // Assert
+        assert_eq!(answered.expect("the work succeeds"), "written");
+        let next = pool.checkout().await.expect("checkout after the commit");
+        assert_eq!(backend_pid(&next).await, pid, "the connection was reused");
+        assert_eq!(rows_written(&next).await, 1, "the write was committed");
+    }
+
+    #[tokio::test]
+    async fn a_transaction_whose_work_fails_rolls_back_and_returns_its_connection() {
+        let Some(url) = scratch_url().await else {
+            return;
+        };
+        // Arrange
+        let (pool, pid) = pool_with_scratch_table(&url).await;
+        let connection = pool.checkout().await.expect("checkout");
+
+        // Act: an ordinary refusal after the work has written something.
+        let answered: Result<()> = connection
+            .transaction(None, async |transaction| {
+                transaction
+                    .execute("INSERT INTO written VALUES (1)", &[])
+                    .await?;
+                anyhow::bail!("refused")
+            })
+            .await;
+
+        // Assert
+        assert_eq!(answered.expect_err("the work fails").to_string(), "refused");
+        let next = pool.checkout().await.expect("checkout after the rollback");
+        assert_eq!(backend_pid(&next).await, pid, "the connection was reused");
+        assert_eq!(rows_written(&next).await, 0, "the write was rolled back");
+    }
+
+    #[tokio::test]
+    async fn a_transaction_abandoned_mid_flight_closes_its_connection() {
+        let Some(url) = scratch_url().await else {
+            return;
+        };
+        // Arrange: a request cancelled while its statement still runs.
+        let (pool, pid) = pool_with_scratch_table(&url).await;
+        let connection = pool.checkout().await.expect("checkout");
+        let work = connection.transaction(None, async |transaction| -> Result<()> {
+            transaction.execute("SELECT pg_sleep(30)", &[]).await?;
+            Ok(())
+        });
+
+        // Act
+        let cancelled = tokio::time::timeout(Duration::from_millis(200), work).await;
+
+        // Assert
+        assert!(cancelled.is_err(), "the work was still running");
+        let next = pool.checkout().await.expect("checkout after the abandon");
+        assert_ne!(backend_pid(&next).await, pid, "the connection was closed");
+    }
+
+    #[tokio::test]
+    async fn a_transaction_runs_at_the_isolation_level_it_asks_for() {
+        let Some(url) = scratch_url().await else {
+            return;
+        };
+        // Arrange
+        let pool = Pool::new(settings(&url, 1, Session::default())).expect("build the pool");
+        let connection = pool.checkout().await.expect("checkout");
+
+        // Act
+        let level: Result<String> = connection
+            .transaction(Some(IsolationLevel::RepeatableRead), async |transaction| {
+                Ok(transaction
+                    .query_one("SHOW transaction_isolation", &[])
+                    .await?
+                    .get(0))
+            })
+            .await;
+
+        // Assert
+        assert_eq!(level.expect("the work succeeds"), "repeatable read");
     }
 
     #[tokio::test]

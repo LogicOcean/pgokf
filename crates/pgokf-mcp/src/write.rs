@@ -138,37 +138,19 @@ pub(crate) async fn call(
     actor: &str,
 ) -> Result<Value> {
     // One transaction per call, so the read a write is based on and the
-    // write itself cannot be separated by anyone else's.
-    let mut connection = writer.pool.checkout().await?;
-    let tx = connection
-        .client_mut()
-        .transaction()
+    // write itself cannot be separated by anyone else's. A refusal rolls it
+    // back, so nothing half-written survives.
+    let connection = writer.pool.checkout().await?;
+    connection
+        .transaction(None, async |tx| match tool {
+            "put_document" => put_document(tx, args, actor).await,
+            "delete_document" => delete_document(tx, args).await,
+            "create_content_bundle" => create_content_bundle(tx, args).await,
+            "refresh_bundle" => refresh_bundle(tx, args).await,
+            "set_bundle_state" => set_bundle_state(tx, args).await,
+            other => bail!("unknown tool '{}'", echo(other)),
+        })
         .await
-        .context("starting the write transaction")?;
-    let outcome = match tool {
-        "put_document" => put_document(&tx, args, actor).await,
-        "delete_document" => delete_document(&tx, args).await,
-        "create_content_bundle" => create_content_bundle(&tx, args).await,
-        "refresh_bundle" => refresh_bundle(&tx, args).await,
-        "set_bundle_state" => set_bundle_state(&tx, args).await,
-        other => bail!("unknown tool '{}'", echo(other)),
-    };
-    // The connection goes back to the pool only once its transaction has
-    // ended cleanly; otherwise it is closed, which ends the transaction too.
-    match outcome {
-        Ok(value) => {
-            tx.commit().await.context("committing the write")?;
-            connection.finish();
-            Ok(value)
-        }
-        // Nothing half-written survives a refusal.
-        Err(error) => {
-            if tx.rollback().await.is_ok() {
-                connection.finish();
-            }
-            Err(error)
-        }
-    }
 }
 
 /// The bundles in the catalog. A read, so it is served by the reader

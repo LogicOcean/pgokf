@@ -62,7 +62,7 @@
       "executable": false
     },
     "CHANGELOG.md": {
-      "sha256": "d0d7968901bca50d6bdba86365a7b0b4c94e9f76a3ed9fbe8a4d8405ed5da174",
+      "sha256": "baae7c8045172279b360b4b8dd744996d64a9f51f05b370cbf76f82b4837e82d",
       "executable": false
     },
     "CODE_OF_CONDUCT.md": {
@@ -78,7 +78,7 @@
       "executable": false
     },
     "Cargo.lock": {
-      "sha256": "c16b4fa83a8f4a450a94630c48cf5e2b2a4edc742c0482bc219c1376d3d600c8",
+      "sha256": "f71310cfd93428b7388ffa95f2a6061428138f503047a5a6b24e0fed231bba01",
       "executable": false
     },
     "Cargo.toml": {
@@ -666,11 +666,11 @@
       "executable": false
     },
     "crates/pgokf-mcp/README.md": {
-      "sha256": "bf570ff6ef2563dc27b47e56ca0739eb7099e6a0c555e6713bfb9c7507be44ff",
+      "sha256": "df186716f7993c965a326cc40bbbf6e446f0aeff4749776d3cd8b29d94aed06d",
       "executable": false
     },
     "crates/pgokf-mcp/src/catalog.rs": {
-      "sha256": "b08acc599b637c4b6d4a39aab39d92f5717ca573b68dd703e51d3843f8312cb5",
+      "sha256": "cafb8fdf49bacbfa59cccbb9210edad6ae0f2a5113189979e73e76c11b386e7f",
       "executable": false
     },
     "crates/pgokf-mcp/src/cursor.rs": {
@@ -718,11 +718,11 @@
       "executable": false
     },
     "crates/pgokf-mcp/src/service.rs": {
-      "sha256": "adcae5f1a27b61b41b21d92ce04fb1b09b81586cf7c2c4a55d835ba5c570a216",
+      "sha256": "c4bfe2b6fe508e040173bc5d907e361b9f31abe0ed1e1c0d253e86405205ec50",
       "executable": false
     },
     "crates/pgokf-mcp/src/tokens.rs": {
-      "sha256": "84919b174877d98e38ee3ceb5a9395425867f8c21eedaf848d95bc1b39936946",
+      "sha256": "de2e5ab7008c47992fad475b2f7f9559cdae17b999ef2b0759845c0a02f0170f",
       "executable": false
     },
     "crates/pgokf-mcp/src/uri.rs": {
@@ -730,7 +730,7 @@
       "executable": false
     },
     "crates/pgokf-mcp/src/write.rs": {
-      "sha256": "26cecb6ef8ce4c0814d39ad8de88b8e07fa85bec1b7a554bedf7b1d00f56f138",
+      "sha256": "3a379d0827fccd7a613f3a7e864c60846cc6de4acb4b7c6ab67bbbc37833df77",
       "executable": false
     },
     "crates/pgokf-pgconn/Cargo.toml": {
@@ -738,11 +738,11 @@
       "executable": false
     },
     "crates/pgokf-pgconn/src/lib.rs": {
-      "sha256": "e0143bf310965b6050a77a63a7b7ddc943d9683827c92ac6e79b270023e2bef7",
+      "sha256": "94810f79314560dab8ad52ce1f365ac909709c502fee2e4ab18ed53bb7425e0d",
       "executable": false
     },
     "crates/pgokf-pgconn/src/pool.rs": {
-      "sha256": "23a3c102682d6772a1e4e8343ecf2d8799343ddd1ebc4afcf8bd36f5b320bead",
+      "sha256": "f2e2b14868a558be09ce995e2551804d70e1122351e53f72a89ed2ffdc306386",
       "executable": false
     },
     "crates/pgokf-process-handle/Cargo.toml": {
@@ -922,7 +922,7 @@
       "executable": false
     },
     "crates/pgokf-verifier/src/process.rs": {
-      "sha256": "b62a6eac940dc1066ea92b8ccc996a5f486e7099ce19270e7d38a6ee421ccd2d",
+      "sha256": "b7235ff38655a15e1e373c49621262658013a0824eccc0f569f6708416246430",
       "executable": false
     },
     "crates/pgokf-verifier/src/process/launchd.rs": {
@@ -1057,6 +1057,10 @@
       "sha256": "d71fc5e7c66755cabaf67f908eaf812ea8fa5c5b09a555063f8b0ec8f14cfa3f",
       "executable": false
     },
+    "crates/pgokf-verifier/tests/supply_chain.rs": {
+      "sha256": "12e0fc186ad5953057d369078abb75f7ecdf3cd07450cd02d17ba3fc750a0424",
+      "executable": false
+    },
     "crates/pgokf-verifier/tests/support/policy_cases.rs": {
       "sha256": "9709c5fb558ab7c6c78f9dbab9998f4f639b199bfed57c3fca13600861ae61ec",
       "executable": false
@@ -1082,7 +1086,7 @@
       "executable": false
     },
     "crates/pgokf-web/src/db.rs": {
-      "sha256": "5194ffb253b6fb43fe84bce39bcacb88e7340159392320b44c7e26ad6790b147",
+      "sha256": "759e796ac5d432c6ac1c01b95cf8c97e9801597f97b5526a9a19ba4f84a8d6e2",
       "executable": false
     },
     "crates/pgokf-web/src/graph.rs": {
@@ -1482,7 +1486,7 @@
       "executable": false
     },
     "deploy/compose/docker-compose.yml": {
-      "sha256": "19adbf2d2338eff9b3f346b3ba8d56e21a29996d55d7ecfd4562b60d9909a128",
+      "sha256": "5869b9db96f93a937d8443f550a67d9817eb5ced1838e3c36bb594d88605b68a",
       "executable": false
     },
     "deploy/confluence/README.md": {

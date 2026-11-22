@@ -292,8 +292,8 @@ services:
     ports:
       - "${PGOKF_MCP_BIND:-127.0.0.1}:${PGOKF_MCP_PORT:-8081}:8081"
     # GET /healthz needs no token and reports the catalog link, for an
-    # external probe. The server itself stops when the link to PostgreSQL
-    # closes, which restart: unless-stopped then heals.
+    # external probe. A connection PostgreSQL closes is replaced on the next
+    # request, so a database restart costs a reconnect, not a restart.
     networks:
       - pgokf-net
     logging:

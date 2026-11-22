@@ -48,20 +48,35 @@ script is the 0.6.0 one regenerated under the new version.
   Azure Container Apps' TCP ingress closes a connection idle for 300
   seconds, so an idle server exited every five minutes. Its reader, writer
   and token-lookup connections now come from pools that replace a closed
-  connection on the next request; `/healthz` reports 503 only while the
-  catalog cannot be reached.
+  connection on the next request. The health check asks on a connection of
+  its own, so `/healthz` reports 503 only while the catalog cannot be
+  reached, not while every reader is busy.
 
 ### Changed
 
 - **`pgokf-pgconn` owns the connection lifecycle.** Besides the connect
-  step and TLS policy it now provides `Session` (tenant, statement and lock
-  bounds applied to every new connection), `Pool` (the pool `pgokf-web`
-  used, set up from a `Session`) and `Borrowed` (the guard that closes a
-  connection whose work was abandoned mid-flight instead of returning it).
+  step and TLS policy it now provides:
+  - `Session`: the tenant and the statement and lock bounds applied to
+    every new connection.
+  - `Pool`: the pool `pgokf-web` used, set up from a `Session`.
+  - `Borrowed`: the guard for one piece of work.
+    - `finish` takes the guard and returns the connection at once, so
+      finished work cannot keep a connection while it borrows another.
+    - `transaction` commits or rolls back and returns the connection only
+      once the transaction has ended cleanly.
+    - Work abandoned mid-flight closes its connection instead of returning
+      it.
+
   `pgokf-web` and `pgokf-mcp` build their pools through it, and
   `pgokf-confluence` sets its import session up through `Session`.
-- `pgokf-mcp`'s plugin builds no longer queue behind one another: each
-  borrows a reader connection of its own. Writes still run one at a time.
+- **`pgokf-mcp` connections.**
+  - Plugin builds no longer queue behind one another: each borrows a
+    reader connection of its own. Writes still run one at a time.
+  - A request waits at most a minute for a free connection.
+  - A refused read (a bad cursor or limit) rolls back and hands its
+    connection back rather than closing it.
+  - Each process opens at most twelve connections: eight readers, one for
+    the health check, two for token lookups and one writer.
 - **PostgreSQL 19 is tested as the GA 19.0.** PostgreSQL 19.0 shipped on
   2026-11-20 and the pinned 19 RC 2 base image and packages no longer
   exist, so CI's PG19 leg (clippy, the in-database suite, an image smoke
