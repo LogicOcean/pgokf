@@ -124,8 +124,11 @@ Each process opens at most twelve connections to the catalog: up to eight
 readers (one per request in flight, handed back before the request takes
 another, and a request waits at most a minute for one), one for the health
 check, up to two for token lookups, and one writer when `--writer-url` is
-set. Size `max_connections`, or the pooler in front of PostgreSQL, for that
-many per replica.
+set. A request abandoned mid-statement - its client gone, or its time up -
+closes its connection, and the server stops that statement within a second
+(each connection sets `client_connection_check_interval`), so abandoned work
+does not leave backends running beyond that count. Size `max_connections`,
+or the pooler in front of PostgreSQL, for that many per replica.
 
 Over stdio the client launched the server and already holds the connection
 string, so there is nothing to authenticate. Over HTTP the server is

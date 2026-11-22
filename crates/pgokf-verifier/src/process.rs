@@ -200,6 +200,9 @@ mod unix {
     use std::{os::unix::process::CommandExt, process::Stdio};
     use sysinfo::{ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System, UpdateKind};
 
+    /// How long containment keeps signalling a command's surviving owned
+    /// processes after the command has ended before it reports them.
+    pub(super) const CONTAINMENT_CLEANUP: Duration = Duration::from_secs(5);
     const PROCESS_OWNER_ENV: &str = "PGOKF_PROCESS_OWNER";
     const PROCESS_GATE_ENV: &str = "PGOKF_PROCESS_GATE";
     const PROCESS_GATE_SCRIPT: &str =
@@ -745,7 +748,7 @@ mod unix {
 
         pub(crate) fn terminate_and_ensure_released(&mut self) -> Result<(), String> {
             let monitor_error = self.stop_monitor().err();
-            let deadline = Instant::now() + Duration::from_secs(5);
+            let deadline = Instant::now() + CONTAINMENT_CLEANUP;
             let mut empty_since = None;
             loop {
                 let survivors = self.survivors();
@@ -1569,7 +1572,12 @@ mod tests {
         spec.durable_stderr = Some(stderr.clone());
         let start = Instant::now();
         assert!(spec.run().unwrap_err().contains("timeout"));
-        assert!(start.elapsed() < OUTLIVES);
+        // The deadline is enforced on time: the run ends within its timeout
+        // plus containment's own cleanup bound and a second's slack, long
+        // before the command's sleep would have.
+        let enforced_by = spec.timeout + super::unix::CONTAINMENT_CLEANUP + Duration::from_secs(1);
+        assert!(enforced_by < OUTLIVES);
+        assert!(start.elapsed() < enforced_by, "{:?}", start.elapsed());
         assert_eq!(fs::read(stdout).unwrap(), b"partial-out");
         assert_eq!(fs::read(stderr).unwrap(), b"partial-err");
         for source in [

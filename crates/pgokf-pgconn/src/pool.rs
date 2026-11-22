@@ -102,11 +102,20 @@ pub struct PoolSettings<'a> {
     pub session: Session,
 }
 
+/// How often the server checks, while a statement runs, that the client is
+/// still connected. PostgreSQL otherwise runs a statement to its end after
+/// the client has gone, so work abandoned mid-statement would leave its
+/// backend running beside the connection the pool opens to replace it.
+const CLIENT_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+
 /// A pool of catalog connections, each set up from one [`Session`].
 ///
 /// A checkout that finds the connection it would reuse already closed by the
 /// server opens a new one instead, so a link that drops while idle costs one
-/// reconnect on the next request.
+/// reconnect on the next request. Every connection also has the server check
+/// every [`CLIENT_CHECK_INTERVAL`] that its client is still there, so the
+/// backend of a connection closed mid-statement ends within about that long,
+/// and the pool's backends stay within its size.
 #[derive(Clone)]
 pub struct Pool {
     inner: deadpool_postgres::Pool,
@@ -139,10 +148,17 @@ impl Pool {
             .post_create(Hook::async_fn(move |client, _| {
                 let session = session.clone();
                 Box::pin(async move {
-                    session
-                        .apply(client)
-                        .await
-                        .map_err(|error| HookError::message(format!("{error:#}")))
+                    async {
+                        set_milliseconds(
+                            client,
+                            "client_connection_check_interval",
+                            CLIENT_CHECK_INTERVAL,
+                        )
+                        .await?;
+                        session.apply(client).await
+                    }
+                    .await
+                    .map_err(|error: anyhow::Error| HookError::message(format!("{error:#}")))
                 })
             }))
             .build()
@@ -177,8 +193,9 @@ impl Pool {
 /// through [`Borrowed::transaction`], which does both. Work abandoned
 /// mid-flight - a request that timed out, or a client that went away - drops
 /// it unfinished, and the connection is taken out of the pool and closed
-/// instead: closing the socket is what makes the server cancel the running
-/// statement, and no later request inherits a connection in an unknown state.
+/// instead: the server notices the closed client within
+/// [`CLIENT_CHECK_INTERVAL`] and cancels the running statement, and no later
+/// request inherits a connection in an unknown state.
 pub struct Borrowed {
     object: Option<Object>,
     done: bool,
@@ -412,7 +429,8 @@ mod tests {
                 .client()
                 .query_one(
                     "SELECT current_setting('pgokf.tenant'), \
-                     current_setting('statement_timeout'), current_setting('lock_timeout')",
+                     current_setting('statement_timeout'), current_setting('lock_timeout'), \
+                     current_setting('client_connection_check_interval')",
                     &[],
                 )
                 .await
@@ -420,6 +438,7 @@ mod tests {
             assert_eq!(row.get::<_, String>(0), "acme");
             assert_eq!(row.get::<_, String>(1), "1234ms");
             assert_eq!(row.get::<_, String>(2), "567ms");
+            assert_eq!(row.get::<_, String>(3), "1s");
         }
     }
 
@@ -556,6 +575,58 @@ mod tests {
         assert!(cancelled.is_err(), "the work was still running");
         let next = pool.checkout().await.expect("checkout after the abandon");
         assert_ne!(backend_pid(&next).await, pid, "the connection was closed");
+    }
+
+    #[tokio::test]
+    async fn work_abandoned_mid_statement_leaves_no_more_backends_than_the_pool_holds() {
+        let Some(url) = scratch_url().await else {
+            return;
+        };
+        // Arrange: a two-connection pool whose backends can be told apart
+        // from every other session on the server.
+        let marker = format!("pgokf-pgconn-abandon-{}", std::process::id());
+        let pool_url = format!("{url} application_name={marker}");
+        let pool = Pool::new(settings(&pool_url, 2, Session::default())).expect("build the pool");
+        let (admin, _driver) = crate::connect(&url, false).await.expect("admin connection");
+        let backends = async || -> i64 {
+            admin
+                .query_one(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE application_name = $1",
+                    &[&marker],
+                )
+                .await
+                .expect("count the pool's backends")
+                .get(0)
+        };
+
+        // Act: six requests, each abandoned while its statement still runs.
+        for _ in 0..6 {
+            let connection = pool.checkout().await.expect("checkout");
+            let work = connection.transaction(None, async |transaction| -> Result<()> {
+                transaction.execute("SELECT pg_sleep(30)", &[]).await?;
+                Ok(())
+            });
+            let abandoned = tokio::time::timeout(Duration::from_millis(200), work).await;
+            assert!(abandoned.is_err(), "the statement was still running");
+        }
+
+        // Assert: the server ends each abandoned backend, so no more remain
+        // than the pool may hold.
+        let deadline = tokio::time::Instant::now() + SETTLE;
+        let mut live = backends().await;
+        while live > 2 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            live = backends().await;
+        }
+        admin
+            .execute(
+                "SELECT pg_catalog.pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity \
+                 WHERE application_name = $1",
+                &[&marker],
+            )
+            .await
+            .expect("end the test's backends");
+        assert!(live <= 2, "{live} backends still run for a pool of 2");
     }
 
     #[tokio::test]

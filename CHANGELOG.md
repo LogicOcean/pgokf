@@ -24,10 +24,12 @@ script is the 0.6.0 one regenerated under the new version.
 
 - **`url` 2.5.9 for RUSTSEC-2026-0592** (a stack overflow in
   `Url::origin()` on a URL nested in many `blob:` prefixes).
-  `pgokf-confluence` compares the origin of links it reads out of page
-  content, so a page carrying such a link could have crashed an import. The
-  lockfile changes `url` and the `form_urlencoded` 1.2.3 it requires, and
-  the third-party notices follow.
+  `pgokf-confluence` calls `Url::origin()`, but only on http, https and
+  mailto links and on API links of at most 16 KiB, too short to nest deeply
+  enough to overflow, so it was not exploitable; the update keeps the
+  advisory gates passing and removes the flaw. The lockfile changes `url`
+  and the `form_urlencoded` 1.2.3 it requires, and the third-party notices
+  follow.
 - **`quinn-proto` 0.11.19 and `quinn-udp` 0.5.16 for RUSTSEC-2026-0523,
   RUSTSEC-2026-0524 and RUSTSEC-2026-0538** (a peer opening streams beyond
   the stream limit, a long Retry token that can panic or exhaust a client's
@@ -71,7 +73,10 @@ script is the 0.6.0 one regenerated under the new version.
     - `transaction` commits or rolls back and returns the connection only
       once the transaction has ended cleanly.
     - Work abandoned mid-flight closes its connection instead of returning
-      it.
+      it, and every pooled connection has the server check each second that
+      its client is still there (`client_connection_check_interval`), so
+      the abandoned statement stops too and the pool's backends stay within
+      its size.
 
   `pgokf-web` and `pgokf-mcp` build their pools through it, and
   `pgokf-confluence` sets its import session up through `Session`.

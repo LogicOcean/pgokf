@@ -192,19 +192,23 @@ fn env_file_vars(path: Option<&str>) -> Result<BTreeMap<String, String>> {
     Ok(parse_env_file(&text))
 }
 
+/// The bound on every catalog statement for the transport `http` selects:
+/// over HTTP each statement is bounded under the request budget, so the
+/// database gives up before the transport does; stdio sets no bound.
+fn statement_timeout(http: Option<SocketAddr>) -> Option<std::time::Duration> {
+    http.map(|_| http::STATEMENT_TIMEOUT)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let file = env_file_vars(cli.env_file.as_deref())?;
     let settings = resolve_settings(&cli, &file, &ambient_settings())?;
-    // Over HTTP every statement is bounded under the request budget, so the
-    // database gives up before the transport does; stdio sets no bound.
-    let statement_timeout = cli.http.map(|_| http::STATEMENT_TIMEOUT);
     let catalog = Catalog::connect(
         &settings.database_url,
         settings.tenant.as_deref(),
         settings.tls,
-        statement_timeout,
+        statement_timeout(cli.http),
     )
     .await
     .context("failed to connect to the catalog")?;
@@ -336,6 +340,21 @@ async fn write_response(stdout: &mut Stdout, response: &Response) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_http_server_bounds_every_statement_under_the_request_budget() {
+        // Arrange
+        let bind: SocketAddr = "127.0.0.1:8081".parse().expect("an address");
+
+        // Act / Assert
+        assert_eq!(statement_timeout(Some(bind)), Some(http::STATEMENT_TIMEOUT));
+    }
+
+    #[test]
+    fn a_stdio_server_leaves_statements_unbounded() {
+        // Arrange / Act / Assert
+        assert_eq!(statement_timeout(None), None);
+    }
 
     #[test]
     fn parse_env_file_reads_assignments_and_skips_noise() {

@@ -145,13 +145,7 @@ impl Catalog {
     /// Returns an error if the connection or its setup fails, or the role
     /// is not a writer.
     pub async fn with_writer(mut self, writer_url: &str, force_tls: bool) -> Result<Self> {
-        let writers = Pool::new(PoolSettings {
-            database_url: writer_url,
-            force_tls,
-            max_size: write::WRITER_CONNECTIONS,
-            wait_timeout: Some(POOL_WAIT),
-            session: writer_session(self.tenant.as_deref(), self.statement_timeout),
-        })?;
+        let writers = self.writer_pool(writer_url, force_tls)?;
         let writer = writers
             .checkout()
             .await
@@ -171,6 +165,18 @@ impl Catalog {
         }
         self.writer = Some(WriterConn::new(writers));
         Ok(self)
+    }
+
+    /// The writer's pool on `writer_url`, set up for this catalog's tenant
+    /// and transport. No connection is opened until the first checkout.
+    fn writer_pool(&self, writer_url: &str, force_tls: bool) -> Result<Pool> {
+        Pool::new(PoolSettings {
+            database_url: writer_url,
+            force_tls,
+            max_size: write::WRITER_CONNECTIONS,
+            wait_timeout: Some(POOL_WAIT),
+            session: writer_session(self.tenant.as_deref(), self.statement_timeout),
+        })
     }
 
     /// The writer connections, or why there are none to use.
@@ -1560,6 +1566,55 @@ mod tests {
             .expect("the skill is returned");
         assert_eq!(skill["skill_md"], "# skill");
         drop(busy);
+    }
+
+    /// The tenant and the bounds a connection's session carries.
+    async fn session_settings(connection: &Borrowed) -> (String, String, String) {
+        let row = connection
+            .client()
+            .query_one(
+                "SELECT current_setting('pgokf.tenant', true), \
+                 current_setting('statement_timeout'), current_setting('lock_timeout')",
+                &[],
+            )
+            .await
+            .expect("read the session settings");
+        (row.get(0), row.get(1), row.get(2))
+    }
+
+    #[tokio::test]
+    async fn every_catalog_connection_is_scoped_to_the_tenant_and_bounded() {
+        let Some(url) = scratch_url().await else {
+            return;
+        };
+        // Arrange: a tenant-scoped catalog on a transport that bounds
+        // statements.
+        let bound = std::time::Duration::from_millis(4321);
+        let catalog = Catalog::connect(&url, Some("acme"), false, Some(bound))
+            .await
+            .expect("connect the catalog");
+        let writers = catalog
+            .writer_pool(&url, false)
+            .expect("build the writer pool");
+
+        // Act
+        let reader = catalog.readers.checkout().await.expect("a reader");
+        let health = catalog
+            .health
+            .checkout()
+            .await
+            .expect("the health connection");
+        let writer = writers.checkout().await.expect("a writer");
+
+        // Assert
+        let scoped = ("acme".to_owned(), "4321ms".to_owned());
+        for (name, connection) in [("reader", &reader), ("health", &health)] {
+            let (tenant, statement, _) = session_settings(connection).await;
+            assert_eq!((tenant, statement), scoped, "the {name} connection");
+        }
+        let (tenant, statement, lock) = session_settings(&writer).await;
+        assert_eq!((tenant, statement), scoped, "the writer connection");
+        assert_eq!(lock, "15s", "the writer waits a bounded time for a lock");
     }
 
     #[tokio::test]
