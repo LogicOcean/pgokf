@@ -62,7 +62,7 @@
       "executable": false
     },
     "CHANGELOG.md": {
-      "sha256": "baae7c8045172279b360b4b8dd744996d64a9f51f05b370cbf76f82b4837e82d",
+      "sha256": "18ce21b79a9348c7a77d293b92d1c5d05858fca4b38980d7a06f577aa5b39424",
       "executable": false
     },
     "CODE_OF_CONDUCT.md": {
@@ -78,7 +78,7 @@
       "executable": false
     },
     "Cargo.lock": {
-      "sha256": "f71310cfd93428b7388ffa95f2a6061428138f503047a5a6b24e0fed231bba01",
+      "sha256": "7d38b644bb301b6697fb296e0686fd79aa916668ecac756f28568da64654c62a",
       "executable": false
     },
     "Cargo.toml": {
@@ -106,7 +106,7 @@
       "executable": false
     },
     "THIRD-PARTY-NOTICES.txt": {
-      "sha256": "c0179ed586bc8a832b56cb021af4e0ed019bb8ca08080cf8a5c822fbb7bc0b0c",
+      "sha256": "22022cb52bbb21205dca5b49941dd4232e085d1b0f1be05666b590e6badcec9a",
       "executable": false
     },
     "about.hbs": {
