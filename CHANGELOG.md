@@ -10,6 +10,20 @@ are defined in [docs/api-stability.md](docs/api-stability.md).
 
 ## [Unreleased]
 
+### Added
+
+- **`skills/pgokf-mcp`: an Agent Skill for using a catalog through
+  `pgokf-mcp`.** The existing skills cover the catalog over SQL
+  (`pgokf-catalog`) and the document format (`okf-authoring`); nothing
+  covered an agent that holds only the MCP tools. Tested against a live
+  catalog, agents without it reported human-reviewed runbooks as unverified
+  (they guessed a `trust_tier` value that matches nothing), tried
+  `output_dir` on an HTTP server before installing a stored skill, and wrote
+  `generated` metadata and an invented URL into a document. The skill covers
+  search syntax and scoping, finding a concept's trust tier and status,
+  installing a stored skill byte for byte from `build_workspace_plugin`, and
+  what `put_document` does with `verified` and `generated`.
+
 ## [0.7.0] - 2026-11-20
 
 A companion release: one pooled connection lifecycle shared by the

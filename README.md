@@ -102,7 +102,7 @@ Full docs are published at **<https://logicocean.github.io/pgokf/>**. Key entry 
 | [okf-authoring](docs/okf-authoring.md) | Authoring OKF v0.2 bundles (frontmatter, actors, reserved files) |
 | [api-stability](docs/api-stability.md) | The public API contract, SemVer policy, deprecation |
 
-Runnable SQL is in [`examples/queries/`](examples/queries); reusable OKF templates in [`templates/`](templates); authoring/catalog skills in [`skills/`](skills).
+Runnable SQL is in [`examples/queries/`](examples/queries); reusable OKF templates in [`templates/`](templates); Agent Skills in [`skills/`](skills): `okf-authoring` (writing OKF documents), `pgokf-catalog` (the catalog over SQL) and `pgokf-mcp` (the catalog through its MCP tools).
 
 ## Building from source
 
