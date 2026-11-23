@@ -62,7 +62,7 @@
       "executable": false
     },
     "CHANGELOG.md": {
-      "sha256": "b8f95e485d892b6031f84502b1f1b54b765357c24285a37c53079a8ef16364e1",
+      "sha256": "efe72cb21cfcd24d5981793fb5dcfaeb7dd3024595e84396e771c518e1c0547a",
       "executable": false
     },
     "CODE_OF_CONDUCT.md": {
@@ -98,7 +98,7 @@
       "executable": false
     },
     "README.md": {
-      "sha256": "1647b92ea73d27f85c659b82efe1e5f126b51743d04a8df6ddc2337e5432ed95",
+      "sha256": "f6ff7d15e700f03c08736ceeb6473c534fa66e58cab28f47e725e182abb3409b",
       "executable": false
     },
     "SECURITY.md": {
@@ -1791,6 +1791,10 @@
     },
     "skills/pgokf-catalog/SKILL.md": {
       "sha256": "1bebc96f7be3a21241f441ce97e3948fc960db417eb50c69617cfffe22fac8cb",
+      "executable": false
+    },
+    "skills/pgokf-mcp/SKILL.md": {
+      "sha256": "1e077e3a7f65e5dd29403287c0fb7c5698581e329afbb452158a473e30e5d1b2",
       "executable": false
     },
     "spec/OKF-EXTENSION-SPEC.md": {
